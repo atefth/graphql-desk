@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
@@ -261,6 +262,39 @@ def _schema(
     )
 
 
+def generated_output_paths(
+    root: Path, package: Path, schemas: Iterable[SchemaConfig]
+) -> tuple[Path, ...]:
+    """Enumerate canonical reserved outputs for config and project validation."""
+    _inside(package, root, "generated_package")
+    if package == root:
+        raise ValueError("generated_package must lie below the project root")
+    paths: list[Path] = []
+    current = package
+    while current != root:
+        for suffix in (".py", ".pyi"):
+            initializer = _path(
+                str(current / f"__init__{suffix}"), root, "generated initializer"
+            )
+            _inside(initializer, current, "generated initializer")
+            paths.append(initializer)
+        current = current.parent
+    for schema in schemas:
+        output = _path(str(schema.schema_output), root, "schema_output")
+        _inside(output, package, "schema_output")
+        runtime = _path(
+            str(schema.schema_output.with_suffix(".py")),
+            root,
+            "generated runtime companion",
+        )
+        _inside(runtime, package, "generated runtime companion")
+        paths.extend((output, runtime))
+        for destination in (schema.persisted_output, schema.cache_output):
+            if destination is not None:
+                paths.append(_path(str(destination), root, "generated output"))
+    return tuple(paths)
+
+
 def parse_project_config(text: str, *, config_path: Path) -> ProjectConfig | None:
     """Parse facts only; an absent table means this project is inactive.
 
@@ -315,43 +349,18 @@ def parse_project_config(text: str, *, config_path: Path) -> ProjectConfig | Non
     if len({item.name for item in schemas}) != len(schemas):
         raise ValueError("Schema names must be unique")
     used = {os.path.normcase(str(path))}
-    current = package
-    while current != root:
-        for suffix in (".py", ".pyi"):
-            initializer = _path(
-                str(current / f"__init__{suffix}"), root, "generated initializer"
-            )
-            _inside(initializer, current, "generated initializer")
-            identity = os.path.normcase(str(initializer))
-            if identity in used:
-                raise ValueError("Generated initializer paths collide")
-            used.add(identity)
-        current = current.parent
     for schema in schemas:
         if schema.origin.local_path is not None:
             used.add(os.path.normcase(str(schema.origin.local_path)))
-    for schema in schemas:
-        runtime = _path(
-            str(schema.schema_output.with_suffix(".py")),
-            root,
-            "generated runtime companion",
-        )
-        _inside(runtime, package, "generated runtime companion")
-        for output in (
-            schema.schema_output,
-            runtime,
-            schema.persisted_output,
-            schema.cache_output,
+    for output in generated_output_paths(root, package, schemas):
+        identity = os.path.normcase(str(output))
+        if output.is_dir() or any(
+            Path(identity).is_relative_to(Path(other))
+            or Path(other).is_relative_to(Path(identity))
+            for other in used
         ):
-            if output is not None:
-                identity = os.path.normcase(str(output))
-                if output.is_dir() or any(
-                    Path(identity).is_relative_to(Path(other))
-                    or Path(other).is_relative_to(Path(identity))
-                    for other in used
-                ):
-                    raise ValueError("Generated output paths collide")
-                used.add(identity)
+            raise ValueError("Generated output paths collide")
+        used.add(identity)
     refresh = table.get("schema_refresh_interval", 0)
     if isinstance(refresh, bool) or not isinstance(refresh, (int, float)):
         raise ValueError("schema_refresh_interval must be a nonnegative finite number")
