@@ -1,6 +1,6 @@
 # Python API, source and typing contract
 
-Planning decisions for PLAN-01 and PLAN-05; required implementation acceptance, **not implemented or proven**. Full upstream parity remains the target. Names below are adopted defaults, not requests for a new product decision. These contracts reach runtime exports, generated schema/operation declarations, editor source binding, CLI discovery, client integration documentation and positive/negative checker fixtures.
+Requirements contract for PLAN-01 and PLAN-05. Production foundations are tracked in [feature status](../feature-status.md); no broad acceptance gate has passed. Full upstream parity remains the target. Names below are adopted defaults, not requests for a new product decision. These contracts reach runtime exports, generated schema/operation declarations, editor source binding, CLI discovery, client integration documentation and positive/negative checker fixtures.
 
 ## Source evidence
 

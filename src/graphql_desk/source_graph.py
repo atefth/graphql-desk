@@ -1,6 +1,6 @@
 """Resolve module-level source facts from explicit snapshots, without imports.
 
-Factories, fragment bindings, nested scopes and decoded-character maps belong to
+Fragment bindings, nested scopes and decoded-character maps belong to
 later slices. This graph never discovers files or executes project Python.
 """
 
@@ -8,7 +8,7 @@ import ast
 import keyword
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .source import Span
 
@@ -43,6 +43,21 @@ class StringContribution:
 
 
 @dataclass(frozen=True)
+class FactoryBinding:
+    module: str
+    export: str
+    schema_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ProjectBindings:
+    project: str
+    schemas: tuple[str, ...]
+    default_schema: str | None = None
+    factories: tuple[FactoryBinding, ...] = ()
+
+
+@dataclass(frozen=True)
 class ResolvedCall:
     module: ModuleDependency
     range: Span
@@ -51,6 +66,7 @@ class ResolvedCall:
     dependencies: tuple[ModuleDependency, ...]
     operation: str | None = None
     binding: str | None = None
+    schema_name: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -73,6 +89,7 @@ class _Value:
     text: str
     contributions: tuple[StringContribution, ...] = ()
     dependencies: frozenset[ModuleDependency] = frozenset()
+    schema_name: str | None = None
 
 
 class _Unresolved(Exception):
@@ -92,7 +109,7 @@ class _Module:
         self.tree = ast.parse(snapshot.source)
         compile(self.tree, snapshot.uri, "exec")
         self.bindings: dict[
-            str, list[tuple[tuple[int, int], ast.expr | tuple[str, str]]]
+            str, list[tuple[tuple[int, int], ast.expr | tuple[str, str] | _Value]]
         ] = {}
         self.blocked: set[str] = set()
         self.star = False
@@ -114,6 +131,10 @@ class _Module:
                             statement,
                             (module, alias.name),
                         )
+            elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.add(statement.name, statement, _Value("opaque", statement.name))
+                if statement.decorator_list:
+                    self.blocked.add(statement.name)
             elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
                 targets = (
                     statement.targets
@@ -144,7 +165,7 @@ class _Module:
                 self.star = True
 
     def add(
-        self, name: str, statement: ast.stmt, value: ast.expr | tuple[str, str]
+        self, name: str, statement: ast.stmt, value: ast.expr | tuple[str, str] | _Value
     ) -> None:
         self.bindings.setdefault(name, []).append(
             ((statement.lineno, statement.col_offset), value)
@@ -235,7 +256,59 @@ class _Module:
 
 
 class _Graph:
-    def __init__(self, snapshots: tuple[ModuleSnapshot, ...]) -> None:
+    def __init__(
+        self,
+        snapshots: tuple[ModuleSnapshot, ...],
+        bindings: tuple[ProjectBindings, ...],
+    ) -> None:
+        self.bindings: dict[str, ProjectBindings] = {}
+        self.factories: dict[tuple[str, str, str], FactoryBinding] = {}
+        for project in bindings:
+            if not project.project or project.project in self.bindings:
+                raise ValueError(
+                    "Project binding identities must be nonempty and unique"
+                )
+            if not project.schemas or len(set(project.schemas)) != len(project.schemas):
+                raise ValueError("Project schemas must be nonempty and unique")
+            if any(
+                re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", name) is None
+                or keyword.iskeyword(name)
+                for name in project.schemas
+            ):
+                raise ValueError("Schema names must be valid configured binding names")
+            if (
+                project.default_schema is not None
+                and project.default_schema not in project.schemas
+            ):
+                raise ValueError("Default schema must name a configured schema")
+            self.bindings[project.project] = project
+            for factory in project.factories:
+                if (
+                    not factory.module
+                    or any(
+                        not part.isidentifier() or keyword.iskeyword(part)
+                        for part in factory.module.split(".")
+                    )
+                    or unicodedata.normalize("NFKC", factory.module) != factory.module
+                    or not factory.export.isidentifier()
+                    or keyword.iskeyword(factory.export)
+                    or unicodedata.normalize("NFKC", factory.export) != factory.export
+                ):
+                    raise ValueError(
+                        "Factory identities must use canonical module/export names"
+                    )
+                if (
+                    factory.schema_name is not None
+                    and factory.schema_name not in project.schemas
+                ):
+                    raise ValueError("Factory schema must name a configured schema")
+                factory_key = (project.project, factory.module, factory.export)
+                if factory_key in self.factories or factory_key[1:] == (
+                    "graphql_desk",
+                    "init_graphql",
+                ):
+                    raise ValueError("Duplicate or reserved factory identity")
+                self.factories[factory_key] = factory
         self.modules: dict[tuple[str, str], _Module] = {}
         self.diagnostics: list[GraphDiagnostic] = []
         self.mutated: set[tuple[str, str]] = set()
@@ -295,7 +368,7 @@ class _Graph:
                             (node.lineno, node.col_offset),
                             set(),
                         )
-                        trusted = callee.kind == "callable"
+                        trusted = callee.kind in {"callable", "initializer"}
                     except (_Unresolved, RecursionError):
                         trusted = False
                     if not trusted:
@@ -328,8 +401,10 @@ class _Graph:
                         self.mutated.add((module.snapshot.project, value.text))
                         if value.text == "builtins":
                             module.star = True
-                    elif value.kind == "callable":
-                        self.mutated.add((module.snapshot.project, "graphql_desk"))
+                    elif value.kind in {"callable", "initializer"}:
+                        self.mutated.add(
+                            (module.snapshot.project, value.text.rsplit(".", 1)[0])
+                        )
 
     def namespace_reflection(
         self, module: _Module, node: ast.expr, seen: set[str]
@@ -366,6 +441,19 @@ class _Graph:
         *,
         probe: bool = False,
     ) -> _Value:
+        factory = self.factories.get(
+            (module.snapshot.project, module.snapshot.module, name)
+        )
+        if probe and factory is not None:
+            return _Value("callable", f"{factory.module}.{factory.export}")
+        if (
+            not probe
+            and factory is not None
+            and (module.snapshot.project, module.snapshot.module) in self.mutated
+        ):
+            raise _Unresolved(
+                "Configured factory namespace is mutated in the supplied project"
+            )
         if not probe and (module.star or name in module.blocked):
             raise _Unresolved(f"Binding {name!r} is shadowed or mutation-dependent")
         definitions = module.bindings.get(name, [])
@@ -382,7 +470,9 @@ class _Graph:
         fallback: _Value | None = None
         for _, definition in definitions:
             try:
-                if isinstance(definition, tuple):
+                if isinstance(definition, _Value):
+                    value = definition
+                elif isinstance(definition, tuple):
                     imported, symbol = definition
                     if not imported:
                         raise _Unresolved(
@@ -406,8 +496,22 @@ class _Graph:
                 value.text,
                 value.contributions,
                 value.dependencies | {module.identity},
+                schema_name=value.schema_name,
             )
-            if not probe or value.kind == "callable" or value.text == "graphql_desk":
+            if factory is not None:
+                value = self.declared_factory(
+                    module.snapshot.project,
+                    factory.module,
+                    factory.export,
+                    factory,
+                    value,
+                    probe=probe,
+                )
+            if (
+                not probe
+                or value.kind in {"callable", "initializer"}
+                or value.text == "graphql_desk"
+            ):
                 return value
             fallback = value
         if fallback is not None:
@@ -445,23 +549,49 @@ class _Graph:
                 else frozenset[ModuleDependency]()
             )
             return _Value("module", imported, dependencies=dependencies)
-        if (
+        factory = self.factories.get((caller.snapshot.project, imported, symbol))
+        if target is None and imported == "graphql_desk" and symbol == "init_graphql":
+            return _Value("initializer", "graphql_desk.init_graphql")
+        builtin = (
             target is None
             and imported == "graphql_desk"
             and symbol in {"graphql", "gql"}
-        ):
-            return _Value("callable", "graphql_desk.graphql")
+        )
+        value: _Value | None = None
         if target is not None and (
             symbol in target.bindings or symbol in target.blocked or target.star
         ):
-            return self.name(
-                target,
-                symbol,
-                (len(target.snapshot.source) + 2, 0),
-                active,
-                probe=probe,
+            try:
+                value = self.name(
+                    target,
+                    symbol,
+                    (len(target.snapshot.source) + 2, 0),
+                    active,
+                    probe=probe,
+                )
+            except _Unresolved:
+                if factory is None or not probe:
+                    raise
+
+        if factory is not None or builtin:
+            if (
+                factory is not None
+                and target is not None
+                and value is None
+                and not probe
+            ):
+                raise _Unresolved(
+                    "Configured factory export is missing or not statically callable"
+                )
+            return self.declared_factory(
+                caller.snapshot.project, imported, symbol, factory, value, probe=probe
             )
-        if target is not None and "__getattr__" in target.blocked:
+
+        if value is not None:
+            return value
+        if target is not None and (
+            "__getattr__" in target.blocked or "__getattr__" in target.bindings
+        ):
             raise _Unresolved(f"Dynamic module exports in {imported!r} are unresolved")
         submodule = f"{imported}.{symbol}"
         if (caller.snapshot.project, submodule) in self.modules:
@@ -474,6 +604,93 @@ class _Graph:
             )
             return _Value("module", submodule, dependencies=dependencies)
         return _Value("external", f"{imported}.{symbol}")
+
+    def declared_factory(
+        self,
+        project: str,
+        imported: str,
+        symbol: str,
+        factory: FactoryBinding | None,
+        value: _Value | None,
+        *,
+        probe: bool,
+    ) -> _Value:
+        if (
+            not probe
+            and value is not None
+            and value.kind not in {"opaque", "external", "callable"}
+        ):
+            raise _Unresolved("Configured factory export is not a callable binding")
+        schema = None if probe else self.factory_schema(project, factory)
+        if (
+            value is not None
+            and not probe
+            and value.schema_name is not None
+            and schema != value.schema_name
+        ):
+            raise _Unresolved(
+                "Configured factory conflicts with its resolved schema binding"
+            )
+        return _Value(
+            "callable",
+            f"{imported}.{symbol}",
+            dependencies=value.dependencies if value else frozenset(),
+            schema_name=schema,
+        )
+
+    def factory_schema(
+        self, project: str, factory: FactoryBinding | None
+    ) -> str | None:
+        facts = self.bindings.get(project)
+        if facts is None:
+            return None
+        schema = (
+            factory.schema_name
+            if factory and factory.schema_name
+            else facts.default_schema
+        )
+        if schema is None:
+            raise _Unresolved(
+                "Schema binding is ambiguous; import an explicitly bound factory"
+            )
+        return schema
+
+    def initialize(
+        self, module: _Module, node: ast.Call, active: set[tuple[str, str, str]]
+    ) -> _Value:
+        if (
+            len(node.args) == 1
+            and not node.keywords
+            and not isinstance(node.args[0], ast.Starred)
+        ):
+            argument = node.args[0]
+        elif (
+            not node.args
+            and len(node.keywords) == 1
+            and node.keywords[0].arg == "schema"
+        ):
+            argument = node.keywords[0].value
+        else:
+            raise _Unresolved("init_graphql requires one static schema argument")
+        schema = self.expression(
+            module, argument, (node.lineno, node.col_offset), active
+        )
+        if (
+            schema.kind != "string"
+            or re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", schema.text) is None
+        ):
+            raise _Unresolved(
+                "init_graphql requires a statically resolved valid schema name"
+            )
+        facts = self.bindings.get(module.snapshot.project)
+        if facts is not None and schema.text not in facts.schemas:
+            raise _Unresolved(f"Unknown configured schema: {schema.text!r}")
+        return _Value(
+            "callable",
+            "graphql_desk.graphql",
+            dependencies=schema.dependencies,
+            schema_name=schema.text,
+        )
 
     def expression(
         self,
@@ -502,6 +719,19 @@ class _Graph:
                     value.text,
                     value.contributions,
                     value.dependencies | parent.dependencies,
+                    schema_name=value.schema_name,
+                )
+        if isinstance(node, ast.Call):
+            callee = self.expression(module, node.func, before, active, probe=probe)
+            if callee.kind == "initializer":
+                if probe:
+                    return _Value("callable", "graphql_desk.graphql")
+                value = self.initialize(module, node, active)
+                return _Value(
+                    value.kind,
+                    value.text,
+                    dependencies=value.dependencies | callee.dependencies,
+                    schema_name=value.schema_name,
                 )
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             left = self.expression(module, node.left, before, active, probe=probe)
@@ -570,12 +800,15 @@ class _Graph:
             dependencies,
             selector,
             module.call_bindings.get(id(node)),
+            schema_name=callable_.schema_name,
         )
 
 
-def resolve_project(modules: tuple[ModuleSnapshot, ...]) -> ProjectSources:
+def resolve_project(
+    modules: tuple[ModuleSnapshot, ...], *, bindings: tuple[ProjectBindings, ...] = ()
+) -> ProjectSources:
     """Resolve stable module calls in caller-selected snapshots; no discovery."""
-    graph = _Graph(modules)
+    graph = _Graph(modules, bindings)
     calls: list[ResolvedCall] = []
     for module in graph.modules.values():
 
@@ -595,13 +828,18 @@ def resolve_project(modules: tuple[ModuleSnapshot, ...]) -> ProjectSources:
                     callable_ = graph.expression(
                         module, node.func, (node.lineno, node.col_offset), set()
                     )
-                    if callable_.kind == "callable":
+                    if callable_.kind in {"callable", "initializer"}:
                         candidate = True
                         if self.scoped:
                             raise _Unresolved(
                                 "Nested scopes require a later project resolver slice"
                             )
-                        calls.append(graph.extract(module, node, callable_))
+                        if callable_.kind == "initializer":
+                            graph.expression(
+                                module, node, (node.lineno, node.col_offset), set()
+                            )
+                        else:
+                            calls.append(graph.extract(module, node, callable_))
                 except RecursionError:
                     if candidate:
                         graph.diagnostics.append(
@@ -622,7 +860,7 @@ def resolve_project(modules: tuple[ModuleSnapshot, ...]) -> ProjectSources:
                                 set(),
                                 probe=True,
                             )
-                            candidate = origin.kind == "callable"
+                            candidate = origin.kind in {"callable", "initializer"}
                         except (_Unresolved, RecursionError):
                             pass
                     if candidate:

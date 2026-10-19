@@ -2,7 +2,12 @@ import unittest
 from dataclasses import replace
 
 from graphql_desk.source import extract_calls
-from graphql_desk.source_graph import ModuleSnapshot, resolve_project
+from graphql_desk.source_graph import (
+    FactoryBinding,
+    ModuleSnapshot,
+    ProjectBindings,
+    resolve_project,
+)
 
 
 def module(
@@ -325,3 +330,274 @@ alias('{ id }')
                 )
                 self.assertEqual(result.calls, ())
                 self.assertTrue(result.diagnostics)
+
+    def test_exact_declared_factory_facts_and_project_default(self) -> None:
+        facts = ProjectBindings(
+            "app",
+            ("main", "other"),
+            "main",
+            (FactoryBinding("generated.other", "graphql", "other"),),
+        )
+        snapshots = (
+            module(
+                "main",
+                """from graphql_desk import gql
+from generated.other import graphql as query
+import generated.other as generated
+one=gql("{ one }")
+two=query("{ two }")
+three=generated.graphql("{ three }")
+from generated.lookalike import graphql as fake
+fake("{ not_a_document }")
+""",
+            ),
+        )
+        result = resolve_project(snapshots, bindings=(facts,))
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual(
+            [call.schema_name for call in result.calls], ["main", "other", "other"]
+        )
+        self.assertEqual(
+            [call.binding for call in result.calls], ["one", "two", "three"]
+        )
+        baseline = resolve_project(
+            (module("main", 'from graphql_desk import gql\ngql("{ id }")'),)
+        )
+        self.assertIsNone(baseline.calls[0].schema_name)
+
+    def test_schema_initializers_constants_aliases_and_reexports(self) -> None:
+        facts = ProjectBindings("app", ("main", "other"), "main")
+        constants = module("constants", 'SCHEMA="other"')
+        factory = module(
+            "factory",
+            "from graphql_desk import init_graphql as init\n"
+            "from constants import SCHEMA\nquery=init(schema=SCHEMA)",
+        )
+        consumer = module("main", 'from factory import query as gql\ndoc=gql("{ id }")')
+        result = resolve_project((constants, factory, consumer), bindings=(facts,))
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual(len(result.calls), 1)
+        self.assertEqual(result.calls[0].schema_name, "other")
+        self.assertEqual(
+            {item.module for item in result.calls[0].dependencies},
+            {"main", "factory", "constants"},
+        )
+        unconfigured = resolve_project(
+            (
+                module(
+                    "main",
+                    'import graphql_desk as desk\nquery=desk.init_graphql("unused")\n'
+                    'query("{ id }")',
+                ),
+            )
+        )
+        self.assertEqual(unconfigured.diagnostics, ())
+        self.assertEqual(unconfigured.calls[0].schema_name, "unused")
+        keyword_baseline = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import init_graphql\n"
+                    'query=init_graphql("class")\nquery("{ id }")',
+                ),
+            )
+        )
+        self.assertEqual(keyword_baseline.diagnostics, ())
+        self.assertEqual(keyword_baseline.calls[0].schema_name, "class")
+
+    def test_configured_template_identity_resolves_stable_local_function(self) -> None:
+        facts = ProjectBindings(
+            "app", ("main",), "main", (FactoryBinding("templates", "custom"),)
+        )
+        templates = module(
+            "templates", "def custom(source):\n raise RuntimeError('never execute')"
+        )
+        bridge = module("bridge", "from templates import custom as query")
+        consumer = module("main", 'from bridge import query\nquery("{ id }")')
+        result = resolve_project((templates, bridge, consumer), bindings=(facts,))
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual(result.calls[0].schema_name, "main")
+        self.assertEqual(
+            {item.module for item in result.calls[0].dependencies},
+            {"templates", "bridge", "main"},
+        )
+
+    def test_ambiguous_defaults_unknown_schemas_and_dynamic_initializers_fail(
+        self,
+    ) -> None:
+        facts = ProjectBindings("app", ("main", "other"))
+        ambiguous = resolve_project(
+            (module("main", 'from graphql_desk import gql\ngql("{ id }")'),),
+            bindings=(facts,),
+        )
+        self.assertEqual(ambiguous.calls, ())
+        self.assertIn("ambiguous", ambiguous.diagnostics[0].message)
+        for initializer in (
+            'init_graphql("missing")',
+            "init_graphql(dynamic)",
+            'init_graphql("main", "other")',
+            "init_graphql(*schemas)",
+            'init_graphql(schema="main", other=1)',
+            'init_graphql("bad-name")',
+        ):
+            with self.subTest(initializer=initializer):
+                result = resolve_project(
+                    (
+                        module(
+                            "main",
+                            "from graphql_desk import init_graphql\nquery="
+                            + initializer
+                            + '\nquery("{ id }")',
+                        ),
+                    ),
+                    bindings=(facts,),
+                )
+                self.assertEqual(result.calls, ())
+                self.assertTrue(result.diagnostics)
+        explicit = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import init_graphql\n"
+                    'query=init_graphql("other")\nquery("{ id }")',
+                ),
+            ),
+            bindings=(facts,),
+        )
+        self.assertEqual(explicit.diagnostics, ())
+        self.assertEqual(explicit.calls[0].schema_name, "other")
+
+    def test_binding_facts_are_validated_before_resolution(self) -> None:
+        invalid = (
+            (ProjectBindings("app", ()),),
+            (ProjectBindings("app", ("main", "main")),),
+            (ProjectBindings("app", ("bad-name",)),),
+            (ProjectBindings("app", ("class",)),),
+            (ProjectBindings("app", ("main",), "missing"),),
+            (
+                ProjectBindings(
+                    "app", ("main",), factories=(FactoryBinding("a", "g", "missing"),)
+                ),
+            ),
+            (
+                ProjectBindings(
+                    "app", ("main",), factories=(FactoryBinding("a-b", "g"),)
+                ),
+            ),
+            (
+                ProjectBindings(
+                    "app", ("main",), factories=(FactoryBinding("a", "class"),)
+                ),
+            ),
+            (
+                ProjectBindings(
+                    "app",
+                    ("main",),
+                    factories=(FactoryBinding("a", "g"), FactoryBinding("a", "g")),
+                ),
+            ),
+            (
+                ProjectBindings(
+                    "app",
+                    ("main",),
+                    factories=(FactoryBinding("templates", "nested.gql"),),
+                ),
+            ),
+            (ProjectBindings("app", ("main",)), ProjectBindings("app", ("main",))),
+        )
+        for bindings in invalid:
+            with self.subTest(bindings=bindings), self.assertRaises(ValueError):
+                resolve_project((), bindings=bindings)
+
+    def test_declared_factories_cannot_bypass_invalid_missing_or_mutated_exports(
+        self,
+    ) -> None:
+        facts = ProjectBindings(
+            "app", ("main",), "main", (FactoryBinding("templates", "custom"),)
+        )
+        consumer = module("main", 'from templates import custom\ncustom("{ id }")')
+        for source in (
+            "def broken(",
+            "# missing export",
+            "def replace(fn): return 'not callable'\n@replace\n"
+            "def custom(source): return source",
+            'custom="not callable"',
+            "def custom(source): return source\ncustom=other",
+            "def custom(source): return source\ncustom.__code__=other.__code__",
+        ):
+            with self.subTest(source=source):
+                result = resolve_project(
+                    (module("templates", source), consumer), bindings=(facts,)
+                )
+                self.assertEqual(result.calls, ())
+                self.assertTrue(result.diagnostics)
+        mutated = resolve_project(
+            (
+                module(
+                    "main",
+                    "from generated.main import graphql as query\n"
+                    'query.__code__=other.__code__\nquery("{ id }")',
+                ),
+            ),
+            bindings=(
+                ProjectBindings(
+                    "app",
+                    ("main",),
+                    "main",
+                    (FactoryBinding("generated.main", "graphql", "main"),),
+                ),
+            ),
+        )
+        self.assertEqual(mutated.calls, ())
+        self.assertTrue(mutated.diagnostics)
+
+    def test_project_factory_and_schema_facts_remain_isolated(self) -> None:
+        source = 'from generated.schema import graphql\ngraphql("{ id }")'
+        result = resolve_project(
+            (
+                module("main", source, project="one"),
+                module("main", source, project="two"),
+            ),
+            bindings=(
+                ProjectBindings(
+                    "one",
+                    ("a",),
+                    "a",
+                    (FactoryBinding("generated.schema", "graphql", "a"),),
+                ),
+                ProjectBindings(
+                    "two",
+                    ("b",),
+                    "b",
+                    (FactoryBinding("generated.schema", "graphql", "b"),),
+                ),
+            ),
+        )
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual([call.schema_name for call in result.calls], ["a", "b"])
+
+    def test_local_declared_factory_mutation_and_dynamic_exports_remain_guarded(
+        self,
+    ) -> None:
+        facts = ProjectBindings(
+            "app", ("main",), "main", (FactoryBinding("templates", "custom"),)
+        )
+        templates = module(
+            "templates",
+            "def custom(source): return source\ncustom.__code__=other.__code__\n"
+            'custom("{ id }")',
+        )
+        result = resolve_project((templates,), bindings=(facts,))
+        self.assertEqual(result.calls, ())
+        self.assertTrue(result.diagnostics)
+        package = module(
+            "pkg", "def __getattr__(name): return replacement", package=True
+        )
+        child = module("pkg.child", 'TEXT="{ id }"')
+        consumer = module(
+            "main",
+            "from graphql_desk import gql\nfrom pkg import child\ngql(child.TEXT)",
+        )
+        result = resolve_project((package, child, consumer))
+        self.assertEqual(result.calls, ())
+        self.assertTrue(result.diagnostics)
