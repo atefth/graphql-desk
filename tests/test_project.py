@@ -233,7 +233,9 @@ schemas=[{name="shop",schema="shop.graphql",schema_output="generated/types/shop.
         )
         assert selected is not None
         self.assertEqual(selected.origin, "explicit")
-        self.assertEqual(selected.config, explicit)
+        self.assertEqual(
+            selected.config, replace(explicit, source_scope="explicit_cli")
+        )
         explicit.path.write_text('[project]\nname="inactive"')
         with self.assertRaises(ValueError):
             effective_project(
@@ -250,6 +252,37 @@ schemas=[{name="shop",schema="shop.graphql",schema_output="generated/types/shop.
             effective_project(
                 workspace, explicit_config=explicit.path, workspace=workspace
             )
+
+    def test_explicit_source_scope_survives_only_its_selected_config_reload(
+        self,
+    ) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        path = project / "pyproject.toml"
+        path.write_text(_BASE + 'source_roots=["../external"]', encoding="utf-8")
+        with self.assertRaises(ValueError):
+            find_project(project)
+        selected = effective_project(project, explicit_config=path)
+        assert selected is not None
+        self.assertEqual(selected.config.source_scope, "explicit_cli")
+        reloaded = find_project(project, selected_config=selected.config)
+        self.assertEqual(reloaded, selected.config)
+        foreign = project / "nested"
+        foreign.mkdir()
+        (foreign / "pyproject.toml").write_text(
+            _BASE + 'source_roots=["../../external"]', encoding="utf-8"
+        )
+        with self.assertRaises(ValueError):
+            find_project(foreign, selected_config=selected.config)
+        fallback = {
+            "schema": "schema.graphql",
+            "schema_output": "graphql_desk_generated/default.pyi",
+            "source_roots": ["../external"],
+        }
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        with self.assertRaises(ValueError):
+            effective_project(workspace, workspace=workspace, editor_fallback=fallback)
 
     def test_invalid_nearest_never_activates_editor_fallback(self) -> None:
         self.root.joinpath("pyproject.toml").write_text(

@@ -6,7 +6,11 @@ from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from unittest.mock import patch
 
-from graphql_desk.config import ProjectConfig, parse_project_config
+from graphql_desk.config import (
+    ProjectConfig,
+    load_project_config,
+    parse_project_config,
+)
 from graphql_desk.source_graph import ModuleSnapshot, resolve_project
 from graphql_desk.source_selection import select_project_sources
 
@@ -172,7 +176,9 @@ class SourceSelectionTests(unittest.TestCase):
         self.assertEqual(
             len(
                 select_project_sources(
-                    config, (path,), workspace=other, explicit_config=True
+                    replace(config, source_scope="explicit_cli"),
+                    (path,),
+                    workspace=other,
                 )
             ),
             1,
@@ -247,6 +253,62 @@ class SourceSelectionTests(unittest.TestCase):
         alias = self.root / "alias.py"
         self.symlink(alias, output)
         self.assertEqual(select_project_sources(config, (alias,)), ())
+
+    def test_explicit_external_roots_survive_selected_config_reload(self) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        text = _BASE + 'source_roots=[".", "../external"]\n'
+        config_path = project / "pyproject.toml"
+        config_path.write_text(text, encoding="utf-8")
+        with self.assertRaises(ValueError):
+            load_project_config(config_path)
+        config = load_project_config(config_path, source_scope="explicit_cli")
+        assert config is not None
+        paths = (self.file("project/q.py"), self.file("external/other.py"))
+        selected = select_project_sources(config, paths, workspace=project)
+        self.assertEqual({s.module for s in selected}, {"q", "other"})
+        self.assertEqual(
+            {s.source_root for s in selected}, {project, self.root / "external"}
+        )
+        with self.assertRaisesRegex(ValueError, "roots"):
+            select_project_sources(replace(config, source_scope="project"), paths)
+
+    def test_external_nearest_configured_owner_is_not_stolen(self) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        text = _BASE + 'source_roots=["../external"]\n'
+        path = project / "pyproject.toml"
+        path.write_text(text, encoding="utf-8")
+        config = load_project_config(path, source_scope="explicit_cli")
+        assert config is not None
+        source = self.file("external/q.py")
+        foreign = self.config(root=source.parent)
+        foreign.path.write_text(_BASE, encoding="utf-8")
+        self.assertEqual(select_project_sources(config, (source,)), ())
+        foreign.path.write_text("[tool.graphql-desk]\nunknown=true", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            select_project_sources(config, (source,))
+        # A foreign ancestor outside the configured root still owns that source.
+        foreign.path.unlink()
+        (self.root / "pyproject.toml").write_text(_BASE, encoding="utf-8")
+        self.assertEqual(select_project_sources(config, (source,)), ())
+
+    def test_external_root_symlink_cannot_escape_even_with_explicit_scope(self) -> None:
+        project = self.root / "project"
+        project.mkdir()
+        config = parse_project_config(
+            _BASE + 'source_roots=["../external"]\n',
+            config_path=project / "pyproject.toml",
+            source_scope="explicit_cli",
+        )
+        assert config is not None
+        target = self.file("outside.py")
+        external = self.root / "external"
+        external.mkdir()
+        link = external / "alias.py"
+        self.symlink(link, target)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            select_project_sources(config, (link,))
 
 
 if __name__ == "__main__":

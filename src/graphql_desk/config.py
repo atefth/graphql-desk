@@ -13,7 +13,7 @@ import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from urllib.parse import urlsplit
 
 if sys.version_info >= (3, 11):
@@ -104,6 +104,9 @@ class ProjectConfig:
     exclude: tuple[str, ...]
     entrypoints: tuple[str, ...] | None
     authoring_roots: tuple[Path, ...]
+    source_scope: Literal["project", "explicit_cli"] = field(
+        default="project", kw_only=True
+    )
 
 
 def _table(value: object, label: str) -> dict[str, object]:
@@ -335,7 +338,12 @@ def generated_output_paths(
     return tuple(paths)
 
 
-def parse_project_config(text: str, *, config_path: Path) -> ProjectConfig | None:
+def parse_project_config(
+    text: str,
+    *,
+    config_path: Path,
+    source_scope: Literal["project", "explicit_cli"] = "project",
+) -> ProjectConfig | None:
     """Parse facts only; an absent table means this project is inactive.
 
     Does not resolve environment credentials, imported symbols, project ownership
@@ -351,17 +359,23 @@ def parse_project_config(text: str, *, config_path: Path) -> ProjectConfig | Non
     return parse_project_settings(
         _table(tool["graphql-desk"], "tool.graphql-desk"),
         config_path=config_path.resolve(),
+        source_scope=source_scope,
     )
 
 
 def parse_project_settings(
-    settings: Mapping[str, object], *, config_path: Path
+    settings: Mapping[str, object],
+    *,
+    config_path: Path,
+    source_scope: Literal["project", "explicit_cli"] = "project",
 ) -> ProjectConfig:
     """Validate project settings shared by TOML and the editor fallback object.
 
     For editor fallback, config_path is a virtual workspace-relative context,
     not a claim that a pyproject was read. This function does not write it.
     """
+    if source_scope not in ("project", "explicit_cli"):
+        raise ValueError("Unknown source selection scope")
     table = _table(settings, "tool.graphql-desk")
     _known(table, _PROJECT_KEYS, "tool.graphql-desk")
     # A fallback's virtual filename must not follow an inactive pyproject symlink.
@@ -434,8 +448,9 @@ def parse_project_settings(
             for value in _strings(table.get("source_roots", ["."]), "source_roots")
         )
     )
-    for source_root in roots:
-        _inside(source_root, root, "source_roots")
+    if source_scope == "project":
+        for source_root in roots:
+            _inside(source_root, root, "source_roots")
     authoring = tuple(
         dict.fromkeys(
             _path(value, root, "authoring_roots")
@@ -492,9 +507,14 @@ def parse_project_settings(
         exclude=excludes,
         entrypoints=entrypoints,
         authoring_roots=authoring,
+        source_scope=source_scope,
     )
 
 
-def load_project_config(path: Path) -> ProjectConfig | None:
+def load_project_config(
+    path: Path, *, source_scope: Literal["project", "explicit_cli"] = "project"
+) -> ProjectConfig | None:
     """Read one explicitly supplied pyproject; never search or execute code."""
-    return parse_project_config(path.read_text(encoding="utf-8"), config_path=path)
+    return parse_project_config(
+        path.read_text(encoding="utf-8"), config_path=path, source_scope=source_scope
+    )
