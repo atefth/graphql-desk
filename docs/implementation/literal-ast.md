@@ -1,0 +1,11 @@
+# Literal executable AST declarations
+
+`graphql_desk.literal_ast.render_literal_ast_types(source, *, name, no_location=False)` returns annotation-only `.pyi` declarations exposing `<name>Document`. It parses with graphql-core and refines frozen executable AST nodes: exact kinds, names, scalar/enum/operation values, tuple shapes, nesting and absent attributes. Operations, fragments, directives, variables/defaults, selection/type nodes and recursive values are supported. SDL definitions and unsafe declaration names reject; syntax errors retain parser locations. Parsing does not imply schema validity.
+
+Private subclasses remain compatible with ordinary `Node`/`DocumentNode` consumers in both strict checkers. They are static views, not runtime classes: no import, construction or `isinstance` promise applies to generated refinements. Future generated bindings must preserve the original parser objects without wrappers or copying. Tests check real object identity and ordinary AST consumers.
+
+Variable defaults and variable-directive arguments use const-required checker bases. The pinned parser actually returns ordinary list/object/directive classes there, while its annotations require corresponding `Const*` types. These refinements follow the real node attributes without claiming the runtime object changed class.
+
+Location presence is precise (`Location` or `None`), but numeric offsets, tokens and source metadata keep ordinary mutable types. Narrowing mutable `Location.start` to a numeric literal is rejected by Pyright and becomes false after legal mutation through a normal `Location` consumer. This limitation remains explicit rather than publishing unsound precision.
+
+This is the declaration foundation for #25. Generated parse overloads, runtime companions, dynamic-string fallback attachment and complete exact-location acceptance remain open. API-01 and the live-typing gate have not passed. Tests cover emitted stub imports, exact positive/negative bindings in mypy/Pyright, parse options, complex defaults, unsafe names and excessive nesting.
