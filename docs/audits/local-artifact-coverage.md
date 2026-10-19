@@ -1,11 +1,13 @@
 # Local planning artifact coverage audit — 2026-10-19
 
-Compared actual artifact contents with merged repository docs at `e3aeef4` (docs PR #10), not just filenames or earlier summaries. Scope is GraphQL Desk research only: 21 Markdown artifacts under the five GraphQL Desk local work directories, the original blueprint, nine retained spike logs, and the accessible GraphQL planning chat. No product code was written; foundational issue #11 remains queued. This docs-only correction addresses #12; no product gate changes.
+Compared actual artifact contents with merged repository docs at `e3aeef4` (docs PR #10), not just filenames or earlier summaries. Scope is GraphQL Desk research only: 21 Markdown artifacts under the five GraphQL Desk local work directories, the original blueprint, nine retained spike logs, and the accessible GraphQL planning chat. The extended pass adds 95 fixture/configuration/lock files and 22 associated research chats, documented in the appendix. No product code was written; foundational issue #11 remains queued. This docs-only correction addresses #12; no product gate changes.
 
 ## Material omissions found
 
 1. **Contributor safeguards:** local `issue-6-initial-support-matrix.md` explicitly specified a small first-production PR template and branch protection/ruleset required checks. The full audit also required branch protections. Merged docs covered Actions and Ponytail but not those concrete enforcement steps. Restored them in [support/evidence](../contracts/support-performance-and-evidence.md#contributor-safeguards-and-optional-generator-compatibility). Rules are not claimed active; actual setup follows the first workflow before production merges.
 2. **Optional generator dependency collision:** `codegen-comparison/README.md` records Ariadne 0.19.0's graphql-core `<3.3` constraint. Merged docs chose core 3.3.0 without carrying that compatibility fact forward. Exact version-specific PyPI metadata confirms the conflict. Added isolated optional-tool evaluation policy; neither generator becomes a required core dependency.
+
+The extended pass also corrected the E-LSP recipe to the actual nested UserCard fixture and qualified the E-TSP renderer: its limited rejection guards do not establish sound treatment of every unsupported list/directive case. These correct evidence claims, without adding product scope.
 
 No further material feature, decision or acceptance omission was identified in the inspected scope. Historical differences below are deliberate supersessions, not hidden missing parity. This is bounded evidence, not a claim about every file in the user's Codex storage.
 
@@ -47,7 +49,7 @@ Paths below are relative to the original research `work/` directory unless state
 | `graphql-desk-generators/spikes/turms-watch-probe.stdout.log` | Watch-start message only; not proof regeneration succeeded. Reuse/Evidence describe limits. |
 | `graphql-desk-generators/spikes/turms-watch-probe.stderr.log` | Confirms `GraphQLFilter`, `x.split(".")[1]`, IndexError; crash already captured in Reuse/Evidence. |
 | `graphql-desk-generators/spikes/codegen-edge-cases/watch-test.out.log` | Watch-start message, not independent success evidence. |
-| `graphql-desk-generators/spikes/codegen-edge-cases/watch-test.err.log` | Same filter-failure class; already captured. Reported isolated successful regeneration remains report-level evidence, not rerun here. |
+| `graphql-desk-generators/spikes/codegen-edge-cases/watch-test.err.log` | Same filter-failure class; already captured. Historical command output also records a generated timestamp advance; content correctness and robust watch behavior remain unproved, and were not rerun here. |
 | `graphql-desk-generators/spikes/codegen-edge-cases/turms-run.log` | Progress display only; does not independently establish model correctness. Decisions rely on reported inspected outputs with limits. |
 | `graphql-desk-generators/spikes/codegen-comparison/turms-run.log` | Progress display only; same evidence boundary. |
 | `graphql-desk-generators/spikes/codegen-comparison/turms-check.log` | Progress display only despite filename; not treated as a checker test pass. |
@@ -56,6 +58,6 @@ Paths below are relative to the original research `work/` directory unless state
 
 ## Access limits and status
 
-Did not inspect unrelated Codex chats, account/session databases, secrets, vendored dependencies or binary extension caches. Chat tool outputs were excluded; raw historical subagent/tool-output bodies were not retrieved for exhaustive independent review. Source-code fixture trees/generated outputs were not all re-executed or re-reviewed as new product tests; this comparison concerns substantive planning/report/decision coverage. Relevant pinned-source/artifact audits already live in repository docs. No suite, spike or security scan was rerun for this inventory; only exact generator metadata was re-fetched to confirm finding 2.
+The [extended inventory](local-fixture-inventory.md) records all 88 remaining source/config/generated fixture files, seven lockfiles and the original plus 22 research chats. Available tool outputs were retrieved and relevant results compared, including failed intermediate probes. Of 427 shell-output records, 35 were truncated by retrieval; complete raw local rollout bodies were not read end to end. No claim of exhaustive raw-transcript verification is made. Unrelated/private material, dependencies, binaries and caches were excluded as detailed there. No suite, spike or security scan was rerun; only exact generator metadata was re-fetched in the first pass.
 
-The two material corrections are ready for review; implementation remains paused pending review/landing of the docs-only follow-up. Full-parity target, all product statuses and private board visibility remain unchanged. The evidence map does not claim every local byte is preserved in GitHub, only that the inspected substantive decisions/findings/requirements are covered with the stated corrections and supersessions.
+The planning omissions and evidence corrections are ready for review; implementation remains paused pending review/landing of the docs-only follow-up. Full-parity target, all product statuses and private board visibility remain unchanged. The evidence map does not claim every local byte is preserved in GitHub, only that the inspected substantive decisions/findings/requirements are covered with the stated corrections and supersessions.
