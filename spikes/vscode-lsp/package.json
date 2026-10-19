@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "check": "node check.mjs"
+  },
+  "devDependencies": {
+    "graphql-language-service-cli": "3.5.0"
+  }
+}
