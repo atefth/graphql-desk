@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from graphql import (
@@ -49,6 +49,15 @@ def _construct(
 
     parsed = parse(source)
     definitions = list(parsed.definitions)
+    primary = definitions[0]
+    if isinstance(primary, FragmentDefinitionNode) and primary.directives:
+        directives = tuple(
+            directive
+            for directive in primary.directives
+            if directive.name.value != "_unmask"
+        )
+        if directives != primary.directives:
+            definitions[0] = replace(primary, directives=directives)
     operations: list[OperationDefinitionNode] = []
     by_name: dict[str, FragmentDefinitionNode] = {}
     operation_names: set[str] = set()
