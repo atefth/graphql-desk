@@ -72,3 +72,5 @@ This is groundwork for the live bridge. It performs no editor/file mutation and 
 
 
 The pure [Python call extractor](docs/implementation/source-extraction.md) recognizes a conservative subset of direct GraphQL Desk imports and inline literals in one source snapshot. It returns decoded text, host ranges and explicit diagnostics without executing Python; it does not yet resolve complete projects or generate types.
+
+The [static module graph](docs/implementation/source-graph.md) resolves a first subset of constants/imports/reexports from explicit versioned snapshots. Factory/fragment bindings, source matching and exact decoded maps remain open.
