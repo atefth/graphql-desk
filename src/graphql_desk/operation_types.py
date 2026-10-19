@@ -1,9 +1,11 @@
 """Render the supported operation subset as static dictionary declarations."""
 
 import keyword
+import re
 import unicodedata
 
 from graphql import (
+    DirectiveNode,
     FieldNode,
     GraphQLCompositeType,
     GraphQLEnumType,
@@ -13,6 +15,7 @@ from graphql import (
     GraphQLSchema,
     GraphQLUnionType,
     InlineFragmentNode,
+    KnownDirectivesRule,
     ListTypeNode,
     NamedTypeNode,
     Node,
@@ -23,6 +26,7 @@ from graphql import (
     Visitor,
     parse,
     parse_type,
+    specified_rules,
     validate,
     visit,
 )
@@ -30,15 +34,52 @@ from graphql import (
 from .config import ScalarMapping
 from .schema_types import mapped_type_declarations, render_schema_types
 
+_CONDITIONAL = frozenset({"include", "skip", "defer"})
+# GraphQLSP's pinned built-in unknown-directive suppression list.
+_CLIENT_DIRECTIVES = frozenset(
+    {
+        "populate",
+        "client",
+        "unmask",
+        "_unmask",
+        "_optional",
+        "_relayPagination",
+        "_simplePagination",
+        "_required",
+        "optional",
+        "required",
+        "arguments",
+        "argumentDefinitions",
+        "connection",
+        "refetchable",
+        "relay",
+        "inline",
+    }
+)
+
+
+def _directives(node: FieldNode | InlineFragmentNode) -> set[str]:
+    return {directive.name.value for directive in node.directives or ()}
+
+
+def _null_override(node: FieldNode) -> bool | None:
+    names = _directives(node)
+    if names & {"required", "_required"}:
+        return False
+    if names & {"optional", "_optional"}:
+        return True
+    return None
+
 
 class _SupportedSyntax(Visitor):
     def enter(self, node: Node, *_args: object) -> None:
         if node.kind in {
-            "directive",
             "fragment_definition",
             "fragment_spread",
         }:
             raise ValueError(f"Unsupported operation syntax: {node.kind}")
+        if isinstance(node, InlineFragmentNode) and _directives(node) & _CONDITIONAL:
+            raise ValueError("Conditional inline fragments are not supported yet")
 
 
 def _output_type(type_: TypeNode, leaf: str, *, nullable: bool = True) -> str:
@@ -68,11 +109,12 @@ def render_operation_types(
     operation: str | None = None,
     scalars: tuple[ScalarMapping, ...] = (),
     enums: tuple[tuple[str, str], ...] = (),
+    client_directives: tuple[str, ...] = (),
 ) -> str:
     """Render validated operation declarations, rejecting unsupported semantics.
 
-    Named fragments and directives are not supported yet. This renders
-    declarations only, not execution or inference.
+    Named fragments, conditional inline fragments and conditionally repeated
+    composite fields are not supported yet. No execution or inference occurs.
     """
     if (
         not name.isidentifier()
@@ -85,7 +127,36 @@ def render_operation_types(
     inputs, outputs, _ = mapped_type_declarations(schema, scalars, enums)
     document = parse(source)
     visit(document, _SupportedSyntax())
-    errors = validate(schema, document)
+    if any(
+        re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", item) is None
+        for item in client_directives
+    ):
+        raise ValueError("Client directives must be GraphQL names without @")
+    client_names = _CLIENT_DIRECTIVES | set(client_directives)
+
+    class KnownClientDirectives(KnownDirectivesRule):
+        def enter_directive(
+            self,
+            node: DirectiveNode,
+            key: object,
+            parent: object,
+            path: object,
+            ancestors: list[Node],
+        ) -> None:
+            if node.name.value in client_names and not schema.get_directive(
+                node.name.value
+            ):
+                return
+            super().enter_directive(node, key, parent, path, ancestors)
+
+    errors = validate(
+        schema,
+        document,
+        [
+            KnownClientDirectives if rule is KnownDirectivesRule else rule
+            for rule in specified_rules
+        ],
+    )
     if errors:
         raise ValueError("; ".join(error.message for error in errors))
     operations = [
@@ -195,8 +266,19 @@ def render_operation_types(
                 )
             for key, group in sorted(groups.items()):
                 scope, node = group[0]
+                optional = all(_directives(item) & _CONDITIONAL for _, item in group)
+                overrides = {_null_override(item) for _, item in group}
+                if len(overrides) > 1:
+                    raise ValueError(
+                        "Repeated fields have different nullability directives"
+                    )
+
+                def annotation(value: str) -> str:
+                    return f"NotRequired[{value!r}]" if optional else repr(value)
+
                 if node.name.value == "__typename":
-                    fields.append((key, repr(f"Literal[{concrete.name!r}]")))
+                    # Pinned inference keeps typename literal even with @optional.
+                    fields.append((key, annotation(f"Literal[{concrete.name!r}]")))
                     continue
                 if node.name.value.startswith("__"):
                     raise ValueError(
@@ -209,6 +291,13 @@ def render_operation_types(
                 if isinstance(
                     named, (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType)
                 ):
+                    if len(group) > 1 and any(
+                        _directives(item) & _CONDITIONAL for _, item in group
+                    ):
+                        raise ValueError(
+                            "Conditionally repeated composite fields "
+                            "are not supported yet"
+                        )
                     child_name = f"{branch}_{key}"
                     children: list[tuple[GraphQLCompositeType, SelectionNode]] = []
                     child_parents: list[GraphQLCompositeType] = []
@@ -235,7 +324,17 @@ def render_operation_types(
                     leaf = outputs.get(named.name, named.name)
                 else:
                     raise ValueError(f"Unsupported output type: {named.name}")
-                fields.append((key, repr(_output_type(field_type, leaf))))
+                override = _null_override(node)
+                if override is None:
+                    value = _output_type(field_type, leaf)
+                else:
+                    outer = (
+                        field_type.type
+                        if isinstance(field_type, NonNullTypeNode)
+                        else field_type
+                    )
+                    value = _output_type(outer, leaf, nullable=override)
+                fields.append((key, annotation(value)))
             declare(branch, fields)
         if abstract or not branches:
             if class_name in reserved:

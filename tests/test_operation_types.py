@@ -36,6 +36,199 @@ _SOURCE = """
 
 
 class OperationTypesTests(unittest.TestCase):
+    def test_field_directives_preserve_outer_nullability_and_presence(self) -> None:
+        schema = build_schema(
+            "directive @defer(if: Boolean = true) on FIELD "
+            "directive @stream(initialCount: Int = 0) on FIELD "
+            "type Query { value: String! maybe: String values: [String!]! }"
+        )
+        original_directives = schema.directives
+        output = render_operation_types(
+            schema,
+            "{ skipped:value @skip(if:false) included:value @include(if:true) "
+            "deferred:value @defer streamed:values @stream "
+            "nullable:value @optional needed:maybe @_required "
+            "both:maybe @optional @required items:values @_optional "
+            "kind:__typename @include(if:false) fixed:__typename @optional }",
+            name="Read",
+        )
+        for expected in (
+            "'skipped': NotRequired['String']",
+            "'included': NotRequired['String']",
+            "'deferred': NotRequired['String']",
+            "'streamed': 'list[String]'",
+            "'nullable': 'String | None'",
+            "'needed': 'String'",
+            "'both': 'String'",
+            "'items': 'list[String] | None'",
+            "'kind': NotRequired[\"Literal['Query']\"]",
+            "'fixed': \"Literal['Query']\"",
+        ):
+            self.assertIn(expected, output)
+        self.assertIs(schema.directives, original_directives)
+
+    def test_directive_validation_only_suppresses_allowed_unknown_names(self) -> None:
+        schema = build_schema(
+            "directive @required(count: Int!) on FIELD "
+            "directive @custom(if: Boolean!) on FIELD type Query { value: String }"
+        )
+        for source, clients in (
+            ("{ value @required }", ()),
+            ("{ value @custom(if: 1) }", ("custom",)),
+            ("query @custom(if: true) { value }", ("custom",)),
+            ("{ value @skip }", ()),
+            ("{ value @include(if: 1) }", ()),
+            ("query($flag: Int!) { value @skip(if: $flag) }", ()),
+            ("{ value @unknown }", ()),
+            ("{ value @stream }", ()),
+            ("{ value @skip(if: true) @skip(if: false) }", ()),
+        ):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                render_operation_types(
+                    schema, source, name="Read", client_directives=clients
+                )
+        output = render_operation_types(
+            schema,
+            "{ value @configured }",
+            name="Read",
+            client_directives=("configured",),
+        )
+        self.assertIn("'value': 'String | None'", output)
+        for client in ("@bad", "bad-name", "", "café"):
+            with self.subTest(client=client), self.assertRaises(ValueError):
+                render_operation_types(
+                    schema, "{ value }", name="Read", client_directives=(client,)
+                )
+
+    def test_duplicate_field_directives_have_order_independent_safe_policy(
+        self,
+    ) -> None:
+        schema = build_schema(
+            "type User { id: ID! name: String! } "
+            "type Query { user: User value: String }"
+        )
+        for source in (
+            "{ value @include(if:false) value }",
+            "{ value value @include(if:false) }",
+        ):
+            output = render_operation_types(schema, source, name="Read")
+            self.assertIn("'value': 'String | None'", output)
+            self.assertNotIn("NotRequired['String", output)
+        for source in (
+            "{ value @required value @optional }",
+            "{ value value @required }",
+            "{ kind:__typename @required kind:__typename @optional }",
+            "{ user { id } user @include(if:false) { name } }",
+            "{ user @include(if:true) { id } user @skip(if:false) { name } }",
+            "{ ... @include(if:true) { value } }",
+            "{ ... @defer { value } }",
+        ):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                render_operation_types(schema, source, name="Read")
+        self.assertIn(
+            "'user': NotRequired['ReadResult_user | None']",
+            render_operation_types(
+                schema, "{ user @include(if:true) { id } }", name="Read"
+            ),
+        )
+
+    def test_conditional_execution_and_generated_checker_contracts(self) -> None:
+        from graphql import graphql_sync  # pyright: ignore[reportUnknownVariableType]
+
+        schema = build_schema(
+            "type Query { value: String! maybe: String values: [String!]! }"
+        )
+        source = (
+            "query($flag:Boolean!){ a:value @include(if:$flag) "
+            "b:maybe @required c:values @optional }"
+        )
+        for flag in (False, True):
+            result = graphql_sync(
+                schema,
+                "query($flag:Boolean!){ a:value @include(if:$flag) }",
+                root_value={"value": "x"},
+                variable_values={"flag": flag},
+            )
+            self.assertIsNone(result.errors)
+            self.assertEqual(result.data, {"a": "x"} if flag else {})
+        output = render_operation_types(schema, source, name="Read")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "generated.py").write_text(output, encoding="utf-8")
+            runtime = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from generated import ReadResult; "
+                    "assert ReadResult.__required_keys__ == {'b','c'}; "
+                    "assert ReadResult.__optional_keys__ == {'a'}",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stderr)
+            (root / "fixture.py").write_text(
+                "from generated import ReadResult\n"
+                "good: ReadResult = {'b':'x','c':None}\n"
+                "present: ReadResult = {'a':'x','b':'x','c':['x']}\n"
+                "bad_optional: ReadResult = {'a':None,'b':'x','c':[]}\n"
+                "bad_required: ReadResult = {'b':None,'c':[]}\n"
+                "bad_item: ReadResult = {'b':'x','c':[None]}\n"
+                "def guarded(value: ReadResult) -> str:\n"
+                "    return value['a'] if 'a' in value else 'missing'\n"
+                "def unguarded(value: ReadResult) -> str:\n"
+                "    return value['a']\n",
+                encoding="utf-8",
+            )
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+            self.assertIn("Found 3 errors in 1 file", mypy.stdout)
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["fixture.py", "generated.py"],
+                        "typeCheckingMode": "strict",
+                        "pythonVersion": "3.10",
+                        "reportTypedDictNotRequiredAccess": "error",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(pyright.returncode, 1, pyright.stdout + pyright.stderr)
+            diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
+            self.assertEqual(len(diagnostics), 4, diagnostics)
+            self.assertEqual(
+                {item["range"]["start"]["line"] for item in diagnostics}, {3, 4, 5, 9}
+            )
+
     def test_abstract_variants_preserve_selection_scope_and_discriminators(
         self,
     ) -> None:
@@ -476,7 +669,7 @@ class OperationTypesTests(unittest.TestCase):
             "{ __schema { queryType { name } } }",
             "query Same { greeting } query Same { greeting }",
             '{ a:greeting a:user(id: "1") { id } }',
-            "{ greeting @skip(if: false) }",
+            "{ greeting @skip(if: 1) }",
             'fragment F on User { id } query Q { user(id: "1") { ...F } }',
         ):
             with self.subTest(source=source), self.assertRaises(ValueError):
