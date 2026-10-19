@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "verify:pyright-tsp": "node spikes/pyright-bridge/tsp_probe.mjs"
+  },
+  "devDependencies": {
+    "pyright": "1.1.414",
+    "pyright-typeserver": "1.1.414"
+  }
+}
