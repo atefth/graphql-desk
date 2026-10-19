@@ -13,6 +13,7 @@ from .config import (
     load_project_config,
     parse_project_settings,
 )
+from .source_graph import FactoryBinding, ProjectBindings, ResolvedCall
 
 
 def _canonical(path: Path) -> Path:
@@ -103,6 +104,45 @@ def select_schema(
         if schema.name == binding:
             return schema
     raise ValueError("Unknown schema binding")
+
+
+def project_bindings(config: ProjectConfig, *, project_id: str) -> ProjectBindings:
+    """Describe configured constructors without importing generated modules.
+
+    The caller supplies the same opaque identity used in ModuleSnapshot.project;
+    no identity is guessed from paths. This does not create generated modules or
+    establish source eligibility, credentials or static symbol availability.
+    """
+    if not project_id:
+        raise ValueError("Project identity must be nonempty")
+    schemas = tuple(schema.name for schema in config.schemas)
+    default = "default" if schemas == ("default",) else None
+    factories = [
+        FactoryBinding(f"{config.generated_package}.{schema}", "graphql", schema)
+        for schema in schemas
+    ]
+    if config.template is not None:
+        module, _, export = config.template.rpartition(".")
+        if (module, export) == ("graphql_desk", "init_graphql"):
+            raise ValueError("The schema initializer cannot be a document template")
+        if not any(
+            (item.module, item.export) == (module, export) for item in factories
+        ):
+            factories.append(FactoryBinding(module, export))
+    return ProjectBindings(project_id, schemas, default, tuple(factories))
+
+
+def schema_for_call(
+    config: ProjectConfig, call: ResolvedCall, *, project_id: str
+) -> SchemaConfig:
+    """Route actual schema metadata, leaving call provenance/version facts intact.
+
+    call.binding is a Python assignment name and never selects a schema. This
+    checks project/schema identity only, not source matching or snapshot freshness.
+    """
+    if not project_id or call.module.project != project_id:
+        raise ValueError("Resolved call belongs to a different project")
+    return select_schema(config, binding=call.schema_name)
 
 
 def _overlap(first: Path, second: Path) -> bool:

@@ -10,9 +10,12 @@ from graphql_desk.config import ProjectConfig, load_project_config, parse_projec
 from graphql_desk.project import (
     effective_project,
     find_project,
+    project_bindings,
+    schema_for_call,
     select_schema,
     validate_project_ownership,
 )
+from graphql_desk.source_graph import ModuleSnapshot, resolve_project
 
 _BASE = """[tool.graphql-desk]
 schema="schema.graphql"
@@ -36,6 +39,132 @@ class ProjectTests(unittest.TestCase):
         config = self.config(root, text)
         config.path.write_text(text, encoding="utf-8")
         return config
+
+    def test_configured_factory_facts_and_real_call_schema_routing(self) -> None:
+        config = self.config(
+            self.root,
+            """[tool.graphql-desk]
+generated_package="generated.types"
+schemas=[{name="shop",schema="shop.graphql",schema_output="generated/types/shop.pyi"},
+{name="users",schema="users.graphql",schema_output="generated/types/users.pyi"}]
+""",
+        )
+        facts = project_bindings(config, project_id="workspace-project")
+        self.assertEqual(facts.schemas, ("shop", "users"))
+        self.assertIsNone(facts.default_schema)
+        self.assertEqual(
+            tuple(
+                (item.module, item.export, item.schema_name) for item in facts.factories
+            ),
+            (
+                ("generated.types.shop", "graphql", "shop"),
+                ("generated.types.users", "graphql", "users"),
+            ),
+        )
+        snapshot = ModuleSnapshot(
+            "workspace-project",
+            "queries",
+            "file:///queries.py",
+            7,
+            'from generated.types.shop import graphql\nusers=graphql("{ id }")',
+        )
+        resolved = resolve_project((snapshot,), bindings=(facts,))
+        self.assertEqual(resolved.diagnostics, ())
+        call = resolved.calls[0]
+        self.assertEqual(call.binding, "users")
+        self.assertEqual(call.schema_name, "shop")
+        before = (call, call.dependencies, call.contributions)
+        self.assertIs(
+            schema_for_call(config, call, project_id="workspace-project"),
+            config.schemas[0],
+        )
+        self.assertEqual(before, (call, call.dependencies, call.contributions))
+        self.assertEqual(call.module.version, 7)
+        self.assertEqual(call.module.uri, "file:///queries.py")
+        with self.assertRaises(ValueError):
+            schema_for_call(config, call, project_id="other-project")
+        with self.assertRaises(ValueError):
+            schema_for_call(
+                config,
+                replace(call, schema_name="unknown"),
+                project_id="workspace-project",
+            )
+        with self.assertRaises(ValueError):
+            schema_for_call(
+                config, replace(call, schema_name=None), project_id="workspace-project"
+            )
+
+    def test_default_template_facts_do_not_leak_credentials_or_invent_gql_export(
+        self,
+    ) -> None:
+        config = self.config(
+            self.root,
+            _BASE.replace(
+                '"schema.graphql"',
+                '{url="https://example.test?secret=SECRET",headers={Authorization="SECRET"}}',
+            )
+            + 'template="custom.query"',
+        )
+        facts = project_bindings(config, project_id="project")
+        self.assertEqual(facts.default_schema, "default")
+        self.assertNotIn("SECRET", repr(facts))
+        self.assertFalse(any(item.export == "gql" for item in facts.factories))
+        for source in (
+            'from custom import query\nresult=query("{ id }")',
+            'from graphql_desk import gql\nresult=gql("{ id }")',
+            "from graphql_desk_generated.default import graphql\n"
+            'result=graphql("{ id }")',
+        ):
+            result = resolve_project(
+                (ModuleSnapshot("project", "queries", "file:///q.py", 1, source),),
+                bindings=(facts,),
+            )
+            self.assertEqual(result.diagnostics, ())
+            self.assertEqual(len(result.calls), 1)
+            self.assertIs(
+                schema_for_call(config, result.calls[0], project_id="project"),
+                config.schemas[0],
+            )
+
+    def test_template_identity_dedup_reserved_initializer_and_project_separation(
+        self,
+    ) -> None:
+        config = self.config(
+            self.root, _BASE + 'template="graphql_desk_generated.default.graphql"'
+        )
+        facts = project_bindings(config, project_id="one")
+        self.assertEqual(len(facts.factories), 1)
+        self.assertEqual(facts.factories[0].schema_name, "default")
+        with self.assertRaises(ValueError):
+            project_bindings(
+                replace(config, template="graphql_desk.init_graphql"), project_id="one"
+            )
+        with self.assertRaises(ValueError):
+            project_bindings(config, project_id="")
+        second = project_bindings(config, project_id="two")
+        results = resolve_project(
+            (
+                ModuleSnapshot(
+                    "one",
+                    "q",
+                    "file:///q.py",
+                    1,
+                    'from graphql_desk import graphql\nq=graphql("{ first }")',
+                ),
+                ModuleSnapshot(
+                    "two",
+                    "q",
+                    "file:///q.py",
+                    2,
+                    'from graphql_desk import graphql\nq=graphql("{ second }")',
+                ),
+            ),
+            bindings=(facts, second),
+        )
+        self.assertEqual(len(results.calls), 2)
+        self.assertEqual(results.diagnostics, ())
+        with self.assertRaises(ValueError):
+            schema_for_call(config, results.calls[1], project_id="one")
 
     def test_effective_project_selects_whole_configs_before_fallback_validation(
         self,
