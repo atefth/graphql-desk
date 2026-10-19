@@ -4,7 +4,7 @@
 
 ## Current gate status
 
-**Planning/documentation readiness: PASSED. Product full-parity gate: NOT PASSED. No product acceptance gates have passed.** The requested parity gates are criteria for future implementation and acceptance testing; documentation checks and narrow feasibility proofs do not satisfy them. This docs PR stays draft pending Ponytail review.
+**Planning/documentation readiness: PASSED. Product full-parity gate: NOT PASSED. No product acceptance gates have passed.** The requested parity gates are criteria for future implementation and acceptance testing; documentation checks and narrow feasibility proofs do not satisfy them. Ponytail documentation review passed after the corrections recorded below; this PR remains draft as requested.
 
 | Product area / ledger | Current status | Evidence limit |
 |---|---|---|
@@ -126,3 +126,11 @@ Any change to these defaults should be captured in the parity issue before codin
 - [x] Relative documentation links and whitespace validated; checkout originally contained only README.md; parent blueprint preserved.
 
 Planning readiness means the documentation is ready for review. It does not certify implementation feasibility or product conformance. Exact API/binding ergonomics, persisted omission/build mechanism, dependency pins, supported versions and performance budgets remain explicit implementation validation gates; do not claim them solved by this plan. Docs PRs must land before issue/roadmap updates and production implementation. After landing, implementation may use parallel agents where independent, with small PRs, CI from the first production PR, Ponytail coding and review before publication.
+
+## Ponytail documentation review (2026-10-19)
+
+Reviewed the current docs-only PR diff, all five connected Markdown files and PR description for scope, acceptance/evidence consistency and unnecessary implementation commitments. Expected use is human planning/review; no runtime or production-load behavior is introduced.
+
+Corrected three substantive inconsistencies in the retained gql.tada audit: required user-facing sub-APIs were labeled optional; one acceptance case limited scalar mappings to output despite required variable/input mappings; cache wording implied a mandatory persistent cache. These now match API-01, SCALAR-01 and the optional-cache decision. Detailed requirements and ledger statuses are preserved.
+
+Review passes with no remaining substantive findings in the docs scope. Documentation readiness passes; no product acceptance gate passes. PR remains draft by request. Relative links (including local section anchors), code fences and whitespace were checked. Remote targets, upstream suites, spike artifacts and production behavior were not revalidated.
