@@ -8,6 +8,7 @@ from pathlib import Path
 
 from graphql import build_schema
 
+from graphql_desk.config import ScalarMapping
 from graphql_desk.operation_types import render_operation_types
 
 _SCHEMA = """
@@ -35,6 +36,143 @@ _SOURCE = """
 
 
 class OperationTypesTests(unittest.TestCase):
+    def test_mapped_types_runtime_and_checker_boundaries(self) -> None:
+        schema = build_schema(
+            "scalar Date scalar Loose scalar class scalar Literal scalar list "
+            "enum Color { RED BLUE } "
+            "input Filter { when: Date! nested: [Filter!] color: Color dates: [Date] } "
+            "type Query { today(when: Date!, filter: Filter): Date! "
+            "color: Color! all: [Date!]! }"
+        )
+        source = (
+            "query Work($when: Date!, $filter: Filter) { "
+            "today(when: $when, filter: $filter) color all }"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "imported.txt"
+            (root / "domain.py").write_text(
+                "from enum import Enum\nfrom pathlib import Path\n"
+                "Path('imported.txt').write_text('executed')\n"
+                "class Color(Enum):\n RED = 'RED'\n BLUE = 'BLUE'\n"
+            )
+            output = render_operation_types(
+                schema,
+                source,
+                name="Mapped",
+                scalars=(
+                    ScalarMapping("Date", "builtins.str", "datetime.datetime"),
+                    ScalarMapping("Loose", "typing.Any", "typing.Any"),
+                    ScalarMapping("class", "builtins.str", "builtins.str"),
+                    ScalarMapping("Literal", "builtins.str", "builtins.str"),
+                    ScalarMapping("list", "builtins.str", "builtins.str"),
+                ),
+                enums=(("Color", "domain.Color"),),
+            )
+            self.assertFalse(
+                marker.exists(), "Rendering must not execute configured modules"
+            )
+            self.assertIn("'when': 'DateInput'", output)
+            self.assertIn("'today': 'DateOutput'", output)
+            self.assertIn("'all': 'list[DateOutput]'", output)
+            self.assertIn(
+                "'dates': NotRequired['list[DateInput | None] | None']", output
+            )
+            (root / "generated.py").write_text(output)
+            runtime = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import generated; from datetime import datetime; "
+                    "assert generated.DateInput is str; "
+                    "assert generated.DateOutput is datetime; "
+                    "assert generated.classInput is str; "
+                    "assert generated.LiteralOutput is str; "
+                    "assert generated.listOutput is str; "
+                    "assert generated.Color.RED.value == 'RED'",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stderr)
+            self.assertTrue(
+                marker.exists(),
+                "Only importing generated declarations executes their imports",
+            )
+            (root / "fixture.py").write_text(
+                "from datetime import datetime\n"
+                "from generated import MappedVariables, MappedResult, Color\n"
+                "good_vars: MappedVariables = {'when': 'x', "
+                "'filter': {'when': 'x', 'color': Color.RED}}\n"
+                "good_result: MappedResult = {'today': datetime(2020, 1, 1), "
+                "'color': Color.RED, 'all': []}\n"
+                "bad_vars: MappedVariables = {'when': datetime(2020, 1, 1)}\n"
+                "bad_result: MappedResult = {'today': 'x', "
+                "'color': Color.RED, 'all': []}\n"
+                "bad_enum: MappedVariables = {'when': 'x', "
+                "'filter': {'when': 'x', 'color': 'RED'}}\n"
+                "bad_null: MappedVariables = {'when': None}\n"
+            )
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+            self.assertIn("Found 4 errors in 1 file", mypy.stdout)
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["fixture.py", "generated.py", "domain.py"],
+                        "pythonVersion": "3.10",
+                        "typeCheckingMode": "strict",
+                    }
+                )
+            )
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(pyright.returncode, 1, pyright.stdout + pyright.stderr)
+            diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
+            self.assertEqual(len(diagnostics), 4, diagnostics)
+            self.assertEqual(
+                {item["range"]["start"]["line"] for item in diagnostics}, {4, 5, 6, 7}
+            )
+
+    def test_nested_operation_declaration_cannot_overwrite_mapping_alias(self) -> None:
+        schema = build_schema(
+            "scalar XResult_ type Child { id: ID! } "
+            "type Query { child(v: XResult_!): Child! }"
+        )
+        with self.assertRaisesRegex(ValueError, "Colliding"):
+            render_operation_types(
+                schema,
+                "query($v: XResult_!) { Output: child(v: $v) { id } }",
+                name="X",
+                scalars=(ScalarMapping("XResult_", "builtins.str", "builtins.str"),),
+            )
+
     def test_wrappers_aliases_merges_and_variable_defaults(self) -> None:
         output = render_operation_types(build_schema(_SCHEMA), _SOURCE, name="Book")
         for expected in (

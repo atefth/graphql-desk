@@ -22,7 +22,8 @@ from graphql import (
     visit,
 )
 
-from .schema_types import render_schema_types
+from .config import ScalarMapping
+from .schema_types import mapped_type_declarations, render_schema_types
 
 
 class _SupportedSyntax(Visitor):
@@ -56,11 +57,17 @@ def _named_type(type_: TypeNode) -> str:
 
 
 def render_operation_types(
-    schema: GraphQLSchema, source: str, *, name: str, operation: str | None = None
+    schema: GraphQLSchema,
+    source: str,
+    *,
+    name: str,
+    operation: str | None = None,
+    scalars: tuple[ScalarMapping, ...] = (),
+    enums: tuple[tuple[str, str], ...] = (),
 ) -> str:
     """Render validated operation declarations, rejecting unsupported semantics.
 
-    No fragments, directives, abstract outputs or custom scalar mappings are
+    No fragments, directives or abstract outputs are
     supported yet. This renders declarations only, not execution or inference.
     """
     if (
@@ -70,7 +77,8 @@ def render_operation_types(
         or unicodedata.normalize("NFKC", name) != name
     ):
         raise ValueError(f"Unsafe Python operation name: {name!r}")
-    output = render_schema_types(schema)
+    output = render_schema_types(schema, scalars=scalars, enums=enums)
+    inputs, outputs, _ = mapped_type_declarations(schema, scalars, enums)
     document = parse(source)
     visit(document, _SupportedSyntax())
     errors = validate(schema, document)
@@ -92,7 +100,7 @@ def render_operation_types(
         if len(matches) != 1:
             raise ValueError(f"Unknown selected operation: {operation!r}")
         selected = matches[0]
-    reserved = set(schema.type_map)
+    reserved = set(schema.type_map) | set(inputs.values()) | set(outputs.values())
     declarations: list[str] = []
 
     def declare(class_name: str, fields: list[tuple[str, str]]) -> None:
@@ -106,7 +114,8 @@ def render_operation_types(
     for variable in sorted(
         selected.variable_definitions or (), key=lambda item: item.variable.name.value
     ):
-        annotation = _output_type(variable.type, _named_type(variable.type))
+        leaf = _named_type(variable.type)
+        annotation = _output_type(variable.type, inputs.get(leaf, leaf))
         if variable.default_value is not None or not isinstance(
             variable.type, NonNullTypeNode
         ):
@@ -148,7 +157,7 @@ def render_operation_types(
                 selection(named, children, child_name)
                 leaf = child_name
             elif isinstance(named, (GraphQLScalarType, GraphQLEnumType)):
-                leaf = named.name
+                leaf = outputs.get(named.name, named.name)
             else:
                 raise ValueError(f"Unsupported output type: {named.name}")
             annotation = _output_type(field_type, leaf)
