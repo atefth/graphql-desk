@@ -4,7 +4,7 @@
 
 ## Current gate status
 
-**Documentation readiness for review: PASSED. Final research/scope readiness for implementation: NOT COMPLETE (see [remaining planning gaps](planning-readiness-audit.md)). Product full-parity gate: NOT PASSED. No product acceptance gates have passed.** The requested parity gates are criteria for future implementation and acceptance testing; documentation checks and narrow feasibility proofs do not satisfy them. The final Ponytail planning audit found remaining planning blockers and corrected an editor inventory omission; this PR remains draft as requested.
+**Planning specification/documentation readiness for review: PASSED (see [gap dispositions and evidence](planning-readiness-audit.md)). Product full-parity gate: NOT PASSED. No product acceptance gates have passed.** The requested parity gates are criteria for future implementation and acceptance testing; documentation checks and narrow feasibility proofs do not satisfy them. The final research pass specified all eight planning gaps and corrected an editor inventory omission; this PR remains draft as requested.
 
 | Product area / ledger | Current status | Evidence limit |
 |---|---|---|
@@ -104,7 +104,7 @@ Any change to these defaults should be captured in the parity issue before codin
 
 ## Current go/no-go
 
-**Go for an incremental proof-driven foundation; no-go for a full-parity claim today.** No product implementation exists. The highest-risk gate is sound live operation typing and recovery through the in-memory `.pyi` lifecycle. Source extraction/config and the exact persisted-document build contract also need decisions before the shared project model is frozen. Full parity remains the acceptance target; experimental and WIP upstream features retain those maturity labels rather than being silently dropped.
+**Go for an incremental proof-driven foundation; no-go for a full-parity claim today.** No product implementation exists. The highest-risk gate is sound live operation typing and recovery through the in-memory `.pyi` lifecycle. Source extraction/config and the persisted-document build contract are specified in the detailed contracts; their implementation must satisfy the recorded acceptance cases before the shared project model is treated as stable. Full parity remains the acceptance target; experimental and WIP upstream features retain those maturity labels rather than being silently dropped.
 
 
 ## Repository governance and traceability
@@ -125,7 +125,7 @@ Any change to these defaults should be captured in the parity issue before codin
 - [x] Dependencies and delivery gates documented; static authoring, operation selection, scalar mapping, invalid-buffer and schema isolation contracts recorded for review.
 - [x] Relative documentation links and whitespace validated; checkout originally contained only README.md; parent blueprint preserved.
 
-The checked items above establish documentation readiness for review, not completion of all research or scope contracts. The final [planning gap register](planning-readiness-audit.md) blocks implementation until its planning items close. Documentation readiness means the documentation is ready for review. It does not certify implementation feasibility or product conformance. Exact API/binding contracts, persisted omission/build mechanism, initial dependency/support choices and measurable performance budgets must first be specified in planning, then validated by implementation; do not claim them solved by this plan. Docs PRs must land before issue/roadmap updates and production implementation. After landing, implementation may use parallel agents where independent, with small PRs, CI from the first production PR, Ponytail coding and review before publication.
+The checked items above establish documentation readiness for review, not completion of all research or scope contracts. The final [planning gap register](planning-readiness-audit.md) records explicit contracts for all eight items; their product behavior remains to be tested. Documentation readiness means the documentation is ready for review. It does not certify implementation feasibility or product conformance. Exact API/binding contracts, persisted omission/build mechanism, initial dependency/support choices and measurable budgets are now specified in the contracts below; their implementation remains unproven. Docs PRs must land before issue/roadmap updates and production implementation. After landing, implementation may use parallel agents where independent, with small PRs, CI from the first production PR, Ponytail coding and review before publication.
 
 ## Ponytail documentation review (2026-10-19)
 
@@ -134,3 +134,14 @@ Reviewed the current docs-only PR diff, all five connected Markdown files and PR
 Corrected three substantive inconsistencies in the retained gql.tada audit: required user-facing sub-APIs were labeled optional; one acceptance case limited scalar mappings to output despite required variable/input mappings; cache wording implied a mandatory persistent cache. These now match API-01, SCALAR-01 and the optional-cache decision. Detailed requirements and ledger statuses are preserved.
 
 This earlier review was superseded by the [final planning readiness audit](planning-readiness-audit.md), which found additional planning blockers and the extension-highlighting omission. Documentation readiness for review passes; no product acceptance gate passes. PR remains draft by request. Relative links (including local section anchors), code fences and whitespace were checked. Remote targets, upstream suites, spike artifacts and production behavior were not revalidated.
+
+## Detailed adopted planning contracts
+
+These specifications supersede earlier provisional recommendations where more precise. All detailed ledger statuses remain product acceptance statuses, not documentation completion flags.
+
+- [Python API, static authoring and type/helper semantics](contracts/api-and-types.md)
+- [Configuration, CLI and generated-state lifecycle](contracts/config-cli-and-lifecycle.md)
+- [Persisted byte/build rules and project analysis](contracts/persisted-and-project-analysis.md)
+- [Support, performance budgets and portable evidence](contracts/support-performance-and-evidence.md)
+
+There are no outstanding irreducible product choices requiring user input. Adopted defaults remain reviewable and may change through an explicit documented decision; no upstream capability is dropped. New implementation evidence can reopen a design question without changing the full-parity target.

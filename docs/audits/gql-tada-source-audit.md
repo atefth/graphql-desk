@@ -1,3 +1,5 @@
+> Later planning contracts specify the Python decisions and newly verified published-artifact surfaces: see [final readiness audit](../planning-readiness-audit.md). Historical source-audit verification limits below describe that original pass.
+
 > Source-audit evidence retained from 2026-10-19; current product decisions and delivery order are in [the parity plan](../parity-plan.md). Historical questions below do not reopen settled scope: embedded Python calls, identity-only fragments, editor conveniences and persisted operations are required. No upstream tests were rerun for this documentation checkout.
 
 # gql.tada source-level completeness audit

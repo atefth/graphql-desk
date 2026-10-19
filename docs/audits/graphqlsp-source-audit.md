@@ -1,3 +1,5 @@
+> Later planning contracts specify the Python decisions and newly verified published-artifact surfaces: see [final readiness audit](../planning-readiness-audit.md). Historical source-audit verification limits below describe that original pass.
+
 > Source-audit evidence retained from 2026-10-19; current product decisions and delivery order are in [the parity plan](../parity-plan.md). Historical questions below do not reopen settled scope: embedded Python calls, identity-only fragments, editor conveniences and persisted operations are required. No upstream tests were rerun for this documentation checkout.
 
 # GraphQLSP source audit for GraphQL Desk
@@ -74,7 +76,7 @@ At minimum, maintain automated fixtures that run in a real VS Code extension hos
 - No exhaustive compatibility run was made against a published `@0no-co/graphqlsp@1.17.5` tarball or gql.tada release; this audit uses source commit `5f277f3` and manifest version 1.17.5.
 - Exact cross-version behavior, stale-schema race timing, multi-root project indexing, every diagnostic rule/range, and all fragment rename edge cases were not manually exercised beyond tests/source.
 - I did not inspect every upstream changelog entry or compare all historical/newer commits. Recheck pinned sources when converting this inventory into a product support promise.
-- Settled scope: static embedded Python calls, required field-use analysis, identity-only masking, and persisted operations. Still open: exact Python API/binding, persisted document omission/build contract, supported-client fixtures, and generic-LSP/VS Code packaging.
+- Settled scope: static embedded Python calls, required field-use analysis, identity-only masking, and persisted operations. Python API/binding, omission/build and packaging contracts are now specified in the final planning contracts; their supported-client fixtures and production behavior remain unverified.
 
 ## Final planning audit correction
 
