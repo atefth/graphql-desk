@@ -1,0 +1,11 @@
+# Finite source selection
+
+`graphql_desk.source_selection.select_project_sources(config, candidates, *, workspace=None, explicit_config=False)` selects from explicit candidate paths and returns frozen `SourceFile(path, source_root, module, is_package)` facts. It does not enumerate directories, read Python source, execute imports or acquire unsaved buffers. Relative candidates use the project root; missing paths may represent new unsaved files.
+
+Matching uses full source-root-relative paths, case-sensitively on every platform. `*` and `?` stay within a component; a whole `**` component spans zero or more components. Files must match an include and no exclude. Generated package descendants, owned outputs and the reserved `build/graphql-desk` tree remain excluded. Canonical identities deduplicate aliases separately from pattern matching. The first eligible configured root supplies the module identity; distinct files with one module identity reject. Nested `__init__.py` identifies its package, while source-root `__init__.py` has no module identity and rejects.
+
+Selection rechecks canonical containment, symlink targets and nearest configured ownership. Nested active projects own their files; inactive configurations do not, and invalid nearer configuration fails closed. Exact configured entrypoints must identify one eligible file. Directories, broken file symlinks, root escapes and invalid Python module components reject. Configuration files may be read to establish ownership.
+
+The existing configuration parser still requires source roots inside their project. `explicit_config=True` permits selecting a project outside the supplied workspace; the contract's additional explicit-CLI exception for roots outside the project is not implemented yet. Broader source/config/schema freshness remains the lifecycle caller's responsibility, rather than a second proof in this path selector.
+
+This is a #27 foundation for shared editor/CLI discovery. Actual enumeration, snapshot acquisition, command dispatch and live integration remain open, as do SCHEMA-01 and the live-typing gate. Tests cover defaults/globs, canonical aliases, nested ownership, unsaved paths, entrypoints and module collisions without executing source files.
