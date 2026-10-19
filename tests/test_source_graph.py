@@ -3,6 +3,7 @@ from dataclasses import replace
 
 from graphql_desk.source import extract_calls
 from graphql_desk.source_graph import (
+    DocumentIdentity,
     FactoryBinding,
     ModuleSnapshot,
     ProjectBindings,
@@ -599,5 +600,258 @@ fake("{ not_a_document }")
             "from graphql_desk import gql\nfrom pkg import child\ngql(child.TEXT)",
         )
         result = resolve_project((package, child, consumer))
+        self.assertEqual(result.calls, ())
+        self.assertTrue(result.diagnostics)
+
+    def test_fragment_references_target_actual_imported_calls_in_caller_order(
+        self,
+    ) -> None:
+        leaf = module(
+            "leaf",
+            'from graphql_desk import gql\nleaf=gql("fragment Leaf on User { id }")',
+        )
+        left = module(
+            "left",
+            "from graphql_desk import gql\nfrom leaf import leaf\n"
+            'left=gql("fragment Left on User { ...Leaf name }", [leaf])',
+        )
+        bridge = module(
+            "bridge", "from left import left as first\nfrom leaf import leaf as second"
+        )
+        consumer = module(
+            "main",
+            "from graphql_desk import gql\nfrom bridge import first, second\n"
+            'doc=gql("query Q { user { ...Left ...Leaf } }", (first, second, first))',
+        )
+        result = resolve_project((consumer, bridge, left, leaf))
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual(len(result.calls), 3)
+        by_binding = {call.binding: call for call in result.calls}
+        document = by_binding["doc"]
+        left_call = by_binding["left"]
+        leaf_call = by_binding["leaf"]
+        self.assertEqual(document.source, "query Q { user { ...Left ...Leaf } }")
+        self.assertEqual(
+            [reference.target for reference in document.fragments],
+            [
+                DocumentIdentity(left_call.module, left_call.range),
+                DocumentIdentity(leaf_call.module, leaf_call.range),
+                DocumentIdentity(left_call.module, left_call.range),
+            ],
+        )
+        self.assertEqual(
+            [
+                consumer.source[ref.range.start : ref.range.end]
+                for ref in document.fragments
+            ],
+            ["first", "second", "first"],
+        )
+        self.assertTrue(
+            all(ref.reference_module == document.module for ref in document.fragments)
+        )
+        self.assertEqual(
+            {item.module for item in document.dependencies},
+            {"main", "bridge", "left", "leaf"},
+        )
+        self.assertEqual(
+            left_call.fragments[0].target,
+            DocumentIdentity(leaf_call.module, leaf_call.range),
+        )
+        updated = resolve_project(
+            (
+                consumer,
+                bridge,
+                left,
+                replace(
+                    leaf, version=2, source=leaf.source.replace("{ id }", "{ name }")
+                ),
+            )
+        )
+        updated_document = next(call for call in updated.calls if call.binding == "doc")
+        self.assertEqual(updated_document.fragments[1].target.module.version, 2)
+        self.assertIn(2, {item.version for item in updated_document.dependencies})
+
+    def test_fragment_references_support_qualified_and_inline_document_values(
+        self,
+    ) -> None:
+        fragments = module(
+            "fragments",
+            'from graphql_desk import gql\nfields=gql("fragment F on User { id }")',
+        )
+        consumer = module(
+            "main",
+            "from graphql_desk import gql\nimport fragments as f\n"
+            'doc=gql("{ user { ...F ...G } }", [f.fields, '
+            'gql("fragment G on User { name }")])',
+        )
+        result = resolve_project((consumer, fragments))
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual(len(result.calls), 3)
+        identities = {
+            DocumentIdentity(call.module, call.range) for call in result.calls
+        }
+        document = next(call for call in result.calls if call.binding == "doc")
+        self.assertEqual(len(document.fragments), 2)
+        self.assertTrue(all(ref.target in identities for ref in document.fragments))
+        self.assertEqual(document.fragments[0].target.module.module, "fragments")
+        self.assertEqual(document.fragments[1].target.module.module, "main")
+
+    def test_fragment_reference_resolution_rejects_dynamic_values_and_cycles(
+        self,
+    ) -> None:
+        for reference in ('"not a document"', "make()", "*items", "missing"):
+            result = resolve_project(
+                (
+                    module(
+                        "main",
+                        'from graphql_desk import gql\ndoc=gql("{ id }", ['
+                        + reference
+                        + "])",
+                    ),
+                )
+            )
+            with self.subTest(reference=reference):
+                self.assertEqual(result.calls, ())
+                self.assertTrue(result.diagnostics)
+        for source in (
+            'from graphql_desk import gql\nf=gql("fragment F on User { ...F }", [f])',
+            'from graphql_desk import gql\nitems=[]\ndoc=gql("{ id }", items)',
+        ):
+            result = resolve_project((module("main", source),))
+            self.assertEqual(result.calls, ())
+            self.assertTrue(result.diagnostics)
+        a = module(
+            "a",
+            "from graphql_desk import gql\nfrom b import B\n"
+            'A=gql("fragment A on User { ...B }", [B])',
+        )
+        b = module(
+            "b",
+            "from graphql_desk import gql\nfrom a import A\n"
+            'B=gql("fragment B on User { ...A }", [A])',
+        )
+        result = resolve_project((a, b))
+        self.assertEqual(result.calls, ())
+        self.assertTrue(any("cycle" in item.message for item in result.diagnostics))
+
+    def test_fragment_schema_identity_is_checked_and_unknown_metadata_propagates(
+        self,
+    ) -> None:
+        source = """from graphql_desk import gql, init_graphql
+a=init_graphql('a')
+b=init_graphql('b')
+fragment=a('fragment F on User { id }')
+unknown=gql('fragment U on User { name }')
+valid=a('{ user { ...F ...U } }', [fragment, unknown])
+inherited=gql('{ user { ...F } }', [fragment])
+invalid=b('{ user { ...F } }', [fragment])
+"""
+        result = resolve_project((module("main", source),))
+        by_binding = {call.binding: call for call in result.calls}
+        self.assertNotIn("invalid", by_binding)
+        self.assertEqual(by_binding["valid"].schema_name, "a")
+        self.assertEqual(by_binding["inherited"].schema_name, "a")
+        self.assertIsNone(by_binding["unknown"].schema_name)
+        self.assertTrue(
+            any("different schema" in item.message for item in result.diagnostics)
+        )
+
+    def test_document_consumption_does_not_invalidate_static_authoring(self) -> None:
+        source = """from graphql_desk import gql
+fragment=gql('fragment F on User { id }')
+document=gql('query Q { user { ...F } }', [fragment])
+client.execute(document)
+client.execute(document.ast)
+"""
+        result = resolve_project((module("main", source),))
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual(len(result.calls), 2)
+        self.assertEqual(len(result.calls[1].fragments), 1)
+        for mutation in (
+            "fragment.ast.definitions=()",
+            "tree=fragment.ast; tree.definitions=()",
+            "items=[fragment]; items[0].ast.definitions=()",
+            "items=[*[fragment]]; items[0].ast.definitions=()",
+            "items={'f': fragment}; items['f'].ast.definitions=()",
+            "setattr(fragment.ast, 'definitions', ())",
+            "put=setattr; put(fragment.ast, 'definitions', ())",
+        ):
+            mutated = source.replace("client.execute(document)", mutation)
+            with self.subTest(mutation=mutation):
+                invalid = resolve_project((module("main", mutated),))
+                self.assertEqual(invalid.calls, ())
+                self.assertTrue(invalid.diagnostics)
+
+    def test_python_reference_records_do_not_claim_graphql_fragment_validation(
+        self,
+    ) -> None:
+        source = """from graphql_desk import gql
+operation=gql('query NotAFragment { unknownField }')
+document=gql('{ otherUnknownField }', [operation])
+"""
+        result = resolve_project((module("main", source),))
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual(len(result.calls), 2)
+        self.assertEqual(len(result.calls[1].fragments), 1)
+
+    def test_failed_module_traversal_discards_cached_dependent_references(self) -> None:
+        fragment = module(
+            "fragment",
+            'from graphql_desk import gql\nf=gql("fragment F on User { id }")\n'
+            "deep=gql(" + "+".join(['"x"'] * 550) + ")",
+        )
+        consumer = module(
+            "main",
+            "from graphql_desk import gql\nfrom fragment import f\n"
+            'doc=gql("{ user { ...F } }", [f])',
+        )
+        independent = module(
+            "independent", 'from graphql_desk import gql\nok=gql("{ ok }")'
+        )
+        result = resolve_project((consumer, fragment, independent))
+        self.assertEqual([call.binding for call in result.calls], ["ok"])
+        self.assertIn("source-too-complex", {item.code for item in result.diagnostics})
+
+    def test_imported_document_mutation_and_diagnostic_probes_create_no_references(
+        self,
+    ) -> None:
+        fragment = module(
+            "fragment",
+            'from graphql_desk import gql\nf=gql("fragment F on User { id }")',
+        )
+        consumer = module(
+            "main",
+            "from graphql_desk import gql\nfrom fragment import f\n"
+            'f.ast.definitions=()\ndoc=gql("{ user { ...F } }", [f])',
+        )
+        result = resolve_project((consumer, fragment))
+        self.assertEqual(result.calls, ())
+        self.assertTrue(result.diagnostics)
+        consumer = module(
+            "main",
+            "from generated.main import graphql as query\nfrom fragment import f\n"
+            'doc=query("{ user { ...F } }", [f])',
+        )
+        facts = ProjectBindings(
+            "app",
+            ("main",),
+            factories=(FactoryBinding("generated.main", "graphql", "main"),),
+        )
+        result = resolve_project((consumer, fragment), bindings=(facts,))
+        self.assertEqual(result.calls, ())
+        self.assertTrue(any("ambiguous" in item.message for item in result.diagnostics))
+
+    def test_imported_ast_projection_mutation_traces_document_origin(self) -> None:
+        fragment = module(
+            "fragment",
+            'from graphql_desk import gql\nf=gql("fragment F on User { id }")\n'
+            "tree=f.ast",
+        )
+        consumer = module(
+            "main",
+            "from graphql_desk import gql\nfrom fragment import f, tree\n"
+            'tree.definitions=()\ndoc=gql("{ user { ...F } }", [f])',
+        )
+        result = resolve_project((consumer, fragment))
         self.assertEqual(result.calls, ())
         self.assertTrue(result.diagnostics)
