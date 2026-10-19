@@ -1,6 +1,6 @@
 # GraphQL Desk
 
-Planned Python developer tooling targeting **full user-visible parity with gql.tada 1.11.4 and its GraphQLSP VS Code integration**. Python-native equivalents are welcome; no upstream capability may be silently dropped. The first implementation slice establishes packaging and CI; no editor or broad typing gate has passed.
+Planned Python developer tooling targeting **full user-visible parity with gql.tada 1.11.4 and its GraphQLSP VS Code integration**. Python-native equivalents are welcome; no upstream capability may be silently dropped. The foundation package carries explicitly annotated GraphQL documents; no editor or broad typing gate has passed.
 
 Start with the [canonical parity plan](docs/parity-plan.md): requirements, acceptance gates, decisions and delivery order. Review [evidence, reuse and support](docs/audits/evidence-and-reuse.md), then the pinned [gql.tada inventory](docs/audits/gql-tada-source-audit.md) and [GraphQLSP inventory](docs/audits/graphqlsp-source-audit.md).
 
@@ -32,3 +32,27 @@ uv build --no-sources --no-build-isolation
 CI checks all five Python minors on Ubuntu 24.04 x64, with Windows Server 2025 x64 and macOS 14 arm64 smoke lanes. Windows Server is a CI smoke environment, not evidence for the planned Windows 11 editor support. These package checks do not establish VS Code/Pylance, generated typing, fragment, client, performance or full-parity acceptance. Before the first production merge, the aggregate `CI` check must be required on `main` with enforcement verified; a workflow file alone does not configure branch protection.
 
 The only runtime dependency is pinned `graphql-core==3.3.0` (MIT). CI audits the locked runtime/development dependency set and rejects runtime dependencies outside the reviewed license inventory. Optional generators are absent. Builds use the locked Hatchling backend; smoke checks rebuild the source archive, then install both wheels into fresh environments outside the source tree.
+
+## Typed-document boundary
+
+`TypedDocument[Result, Variables]` holds a `graphql-core` `DocumentNode` in `.ast` and an optional `.operation_name`. The carrier preserves the supplied AST and performs no schema validation or response coercion. The generic parameters are annotations supplied by the caller today; generation and live inference remain future work.
+
+```python
+from typing import TypedDict
+
+from graphql import parse
+from graphql_desk import TypedDocument
+
+class GreetingResult(TypedDict):
+    greeting: str
+
+class GreetingVariables(TypedDict):
+    name: str
+
+document = TypedDocument[GreetingResult, GreetingVariables](
+    parse("query Greeting($name: String!) { greeting(name: $name) }"),
+    operation_name="Greeting",
+)
+```
+
+An AST-consuming executor receives `document.ast` and `document.operation_name`; its data/error envelope remains unchanged. The carrier cannot verify that manual result/variable annotations describe the AST. A generic user-side signature `execute(document: TypedDocument[R, V], variables: V) -> R` can correlate the two types; this package supplies no execution client. Use an explicitly typed `Variables` binding at that boundary: mypy does not reliably infer the correlated variable type from an inline dictionary. The frozen carrier prevents rebinding its fields; it does not freeze graphql-core's mutable AST internals.
