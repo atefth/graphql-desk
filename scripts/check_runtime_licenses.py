@@ -1,6 +1,7 @@
 """Fail when the installed runtime dependency closure needs a license review."""
 
 import json
+import sys
 from importlib.metadata import distribution
 
 from packaging.requirements import Requirement
@@ -11,7 +12,7 @@ def runtime_inventory(root: str) -> list[dict[str, str]]:
     pending = [root]
     seen: set[str] = set()
     inventory: list[dict[str, str]] = []
-    approved = {"graphql-core": "MIT", "typing-extensions": "PSF-2.0"}
+    approved = {"graphql-core": "MIT", "tomli": "MIT", "typing-extensions": "PSF-2.0"}
     while pending:
         name = canonicalize_name(pending.pop())
         if name in seen:
@@ -44,8 +45,11 @@ def runtime_inventory(root: str) -> list[dict[str, str]]:
 
 if __name__ == "__main__":
     result = runtime_inventory("graphql-desk")
-    assert result == [
+    expected = [
         {"name": "graphql-core", "version": "3.3.0", "license": "MIT"},
         {"name": "typing-extensions", "version": "4.16.0", "license": "PSF-2.0"},
     ]
+    if sys.version_info < (3, 11):
+        expected.insert(1, {"name": "tomli", "version": "2.5.0", "license": "MIT"})
+    assert result == expected
     print(json.dumps(result, indent=2))
