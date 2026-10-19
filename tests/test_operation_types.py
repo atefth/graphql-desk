@@ -11,7 +11,13 @@ from unittest.mock import patch
 from graphql import build_schema
 
 from graphql_desk.config import ScalarMapping
-from graphql_desk.fragments import SchemaContext, index_fragments
+from graphql_desk.fragment_refs import fragment_identity_key
+from graphql_desk.fragments import (
+    FragmentIndex,
+    IndexedDocument,
+    SchemaContext,
+    index_fragments,
+)
 from graphql_desk.operation_types import (
     render_indexed_operation_types,
     render_operation_types,
@@ -44,6 +50,287 @@ _SOURCE = """
 
 
 class OperationTypesTests(unittest.TestCase):
+    def test_indexed_masked_payloads_capabilities_and_owner_guards(self) -> None:
+        schema = build_schema(
+            "type User { id: ID! name: String! friends: [User] } "
+            "type Query { user: User! }"
+        )
+        context = SchemaContext("main", schema, "v1")
+
+        def make(
+            child_version: int = 1, *, conditional: bool = True
+        ) -> tuple[FragmentIndex, IndexedDocument]:
+            modules = (
+                ModuleSnapshot(
+                    "p",
+                    "child",
+                    "file:///child.py",
+                    child_version,
+                    "from graphql_desk import gql\n"
+                    'c=gql("fragment C on User { name }")',
+                ),
+                ModuleSnapshot(
+                    "p",
+                    "fragment",
+                    "file:///fragment.py",
+                    1,
+                    "from graphql_desk import gql\nfrom child import c\n"
+                    'f=gql("fragment F on User { id ...C }",[c])',
+                ),
+                ModuleSnapshot(
+                    "p",
+                    "main",
+                    "file:///main.py",
+                    1,
+                    "from graphql_desk import gql\nfrom fragment import f\n"
+                    "from child import c\n"
+                    'q=gql("query Q($flag:Boolean!){user{id ...F ...C '
+                    '@include(if:$flag) friends{...F}}}",[f,c])',
+                ),
+            )
+            if not conditional:
+                modules = (
+                    *modules[:-1],
+                    replace(
+                        modules[-1],
+                        source=modules[-1]
+                        .source.replace("($flag:Boolean!)", "")
+                        .replace("@include(if:$flag)", ""),
+                    ),
+                )
+            index = index_fragments(
+                resolve_project(modules), schemas={("p", None): context}
+            )
+            self.assertEqual(index.diagnostics, ())
+            return index, next(d for d in index.documents if d.call.binding == "q")
+
+        index, document = make()
+        output = render_indexed_operation_types(
+            context, document, name="Read", fragment_index=index
+        )
+        self.assertEqual(output.count("ID = str"), 1)
+        self.assertIn("ReadFragment_F", output)
+        self.assertIn("ReadFragment_C", output)
+        self.assertIn("closed=True", output)
+        self.assertIn("_graphql_desk_φ", output)
+        from graphql import graphql_sync  # pyright: ignore[reportUnknownVariableType]
+
+        executed = graphql_sync(
+            schema,
+            "\n".join(fact.printed for fact in document.definitions),
+            root_value={"user": {"id": "1", "name": "n", "friends": []}},
+            variable_values={"flag": False},
+        )
+        self.assertIsNone(executed.errors)
+        self.assertEqual(
+            executed.data, {"user": {"id": "1", "name": "n", "friends": []}}
+        )
+        changed_index, changed_document = make(2)
+        changed = render_indexed_operation_types(
+            context, changed_document, name="Read", fragment_index=changed_index
+        )
+        self.assertNotEqual(output, changed)
+        for bad in (
+            replace(index, documents=()),
+            replace(index, documents=index.documents + (index.documents[0],)),
+            replace(
+                index,
+                documents=tuple(
+                    replace(d, context_token="old") if d.call.binding == "f" else d
+                    for d in index.documents
+                ),
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                render_indexed_operation_types(
+                    context, document, name="Read", fragment_index=bad
+                )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "generated.py").write_text(output, encoding="utf8")
+            combined_index, combined_document = make(conditional=False)
+            (root / "combined.py").write_text(
+                render_indexed_operation_types(
+                    context,
+                    combined_document,
+                    name="Combined",
+                    fragment_index=combined_index,
+                ),
+                encoding="utf8",
+            )
+            fixture = (
+                "from typing import cast\n"
+                "from generated import ReadResult, ReadFragment_F, ReadFragment_C\n"
+                "from typing import Literal\n"
+                "from graphql_desk.fragment_refs import FragmentIdentity, FragmentRef\n"
+                + "".join(
+                    f"{d.primary_fragment.name}Identity = FragmentIdentity[Literal["
+                    f"{fragment_identity_key(d, d.primary_fragment)!r}]]\n"
+                    for d in index.documents
+                    if d.primary_fragment is not None
+                )
+                + "C = CIdentity\nF = FIdentity\n"
+                "def read_f(value: FragmentRef[F]) -> None: pass\n"
+                "def read_c(value: FragmentRef[C]) -> None: pass\n"
+                "from combined import CombinedResult\n"
+                "combined = cast(CombinedResult, {})\n"
+                "read_f(combined['user'])\n"
+                "read_c(combined['user'])\n"
+                "result = cast(ReadResult, {})\n"
+                "read_f(result['user'])\n"
+                "payload = cast(ReadFragment_F, {})\n"
+                "identifier: str = payload['id']\n"
+                "read_c(payload)\n"
+                "child = cast(ReadFragment_C, {})\n"
+                "name: str = child['name']\n"
+                "hidden = result['user']['name']  # error\n"
+                "read_c(result['user'])  # error\n"
+                "read_f(child)  # error\n"
+                "hidden_nested = payload['name']  # error\n"
+            )
+            (root / "fixture.py").write_text(fixture, encoding="utf8")
+            expected = {
+                i for i, line in enumerate(fixture.splitlines(), 1) if "# error" in line
+            }
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-X",
+                    "utf8",
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+            lines = {
+                int(line.split(":")[1])
+                for line in mypy.stdout.splitlines()
+                if "fixture.py:" in line and ": error:" in line
+            }
+            self.assertEqual(lines, expected, mypy.stdout + mypy.stderr)
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["fixture.py", "generated.py", "combined.py"],
+                        "typeCheckingMode": "strict",
+                        "pythonVersion": "3.10",
+                    }
+                ),
+                encoding="utf8",
+            )
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
+            self.assertEqual(
+                {d["range"]["start"]["line"] + 1 for d in diagnostics},
+                expected,
+                pyright.stdout + pyright.stderr,
+            )
+
+    def test_masked_abstract_unmask_and_cross_consumer_owner_identity(self) -> None:
+        schema = build_schema(
+            "interface Node { id: ID! } "
+            "type User implements Node { id: ID! name: String! } "
+            "type Org implements Node { id: ID! } "
+            "type Query { nodes: [Node] }"
+        )
+        context = SchemaContext("main", schema, "v1")
+        sources = (
+            ModuleSnapshot(
+                "p",
+                "leaf",
+                "file:///leaf.py",
+                1,
+                'from graphql_desk import gql\nc=gql("fragment C on User { name }")',
+            ),
+            ModuleSnapshot(
+                "p",
+                "fragment",
+                "file:///fragment.py",
+                1,
+                "from graphql_desk import gql\nfrom leaf import c\n"
+                'f=gql("fragment F on Node @_unmask { id ...C }",[c])',
+            ),
+            ModuleSnapshot(
+                "p",
+                "first",
+                "file:///first.py",
+                1,
+                "from graphql_desk import gql\nfrom fragment import f\n"
+                'q=gql("query Q {nodes {kind:__typename ...F}}",[f])',
+            ),
+            ModuleSnapshot(
+                "p",
+                "second",
+                "file:///second.py",
+                8,
+                "from graphql_desk import gql\nfrom fragment import f\n"
+                'other=gql("query Other {nodes {...F}}",[f])',
+            ),
+        )
+        index = index_fragments(
+            resolve_project(sources), schemas={("p", None): context}
+        )
+        self.assertEqual(index.diagnostics, ())
+        document = next(d for d in index.documents if d.call.binding == "q")
+        other = next(d for d in index.documents if d.call.binding == "other")
+        owner = next(d for d in index.documents if d.call.binding == "c")
+        assert owner.primary_fragment is not None
+        key = fragment_identity_key(owner, owner.primary_fragment)
+        output = render_indexed_operation_types(
+            context, document, name="Read", fragment_index=index
+        )
+        second = render_indexed_operation_types(
+            context, other, name="Read", fragment_index=index
+        )
+        self.assertIn(key, output)
+        self.assertIn(key, second)
+        self.assertIn("'id': 'ID'", output)
+        self.assertIn("'nodes': 'list[ReadResult_nodes | None] | None'", output)
+        # @_unmask exposes F, but the nested C remains an opaque capability.
+        operation_part = output.split("ReadFragment_C =")[0]
+        self.assertNotIn("'name':", operation_part)
+        self.assertIn("_graphql_desk_φ", operation_part)
+        unmasked = render_indexed_operation_types(
+            context,
+            document,
+            name="Read",
+            fragment_index=index,
+            disable_masking=True,
+        )
+        self.assertIn("'name': 'String'", unmasked)
+        self.assertNotIn("_graphql_desk_φ", unmasked)
+        self.assertNotIn("fragment_identity", unmasked)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "generated.py"
+            path.write_text(output, encoding="utf8")
+            spec = importlib.util.spec_from_file_location("masked_generated", path)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.assertTrue(hasattr(module, "ReadFragment_F"))
+
     def test_indexed_named_fragments_use_actual_closure_scope_and_selected_operation(
         self,
     ) -> None:
@@ -1283,6 +1570,8 @@ class OperationTypesTests(unittest.TestCase):
                     "pyright",
                     "--project",
                     str(config),
+                    "--pythonpath",
+                    sys.executable,
                     "--outputjson",
                 ],
                 cwd=root,

@@ -21,6 +21,7 @@ from graphql import (
     KnownDirectivesRule,
     ListTypeNode,
     NamedTypeNode,
+    NameNode,
     Node,
     NonNullTypeNode,
     NoUnusedFragmentsRule,
@@ -37,7 +38,8 @@ from graphql import (
 )
 
 from .config import ScalarMapping
-from .fragments import IndexedDocument, SchemaContext
+from .fragment_refs import fragment_identity_key
+from .fragments import FragmentIndex, IndexedDocument, SchemaContext
 from .schema_types import mapped_type_declarations, render_schema_types
 from .source_graph import DocumentIdentity
 
@@ -114,7 +116,7 @@ def _named_type(type_: TypeNode) -> str:
     return type_.name.value
 
 
-def render_operation_types(
+def _render_operation_types(
     schema: GraphQLSchema,
     source: str,
     *,
@@ -124,11 +126,12 @@ def render_operation_types(
     enums: tuple[tuple[str, str], ...] = (),
     client_directives: tuple[str, ...] = (),
     disable_masking: bool = False,
+    fragment_keys: dict[str, str] | None = None,
 ) -> str:
     """Render validated operation declarations, rejecting unsupported semantics.
 
-    Fragment spreads require explicit disable_masking=True until masking is
-    supported. Conditional expansion is bounded; no execution or inference occurs.
+    Raw fragments require explicit unmasking; indexed callers supply owner keys.
+    Conditional expansion is bounded; no execution or inference occurs.
     """
     if (
         not name.isidentifier()
@@ -140,7 +143,10 @@ def render_operation_types(
     output = render_schema_types(schema, scalars=scalars, enums=enums)
     inputs, outputs, _ = mapped_type_declarations(schema, scalars, enums)
     document = parse(source)
-    visit(document, _SupportedSyntax(disable_masking=disable_masking))
+    visit(
+        document,
+        _SupportedSyntax(disable_masking=disable_masking or fragment_keys is not None),
+    )
     if any(
         re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", item) is None
         for item in client_directives
@@ -179,6 +185,18 @@ def render_operation_types(
         for definition in document.definitions
         if isinstance(definition, FragmentDefinitionNode)
     }
+    identities: dict[str, str] = {}
+    if fragment_keys is not None:
+        output += (
+            "\nfrom collections.abc import Callable as __graphql_desk_Callable\n"
+            "from typing_extensions import ReadOnly as __graphql_desk_ReadOnly\n"
+            "from graphql_desk.fragment_refs import "
+            "FragmentIdentity as __graphql_desk_FragmentIdentity\n"
+        )
+        for index, (fragment_name, key) in enumerate(sorted(fragment_keys.items())):
+            alias = f"__graphql_desk_fragment_identity_{index}"
+            identities[fragment_name] = alias
+            output += f"{alias} = __graphql_desk_FragmentIdentity[Literal[{key!r}]]\n"
     fragment_choices: dict[tuple[str, str], list[list[_Field]]] = {}
     operations = [
         definition
@@ -291,7 +309,20 @@ def render_operation_types(
                     if isinstance(node, FragmentSpreadNode)
                     else None
                 )
-                if cache_key is not None and cache_key in fragment_choices:
+                if concrete not in possible(condition):
+                    additions: list[list[_Field]] = [[]]
+                elif (
+                    isinstance(node, FragmentSpreadNode)
+                    and not disable_masking
+                    and fragment_keys is not None
+                    and "_unmask" not in _directives(definition)
+                ):
+                    marker = FieldNode(
+                        name=NameNode(value="_graphql_desk_φ"),
+                        alias=NameNode(value=identities[node.name.value]),
+                    )
+                    additions = [[(condition, marker, False)]]
+                elif cache_key is not None and cache_key in fragment_choices:
                     additions = fragment_choices[cache_key]
                 else:
                     additions = collect(
@@ -392,10 +423,24 @@ def render_operation_types(
                     variant_index += 1
                 branches.append(branch)
                 groups: dict[str, list[_Field]] = {}
+                capabilities: set[str] = set()
                 for scope, node, forced in variant_fields:
+                    if node.name.value == "_graphql_desk_φ":
+                        assert node.alias is not None
+                        capabilities.add(node.alias.value)
+                        continue
                     key = node.alias.value if node.alias else node.name.value
                     groups.setdefault(key, []).append((scope, node, forced))
                 fields: list[tuple[str, str]] = []
+                if capabilities:
+                    identity = " | ".join(sorted(capabilities))
+                    fields.append(
+                        (
+                            "_graphql_desk_φ",
+                            "__graphql_desk_ReadOnly["
+                            f"__graphql_desk_Callable[[{identity}], None]]",
+                        )
+                    )
                 # An authored alias owns its response key, even when named __typename.
                 if abstract and not owns_typename:
                     fields.append(
@@ -503,9 +548,44 @@ def render_operation_types(
         [(root, node) for node in selected.selection_set.selections],
         f"{name}Result",
     )
+    if fragment_keys is not None:
+        for fragment_name, definition in sorted(fragments.items()):
+            parent = schema.get_type(definition.type_condition.name.value)
+            assert isinstance(
+                parent, (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType)
+            )
+            selection(
+                [parent],
+                [(parent, node) for node in definition.selection_set.selections],
+                f"{name}Fragment_{fragment_name}",
+            )
     if needs_never:
         output += "\nfrom typing_extensions import Never as __graphql_desk_Never\n"
     return output + "\n" + "\n\n".join(declarations) + "\n"
+
+
+def render_operation_types(
+    schema: GraphQLSchema,
+    source: str,
+    *,
+    name: str,
+    operation: str | None = None,
+    scalars: tuple[ScalarMapping, ...] = (),
+    enums: tuple[tuple[str, str], ...] = (),
+    client_directives: tuple[str, ...] = (),
+    disable_masking: bool = False,
+) -> str:
+    """Render validated operations; masked spreads require indexed ownership."""
+    return _render_operation_types(
+        schema,
+        source,
+        name=name,
+        operation=operation,
+        scalars=scalars,
+        enums=enums,
+        client_directives=client_directives,
+        disable_masking=disable_masking,
+    )
 
 
 def render_indexed_operation_types(
@@ -517,6 +597,7 @@ def render_indexed_operation_types(
     enums: tuple[tuple[str, str], ...] = (),
     client_directives: tuple[str, ...] = (),
     disable_masking: bool = False,
+    fragment_index: FragmentIndex | None = None,
 ) -> str:
     """Render trusted index facts with their selected operation and context.
 
@@ -539,7 +620,30 @@ def render_indexed_operation_types(
         or (call.operation is not None and call.operation != selected.name)
     ):
         raise ValueError("Indexed document selected operation identity differs")
-    return render_operation_types(
+    keys: dict[str, str] | None = None
+    if not disable_masking and fragment_index is not None:
+        if document not in fragment_index.documents:
+            raise ValueError("Indexed document is absent from fragment owner registry")
+        owners: dict[DocumentIdentity, IndexedDocument] = {}
+        for owner in fragment_index.documents:
+            identity = DocumentIdentity(owner.call.module, owner.call.range)
+            if identity in owners:
+                raise ValueError("Duplicate fragment owner identity")
+            owners[identity] = owner
+        keys = {}
+        for fact in document.definitions:
+            if fact.kind != "fragment":
+                continue
+            resolved_owner = owners.get(fact.document)
+            if (
+                resolved_owner is None
+                or resolved_owner.schema_identity != document.schema_identity
+                or resolved_owner.context_token != document.context_token
+            ):
+                raise ValueError("Fragment owner schema identity or context differs")
+            assert fact.name is not None
+            keys[fact.name] = fragment_identity_key(resolved_owner, fact)
+    return _render_operation_types(
         context.schema,
         "\n\n".join(fact.printed for fact in document.definitions),
         name=name,
@@ -548,4 +652,5 @@ def render_indexed_operation_types(
         enums=enums,
         client_directives=client_directives,
         disable_masking=disable_masking,
+        fragment_keys=keys,
     )
