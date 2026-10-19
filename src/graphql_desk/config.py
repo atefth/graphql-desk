@@ -1,0 +1,436 @@
+"""Declarative project facts; no discovery, credentials, imports or schema loading.
+
+Paths are resolved for identity checks only. Header environment references and
+qualified type symbols remain unresolved until their dedicated integrations.
+"""
+
+import keyword
+import math
+import os
+import re
+import sys
+import unicodedata
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import cast
+from urllib.parse import urlsplit
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+_NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]*\Z")
+_EXCLUDE = (
+    "**/.git/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "**/__pycache__/**",
+    "**/site-packages/**",
+    "**/build/**",
+    "**/dist/**",
+)
+_SCHEMA_KEYS = {
+    "schema",
+    "schema_output",
+    "persisted_output",
+    "cache_output",
+    "scalars",
+    "enums",
+    "disable_masking",
+}
+_PROJECT_KEYS = _SCHEMA_KEYS | {
+    "schemas",
+    "generated_package",
+    "cache_enabled",
+    "template",
+    "track_field_usage",
+    "check_colocated_fragments",
+    "client_directives",
+    "schema_refresh_interval",
+    "disable_preprocessing",
+    "source_roots",
+    "include",
+    "exclude",
+    "entrypoints",
+    "authoring_roots",
+    "templateIsCallExpression",
+}
+
+
+@dataclass(frozen=True)
+class SchemaOrigin:
+    local_path: Path | None = None
+    url: str | None = field(default=None, repr=False)
+    headers: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+
+
+@dataclass(frozen=True)
+class ScalarMapping:
+    name: str
+    input: str
+    output: str
+
+
+@dataclass(frozen=True)
+class SchemaConfig:
+    name: str
+    origin: SchemaOrigin
+    schema_output: Path
+    persisted_output: Path | None
+    cache_output: Path | None
+    scalars: tuple[ScalarMapping, ...]
+    enums: tuple[tuple[str, str], ...]
+    disable_masking: bool
+
+
+@dataclass(frozen=True)
+class ProjectConfig:
+    path: Path
+    root: Path
+    generated_package: str
+    schemas: tuple[SchemaConfig, ...]
+    template: str | None
+    track_field_usage: bool
+    check_colocated_fragments: bool
+    client_directives: tuple[str, ...]
+    schema_refresh_interval: float
+    disable_preprocessing: bool
+    cache_enabled: bool
+    source_roots: tuple[Path, ...]
+    include: tuple[str, ...]
+    exclude: tuple[str, ...]
+    entrypoints: tuple[str, ...] | None
+    authoring_roots: tuple[Path, ...]
+
+
+def _table(value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a table")
+    return cast(dict[str, object], value)
+
+
+def _known(table: dict[str, object], keys: set[str], label: str) -> None:
+    if table.keys() - keys:
+        # Do not repeat untrusted keys or configuration values in diagnostics.
+        raise ValueError(f"Unknown configuration key in {label}")
+
+
+def _string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError(f"{label} must be a nonempty string")
+    return value
+
+
+def _identifier(value: object, label: str) -> str:
+    name = _string(value, label)
+    if (
+        not name.isidentifier()
+        or keyword.iskeyword(name)
+        or unicodedata.normalize("NFKC", name) != name
+    ):
+        raise ValueError(f"{label} must be a canonical Python identifier")
+    return name
+
+
+def _symbol(value: object, label: str) -> str:
+    symbol = _string(value, label)
+    parts = symbol.split(".")
+    if len(parts) < 2:
+        raise ValueError(f"{label} must be an import-qualified type or callable")
+    for part in parts:
+        _identifier(part, label)
+    return symbol
+
+
+def _boolean(table: dict[str, object], key: str, default: bool) -> bool:
+    value = table.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return value
+
+
+def _strings(value: object, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be an array of strings")
+    return tuple(_string(item, label) for item in cast(list[object], value))
+
+
+def _path(value: object, root: Path, label: str) -> Path:
+    text = _string(value, label).replace("${configDir}", str(root))
+    if "${" in text:
+        raise ValueError(f"Unknown substitution in {label}")
+    try:
+        return (root / text).resolve()
+    except (OSError, ValueError, RuntimeError):
+        raise ValueError(f"Invalid path in {label}") from None
+
+
+def _inside(path: Path, root: Path, label: str) -> None:
+    if not path.is_relative_to(root):
+        raise ValueError(f"{label} must stay inside its owning directory")
+
+
+def _origin(value: object, root: Path) -> SchemaOrigin:
+    headers: tuple[tuple[str, str], ...] = ()
+    is_record = isinstance(value, dict)
+    if is_record:
+        table = cast(dict[str, object], value)
+        _known(table, {"url", "headers"}, "schema")
+        value = table.get("url")
+        raw_headers = _table(table.get("headers", {}), "schema headers")
+        pairs: list[tuple[str, str]] = []
+        for key, item in sorted(raw_headers.items()):
+            if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key):
+                raise ValueError("Invalid schema header name")
+            if not isinstance(item, str) or any(c in item for c in "\r\n\x00"):
+                raise ValueError("Schema header values must be single-line strings")
+            remainder = re.sub(r"\$\{env:[A-Za-z_][A-Za-z_0-9]*\}", "", item)
+            if "${" in remainder:
+                raise ValueError("Unknown substitution in schema headers")
+            pairs.append((key, item))
+        headers = tuple(pairs)
+    text = _string(value, "schema")
+    if text.lower().startswith(("http:", "https:")):
+        try:
+            parsed = urlsplit(text)
+            if (
+                not parsed.hostname
+                or parsed.port == 0
+                or "${" in text
+                or any(character.isspace() for character in text)
+            ):
+                raise ValueError
+        except ValueError:
+            raise ValueError("Invalid HTTP(S) schema URL") from None
+        return SchemaOrigin(url=text, headers=headers)
+    if headers or is_record or "://" in text:
+        raise ValueError("Schema URL records require an HTTP(S) URL")
+    local_path = _path(text, root, "schema")
+    if local_path.is_dir():
+        raise ValueError("Local schema must be a file path")
+    return SchemaOrigin(local_path=local_path)
+
+
+def _mappings(
+    table: dict[str, object],
+) -> tuple[tuple[ScalarMapping, ...], tuple[tuple[str, str], ...]]:
+    scalars: list[ScalarMapping] = []
+    enums: list[tuple[str, str]] = []
+    for name, value in sorted(_table(table.get("scalars", {}), "scalars").items()):
+        if not _NAME.fullmatch(name):
+            raise ValueError("Scalar mapping keys must be GraphQL names")
+        if isinstance(value, str):
+            input_type = output_type = _symbol(value, "scalar mapping")
+        else:
+            mapping = _table(value, "scalar mapping")
+            if mapping.keys() != {"input", "output"}:
+                raise ValueError("Scalar mappings require exactly input and output")
+            input_type = _symbol(mapping["input"], "scalar input")
+            output_type = _symbol(mapping["output"], "scalar output")
+        scalars.append(ScalarMapping(name, input_type, output_type))
+    for name, value in sorted(_table(table.get("enums", {}), "enums").items()):
+        if not _NAME.fullmatch(name):
+            raise ValueError("Enum mapping keys must be GraphQL names")
+        enums.append((name, _symbol(value, "enum mapping")))
+    return tuple(scalars), tuple(enums)
+
+
+def _schema(
+    table: dict[str, object], name: str, root: Path, package: Path
+) -> SchemaConfig:
+    output = _path(table.get("schema_output"), root, "schema_output")
+    expected = package / f"{name}.pyi"
+    if output != expected:
+        raise ValueError("schema_output must match generated_package/schema.pyi")
+    _inside(output, package, "schema_output")
+    scalars, enums = _mappings(table)
+    return SchemaConfig(
+        name=name,
+        origin=_origin(table.get("schema"), root),
+        schema_output=output,
+        persisted_output=_path(table["persisted_output"], root, "persisted_output")
+        if "persisted_output" in table
+        else None,
+        cache_output=_path(table["cache_output"], root, "cache_output")
+        if "cache_output" in table
+        else None,
+        scalars=scalars,
+        enums=enums,
+        disable_masking=_boolean(table, "disable_masking", False),
+    )
+
+
+def parse_project_config(text: str, *, config_path: Path) -> ProjectConfig | None:
+    """Parse facts only; an absent table means this project is inactive.
+
+    Does not resolve environment credentials, imported symbols, project ownership
+    across files, source glob matches, entrypoint existence or write permissions.
+    """
+    try:
+        document = cast(dict[str, object], tomllib.loads(text))
+    except (ValueError, RecursionError):
+        raise ValueError("Invalid pyproject TOML") from None
+    tool = _table(document.get("tool", {}), "tool")
+    if "graphql-desk" not in tool:
+        return None
+    table = _table(tool["graphql-desk"], "tool.graphql-desk")
+    _known(table, _PROJECT_KEYS, "tool.graphql-desk")
+    path = config_path.resolve()
+    root = path.parent
+    package_name = _string(
+        table.get("generated_package", "graphql_desk_generated"), "generated_package"
+    )
+    for part in package_name.split("."):
+        _identifier(part, "generated_package")
+    package = root
+    for part in package_name.split("."):
+        package = _path(part, package, "generated_package")
+        _inside(package, root, "generated_package")
+        if package == root:
+            raise ValueError("generated_package must lie below the project root")
+    if not _boolean(table, "templateIsCallExpression", True):
+        raise ValueError("templateIsCallExpression must be true for Python calls")
+    cache_enabled = _boolean(table, "cache_enabled", False)
+    if cache_enabled:
+        raise ValueError("Persistent cache is not implemented; disable cache_enabled")
+    schemas: list[SchemaConfig] = []
+    if "schemas" in table:
+        if table.keys() & _SCHEMA_KEYS:
+            raise ValueError("schemas is mutually exclusive with single-schema fields")
+        records = table["schemas"]
+        if not isinstance(records, list) or not records:
+            raise ValueError("schemas must be a nonempty array of schema records")
+        for record in cast(list[object], records):
+            item = _table(record, "schemas record")
+            _known(item, _SCHEMA_KEYS | {"name"}, "schemas record")
+            name = _identifier(item.get("name"), "schema name")
+            if not _NAME.fullmatch(name):
+                raise ValueError("Schema names must be GraphQL identifiers")
+            if name in {"sources", "persisted", "__init__"}:
+                raise ValueError("Schema name collides with a generated namespace")
+            schemas.append(_schema(item, name, root, package))
+    else:
+        schemas.append(_schema(table, "default", root, package))
+    if len({item.name for item in schemas}) != len(schemas):
+        raise ValueError("Schema names must be unique")
+    used = {os.path.normcase(str(path))}
+    current = package
+    while current != root:
+        for suffix in (".py", ".pyi"):
+            initializer = _path(
+                str(current / f"__init__{suffix}"), root, "generated initializer"
+            )
+            _inside(initializer, current, "generated initializer")
+            identity = os.path.normcase(str(initializer))
+            if identity in used:
+                raise ValueError("Generated initializer paths collide")
+            used.add(identity)
+        current = current.parent
+    for schema in schemas:
+        if schema.origin.local_path is not None:
+            used.add(os.path.normcase(str(schema.origin.local_path)))
+    for schema in schemas:
+        runtime = _path(
+            str(schema.schema_output.with_suffix(".py")),
+            root,
+            "generated runtime companion",
+        )
+        _inside(runtime, package, "generated runtime companion")
+        for output in (
+            schema.schema_output,
+            runtime,
+            schema.persisted_output,
+            schema.cache_output,
+        ):
+            if output is not None:
+                identity = os.path.normcase(str(output))
+                if output.is_dir() or any(
+                    Path(identity).is_relative_to(Path(other))
+                    or Path(other).is_relative_to(Path(identity))
+                    for other in used
+                ):
+                    raise ValueError("Generated output paths collide")
+                used.add(identity)
+    refresh = table.get("schema_refresh_interval", 0)
+    if isinstance(refresh, bool) or not isinstance(refresh, (int, float)):
+        raise ValueError("schema_refresh_interval must be a nonnegative finite number")
+    try:
+        interval = float(refresh)
+    except OverflowError:
+        raise ValueError("schema_refresh_interval is not finite") from None
+    if not math.isfinite(interval) or interval < 0:
+        raise ValueError("schema_refresh_interval must be a nonnegative finite number")
+    directives = _strings(table.get("client_directives", []), "client_directives")
+    if any(not _NAME.fullmatch(name) for name in directives):
+        raise ValueError("client_directives must contain GraphQL names without @")
+    roots = tuple(
+        dict.fromkeys(
+            _path(value, root, "source_roots")
+            for value in _strings(table.get("source_roots", ["."]), "source_roots")
+        )
+    )
+    for source_root in roots:
+        _inside(source_root, root, "source_roots")
+    authoring = tuple(
+        dict.fromkeys(
+            _path(value, root, "authoring_roots")
+            for value in _strings(table.get("authoring_roots", []), "authoring_roots")
+        )
+    )
+    if any(
+        not any(value.is_relative_to(base) for base in roots) for value in authoring
+    ):
+        raise ValueError("authoring_roots must lie under source_roots")
+    entrypoints = (
+        _strings(table["entrypoints"], "entrypoints")
+        if "entrypoints" in table
+        else None
+    )
+    for value in entrypoints or ():
+        if (
+            "\\" in value
+            or any(char in value for char in "*?{}![]")
+            or value.startswith("/")
+            or ".." in value.split("/")
+            or not value.endswith(".py")
+            or ":" in value
+        ):
+            raise ValueError("entrypoints must be exact root-relative Python paths")
+    includes = _strings(table.get("include", ["**/*.py"]), "include")
+    excludes = _strings(table.get("exclude", list(_EXCLUDE)), "exclude")
+    for value in (*includes, *excludes):
+        if (
+            "\\" in value
+            or value.startswith(("/", "!"))
+            or ".." in value.split("/")
+            or any(c in value for c in "{}[]:")
+        ):
+            raise ValueError(
+                "include/exclude require relative /-separated glob patterns"
+            )
+    return ProjectConfig(
+        path=path,
+        root=root,
+        generated_package=package_name,
+        schemas=tuple(schemas),
+        template=_symbol(table["template"], "template")
+        if "template" in table
+        else None,
+        track_field_usage=_boolean(table, "track_field_usage", True),
+        check_colocated_fragments=_boolean(table, "check_colocated_fragments", True),
+        client_directives=directives,
+        schema_refresh_interval=interval,
+        disable_preprocessing=_boolean(table, "disable_preprocessing", False),
+        cache_enabled=cache_enabled,
+        source_roots=roots,
+        include=includes,
+        exclude=excludes,
+        entrypoints=entrypoints,
+        authoring_roots=authoring,
+    )
+
+
+def load_project_config(path: Path) -> ProjectConfig | None:
+    """Read one explicitly supplied pyproject; never search or execute code."""
+    return parse_project_config(path.read_text(encoding="utf-8"), config_path=path)

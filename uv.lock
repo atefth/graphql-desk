@@ -361,6 +361,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "graphql-core" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "typing-extensions" },
 ]
 
@@ -378,6 +379,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "graphql-core", specifier = "==3.3.0" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = "==2.5.0" },
     { name = "typing-extensions", specifier = "==4.16.0" },
 ]
 
