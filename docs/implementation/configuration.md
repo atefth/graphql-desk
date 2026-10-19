@@ -8,4 +8,8 @@ HTTP(S) schema origins and headers are retained as facts only. Header environmen
 
 Python 3.10 uses pinned MIT-licensed `tomli==2.5.0`; Python 3.11+ uses standard-library `tomllib`. The runtime license inventory follows that version marker.
 
-Issue #27 remains open: nearest-project/workspace discovery, cross-project ownership, document routing, environment/credential resolution, symbol resolution, source matching and writer integration still require implementation and acceptance. Local explicit-path schema loading is an independent backend. No full SCHEMA-01 or live-typing gate is claimed.
+`graphql_desk.project.find_project(directory, workspace=None)` finds the nearest configured ancestor, skipping valid inactive pyprojects. Editor callers supply a workspace boundary; searches never read configuration outside it. Invalid nearer configuration fails rather than falling back. Omitting a workspace permits CLI-style upward search; explicit config selection still uses the loader directly.
+
+`select_schema(project, binding=None)` accepts a resolved schema name; only a single `default` schema permits omission. It does not infer bindings from filenames or source text. `validate_project_ownership(projects)` checks supplied project facts for shared generated trees, explicit/implicit output paths and input clobbering, including canonical symlink identities. Equal aliases deduplicate; conflicting snapshots fail. No registry, writes or source enumeration is introduced, and callers must supply every relevant project and recheck before writes.
+
+Issue #27 remains open: editor fallback/command precedence, source-to-schema binding integration, environment/credential resolution, symbol resolution, source matching and writer integration still require implementation and acceptance. Local explicit-path schema loading is an independent backend. No full SCHEMA-01 or live-typing gate is claimed.
