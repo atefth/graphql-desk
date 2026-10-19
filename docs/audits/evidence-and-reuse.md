@@ -1,6 +1,6 @@
 # Evidence, reuse and support review
 
-Planning evidence dated 2026-10-19. The [parity plan](../parity-plan.md) governs scope and order. Historical library metadata below is reported research, not fresh dependency approval. No core typing backend is selected.
+Planning evidence dated 2026-10-19. The [parity plan](../parity-plan.md) governs scope and order. Historical library metadata below is reported research, not fresh dependency approval. No Turms/Ariadne core typing backend is selected; current GraphQL Desk primitives are tracked in the feature status.
 
 ## Reuse map
 
@@ -42,7 +42,7 @@ Planning evidence dated 2026-10-19. The [parity plan](../parity-plan.md) governs
 | OS | Windows evidence only; Linux/macOS unverified | Each declared platform in CI before support promise |
 | Python | 3.10+ was candidate; fixture used 3.11.13 | Select and test target syntax/dependency/package matrix |
 | Node | Fixture 22.17.1/npm 11.6.0; old engine ranges are historical | Pin only if Node-backed service selected; verify distribution/VS Code runtime |
-| Maturity | No product code; scan experimental; init/doctor WIP; global disableMasking preview upstream | Retain labels and do not claim incremental slices are full parity |
+| Maturity | Initial production primitives only; no broad gate passed; scan experimental; init/doctor WIP; global disableMasking preview upstream | Retain labels and do not claim incremental slices are full parity |
 | Review | Small issue-linked PRs; Ponytail coding/review | GitHub Actions from first production implementation |
 
 ## Acceptance detail and provenance

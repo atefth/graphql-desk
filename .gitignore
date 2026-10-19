@@ -8,3 +8,6 @@ dist/
 
 audit-requirements.txt
 runtime-requirements.txt
+
+editor/node_modules/
+editor/.vscode-test/

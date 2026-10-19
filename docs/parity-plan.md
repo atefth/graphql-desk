@@ -1,6 +1,6 @@
 # GraphQL Desk: implementation-ready full-parity plan
 
-**Status:** planning artifact. No product code or production PRs exist yet. Docs-only PR preparation is authorized; product work waits for those PRs to land. No capability below is marked complete.
+**Status:** canonical full-parity contract with initial production foundations merged. Five initial slices cover packaging/CI, the AST carrier, schema input declarations, source candidates and stale-publication guards. See [feature status](feature-status.md) and [complete issue tracking](feature-tracking.md). No broad capability below is marked complete.
 
 ## Current gate status
 
@@ -8,14 +8,14 @@
 
 | Product area / ledger | Current status | Evidence limit |
 |---|---|---|
-| Live schema/operation typing (TYPE-01) | Partial proof; acceptance gate open | Only one unsaved nullability edit changed Pylance hover/diagnostics after an open generated `.pyi` was updated in memory. Disk-only replacement did not refresh in the tested window. Broad type semantics and lifecycle are unproven. |
+| Live schema/operation typing (TYPE-01) | Partial proof; acceptance gate open | Schema input declarations and a stale-publication guard are merged. Earlier narrow research changed one Pylance nullability hover/diagnostic via an open `.pyi`; disk-only refresh failed. Broad semantics, same-source generation and safe lifecycle remain unproven. |
 | Editor experience (EDIT-01) | Partial basic slice; acceptance gate open | Diagnostics, completion, hover, definition and edit/shutdown flow demonstrated in a narrow adapter fixture. Full embedded-Python behavior, references/rename, outline, safe fixes/refactors and persisted actions remain open. |
 | Fragment masking (FRAG-01) | Partial proof; acceptance gate open | Narrow type-only opaque-marker and runtime-identity proof passed Pyright/mypy. Broad GraphQL composition, nested/conditional/abstract/list cases and fixture-helper semantics remain open. |
 | Public API, embedded source and scalar helpers (API-01, SRC-01, SCALAR-01) | Open | No complete product API, embedded-source binding/index or scalar-helper acceptance demonstrated. Saved generator subsets do not close these gates. |
 | Persisted operations (PERSIST-01) | Open | Canonical hashes, manifests, editor actions, conflict handling and Python retained/omitted-document build contract require implementation and acceptance tests. |
 | Complete schema and CLI workflows (SCHEMA-01, CLI-01) | Open | Shared configuration, named-schema isolation, authenticated loading/refresh, complete commands, error handling and editor/CLI agreement remain unproven as a product. |
 | Python project scanning (SCAN-01) | Open | Required embedded-call/import graph, complete scan rules and terminal/JSON/graph output have no product acceptance evidence. |
-| Performance and release compatibility (PERF-01, PACK-01) | Open | No product-scale benchmarks, supported-version/platform matrix, install/package verification or production CI/release acceptance. Historical dependency checks are not release approval. |
+| Performance and release compatibility (PERF-01, PACK-01) | Open | Python packaging/CI and minor/OS smoke checks exist; no product-scale benchmark, complete VSIX/server/editor/client compatibility or release acceptance exists. Historical dependency checks are not release approval. |
 
 Detailed acceptance criteria and per-row statuses below remain unchanged. See [planning readiness review](#planning-readiness-review) and the [evidence ledger](audits/evidence-and-reuse.md) for the separate documentation checks and reported proof limits.
 
@@ -104,14 +104,14 @@ Any change to these defaults should be captured in the parity issue before codin
 
 ## Current go/no-go
 
-**Go for an incremental proof-driven foundation; no-go for a full-parity claim today.** No product implementation exists. The highest-risk gate is sound live operation typing and recovery through the in-memory `.pyi` lifecycle. Source extraction/config and the persisted-document build contract are specified in the detailed contracts; their implementation must satisfy the recorded acceptance cases before the shared project model is treated as stable. Full parity remains the acceptance target; experimental and WIP upstream features retain those maturity labels rather than being silently dropped.
+**Go for incremental implementation; no-go for a full-parity claim.** Initial production primitives exist; no complete live-typing/editor workflow is established. The highest-risk gate is sound live operation typing and recovery through the in-memory `.pyi` lifecycle. Source extraction/config and the persisted-document build contract are specified in the detailed contracts; their implementation must satisfy the recorded acceptance cases before the shared project model is treated as stable. Full parity remains the acceptance target; experimental and WIP upstream features retain those maturity labels rather than being silently dropped.
 
 
 ## Repository governance and traceability
 
 - [Issue #1](https://github.com/atefth/graphql-desk/issues/1) is the full-parity epic; [issue #6](https://github.com/atefth/graphql-desk/issues/6) owns the support/review matrix. Existing feasibility issues are closed and documented; closure records narrow experiments, not product completion.
-- The roadmap board remains private. This checkout adds documentation only: no product code or production PR is authorized now. Docs-only branches, commits and PRs are authorized for review. Product implementation waits until docs PRs land, followed by issue/roadmap updates.
-- Eventual production PRs must be small, issue-linked, include GitHub Actions checks from the first implementation, use Ponytail while coding and pass Ponytail review before publication.
+- The roadmap board remains private. The initial documentation prerequisites landed and incremental implementation is authorized through the linked stories. Keep issue/board states current; merge only after independent Ponytail review and required hosted CI pass, without closing broader gates from a narrow slice.
+- Production PRs must be small, issue-linked, include GitHub Actions checks from the first implementation, use Ponytail while coding and pass Ponytail review before publication.
 - API-01/TYPE-01/FRAG-01/SCALAR-01/PERSIST-01/CLI-01/SCAN-01 map to the [gql.tada pinned source inventory](audits/gql-tada-source-audit.md). EDIT-01/SRC-01/SCHEMA-01 and editor portions of the other rows map to the [GraphQLSP pinned source inventory](audits/graphqlsp-source-audit.md). PERF-01/PACK-01 also include user-required release criteria.
 - All ledger rows remain open until observable acceptance passes. A narrow spike, closed feasibility issue, documented library capability or upstream test inspection cannot close a product row.
 - See [evidence, reuse and support review](audits/evidence-and-reuse.md) for consolidated findings and limits. The user's original blueprint remains untouched in the parent folder; its save-only typing, runtime Pydantic masking, generator-first architecture, timelines and “95%” claim are superseded by this full-parity contract.
@@ -125,7 +125,7 @@ Any change to these defaults should be captured in the parity issue before codin
 - [x] Dependencies and delivery gates documented; static authoring, operation selection, scalar mapping, invalid-buffer and schema isolation contracts recorded for review.
 - [x] Relative documentation links and whitespace validated; checkout originally contained only README.md; parent blueprint preserved.
 
-The checked items above establish documentation readiness for review, not completion of all research or scope contracts. The final [planning gap register](planning-readiness-audit.md) records explicit contracts for all eight items; their product behavior remains to be tested. Documentation readiness means the documentation is ready for review. It does not certify implementation feasibility or product conformance. Exact API/binding contracts, persisted omission/build mechanism, initial dependency/support choices and measurable budgets are now specified in the contracts below; their implementation remains unproven. Docs PRs must land before issue/roadmap updates and production implementation. After landing, implementation may use parallel agents where independent, with small PRs, CI from the first production PR, Ponytail coding and review before publication.
+The checked items above establish documentation readiness for review, not completion of all research or scope contracts. The final [planning gap register](planning-readiness-audit.md) records explicit contracts for all eight items; their product behavior remains to be tested. Documentation readiness means the documentation is ready for review. It does not certify implementation feasibility or product conformance. Exact API/binding contracts, persisted omission/build mechanism, initial dependency/support choices and measurable budgets are now specified in the contracts below; their implementation remains unproven. The initial docs prerequisite is fulfilled. Incremental implementation uses parallel ownership where interfaces permit, small issue-linked PRs, Ponytail coding/review and required hosted CI before readiness and merge.
 
 ## Ponytail documentation review (2026-10-19)
 
