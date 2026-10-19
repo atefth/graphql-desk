@@ -12,9 +12,10 @@ from dataclasses import dataclass, field
 
 from .source import Span
 
-_REFLECTION = {
+_REFLECTION = frozenset(
     f"builtins.{name}" for name in ("globals", "locals", "vars", "exec", "eval")
-}
+)
+_SETTERS = frozenset({"builtins.setattr", "builtins.delattr"})
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,19 @@ class ProjectBindings:
 
 
 @dataclass(frozen=True)
+class DocumentIdentity:
+    module: ModuleDependency
+    call_range: Span
+
+
+@dataclass(frozen=True)
+class FragmentReference:
+    target: DocumentIdentity
+    reference_module: ModuleDependency
+    range: Span
+
+
+@dataclass(frozen=True)
 class ResolvedCall:
     module: ModuleDependency
     range: Span
@@ -67,6 +81,7 @@ class ResolvedCall:
     operation: str | None = None
     binding: str | None = None
     schema_name: str | None = field(default=None, kw_only=True)
+    fragments: tuple[FragmentReference, ...] = field(default=(), kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -90,6 +105,7 @@ class _Value:
     contributions: tuple[StringContribution, ...] = ()
     dependencies: frozenset[ModuleDependency] = frozenset()
     schema_name: str | None = None
+    document: DocumentIdentity | None = None
 
 
 class _Unresolved(Exception):
@@ -261,6 +277,10 @@ class _Graph:
         snapshots: tuple[ModuleSnapshot, ...],
         bindings: tuple[ProjectBindings, ...],
     ) -> None:
+        self.documents: dict[DocumentIdentity, ResolvedCall] = {}
+        self.active_documents: set[DocumentIdentity] = set()
+        self.failed_modules: set[ModuleDependency] = set()
+        self.ready = False
         self.bindings: dict[str, ProjectBindings] = {}
         self.factories: dict[tuple[str, str, str], FactoryBinding] = {}
         for project in bindings:
@@ -350,15 +370,22 @@ class _Graph:
                 )
         for module in self.modules.values():
             for node in ast.walk(module.tree):
-                roots: list[ast.expr] = []
+                roots: list[tuple[ast.expr, bool]] = []
                 if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(
                     node.ctx, (ast.Store, ast.Del)
                 ):
                     root = node.value
                     while isinstance(root, (ast.Attribute, ast.Subscript)):
                         root = root.value
-                    roots.append(root)
+                    roots.append((root, True))
                 elif isinstance(node, ast.Call):
+                    if node.args and self.namespace_reflection(
+                        module, node.func, set(), identities=_SETTERS
+                    ):
+                        root = node.args[0]
+                        while isinstance(root, (ast.Attribute, ast.Subscript)):
+                            root = root.value
+                        roots.append((root, True))
                     if self.namespace_reflection(module, node.func, set()):
                         module.star = True
                     try:
@@ -375,7 +402,7 @@ class _Graph:
                         pending = [*node.args, *(item.value for item in node.keywords)]
                         while pending:
                             argument = pending.pop()
-                            roots.append(argument)
+                            roots.append((argument, False))
                             if isinstance(argument, (ast.List, ast.Tuple, ast.Set)):
                                 pending.extend(argument.elts)
                             elif isinstance(argument, ast.Dict):
@@ -383,37 +410,126 @@ class _Graph:
                                     item for item in argument.keys if item is not None
                                 )
                                 pending.extend(argument.values)
-                for root in roots:
-                    # Opaque code can expose or write these namespace capabilities.
+                for root, mutates in roots:
+                    # Opaque code can expose or write namespace capabilities.
                     if self.namespace_reflection(module, root, set()):
                         module.star = True
+                    if mutates:
+                        values = self.mutation_origins(module, root)
+                    else:
+                        try:
+                            values = [
+                                self.expression(
+                                    module,
+                                    root,
+                                    (root.lineno, root.col_offset),
+                                    set(),
+                                    probe=True,
+                                )
+                            ]
+                        except (_Unresolved, RecursionError):
+                            values = []
+                    for value in values:
+                        if value.kind == "module":
+                            self.mutated.add((module.snapshot.project, value.text))
+                            if value.text == "builtins":
+                                module.star = True
+                        elif value.kind in {"callable", "initializer"}:
+                            self.mutated.add(
+                                (module.snapshot.project, value.text.rsplit(".", 1)[0])
+                            )
+                        elif value.kind == "document-candidate" and mutates:
+                            target = self.modules.get(
+                                (module.snapshot.project, value.text)
+                            )
+                            if target is not None:
+                                target.star = True
+        self.ready = True
+
+    def mutation_origins(self, module: _Module, node: ast.expr) -> list[_Value]:
+        """Trace capabilities only for write targets, never arbitrary object code."""
+        pending = [(module, node)]
+        seen: set[tuple[ModuleDependency, str]] = set()
+        origins: list[_Value] = []
+        while pending:
+            owner, expression = pending.pop()
+            try:
+                value = self.expression(
+                    owner,
+                    expression,
+                    (len(owner.snapshot.source) + 2, 0),
+                    set(),
+                    probe=True,
+                )
+                if value.kind in {
+                    "module",
+                    "callable",
+                    "initializer",
+                    "document-candidate",
+                }:
+                    origins.append(value)
+                    continue
+            except (_Unresolved, RecursionError):
+                pass
+            if isinstance(expression, ast.Name):
+                key = (owner.identity, expression.id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                for _, definition in owner.bindings.get(expression.id, []):
+                    if isinstance(definition, ast.expr):
+                        pending.append((owner, definition))
+                    elif isinstance(definition, tuple) and definition[1]:
+                        target = self.modules.get(
+                            (owner.snapshot.project, definition[0])
+                        )
+                        if target is not None:
+                            pending.append(
+                                (target, ast.Name(id=definition[1], ctx=ast.Load()))
+                            )
+            elif isinstance(expression, (ast.Attribute, ast.Subscript)):
+                if isinstance(expression, ast.Attribute):
                     try:
-                        value = self.expression(
-                            module,
-                            root,
-                            (root.lineno, root.col_offset),
+                        parent = self.expression(
+                            owner,
+                            expression.value,
+                            (len(owner.snapshot.source) + 2, 0),
                             set(),
                             probe=True,
                         )
-                    except (_Unresolved, RecursionError):
-                        continue
-                    if value.kind == "module":
-                        self.mutated.add((module.snapshot.project, value.text))
-                        if value.text == "builtins":
-                            module.star = True
-                    elif value.kind in {"callable", "initializer"}:
-                        self.mutated.add(
-                            (module.snapshot.project, value.text.rsplit(".", 1)[0])
+                        target = (
+                            self.modules.get((owner.snapshot.project, parent.text))
+                            if parent.kind == "module"
+                            else None
                         )
+                        if target is not None:
+                            pending.append(
+                                (target, ast.Name(id=expression.attr, ctx=ast.Load()))
+                            )
+                    except (_Unresolved, RecursionError):
+                        pass
+                pending.append((owner, expression.value))
+            elif isinstance(expression, ast.Starred):
+                pending.append((owner, expression.value))
+            elif isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
+                pending.extend((owner, element) for element in expression.elts)
+            elif isinstance(expression, ast.Dict):
+                pending.extend((owner, value) for value in expression.values)
+        return origins
 
     def namespace_reflection(
-        self, module: _Module, node: ast.expr, seen: set[str]
+        self,
+        module: _Module,
+        node: ast.expr,
+        seen: set[str],
+        *,
+        identities: frozenset[str] = _REFLECTION,
     ) -> bool:
         try:
             value = self.expression(
                 module, node, (len(module.snapshot.source) + 2, 0), set(), probe=True
             )
-            if value.kind == "external" and value.text in _REFLECTION:
+            if value.kind == "external" and value.text in identities:
                 return True
         except (_Unresolved, RecursionError):
             pass
@@ -422,7 +538,7 @@ class _Graph:
             current = pending.pop()
             if not isinstance(current, ast.Name) or current.id in seen:
                 continue
-            if f"builtins.{current.id}" in _REFLECTION:
+            if f"builtins.{current.id}" in identities:
                 return True
             seen.add(current.id)
             pending.extend(
@@ -497,6 +613,7 @@ class _Graph:
                 value.contributions,
                 value.dependencies | {module.identity},
                 schema_name=value.schema_name,
+                document=value.document,
             )
             if factory is not None:
                 value = self.declared_factory(
@@ -720,6 +837,7 @@ class _Graph:
                     value.contributions,
                     value.dependencies | parent.dependencies,
                     schema_name=value.schema_name,
+                    document=value.document,
                 )
         if isinstance(node, ast.Call):
             callee = self.expression(module, node.func, before, active, probe=probe)
@@ -732,6 +850,17 @@ class _Graph:
                     value.text,
                     dependencies=value.dependencies | callee.dependencies,
                     schema_name=value.schema_name,
+                )
+            if callee.kind == "callable":
+                if probe or not self.ready:
+                    return _Value("document-candidate", module.snapshot.module)
+                document = self.document(module, node, callee)
+                return _Value(
+                    "document",
+                    "",
+                    dependencies=frozenset(document.dependencies),
+                    schema_name=document.schema_name,
+                    document=DocumentIdentity(module.identity, document.range),
                 )
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             left = self.expression(module, node.left, before, active, probe=probe)
@@ -746,6 +875,27 @@ class _Graph:
         raise _Unresolved(
             "Use stable module constants, string literals or literal-only +"
         )
+
+    def document(
+        self, module: _Module, node: ast.Call, callable_: _Value
+    ) -> ResolvedCall:
+        identity = DocumentIdentity(module.identity, module.span(node))
+        cached = self.documents.get(identity)
+        if cached is not None:
+            if self.failed_modules.intersection(cached.dependencies):
+                raise _Unresolved(
+                    "Document depends on a module that failed source resolution"
+                )
+            return cached
+        if identity in self.active_documents:
+            raise _Unresolved("Static document binding cycle cannot be resolved")
+        self.active_documents.add(identity)
+        try:
+            document = self.extract(module, node, callable_)
+        finally:
+            self.active_documents.remove(identity)
+        self.documents[identity] = document
+        return document
 
     def extract(
         self, module: _Module, node: ast.Call, callable_: _Value
@@ -772,12 +922,36 @@ class _Graph:
         if source.kind != "string":
             raise _Unresolved("Source must resolve to a static string")
         fragments = node.args[1] if len(node.args) == 2 else keywords.get("fragments")
-        if fragments is not None and not (
-            isinstance(fragments, (ast.List, ast.Tuple)) and not fragments.elts
-        ):
-            raise _Unresolved(
-                "Fragment bindings require the next project resolver slice"
-            )
+        references: list[FragmentReference] = []
+        reference_dependencies: frozenset[ModuleDependency] = frozenset()
+        schemas = (
+            {callable_.schema_name} if callable_.schema_name is not None else set[str]()
+        )
+        if fragments is not None:
+            if not isinstance(fragments, (ast.List, ast.Tuple)):
+                raise _Unresolved("Fragment arguments require a literal list or tuple")
+            for element in fragments.elts:
+                if isinstance(element, ast.Starred):
+                    raise _Unresolved("Starred fragment references are not static")
+                value = self.expression(
+                    module, element, (node.lineno, node.col_offset), set()
+                )
+                if value.kind != "document" or value.document is None:
+                    raise _Unresolved(
+                        "Fragment arguments require resolved static document bindings"
+                    )
+                references.append(
+                    FragmentReference(
+                        value.document, module.identity, module.span(element)
+                    )
+                )
+                reference_dependencies |= value.dependencies
+                if value.schema_name is not None:
+                    schemas.add(value.schema_name)
+            if len(schemas) > 1:
+                raise _Unresolved(
+                    "Fragment references belong to different schema bindings"
+                )
         operation = keywords.get("operation")
         if operation is not None and not (
             isinstance(operation, ast.Constant)
@@ -788,7 +962,10 @@ class _Graph:
         assert isinstance(selector, str) or selector is None
         dependencies = tuple(
             sorted(
-                source.dependencies | callable_.dependencies | {module.identity},
+                source.dependencies
+                | callable_.dependencies
+                | reference_dependencies
+                | {module.identity},
                 key=lambda item: (item.project, item.module),
             )
         )
@@ -800,7 +977,8 @@ class _Graph:
             dependencies,
             selector,
             module.call_bindings.get(id(node)),
-            schema_name=callable_.schema_name,
+            schema_name=next(iter(schemas), None),
+            fragments=tuple(references),
         )
 
 
@@ -839,7 +1017,7 @@ def resolve_project(
                                 module, node, (node.lineno, node.col_offset), set()
                             )
                         else:
-                            calls.append(graph.extract(module, node, callable_))
+                            calls.append(graph.document(module, node, callable_))
                 except RecursionError:
                     if candidate:
                         graph.diagnostics.append(
@@ -905,6 +1083,8 @@ def resolve_project(
             Calls().visit(module.tree)
         except RecursionError:
             del calls[start:]
+            module.star = True
+            graph.failed_modules.add(module.identity)
             graph.diagnostics.append(
                 GraphDiagnostic(
                     module.identity,
@@ -913,4 +1093,9 @@ def resolve_project(
                     Span(0, len(module.snapshot.source)),
                 )
             )
-    return ProjectSources(tuple(calls), tuple(graph.diagnostics))
+    current = tuple(
+        call
+        for call in calls
+        if not graph.failed_modules.intersection(call.dependencies)
+    )
+    return ProjectSources(current, tuple(graph.diagnostics))
