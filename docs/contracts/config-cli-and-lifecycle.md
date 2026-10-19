@@ -1,6 +1,6 @@
 # Configuration, CLI and generated-state contract
 
-Planning decisions for PLAN-02 and PLAN-06; no behavior below is implemented or acceptance-tested. These requirements supplement the [parity plan](../parity-plan.md), retaining every upstream capability through Python equivalents. Optional persistent acceleration must never become a requirement for schema or live operation typing.
+Requirements contract for PLAN-02 and PLAN-06. Production foundations are tracked in [feature status](../feature-status.md); no broad acceptance gate has passed. These requirements supplement the [parity plan](../parity-plan.md), retaining every upstream capability through Python equivalents. Optional persistent acceleration must never become a requirement for schema or live operation typing.
 
 ## Configuration decisions
 

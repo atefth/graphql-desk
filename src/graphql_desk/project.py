@@ -1,15 +1,17 @@
 """Nearest project and schema selection without source discovery or execution."""
 
 import os
-from collections.abc import Iterable
-from dataclasses import replace
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 
 from .config import (
     ProjectConfig,
     SchemaConfig,
     generated_output_paths,
     load_project_config,
+    parse_project_settings,
 )
 
 
@@ -49,6 +51,44 @@ def find_project(
         if current == boundary or current == current.parent:
             return None
         current = current.parent
+
+
+@dataclass(frozen=True)
+class EffectiveProject:
+    config: ProjectConfig
+    origin: Literal["explicit", "nearest", "editor_fallback"]
+
+
+def effective_project(
+    directory: Path,
+    *,
+    explicit_config: Path | None = None,
+    workspace: Path | None = None,
+    editor_fallback: Mapping[str, object] | None = None,
+) -> EffectiveProject | None:
+    """Choose one entire project config before considering editor fallback.
+
+    An explicit config is a user-selected CLI path and can lie outside the
+    nearest-search workspace. Relative explicit paths use directory as CLI cwd.
+    Fallback paths use the workspace root; its config.path is virtual context.
+    Command-specific option overrides belong to the future CLI dispatcher.
+    """
+    if explicit_config is not None:
+        selected = load_project_config(_canonical(directory / explicit_config))
+        if selected is None:
+            raise ValueError("Explicit configuration has no GraphQL Desk project")
+        return EffectiveProject(selected, "explicit")
+    selected = find_project(directory, workspace=workspace)
+    if selected is not None:
+        return EffectiveProject(selected, "nearest")
+    if editor_fallback is None:
+        return None
+    if workspace is None:
+        raise ValueError("Editor fallback requires a workspace root")
+    context = _canonical(workspace) / "pyproject.toml"
+    return EffectiveProject(
+        parse_project_settings(editor_fallback, config_path=context), "editor_fallback"
+    )
 
 
 def select_schema(

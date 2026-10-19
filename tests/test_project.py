@@ -7,7 +7,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from graphql_desk.config import ProjectConfig, load_project_config, parse_project_config
-from graphql_desk.project import find_project, select_schema, validate_project_ownership
+from graphql_desk.project import (
+    effective_project,
+    find_project,
+    select_schema,
+    validate_project_ownership,
+)
 
 _BASE = """[tool.graphql-desk]
 schema="schema.graphql"
@@ -31,6 +36,141 @@ class ProjectTests(unittest.TestCase):
         config = self.config(root, text)
         config.path.write_text(text, encoding="utf-8")
         return config
+
+    def test_effective_project_selects_whole_configs_before_fallback_validation(
+        self,
+    ) -> None:
+        project = self.write_config(
+            self.root,
+            _BASE.replace(
+                '"schema.graphql"',
+                '{url="https://project.test",headers={Authorization="project"}}',
+            ),
+        )
+        fallback: dict[str, object] = {
+            "schema": {
+                "url": "https://fallback.test",
+                "headers": {"Other": "fallback"},
+            },
+            "schema_output": "graphql_desk_generated/default.pyi",
+        }
+        selected = effective_project(
+            self.root, workspace=self.root, editor_fallback=fallback
+        )
+        assert selected is not None
+        self.assertEqual(selected.origin, "nearest")
+        self.assertEqual(selected.config, project)
+        self.assertEqual(
+            selected.config.schemas[0].origin.headers, (("Authorization", "project"),)
+        )
+        self.assertEqual(
+            effective_project(
+                self.root, workspace=self.root, editor_fallback={"invalid": "SECRET"}
+            ),
+            selected,
+        )
+
+    def test_editor_fallback_paths_use_workspace_and_no_file_is_created(self) -> None:
+        directory = self.root / "src"
+        directory.mkdir()
+        selected = effective_project(
+            directory,
+            workspace=self.root,
+            editor_fallback={
+                "schema": "schema.graphql",
+                "schema_output": "graphql_desk_generated/default.pyi",
+            },
+        )
+        assert selected is not None
+        self.assertEqual(selected.origin, "editor_fallback")
+        self.assertEqual(selected.config.root, self.root)
+        self.assertEqual(
+            selected.config.schemas[0].origin.local_path, self.root / "schema.graphql"
+        )
+        self.assertFalse(selected.config.path.exists())
+        self.assertIsNone(effective_project(directory, workspace=self.root))
+        with self.assertRaises(ValueError):
+            effective_project(self.root, editor_fallback={})
+
+    def test_explicit_configuration_wins_even_outside_nearest_workspace(self) -> None:
+        explicit = self.write_config(self.root / "explicit")
+        workspace = self.root / "workspace"
+        self.write_config(workspace)
+        selected = effective_project(
+            workspace,
+            explicit_config=Path("../explicit/pyproject.toml"),
+            workspace=workspace,
+            editor_fallback={"bad": True},
+        )
+        assert selected is not None
+        self.assertEqual(selected.origin, "explicit")
+        self.assertEqual(selected.config, explicit)
+        explicit.path.write_text('[project]\nname="inactive"')
+        with self.assertRaises(ValueError):
+            effective_project(
+                workspace, explicit_config=explicit.path, workspace=workspace
+            )
+        explicit.path.write_text('SECRET="')
+        with self.assertRaises(ValueError) as caught:
+            effective_project(
+                workspace, explicit_config=explicit.path, workspace=workspace
+            )
+        self.assertNotIn("SECRET", str(caught.exception))
+        explicit.path.unlink()
+        with self.assertRaises(OSError):
+            effective_project(
+                workspace, explicit_config=explicit.path, workspace=workspace
+            )
+
+    def test_invalid_nearest_never_activates_editor_fallback(self) -> None:
+        self.root.joinpath("pyproject.toml").write_text(
+            "[tool.graphql-desk]\nunknown=true"
+        )
+        with self.assertRaises(ValueError):
+            effective_project(
+                self.root,
+                workspace=self.root,
+                editor_fallback={
+                    "schema": "schema.graphql",
+                    "schema_output": "graphql_desk_generated/default.pyi",
+                },
+            )
+
+    def test_virtual_fallback_context_does_not_follow_inactive_config_symlink(
+        self,
+    ) -> None:
+        inactive = self.root / "inactive"
+        inactive.mkdir()
+        target = inactive / "pyproject.toml"
+        target.write_text('[project]\nname="inactive"')
+        try:
+            (self.root / "pyproject.toml").symlink_to(target)
+        except OSError:
+            self.skipTest("Creating symlinks is not permitted on this host")
+        selected = effective_project(
+            self.root,
+            workspace=self.root,
+            editor_fallback={
+                "schema": "schema.graphql",
+                "schema_output": "graphql_desk_generated/default.pyi",
+            },
+        )
+        assert selected is not None
+        self.assertEqual(selected.config.root, self.root)
+        self.assertEqual(
+            selected.config.schemas[0].origin.local_path, self.root / "schema.graphql"
+        )
+        self.assertEqual(target.read_text(), '[project]\nname="inactive"')
+        with self.assertRaises(ValueError):
+            effective_project(
+                self.root,
+                workspace=self.root,
+                editor_fallback={
+                    "schema": "schema.graphql",
+                    "schema_output": "graphql_desk_generated/default.pyi",
+                    "persisted_output": "pyproject.toml",
+                },
+            )
 
     def test_nearest_configured_project_and_inactive_nested_pyproject(self) -> None:
         parent = self.write_config(self.root)
