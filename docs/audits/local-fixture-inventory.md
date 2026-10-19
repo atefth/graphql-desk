@@ -104,7 +104,7 @@ Supplement to [local coverage audit](local-artifact-coverage.md), inspected 2026
 
 ## Historical research chats and tool-output boundary
 
-The original planning chat plus these 22 research chats were retrieved with tool outputs enabled. The snapshot exposed 427 shell-command output records across the 23 chats; 35 were marked truncated at the retrieval cap. Research final reports and relevant command results were compared with the contracts, including failed intermediate attempts. Original local rollout files were located and their tool-record metadata inventoried, but their complete raw bodies were **not** independently read end to end. This is an expanded substantive audit, not an exhaustive transcript certification. MCP call metadata does not establish its omitted result body.
+The original planning chat plus these 22 research chats were retrieved with tool outputs enabled. The snapshot exposed 427 shell-command output records across the 23 chats; 35 were marked truncated at the retrieval cap. The final pass located all 35 original local command records: 23 retain complete output, while 12 explicitly contain a permanent persistence truncation marker; see the recovery table below. Research final reports and relevant command results were compared with the contracts, including failed intermediate attempts. Original local rollout files were located and their tool-record metadata inventoried, and the 35 capped command records were individually investigated. Complete unrelated/control transcript bodies were not read end to end. This is an expanded substantive audit, not an exhaustive transcript certification. MCP call metadata does not establish its omitted result body.
 
 | Research chat | Chat ID | Coverage / disposition |
 |---|---|---|
@@ -135,3 +135,47 @@ The original planning chat plus these 22 research chats were retrieved with tool
 Raw output adds corroboration, not a new acceptance pass: the isolated Turms watch command recorded `GeneratedTimestampAdvanced: True`, while another attempt failed to launch and broader events crashed the filter. Neither timestamp alone proves generated model correctness. Clean LSP and Pylance success records follow intermediate failed harness runs. Narrow checker results do not prove general GraphQL semantics.
 
 Excluded: unrelated chats/account or project listings, secrets, reasoning records, vendored dependencies/upstream mirrors, extension binaries, checker/cache databases, `.gitignore` bookkeeping, and empty output directories. Existing pinned upstream artifact audits remain the source-reference review; this inventory does not re-audit every vendored byte or recover missing/truncated historical captures.
+
+## Final recovery of the 35 capped command outputs
+
+Each ID below was matched individually to its original `CommandExecution` event in one of the 23 scoped local rollouts. “Complete” means the retained command output has no persistence-truncation marker; it does not mean every upstream behavior was tested. For document/source reads, existing full artifact/source audits supply the substantive reconciliation. Listings and vendored search noise are not product evidence. Missing historical bytes cannot be reconstructed from a current file without changing provenance.
+
+| Command record ID | Retained capture | Substantive disposition |
+|---|---|---|
+| `exec-4106d0d0-fa3e-42d4-95fe-7d007a9fb3b9` | Persistence-truncated; omitted bytes unavailable | Fixture/dependency listing or historical diff; inspected fixture/report inventory supersedes listing as evidence. |
+| `exec-111953b6-2e7b-4fea-abf0-0083a6ebcabc` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-dfa4ddd6-1d3f-42cd-a2e7-a5b53fb95269` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-5381ff9b-a4ea-4730-86ce-f90dd6caae42` | Persistence-truncated; omitted bytes unavailable | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-9d35a607-5f62-4fac-8397-22fb6d6d45c0` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-f5294550-cf92-4352-a197-42793784269d` | Persistence-truncated; omitted bytes unavailable | Pinned upstream source/search or vendored listing; source audits/contracts retain requirements, no added acceptance pass. |
+| `exec-c50b641f-414a-4d22-939a-1fccbf12f2df` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-8feed262-7092-48e6-ac67-9baeeeb9cf87` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-850c884e-cf23-4239-b301-b9a72f92c2c6` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-cef38265-e79f-4cd3-84e2-646c47730277` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-51c62836-4933-4662-8219-08b8dd440349` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-ad8cafea-2976-4b96-8b5c-a271b4731829` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-30ee8dd7-6cc3-4629-8f79-7cb6f6251b9a` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-8f81d85d-0aaf-478e-8d6a-84a053939ea5` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-86e762ec-1f84-45dc-b99a-34046cf4232b` | Persistence-truncated; omitted bytes unavailable | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-9bd6e2e4-4a4f-453c-82b3-9b81c7f95024` | Persistence-truncated; omitted bytes unavailable | Fixture/dependency listing or historical diff; inspected fixture/report inventory supersedes listing as evidence. |
+| `exec-deff104b-7d24-4c4f-8896-877cae55b6db` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-acb5cf40-81a9-433d-aee6-65ad5ae20402` | Persistence-truncated; omitted bytes unavailable | Pinned upstream source/search or vendored listing; source audits/contracts retain requirements, no added acceptance pass. |
+| `exec-6c036955-d579-4184-b64d-d727fc35db89` | Persistence-truncated; omitted bytes unavailable | Fixture/dependency listing or historical diff; inspected fixture/report inventory supersedes listing as evidence. |
+| `exec-c06657dc-9c1f-48ee-a888-2b17965a8fcf` | Complete retained output | CLI dependency audit confirms 13 high advisories; excluded tree and fresh production audit already required. |
+| `exec-350a7760-02c3-4497-9572-c65851d76c0a` | Complete retained output | Earlier LSP harness fails with `suite is not defined`; later clean test succeeds. No new product result. |
+| `exec-8e3bfb20-eb0e-4dbe-805c-9e3fb410ea86` | Persistence-truncated; omitted bytes unavailable | Fixture/dependency listing or historical diff; inspected fixture/report inventory supersedes listing as evidence. |
+| `exec-8028c57a-bced-463c-890f-4126eb317a47` | Complete retained output | Earlier Pylance harness rejects test-runner path; isolated later run succeeds. No new product result. |
+| `exec-adfb5db5-4c35-46ad-8bab-5d1f08faed09` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-3a7fd157-7eff-425c-9bde-7dceb0932cac` | Persistence-truncated; omitted bytes unavailable | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-9d86dbf1-2e0c-444f-b445-407dee64850b` | Complete retained output | Pinned upstream source/search or vendored listing; source audits/contracts retain requirements, no added acceptance pass. |
+| `exec-53353b4e-9fb0-4c9b-b4af-74ccbf6d28a9` | Persistence-truncated; omitted bytes unavailable | Pinned upstream source/search or vendored listing; source audits/contracts retain requirements, no added acceptance pass. |
+| `exec-9be444c8-2fd0-4eba-b36b-c2c8566f9b55` | Complete retained output | Pinned upstream source/search or vendored listing; source audits/contracts retain requirements, no added acceptance pass. |
+| `exec-444b2662-db24-44ba-a5b5-c6c49b8b7967` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-c5144f5f-2e48-46b1-ba9f-df6ec09f7e45` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-668c2cf6-d76c-4509-ade7-a8cfe1239b13` | Persistence-truncated; omitted bytes unavailable | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-d8b049cc-5767-4cda-99b8-2f2ce4e222f8` | Complete retained output | Historical planning/report/source read; compared with retained artifact contracts and deliberate supersessions in parent audit. |
+| `exec-7d9c679a-b055-4a30-a60c-06606f701ec2` | Persistence-truncated; omitted bytes unavailable | Pinned upstream source/search or vendored listing; source audits/contracts retain requirements, no added acceptance pass. |
+| `exec-e40c8a6f-a17c-4448-bd25-6762b5c9aea7` | Complete retained output | Pinned upstream source/search or vendored listing; source audits/contracts retain requirements, no added acceptance pass. |
+| `exec-b89efce9-22b5-40f3-8c6c-ed0161b4ea61` | Complete retained output | Pinned upstream source/search or vendored listing; source audits/contracts retain requirements, no added acceptance pass. |
+
+Final reconciliation found no additional material requirement or decision omission. The restored contributor safeguards and isolated-generator compatibility rule remain necessary; the exact nested E-LSP replay and narrow E-TSP claim match the actual fixtures. These are research/documentation conclusions only. All 12 product acceptance rows remain open/partial. No product tests, fresh security audit, or physical editor UI interaction were performed during this audit.
