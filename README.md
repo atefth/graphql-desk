@@ -35,6 +35,8 @@ Runtime dependencies are pinned `graphql-core==3.3.0` (MIT) and `typing_extensio
 
 The pure [schema declaration renderer](docs/implementation/schema-types.md) currently covers built-in scalars, enums and input objects, independently of operation generation. The [operation renderer](docs/implementation/operation-types.md) adds a validated object-selection subset with result/variable declarations; factory inference and live integration remain open.
 
+The [runtime factories](docs/implementation/runtime-factories.md) provide untyped `graphql`/`gql` construction and schema-name binding; precise generated inference remains open.
+
 ## Typed-document boundary
 
 `TypedDocument[Result, Variables]` holds a `graphql-core` `DocumentNode` in `.ast` and an optional `.operation_name`. The carrier preserves the supplied AST and performs no schema validation or response coercion. The generic parameters are annotations supplied by the caller today; generation and live inference remain future work.

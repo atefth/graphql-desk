@@ -1,11 +1,13 @@
 """The typed-document foundation for GraphQL Desk."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generic, TypeVar
 
-from graphql import DocumentNode
+from graphql import DocumentNode, parse
 
-__all__ = ["TypedDocument"]
+from .runtime import gql, graphql, init_graphql
+
+__all__ = ["TypedDocument", "gql", "graphql", "init_graphql", "parse"]
 
 _Result = TypeVar("_Result")
 _Variables = TypeVar("_Variables")
@@ -22,3 +24,4 @@ class TypedDocument(Generic[_Result, _Variables]):
 
     ast: DocumentNode
     operation_name: str | None = None
+    schema_name: str | None = field(default=None, kw_only=True)
