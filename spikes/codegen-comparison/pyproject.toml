@@ -1,0 +1,8 @@
+[tool.ariadne-codegen]
+schema_path = "schema.graphql"
+queries_path = "operations.graphql"
+target_package_name = "ariadne_generated"
+target_package_path = "out-ariadne"
+
+[tool.ariadne-codegen.scalars.DateTime]
+type = "datetime.datetime"

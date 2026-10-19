@@ -1,0 +1,12 @@
+fragment UserCard on User {
+  id
+  displayName
+  createdAt
+}
+
+query UserById($id: ID!, $includeBio: Boolean!) {
+  user(id: $id) {
+    ...UserCard
+    bio @include(if: $includeBio)
+  }
+}
