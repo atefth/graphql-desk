@@ -5,15 +5,20 @@ import unicodedata
 
 from graphql import (
     FieldNode,
+    GraphQLCompositeType,
     GraphQLEnumType,
+    GraphQLInterfaceType,
     GraphQLObjectType,
     GraphQLScalarType,
     GraphQLSchema,
+    GraphQLUnionType,
+    InlineFragmentNode,
     ListTypeNode,
     NamedTypeNode,
     Node,
     NonNullTypeNode,
     OperationDefinitionNode,
+    SelectionNode,
     TypeNode,
     Visitor,
     parse,
@@ -32,7 +37,6 @@ class _SupportedSyntax(Visitor):
             "directive",
             "fragment_definition",
             "fragment_spread",
-            "inline_fragment",
         }:
             raise ValueError(f"Unsupported operation syntax: {node.kind}")
 
@@ -67,8 +71,8 @@ def render_operation_types(
 ) -> str:
     """Render validated operation declarations, rejecting unsupported semantics.
 
-    No fragments, directives or abstract outputs are
-    supported yet. This renders declarations only, not execution or inference.
+    Named fragments and directives are not supported yet. This renders
+    declarations only, not execution or inference.
     """
     if (
         not name.isidentifier()
@@ -125,50 +129,133 @@ def render_operation_types(
         variables.append((variable.variable.name.value, rendered))
     declare(f"{name}Variables", variables)
 
-    def selection(
-        parent: GraphQLObjectType, nodes: list[FieldNode], class_name: str
-    ) -> None:
-        groups: dict[str, list[FieldNode]] = {}
-        for node in nodes:
-            key = node.alias.value if node.alias else node.name.value
-            groups.setdefault(key, []).append(node)
-        fields: list[tuple[str, str]] = []
-        for key, group in sorted(groups.items()):
-            node = group[0]
-            if node.name.value == "__typename":
-                fields.append((key, repr(f"Literal[{parent.name!r}]")))
+    variant_index = 0
+    needs_never = False
+
+    def possible(parent: GraphQLCompositeType) -> tuple[GraphQLObjectType, ...]:
+        if isinstance(parent, GraphQLObjectType):
+            return (parent,)
+        return tuple(schema.get_possible_types(parent))
+
+    def collect(
+        concrete: GraphQLObjectType,
+        nodes: list[tuple[GraphQLCompositeType, SelectionNode]],
+    ) -> list[tuple[GraphQLCompositeType, FieldNode]]:
+        fields: list[tuple[GraphQLCompositeType, FieldNode]] = []
+        for scope, node in nodes:
+            if concrete not in possible(scope):
                 continue
-            if node.name.value.startswith("__"):
-                raise ValueError(
-                    "Introspection object selections are not supported yet"
-                )
-            field = parent.fields[node.name.value]
-            field_type = parse_type(str(field.type))
-            named = schema.get_type(_named_type(field_type))
-            assert named is not None
-            if isinstance(named, GraphQLObjectType):
-                child_name = f"{class_name}_{key}"
-                children: list[FieldNode] = []
-                for item in group:
-                    assert item.selection_set is not None
-                    for child in item.selection_set.selections:
-                        assert isinstance(child, FieldNode)
-                        children.append(child)
-                selection(named, children, child_name)
-                leaf = child_name
-            elif isinstance(named, (GraphQLScalarType, GraphQLEnumType)):
-                leaf = outputs.get(named.name, named.name)
+            if isinstance(node, FieldNode):
+                fields.append((scope, node))
             else:
-                raise ValueError(f"Unsupported output type: {named.name}")
-            annotation = _output_type(field_type, leaf)
-            fields.append((key, repr(annotation)))
-        declare(class_name, fields)
+                assert isinstance(node, InlineFragmentNode)
+                condition = (
+                    schema.get_type(node.type_condition.name.value)
+                    if node.type_condition
+                    else scope
+                )
+                assert isinstance(
+                    condition,
+                    (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType),
+                )
+                fields.extend(
+                    collect(
+                        concrete,
+                        [(condition, child) for child in node.selection_set.selections],
+                    )
+                )
+        return fields
+
+    def selection(
+        parents: list[GraphQLCompositeType],
+        nodes: list[tuple[GraphQLCompositeType, SelectionNode]],
+        class_name: str,
+    ) -> None:
+        nonlocal variant_index, needs_never
+        abstract = any(not isinstance(parent, GraphQLObjectType) for parent in parents)
+        candidates = set(possible(parents[0]))
+        for parent in parents[1:]:
+            candidates.intersection_update(possible(parent))
+        branches: list[str] = []
+        for concrete in sorted(candidates, key=lambda item: item.name):
+            branch = class_name
+            if abstract:
+                branch = f"__graphql_desk_variant_{variant_index}"
+                variant_index += 1
+            branches.append(branch)
+            groups: dict[str, list[tuple[GraphQLCompositeType, FieldNode]]] = {}
+            for scope, node in collect(concrete, nodes):
+                key = node.alias.value if node.alias else node.name.value
+                groups.setdefault(key, []).append((scope, node))
+            fields: list[tuple[str, str]] = []
+            # An authored alias owns its response key, even when named __typename.
+            if abstract and "__typename" not in groups:
+                fields.append(
+                    ("__typename", f"NotRequired[{f'Literal[{concrete.name!r}]'!r}]")
+                )
+            for key, group in sorted(groups.items()):
+                scope, node = group[0]
+                if node.name.value == "__typename":
+                    fields.append((key, repr(f"Literal[{concrete.name!r}]")))
+                    continue
+                if node.name.value.startswith("__"):
+                    raise ValueError(
+                        "Introspection object selections are not supported yet"
+                    )
+                assert not isinstance(scope, GraphQLUnionType)
+                field_type = parse_type(str(scope.fields[node.name.value].type))
+                named = schema.get_type(_named_type(field_type))
+                assert named is not None
+                if isinstance(
+                    named, (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType)
+                ):
+                    child_name = f"{branch}_{key}"
+                    children: list[tuple[GraphQLCompositeType, SelectionNode]] = []
+                    child_parents: list[GraphQLCompositeType] = []
+                    for item_scope, item in group:
+                        assert not isinstance(item_scope, GraphQLUnionType)
+                        child_type = schema.get_type(
+                            _named_type(
+                                parse_type(str(item_scope.fields[item.name.value].type))
+                            )
+                        )
+                        assert isinstance(
+                            child_type,
+                            (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType),
+                        )
+                        child_parents.append(child_type)
+                        assert item.selection_set is not None
+                        children.extend(
+                            (child_type, child)
+                            for child in item.selection_set.selections
+                        )
+                    selection(child_parents, children, child_name)
+                    leaf = child_name
+                elif isinstance(named, (GraphQLScalarType, GraphQLEnumType)):
+                    leaf = outputs.get(named.name, named.name)
+                else:
+                    raise ValueError(f"Unsupported output type: {named.name}")
+                fields.append((key, repr(_output_type(field_type, leaf))))
+            declare(branch, fields)
+        if abstract or not branches:
+            if class_name in reserved:
+                raise ValueError(
+                    f"Colliding generated declaration name: {class_name!r}"
+                )
+            reserved.add(class_name)
+            if not branches:
+                needs_never = True
+            declarations.append(
+                f"{class_name} = " + (" | ".join(branches) or "__graphql_desk_Never")
+            )
 
     root = schema.get_root_type(selected.operation)
     assert root is not None
-    nodes: list[FieldNode] = []
-    for node in selected.selection_set.selections:
-        assert isinstance(node, FieldNode)
-        nodes.append(node)
-    selection(root, nodes, f"{name}Result")
+    selection(
+        [root],
+        [(root, node) for node in selected.selection_set.selections],
+        f"{name}Result",
+    )
+    if needs_never:
+        output += "\nfrom typing_extensions import Never as __graphql_desk_Never\n"
     return output + "\n" + "\n\n".join(declarations) + "\n"
