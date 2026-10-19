@@ -1,0 +1,147 @@
+# GraphQL Desk: implementation-ready full-parity plan
+
+**Status:** planning artifact. No product code or production PRs exist yet. Docs-only PR preparation is authorized; product work waits for those PRs to land. No capability below is marked complete.
+
+## Current gate status
+
+**Planning specification/documentation readiness for review: PASSED (see [gap dispositions and evidence](planning-readiness-audit.md)). Product full-parity gate: NOT PASSED. No product acceptance gates have passed.** The requested parity gates are criteria for future implementation and acceptance testing; documentation checks and narrow feasibility proofs do not satisfy them. The final research pass specified all eight planning gaps and corrected an editor inventory omission.
+
+| Product area / ledger | Current status | Evidence limit |
+|---|---|---|
+| Live schema/operation typing (TYPE-01) | Partial proof; acceptance gate open | Only one unsaved nullability edit changed Pylance hover/diagnostics after an open generated `.pyi` was updated in memory. Disk-only replacement did not refresh in the tested window. Broad type semantics and lifecycle are unproven. |
+| Editor experience (EDIT-01) | Partial basic slice; acceptance gate open | Diagnostics, completion, hover, definition and edit/shutdown flow demonstrated in a narrow adapter fixture. Full embedded-Python behavior, references/rename, outline, safe fixes/refactors and persisted actions remain open. |
+| Fragment masking (FRAG-01) | Partial proof; acceptance gate open | Narrow type-only opaque-marker and runtime-identity proof passed Pyright/mypy. Broad GraphQL composition, nested/conditional/abstract/list cases and fixture-helper semantics remain open. |
+| Public API, embedded source and scalar helpers (API-01, SRC-01, SCALAR-01) | Open | No complete product API, embedded-source binding/index or scalar-helper acceptance demonstrated. Saved generator subsets do not close these gates. |
+| Persisted operations (PERSIST-01) | Open | Canonical hashes, manifests, editor actions, conflict handling and Python retained/omitted-document build contract require implementation and acceptance tests. |
+| Complete schema and CLI workflows (SCHEMA-01, CLI-01) | Open | Shared configuration, named-schema isolation, authenticated loading/refresh, complete commands, error handling and editor/CLI agreement remain unproven as a product. |
+| Python project scanning (SCAN-01) | Open | Required embedded-call/import graph, complete scan rules and terminal/JSON/graph output have no product acceptance evidence. |
+| Performance and release compatibility (PERF-01, PACK-01) | Open | No product-scale benchmarks, supported-version/platform matrix, install/package verification or production CI/release acceptance. Historical dependency checks are not release approval. |
+
+Detailed acceptance criteria and per-row statuses below remain unchanged. See [planning readiness review](#planning-readiness-review) and the [evidence ledger](audits/evidence-and-reuse.md) for the separate documentation checks and reported proof limits.
+
+## Reference contract
+
+- Match the complete user-visible capabilities of published `gql.tada@1.11.4` (source tag `cfe64f433bd29ff6f79e462596389b81c6e01aec`) and its GraphQLSP editor integration (source commit `5f277f3fd444af4e7175c3e9afefd73cad465b5d`, manifest version 1.17.5; published npm 1.17.5 lacks some source enhancements), including CLI and test APIs. The pinned source, not the version label alone, defines the broader editor target; see the artifact/source comparison in the evidence contract. Keep upstream maturity labels: `scan` experimental; `init` and `doctor` work in progress.
+- Preserve outcomes, not TypeScript internals. The initial Python editor target is VS Code with Pyright/Pylance. LSP behavior should remain editor-neutral where the protocol supports it.
+- Required core: generated schema typing and live, per-operation result and variable types. `generate-output` is schema type input; it is not operation codegen. `turbo` is only an optional performance cache.
+- Require embedded static GraphQL calls in Python as the Python-native equivalent of gql.tada's TypeScript `graphql()` calls. Standalone `.graphql` files are an additional convenience, not a full-parity gate, because gql.tada's call-based API and project scanner do not require them.
+- Reuse existing libraries when they demonstrably satisfy a criterion. Current strongest candidates: `graphql-core` for Python GraphQL AST/schema/validation semantics; GraphiQL's lower-level language-service package for editor analysis; VS Code/Pyright/Pylance for Python type checking. GraphQL Desk still owns source extraction/indexing, Python type rendering, LSP adaptation, lifecycle, CLI and project analysis. Turms/Ariadne are separate saved model/client generators, not a replacement for live typing.
+
+## Requirements ledger
+
+Each row becomes a story with positive and negative fixtures. A row can be closed only after its observable acceptance cases pass on the supported VS Code/Pylance path and the corresponding CLI/API path where applicable.
+
+| ID | Required behavior | Core acceptance evidence | Status |
+|---|---|---|---|
+| API-01 | Public package surface equivalent to `parse`, `graphql`/document construction, schema-bound initialization, scalar and persisted helpers, `ResultOf`, `VariablesOf`, `FragmentOf`, client document interoperability, testing/CLI/editor entry points, and documented package subpaths. Map upstream `./internal` to a documented Python advanced/internal namespace with no stability promise; retain user-reachable utilities in the inventory rather than silently omitting them. Exact Python names require API fixtures. | Import/API compatibility fixtures; result and variables extraction from generated/source documents; runtime client remains usable; every public package subpath is documented or has an explicit compatibility decision. | Open |
+| SRC-01 | Embedded static Python operation/fragment calls are discoverable and mapped to source ranges and Python consumers. Dynamic/unresolvable interpolation gets an actionable diagnostic instead of fabricated types. Standalone `.graphql` files may be added as a clearly marked extra. | Edit an embedded Python operation unsaved; prove type/diagnostic ranges and shared fragment/persisted/scan indexing. If `.graphql` support is implemented, require the same tests for that source too. | Open |
+| TYPE-01 | Required schema typings plus live result and variables for each named operation. Correct fields, aliases, nested lists, every null/list wrapper, variable presence vs `None`, defaults, inputs, enums, scalars, unions/interfaces, `__typename`, and `@skip`/`@include`/`@defer`/`@_optional`/`@_required`. | Positive and negative Pyright/Pylance fixtures, hover and diagnostics on edits; exact type/key semantics. A multi-operation source must bind each operation explicitly and never silently apply definition-zero types to another operation. | One nullable-field bridge case demonstrated; rest open |
+| EDIT-01 | Embedded Python GraphQL syntax highlighting, GraphQL editor diagnostics, completion, signature/description/deprecation hover, schema and fragment definition, cross-file references/rename, operation/fragment outline, safe quick fixes, extract-to-fragment and persisted-ID refactors. | VS Code extension-host tests for required embedded Python calls; if optional `.graphql` support is added, cover it separately. Check exact ranges/edits, refresh and cancellation. LSP protocol coverage plus VS Code client coverage. | Basic diagnostics/completion/hover/definition only demonstrated |
+| FRAG-01 | Fragment graph, explicit composition and transitive spreads, type-condition validation, cross-file imports/exports and colocation warning, default type-level masking, `FragmentOf`, `readFragment`, `@_unmask`, global `disableMasking`, and fragment test helpers (`readResult`, `maskFragments`, unsafe fixture cast). | Pyright/Pylance rejects fragment-only field access before read, permits it after read, preserves optional/list/nullable shapes, interface/union narrowing and nested masks; helper types match documented safe/unsafe boundaries. Runtime checks prove identity/no mutation for helpers, matching gql.tada's type-only behavior. | A minimal opaque-marker identity proof passed Pyright 1.1.414 and mypy 2.4.0, including runtime object identity; recursive GraphQL cases remain open |
+| SCALAR-01 | Reusable schema-bound scalar, enum and input-object typing helper. Custom scalar and enum mappings affect static input/result types but do not falsely promise runtime validation or serialization. | Accepted/rejected type fixtures, optional/null values, enum remapping, custom scalar input/output mapping, runtime identity behavior. | Open |
+| PERSIST-01 | Persisted declaration by explicit ID and hash action; stale-hash diagnostics; deterministic SHA-256 canonicalization; normalized manifest with transitive fragments once, duplicates/conflicts handling, preserved-document and type-only/omitted-document modes. Do not imply APQ, transport, or server registration. | Exact upstream-compatible digest fixtures, nested fragments and `_unmask`, code-action edit, runtime document modes with identical static types, manifest determinism and conflict tests. | Open; Python type-only/tree-shaking behavior needs a build contract |
+| SCHEMA-01 | Local SDL, introspection JSON, URL and authenticated schema download; secret-safe failures; shared project config; named schemas with explicit per-document selection and isolated outputs/diagnostics/watch. | Editor, CLI and codegen resolve identical config; HTTP/auth/error cases; multi-schema collision and isolation fixtures; unsaved schema edit refreshes dependent editor state. | Open |
+| CLI-01 | Equivalent setup/init, doctor, check, schema/output generation, persisted generation and optional turbo commands; config and errors are shared with editor; severity/fail-on-warning and CI annotations. Preserve upstream WIP maturity for init/doctor. | Fresh-project setup, malformed/missing settings, stable generation, same diagnostic IDs/ranges as editor, exit-code and GitHub Actions annotation fixtures. | Open |
+| SCAN-01 | Experimental project scan: schema field/input/enum reach and usage, deprecations, orphan/cross-feature fragments, complexity/depth/directive use, module-document-fragment-schema graph, terminal/JSON/graph output. Keep field-use tracking distinct: same-file property consumption heuristic, reserved keys, configurable warning, and mutation/subscription caveat. Upstream scan discovers GraphQL calls in a TypeScript project/import graph; Python discovery rules mirror supported embedded calls and imports. | Every upstream source rule has a fixture over embedded Python calls and its import graph; stable JSON schema; warning severity/fail behavior; clearly documented heuristic bounds. If `.graphql` files are added, cover their discovery separately. | Open |
+| PERF-01 | Responsive project-scale editing. Incremental recomputation and invalidation first; persistent turbo-like cache stays optional unless benchmarks justify it. | Realistic workspace benchmark; cold/warm latency; identical results with cache disabled/enabled; invalidation of schema, source, fragments, scalar config and engine version; stale results never appear current. | Open |
+| PACK-01 | Installable VS Code extension and language server, version/support matrix, docs, examples, secure dependency set, production GitHub Actions. Small reviewable PRs link standardized issues; Ponytail review before publication as user requested. | Clean install in supported OS/Python/VS Code versions; extension activation, wheel/package build and CI green; dependency/license audit; issue-linked PR review. | Open |
+
+## Correct interpretation of fragment masking
+
+The upstream implementation confirms that `readFragment`, `maskFragments`, `readResult`, and `unsafe_readResult` are type-level identity helpers; they do not wrap, copy, validate, or mutate response data. The prior Python spike used a runtime `FragmentRef` dataclass, so it proves a static access boundary but is **not** the parity design. Prototype an opaque generic marker in generated declarations and cast/identity helper signatures, with no runtime allocation. Keep deliberate runtime decoding/validation out of this parity contract unless separately requested.
+
+`readFragment` should preserve the upstream-supported nullable/optional and single-array wrapping cases; do not add unsupported recursive outer-array behavior as a parity claim. Safe fixture helpers must require the fragment closure they claim to verify; unsafe helpers must be clearly named and must not imply validation.
+
+## Delivery sequence and gates
+
+1. **Lock source and API contract:** use `gql.tada@1.11.4` and GraphQLSP 1.17.5 source inventories; document embedded Python authoring, project config, operation selection, source maps, type-checker versions, runtime client/document contract, custom scalar fallback, invalid-buffer policy, persisted-document omission mode, and multi-schema assignment. Keep standalone `.graphql` support separate as an optional addition.
+2. **Build shared project model:** parser/schema loader, embedded-Python extractor, host-Python source map, operation/fragment graph, config, diagnostics, schema identity. Graph editor, CLI, scan and persisted tooling must share this model.
+3. **Prove the required typing engine:** deterministic schema declarations plus exact operation/variable type renderer. Establish alias/null/list/presence/default/directive/scalar/enum/abstract-type matrix before spending effort on additional CLI or generator wrappers.
+4. **Prove the VS Code vertical slice:** on every edit, update the generated `.pyi` in memory and verify dependent Pylance hovers/diagnostics; cover invalid text, stale-version rejection, cancellation, close/reopen, multiple operations, fragment/schema edits and cleanup. Disk-only `.pyi` rewrites are already known not to refresh in the narrow fixture.
+5. **Immediately after the live-typing acceptance gate, start both required tracks:** persisted operations (canonicalization, IDs, manifest, retained/omitted-document modes) and independent editor conveniences (references/rename, outline, safe quick fixes, fragment extraction). Run these tracks in parallel where independent; persisted-ID editor actions depend on the persisted-operation track.
+6. **Complete fragment parity and remaining editor behavior:** identity-only masking/read helpers, `@_unmask`, global disable, safe/unsafe fixture helpers, scalar helpers, client interoperability, colocation and field-use diagnostics; finish dependent persisted-ID actions.
+7. **Complete schema, CLI and project workflows:** schema download/config/multi-schema, shared CLI check/doctor/init/schema generation, experimental scan/report/graph, CI output. Add fixtures per inventory row and compare editor/CLI diagnostics.
+8. **Profile and ship incrementally:** performance and optional cache, dependency/license/security and supported-version matrix, GitHub Actions with the first production PR. Each PR should implement one narrow slice with focused acceptance evidence; do not label any subset “full parity.”
+
+## Dependency-gated delivery milestones
+
+Use ordered exit-gated milestones instead of calendar dates until implementation velocity is known. Full gql.tada parity remains the release bar.
+
+1. **Live typing foundation:** static embedded Python GraphQL calls, generated schema typings, per-operation result/variable inference, and reliable in-memory Pylance refresh. Exit after the VS Code/Pylance acceptance matrix covers nullability, variables, aliases, lists, fragment indexing, invalid edits, cancellation, and cleanup.
+2. **Persisted operations and editor conveniences:** begin both required tracks immediately after the live-typing gate, in parallel where independent. References/rename, outline, safe quick fixes and fragment extraction belong here; persisted-ID editor actions depend on the persisted track. Deliver deterministic IDs/hash actions, stale-ID diagnostics, transitive fragment closure, manifest generation, duplicate/conflict handling, and retained versus type-only document behavior. This is required parity.
+3. **Fragment parity and remaining editor behavior:** complete masking/read helpers, fragment semantics, colocation, field-use diagnostics and remaining dependent editor actions.
+4. **Schema, CLI, and project workflows:** local/remote schema loading, shared config, named multi-schema isolation, setup/check/doctor/output commands, experimental scan/report/graph, and CI annotations.
+5. **Performance and release parity gate:** incremental responsiveness, optional persistent cache, supported-version/package matrix, security/license review, docs/examples, and production CI. Declare full parity only after every acceptance row passes.
+
+Dates remain unset until the live-typing proof establishes implementation pace. Production PRs must stay small and issue-linked, add GitHub Actions checks from the first production PR, and receive Ponytail review before publication.
+
+## Planning decisions and implementation verification gates
+
+These are explicit gates, not exclusions. Authoring scope and identity-only fragment behavior are settled user decisions. The remaining defaults below are adopted planning choices for review, not proven implementation behavior. Exact API signatures, output omission mechanism, dependency pins and support versions must be verified in the first relevant implementation slice:
+
+| Decision | Planning contract | Why it matters |
+|---|---|---|
+| Python source form | Require static `graphql("...")`/`gql("...")` calls as the Python equivalent of gql.tada's embedded template calls; dynamic interpolation gets a clear unsupported-source diagnostic. Treat `.graphql` files as an extra convenience after core parity unless the user explicitly promotes them. | Matches the upstream authoring and project-scan source model without adding an unrequested input system. |
+| Operation selection | Bind each named operation by explicit name; allow implicit operation only when a document has exactly one operation; diagnose ambiguous/anonymous multi-operation sources. | Avoids inheriting gql.tada's first-definition behavior silently and makes client calls type-safe. |
+| Shared project configuration | Python-native `pyproject.toml` settings with a future import path for GraphQL Config if useful; one resolver shared by LSP/CLI. | Prevents Node-only config APIs from becoming required in a Python package and avoids editor/CLI drift. |
+| Custom scalars | Built-ins have fixed Python mappings; each custom scalar requires an explicit input/output mapping or emits a configuration diagnostic. Do not silently fall back to `Any`. | Preserves soundness; gql.tada's `graphql.scalar` is type-only and does not serialize/validate runtime values. |
+| Invalid live documents | Never present last-known-good operation types as current without a visible stale diagnostic. Keep unaffected operations current; mark or remove only affected operation typing pending repair. | Prevents stale types after malformed or incomplete edits while keeping feedback local. The exact representation in `.pyi` needs an early Pylance test. |
+| Persisted document omission | Support both retained runtime document and an explicit build-time type-only/omitted-document path; manifest alone does not strip runtime text. | Python has no TypeScript type erasure/tree-shaking equivalent, so behavior needs an explicit packaging/build contract. |
+| Checker/support policy | Require Pyright/Pylance for VS Code live typing; keep mypy compatibility as a separately measured library-level goal, not a claim of editor parity. | The user chose VS Code/Pyright as the primary editor path; a generic LSP does not update arbitrary Python checkers. |
+| Fragment API runtime behavior | Opaque generated marker plus identity helpers; no runtime wrappers, coercion or response validation. | Matches upstream helper behavior and the new Pyright/mypy identity proof. |
+
+Any change to these defaults should be captured in the parity issue before coding. The user confirmed the full feature target; embedded Python calls are therefore required, while standalone `.graphql` files remain optional extra scope.
+
+## Existing evidence and limits
+
+- VS Code GraphQL LSP spike passed a protocol-level extension-host flow for diagnostics, completion, hover, definition, edits and shutdown with a clean lower-level GraphiQL dependency audit. GraphQLSP-specific rename, refactors, source-use analysis and persisted actions are not supplied automatically by that library.
+- Pylance extension-host spike passed one unsaved nullability edit after the open `.pyi` was changed in memory. Disk-only stub rewrite did not refresh within the tested window. This is not proof for broad type semantics or production lifecycle.
+- Ariadne/Turms generated a tested subset of saved outputs. Neither is a live typing bridge or complete editor/CLI parity package. No production backend selection is needed for required operation typings.
+- GraphQLSP's VS Code Outline/symbol support is an extension contribution, while GraphQLSP itself is a TypeScript language-service plugin. The lower-level GraphiQL analysis package does not supply GraphQLSP's fragment references/rename, refactors, import/field-use analysis, persisted hash actions, or live Pyright types. The plugin itself does not supply syntax highlighting; the pinned VS Code extension does contribute grammars, so equivalent embedded-Python highlighting is required under EDIT-01.
+- Source-level gql.tada audit confirms scalar and fragment helpers are identity/type-level operations, `graphql()` inference uses a document's first definition, and `scan` walks TypeScript GraphQL call expressions plus module imports. GraphQL Desk must bind each named operation explicitly; standalone `.graphql` support remains optional extra scope.
+- `graphql-core` is the likely Python semantic substrate; the Node GraphiQL language-service reuse path and all transitive dependencies still require production security/license/API review.
+- Source audits inspected gql.tada tag `cfe64f4` and GraphQLSP commit `5f277f3`, including checked-in tests, but did not run upstream suites, unpack the published npm tarball, or validate every edge case. Re-pin and rerun the reference contract before release claims.
+
+## Current go/no-go
+
+**Go for an incremental proof-driven foundation; no-go for a full-parity claim today.** No product implementation exists. The highest-risk gate is sound live operation typing and recovery through the in-memory `.pyi` lifecycle. Source extraction/config and the persisted-document build contract are specified in the detailed contracts; their implementation must satisfy the recorded acceptance cases before the shared project model is treated as stable. Full parity remains the acceptance target; experimental and WIP upstream features retain those maturity labels rather than being silently dropped.
+
+
+## Repository governance and traceability
+
+- [Issue #1](https://github.com/atefth/graphql-desk/issues/1) is the full-parity epic; [issue #6](https://github.com/atefth/graphql-desk/issues/6) owns the support/review matrix. Existing feasibility issues are closed and documented; closure records narrow experiments, not product completion.
+- The roadmap board remains private. This checkout adds documentation only: no product code or production PR is authorized now. Docs-only branches, commits and PRs are authorized for review. Product implementation waits until docs PRs land, followed by issue/roadmap updates.
+- Eventual production PRs must be small, issue-linked, include GitHub Actions checks from the first implementation, use Ponytail while coding and pass Ponytail review before publication.
+- API-01/TYPE-01/FRAG-01/SCALAR-01/PERSIST-01/CLI-01/SCAN-01 map to the [gql.tada pinned source inventory](audits/gql-tada-source-audit.md). EDIT-01/SRC-01/SCHEMA-01 and editor portions of the other rows map to the [GraphQLSP pinned source inventory](audits/graphqlsp-source-audit.md). PERF-01/PACK-01 also include user-required release criteria.
+- All ledger rows remain open until observable acceptance passes. A narrow spike, closed feasibility issue, documented library capability or upstream test inspection cannot close a product row.
+- See [evidence, reuse and support review](audits/evidence-and-reuse.md) for consolidated findings and limits. The user's original blueprint remains untouched in the parent folder; its save-only typing, runtime Pydantic masking, generator-first architecture, timelines and “95%” claim are superseded by this full-parity contract.
+
+## Planning readiness review
+
+- [x] Pinned gql.tada and GraphQLSP capability inventories retained with source/test citations; all public APIs/subpaths, editor, CLI, schemas, fragments, persisted and scan surfaces trace to ledger IDs.
+- [x] Every required ledger row has observable acceptance cases; detailed type/editor cases remain in the source audits and workflow/lifecycle cases in the evidence review.
+- [x] Scope, identity behavior, primary editor/checker, ordering and governance reconciled; optional extras/cache distinguished from required capabilities.
+- [x] Narrow proofs separated from open product gates; local reported evidence distinguished from fresh execution and production dependency approval.
+- [x] Dependencies and delivery gates documented; static authoring, operation selection, scalar mapping, invalid-buffer and schema isolation contracts recorded for review.
+- [x] Relative documentation links and whitespace validated; checkout originally contained only README.md; parent blueprint preserved.
+
+The checked items above establish documentation readiness for review, not completion of all research or scope contracts. The final [planning gap register](planning-readiness-audit.md) records explicit contracts for all eight items; their product behavior remains to be tested. Documentation readiness means the documentation is ready for review. It does not certify implementation feasibility or product conformance. Exact API/binding contracts, persisted omission/build mechanism, initial dependency/support choices and measurable budgets are now specified in the contracts below; their implementation remains unproven. Docs PRs must land before issue/roadmap updates and production implementation. After landing, implementation may use parallel agents where independent, with small PRs, CI from the first production PR, Ponytail coding and review before publication.
+
+## Ponytail documentation review (2026-10-19)
+
+Reviewed the current docs-only PR diff, all five connected Markdown files and PR description for scope, acceptance/evidence consistency and unnecessary implementation commitments. Expected use is human planning/review; no runtime or production-load behavior is introduced.
+
+Corrected three substantive inconsistencies in the retained gql.tada audit: required user-facing sub-APIs were labeled optional; one acceptance case limited scalar mappings to output despite required variable/input mappings; cache wording implied a mandatory persistent cache. These now match API-01, SCALAR-01 and the optional-cache decision. Detailed requirements and ledger statuses are preserved.
+
+This earlier review was superseded by the [final planning readiness audit](planning-readiness-audit.md), which found additional planning blockers and the extension-highlighting omission. Documentation readiness for review passes; no product acceptance gate passes. Relative links (including local section anchors), code fences and whitespace were checked. Remote targets, upstream suites, spike artifacts and production behavior were not revalidated.
+
+## Detailed adopted planning contracts
+
+These specifications supersede earlier provisional recommendations where more precise. All detailed ledger statuses remain product acceptance statuses, not documentation completion flags.
+
+- [Python API, static authoring and type/helper semantics](contracts/api-and-types.md)
+- [Configuration, CLI and generated-state lifecycle](contracts/config-cli-and-lifecycle.md)
+- [Persisted byte/build rules and project analysis](contracts/persisted-and-project-analysis.md)
+- [Support, performance budgets and portable evidence](contracts/support-performance-and-evidence.md)
+
+There are no outstanding irreducible product choices requiring user input. Adopted defaults remain reviewable and may change through an explicit documented decision; no upstream capability is dropped. New implementation evidence can reopen a design question without changing the full-parity target.
