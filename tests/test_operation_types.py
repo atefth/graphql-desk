@@ -19,6 +19,7 @@ from graphql_desk.fragments import (
     index_fragments,
 )
 from graphql_desk.operation_types import (
+    render_indexed_fragment_types,
     render_indexed_operation_types,
     render_operation_types,
 )
@@ -330,6 +331,190 @@ class OperationTypesTests(unittest.TestCase):
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             self.assertTrue(hasattr(module, "ReadFragment_F"))
+
+    def test_standalone_indexed_fragment_payload_uses_actual_type_condition(
+        self,
+    ) -> None:
+        schema = build_schema(
+            "type User { id: ID! name: String! friends: [User] } "
+            "type Query { greeting: String! }"
+        )
+        context = SchemaContext("main", schema, "v1")
+        index = index_fragments(
+            resolve_project(
+                (
+                    ModuleSnapshot(
+                        "p",
+                        "child",
+                        "file:///child.py",
+                        1,
+                        "from graphql_desk import gql\n"
+                        'c=gql("fragment C on User { name }")',
+                    ),
+                    ModuleSnapshot(
+                        "p",
+                        "main",
+                        "file:///main.py",
+                        1,
+                        "from graphql_desk import gql\nfrom child import c\n"
+                        'f=gql("fragment F on User { id ...C friends {...C} }",[c])',
+                    ),
+                )
+            ),
+            schemas={("p", None): context},
+        )
+        self.assertEqual(index.diagnostics, ())
+        document = next(d for d in index.documents if d.call.binding == "f")
+        with patch.object(
+            schema,
+            "get_root_type",
+            side_effect=AssertionError(
+                "Fragment rendering must not acquire an operation root"
+            ),
+        ):
+            output = render_indexed_fragment_types(
+                context, document, name="Payload", fragment_index=index
+            )
+        self.assertIn("PayloadResult = TypedDict", output)
+        self.assertIn("'friends': 'list[PayloadResult_friends | None] | None'", output)
+        self.assertNotIn("PayloadFragment_F", output)
+        self.assertEqual(output.count("ID = str"), 1)
+        unmasked = render_indexed_fragment_types(
+            context, document, name="Payload", disable_masking=True
+        )
+        self.assertIn("'name': 'String'", unmasked)
+        self.assertNotIn("_graphql_desk_φ", unmasked)
+        assert document.primary_fragment is not None
+        for wrong in (
+            replace(document, primary_fragment=None),
+            replace(
+                document,
+                primary_fragment=replace(
+                    document.primary_fragment,
+                    document=DocumentIdentity(document.call.module, Span(0, 1)),
+                ),
+            ),
+            replace(document, call=replace(document.call, operation="Q")),
+            replace(document, context_token="old"),
+        ):
+            with self.assertRaises(ValueError):
+                render_indexed_fragment_types(
+                    context, wrong, name="Payload", disable_masking=True
+                )
+        child = next(d for d in index.documents if d.call.binding == "c")
+        assert child.primary_fragment is not None
+        key = fragment_identity_key(child, child.primary_fragment)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "generated.py").write_text(output, encoding="utf8")
+            fixture = (
+                "from typing import Literal, cast\n"
+                "from generated import PayloadResult, PayloadVariables\n"
+                "from graphql_desk.fragment_refs import FragmentIdentity, FragmentRef\n"
+                f"C = FragmentIdentity[Literal[{key!r}]]\n"
+                "def read_c(value: FragmentRef[C]) -> None: pass\n"
+                "result = cast(PayloadResult, {})\n"
+                "identifier: str = result['id']\n"
+                "read_c(result)\n"
+                "variables: PayloadVariables = {}\n"
+                "for friend in result['friends'] or []:\n"
+                "    if friend is not None: read_c(friend)\n"
+                "hidden = result['name']  # error\n"
+            )
+            (root / "fixture.py").write_text(fixture, encoding="utf8")
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-X",
+                    "utf8",
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+            self.assertIn("Found 1 error in 1 file", mypy.stdout)
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["fixture.py", "generated.py"],
+                        "typeCheckingMode": "strict",
+                        "pythonVersion": "3.10",
+                    }
+                ),
+                encoding="utf8",
+            )
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
+            self.assertEqual(
+                {d["range"]["start"]["line"] + 1 for d in diagnostics},
+                {12},
+                pyright.stdout + pyright.stderr,
+            )
+            spec = importlib.util.spec_from_file_location(
+                "fragment_generated", root / "generated.py"
+            )
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.assertEqual(module.PayloadVariables.__required_keys__, frozenset())
+
+    def test_standalone_abstract_and_empty_fragment_payloads(self) -> None:
+        schema = build_schema(
+            "interface Node { id: ID! } interface Empty { id: ID! } "
+            "type User implements Node { id: ID! name: String! } "
+            "type Org implements Node { id: ID! } type Query { greeting: String }"
+        )
+        context = SchemaContext("main", schema, "v1")
+        index = index_fragments(
+            resolve_project(
+                (
+                    ModuleSnapshot(
+                        "p",
+                        "main",
+                        "file:///main.py",
+                        1,
+                        "from graphql_desk import gql\n"
+                        'f=gql("fragment F on Node {kind:__typename id '
+                        '...on User{name}}")\n'
+                        'empty=gql("fragment EmptyFields on Empty {id}")',
+                    ),
+                )
+            ),
+            schemas={("p", None): context},
+        )
+        self.assertEqual(index.diagnostics, ())
+        document = next(d for d in index.documents if d.call.binding == "f")
+        output = render_indexed_fragment_types(context, document, name="Payload")
+        self.assertIn("PayloadResult = __graphql_desk_variant_0 |", output)
+        self.assertIn("'kind': \"Literal['User']\"", output)
+        self.assertIn("'kind': \"Literal['Org']\"", output)
+        empty = next(d for d in index.documents if d.call.binding == "empty")
+        self.assertIn(
+            "PayloadResult = __graphql_desk_Never",
+            render_indexed_fragment_types(context, empty, name="Payload"),
+        )
 
     def test_indexed_named_fragments_use_actual_closure_scope_and_selected_operation(
         self,
