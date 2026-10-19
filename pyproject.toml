@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "graphql-desk"
+version = "0.1.0"
+description = "Typed GraphQL documents for Python"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["graphql-core==3.3.0"]
+
+[dependency-groups]
+dev = [
+  "build==1.6.1",
+  "hatchling==1.32.4",
+  "mypy==2.4.0",
+  "packaging==26.3",
+  "pip-audit==2.10.1",
+  "pyright==1.1.414",
+  "ruff==0.17.1",
+  "typing_extensions==4.16.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/graphql_desk"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src", "tests", "scripts"]
+
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
+include = ["src", "tests", "scripts"]
+enableTypeIgnoreComments = false
+reportUnnecessaryTypeIgnoreComment = "error"
