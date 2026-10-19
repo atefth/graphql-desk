@@ -23,27 +23,27 @@ npm install
 npm run check
 ```
 
-The check exercises the service's CLI against an invalid operation and a completion prefix using the local SDL schema. `.graphqlrc.yml` records the schema/document association expected by the LSP server; the CLI check passes the schema path directly, so server-side config discovery is not exercised.
+The check launches the actual language server over Content-Length framed stdio, initializes it as an LSP client, opens and changes the `.graphql` document, and requests completion and hover. It uses `.graphqlrc.yml` for schema discovery. This exercises the LSP server protocol without shipping a VS Code extension client.
 
-The service speaks LSP and documents GraphQL diagnostics, completion, definitions, symbols, and outline; this fixture does not ship a GraphQL Desk VS Code client.
+The service documents diagnostics, completion, definitions, symbols, and outline; its server also handles LSP hover requests. This fixture does not ship a GraphQL Desk VS Code client.
 
 ## Results
 
-- Diagnostics: supported by the service; the check confirms an unknown field is surfaced at line 0, characters 24–37. This verifies the service range, not the exact VS Code underline rendering.
-- Completion: supported; the check confirms schema field completion for the prefix `na`.
-- Hover: not listed as a supported feature in the service's current official README; not available as a demonstrated capability here.
-- Navigation: service documentation lists links to fragment and named type definitions. The fixture contains no fragment or separate SDL declaration, so navigation remains unverified.
-- Schema discovery: the local SDL works through the CLI's explicit schema-path option. A GraphQL config file is required by the server, but this spike does not exercise server-side config discovery.
-- Refresh: the server relies on an LSP client file watcher and document change notifications. This fixture does not test VS Code refresh behavior.
+- Diagnostics: the LSP publishes an unknown-field diagnostic starting at the field name; its end position extends one character past the identifier in this fixture. This verifies protocol ranges, not the exact VS Code underline rendering.
+- Completion: the LSP completion request suggests the schema field `name` after a document change to the prefix `na`.
+- Hover: the LSP hover request on `name` returns its schema type, `String!`; hover is implemented by the server even though it is omitted from its README's feature list.
+- Navigation: an LSP definition request on the `name` field returns its location in the configured `schema.graphql`.
+- Schema discovery: the server loads the local SDL schema through `.graphqlrc.yml` when started with the fixture directory as `configDir`.
+- Refresh: `textDocument/didChange` triggers updated diagnostics and completion reflects the changed document. External schema-file watcher refresh remains unverified.
 - Generated Python files: not needed for GraphQL diagnostics or completion; Python call-site typing is outside this spike.
 
 ## Acceptance evidence
 
-`npm run check` asserts that an invalid field appears in diagnostics and that the schema field `name` is suggested by completion. This is service-level evidence, not an end-to-end VS Code UI test.
+`npm run check` asserts the LSP diagnostic range, completion suggestion, hover type, and definition target after initialize, didOpen, didChange, completion, hover, and definition JSON-RPC messages over stdio. This is protocol-level evidence, not an end-to-end VS Code UI test.
 
 ## Decision recommendation
 
-Proceed with the existing GraphQL Language Service as the first GraphQL analysis backend for the LSP prototype. Keep the first slice to schema configuration, diagnostics, completion, definition navigation, and document symbols. Do not promise hover parity: it is not among the service's documented features, and a custom hover implementation would need a separate scoped spike. Add a thin VS Code client only after the backend choice is accepted.
+Proceed with the existing GraphQL Language Service as the first GraphQL analysis backend for a VS Code client prototype. The protocol smoke test confirms config discovery, diagnostics, completion, hover, and a definition jump without generated Python files. Manually verify underline rendering, schema-file watcher refresh, and editor integration before making an extension-level claim.
 
 ## Out of scope
 
@@ -52,11 +52,11 @@ Proceed with the existing GraphQL Language Service as the first GraphQL analysis
 
 ## Limitations and risks
 
-- No VS Code extension UI was built or manually exercised. A TypeScript language client is still needed for a shippable extension.
+- No VS Code extension UI was built or manually exercised. A TypeScript language client is still needed for a shippable extension; this test speaks the standard LSP stdio transport directly.
 - The current server README describes partial LSP support and requires GraphQL config; it also documents limitations around multi-root workspaces.
-- Hover, precise diagnostic underlines in VS Code, definition jumps, and live schema refresh remain unverified.
+- Precise diagnostic underlines in VS Code and live schema-file refresh remain unverified.
 - This does not demonstrate live Python type inference, fragment masking, or Ariadne/Turms integration.
-- `npm install` reports 13 high-severity transitive dependency advisories in this exploratory CLI dependency tree; review/update the selected service version before shipping it as a product dependency.
+- This package and lockfile are quarantined under `spikes/` as a development-only feasibility fixture, not a production dependency. `npm audit` reports 13 high-severity vulnerable package entries: `@graphql-tools/code-file-loader`, `@graphql-tools/graphql-file-loader`, `@graphql-tools/graphql-tag-pluck`, `@graphql-tools/json-file-loader`, `@graphql-tools/utils`, `braces`, `fast-glob`, `globby`, `graphql-config`, `graphql-language-service-cli`, `graphql-language-service-server`, `micromatch`, and `source-map-js`. They trace to three advisories: [GHSA-7mx3-vvmw-hjmv](https://github.com/advisories/GHSA-7mx3-vvmw-hjmv) affects `@graphql-tools/utils` versions through 12.0.0; [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm) affects `braces` through `micromatch`, `fast-glob`, and `globby`; [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q) affects `source-map-js` versions 1.0.0–1.2.1. `npm audit` suggests a forced downgrade to `graphql-language-service-cli@3.3.32` as a breaking change; `npm audit fix --dry-run --force` still reports the same 13 entries, so no verified clean compatible update is available. The smaller `graphql-language-service-server` package is also in the reported vulnerable dependency path. `npm audit --omit=dev` reports zero vulnerabilities because the CLI is a dev dependency in this isolated fixture. The lockfile stays to preserve the exact tested tree. Do not promote this dependency to product runtime without a separately reviewed upgrade or replacement.
 
 ## Dependencies
 
