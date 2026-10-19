@@ -361,6 +361,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "graphql-core" },
+    { name = "typing-extensions" },
 ]
 
 [package.dev-dependencies]
@@ -372,11 +373,13 @@ dev = [
     { name = "pip-audit" },
     { name = "pyright" },
     { name = "ruff" },
-    { name = "typing-extensions" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "graphql-core", specifier = "==3.3.0" }]
+requires-dist = [
+    { name = "graphql-core", specifier = "==3.3.0" },
+    { name = "typing-extensions", specifier = "==4.16.0" },
+]
 
 [package.metadata.requires-dev]
 dev = [
@@ -387,7 +390,6 @@ dev = [
     { name = "pip-audit", specifier = "==2.10.1" },
     { name = "pyright", specifier = "==1.1.414" },
     { name = "ruff", specifier = "==0.17.1" },
-    { name = "typing-extensions", specifier = "==4.16.0" },
 ]
 
 [[package]]

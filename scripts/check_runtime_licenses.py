@@ -11,7 +11,7 @@ def runtime_inventory(root: str) -> list[dict[str, str]]:
     pending = [root]
     seen: set[str] = set()
     inventory: list[dict[str, str]] = []
-    approved = {"graphql-core": "MIT"}
+    approved = {"graphql-core": "MIT", "typing-extensions": "PSF-2.0"}
     while pending:
         name = canonicalize_name(pending.pop())
         if name in seen:
@@ -44,5 +44,8 @@ def runtime_inventory(root: str) -> list[dict[str, str]]:
 
 if __name__ == "__main__":
     result = runtime_inventory("graphql-desk")
-    assert result == [{"name": "graphql-core", "version": "3.3.0", "license": "MIT"}]
+    assert result == [
+        {"name": "graphql-core", "version": "3.3.0", "license": "MIT"},
+        {"name": "typing-extensions", "version": "4.16.0", "license": "PSF-2.0"},
+    ]
     print(json.dumps(result, indent=2))
