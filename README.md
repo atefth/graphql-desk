@@ -31,7 +31,9 @@ uv build --no-sources --no-build-isolation
 
 CI checks all five Python minors on Ubuntu 24.04 x64, with Windows Server 2025 x64 and macOS 14 arm64 smoke lanes. Windows Server is a CI smoke environment, not evidence for the planned Windows 11 editor support. These package checks do not establish VS Code/Pylance, generated typing, fragment, client, performance or full-parity acceptance. Before the first production merge, the aggregate `CI` check must be required on `main` with enforcement verified; a workflow file alone does not configure branch protection.
 
-The only runtime dependency is pinned `graphql-core==3.3.0` (MIT). CI audits the locked runtime/development dependency set and rejects runtime dependencies outside the reviewed license inventory. Optional generators are absent. Builds use the locked Hatchling backend; smoke checks rebuild the source archive, then install both wheels into fresh environments outside the source tree.
+Runtime dependencies are pinned `graphql-core==3.3.0` (MIT) and `typing_extensions==4.16.0` (PSF-2.0), needed for generated declarations on Python 3.10. CI audits the locked runtime/development dependency set and rejects runtime dependencies outside the reviewed license inventory. Optional generators are absent. Builds use the locked Hatchling backend; smoke checks rebuild the source archive, then install both wheels into fresh environments outside the source tree.
+
+The pure [schema declaration renderer](docs/implementation/schema-types.md) currently covers built-in scalars, enums and input objects, independently of operation generation.
 
 ## Typed-document boundary
 

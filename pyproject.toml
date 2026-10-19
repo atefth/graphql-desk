@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Typed GraphQL documents for Python"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["graphql-core==3.3.0"]
+dependencies = ["graphql-core==3.3.0", "typing_extensions==4.16.0"]
 
 [dependency-groups]
 dev = [
@@ -19,7 +19,6 @@ dev = [
   "pip-audit==2.10.1",
   "pyright==1.1.414",
   "ruff==0.17.1",
-  "typing_extensions==4.16.0",
 ]
 
 [tool.hatch.build.targets.wheel]
