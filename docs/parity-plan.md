@@ -2,6 +2,23 @@
 
 **Status:** planning artifact. No product code or production PRs exist yet. Docs-only PR preparation is authorized; product work waits for those PRs to land. No capability below is marked complete.
 
+## Current gate status
+
+**Planning/documentation readiness: PASSED. Product full-parity gate: NOT PASSED. No product acceptance gates have passed.** The requested parity gates are criteria for future implementation and acceptance testing; documentation checks and narrow feasibility proofs do not satisfy them. This docs PR stays draft pending Ponytail review.
+
+| Product area / ledger | Current status | Evidence limit |
+|---|---|---|
+| Live schema/operation typing (TYPE-01) | Partial proof; acceptance gate open | Only one unsaved nullability edit changed Pylance hover/diagnostics after an open generated `.pyi` was updated in memory. Disk-only replacement did not refresh in the tested window. Broad type semantics and lifecycle are unproven. |
+| Editor experience (EDIT-01) | Partial basic slice; acceptance gate open | Diagnostics, completion, hover, definition and edit/shutdown flow demonstrated in a narrow adapter fixture. Full embedded-Python behavior, references/rename, outline, safe fixes/refactors and persisted actions remain open. |
+| Fragment masking (FRAG-01) | Partial proof; acceptance gate open | Narrow type-only opaque-marker and runtime-identity proof passed Pyright/mypy. Broad GraphQL composition, nested/conditional/abstract/list cases and fixture-helper semantics remain open. |
+| Public API, embedded source and scalar helpers (API-01, SRC-01, SCALAR-01) | Open | No complete product API, embedded-source binding/index or scalar-helper acceptance demonstrated. Saved generator subsets do not close these gates. |
+| Persisted operations (PERSIST-01) | Open | Canonical hashes, manifests, editor actions, conflict handling and Python retained/omitted-document build contract require implementation and acceptance tests. |
+| Complete schema and CLI workflows (SCHEMA-01, CLI-01) | Open | Shared configuration, named-schema isolation, authenticated loading/refresh, complete commands, error handling and editor/CLI agreement remain unproven as a product. |
+| Python project scanning (SCAN-01) | Open | Required embedded-call/import graph, complete scan rules and terminal/JSON/graph output have no product acceptance evidence. |
+| Performance and release compatibility (PERF-01, PACK-01) | Open | No product-scale benchmarks, supported-version/platform matrix, install/package verification or production CI/release acceptance. Historical dependency checks are not release approval. |
+
+Detailed acceptance criteria and per-row statuses below remain unchanged. See [planning readiness review](#planning-readiness-review) and the [evidence ledger](audits/evidence-and-reuse.md) for the separate documentation checks and reported proof limits.
+
 ## Reference contract
 
 - Match the complete user-visible capabilities of published `gql.tada@1.11.4` (source tag `cfe64f433bd29ff6f79e462596389b81c6e01aec`) and its GraphQLSP editor integration (source commit `5f277f3fd444af4e7175c3e9afefd73cad465b5d`, manifest version 1.17.5), including CLI and test APIs. Keep upstream maturity labels: `scan` experimental; `init` and `doctor` work in progress.
