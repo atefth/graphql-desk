@@ -1,3 +1,5 @@
+> Published/source reconciliation: npm 1.17.5 is not identical to this same-version pinned source. Four embedded source differences were inspected; the broader source editor target remains required. See [artifact/source comparison](../contracts/support-performance-and-evidence.md#classification-of-previously-unchecked-work).
+
 > Later planning contracts specify the Python decisions and newly verified published-artifact surfaces: see [final readiness audit](../planning-readiness-audit.md). Historical source-audit verification limits below describe that original pass.
 
 > Source-audit evidence retained from 2026-10-19; current product decisions and delivery order are in [the parity plan](../parity-plan.md). Historical questions below do not reopen settled scope: embedded Python calls, identity-only fragments, editor conveniences and persisted operations are required. No upstream tests were rerun for this documentation checkout.

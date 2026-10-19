@@ -21,7 +21,7 @@ Detailed acceptance criteria and per-row statuses below remain unchanged. See [p
 
 ## Reference contract
 
-- Match the complete user-visible capabilities of published `gql.tada@1.11.4` (source tag `cfe64f433bd29ff6f79e462596389b81c6e01aec`) and its GraphQLSP editor integration (source commit `5f277f3fd444af4e7175c3e9afefd73cad465b5d`, manifest version 1.17.5), including CLI and test APIs. Keep upstream maturity labels: `scan` experimental; `init` and `doctor` work in progress.
+- Match the complete user-visible capabilities of published `gql.tada@1.11.4` (source tag `cfe64f433bd29ff6f79e462596389b81c6e01aec`) and its GraphQLSP editor integration (source commit `5f277f3fd444af4e7175c3e9afefd73cad465b5d`, manifest version 1.17.5; published npm 1.17.5 lacks some source enhancements), including CLI and test APIs. The pinned source, not the version label alone, defines the broader editor target; see the artifact/source comparison in the evidence contract. Keep upstream maturity labels: `scan` experimental; `init` and `doctor` work in progress.
 - Preserve outcomes, not TypeScript internals. The initial Python editor target is VS Code with Pyright/Pylance. LSP behavior should remain editor-neutral where the protocol supports it.
 - Required core: generated schema typing and live, per-operation result and variable types. `generate-output` is schema type input; it is not operation codegen. `turbo` is only an optional performance cache.
 - Require embedded static GraphQL calls in Python as the Python-native equivalent of gql.tada's TypeScript `graphql()` calls. Standalone `.graphql` files are an additional convenience, not a full-parity gate, because gql.tada's call-based API and project scanner do not require them.
