@@ -14,6 +14,7 @@ from graphql import (
     build_schema,
 )
 
+from graphql_desk.config import ScalarMapping
 from graphql_desk.schema_types import render_schema_types
 
 _SCHEMA = """
@@ -36,6 +37,64 @@ _SCHEMA = """
 
 
 class SchemaTypesTests(unittest.TestCase):
+    def test_mapping_aliases_are_directional_deterministic_and_explicit_any(
+        self,
+    ) -> None:
+        schema = build_schema(
+            "scalar Date scalar Loose enum Color { RED } "
+            "input Filter { when: Date! loose: Loose color: Color } "
+            "type Query { today: Date }"
+        )
+        mappings = (
+            ScalarMapping("Date", "builtins.str", "datetime.datetime"),
+            ScalarMapping("Loose", "typing.Any", "typing.Any"),
+        )
+        output = render_schema_types(
+            schema, scalars=mappings, enums=(("Color", "builtins.str"),)
+        )
+        self.assertIn("'when': 'DateInput'", output)
+        self.assertIn("'loose': NotRequired['LooseInput | None']", output)
+        self.assertIn("# Explicit Any mapping: LooseInput", output)
+        self.assertIn("# Explicit Any mapping: LooseOutput", output)
+        self.assertNotIn("Color = Literal", output)
+        self.assertEqual(
+            output,
+            render_schema_types(
+                schema,
+                scalars=tuple(reversed(mappings)),
+                enums=(("Color", "builtins.str"),),
+            ),
+        )
+
+    def test_bad_mapping_names_kinds_symbols_and_collisions_fail(self) -> None:
+        schema = build_schema(
+            "scalar Date enum Color { RED } type Query { when: Date }"
+        )
+        for mappings, enums in (
+            ((ScalarMapping("Missing", "builtins.str", "builtins.str"),), ()),
+            ((ScalarMapping("Color", "builtins.str", "builtins.str"),), ()),
+            ((ScalarMapping("Date", "os.system('bad')", "builtins.str"),), ()),
+            ((ScalarMapping("Date", "str", "builtins.str"),), ()),
+            ((ScalarMapping("String", "builtins.int", "builtins.int"),), ()),
+            ((ScalarMapping("Date", "builtins.str", "builtins.str"),) * 2, ()),
+            ((), (("Date", "builtins.str"),)),
+            ((), (("Missing", "builtins.str"),)),
+            ((), (("Color", "builtins.str"),) * 2),
+        ):
+            with (
+                self.subTest(mappings=mappings, enums=enums),
+                self.assertRaises(ValueError),
+            ):
+                render_schema_types(schema, scalars=mappings, enums=enums)
+        colliding = build_schema(
+            "scalar Date input DateInput { x: Int } type Query { when: Date }"
+        )
+        with self.assertRaisesRegex(ValueError, "Colliding"):
+            render_schema_types(
+                colliding,
+                scalars=(ScalarMapping("Date", "builtins.str", "datetime.datetime"),),
+            )
+
     def test_wrappers_defaults_and_keyword_fields(self) -> None:
         output = render_schema_types(build_schema(_SCHEMA))
         for expected in (
