@@ -36,6 +36,245 @@ _SOURCE = """
 
 
 class OperationTypesTests(unittest.TestCase):
+    def test_conditional_blocks_and_repeated_composites_match_execution_and_checkers(
+        self,
+    ) -> None:
+        from graphql import graphql_sync  # pyright: ignore[reportUnknownVariableType]
+
+        schema = build_schema(
+            "type User { id: ID! name: String! title: String! } "
+            "type Query { user: User! }"
+        )
+        for source, expected_mypy_errors in (
+            (
+                "query($flag:Boolean!) { user { id "
+                "... @include(if:$flag) { name title } } }",
+                2,
+            ),
+            (
+                "query($flag:Boolean!) { user { id } "
+                "user @include(if:$flag) { name title } }",
+                4,
+            ),
+        ):
+            with (
+                self.subTest(source=source),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                for flag in (False, True):
+                    result = graphql_sync(
+                        schema,
+                        source,
+                        root_value={"user": {"id": "1", "name": "x", "title": "y"}},
+                        variable_values={"flag": flag},
+                    )
+                    self.assertIsNone(result.errors)
+                    self.assertEqual(
+                        result.data,
+                        {"user": {"id": "1", "name": "x", "title": "y"}}
+                        if flag
+                        else {"user": {"id": "1"}},
+                    )
+                output = render_operation_types(schema, source, name="Read")
+                self.assertIn("closed=True", output)
+                root = Path(directory)
+                (root / "generated.py").write_text(output, encoding="utf-8")
+                (root / "fixture.py").write_text(
+                    "from typing_extensions import TypedDict\n"
+                    "from generated import ReadResult\n"
+                    "base: ReadResult = {'user': {'id':'1'}}\n"
+                    "full: ReadResult = {'user': {'id':'1','name':'x','title':'y'}}\n"
+                    "partial: ReadResult = {'user': {'id':'1','name':'x'}}\n"
+                    "class Wide(TypedDict):\n    id: str\n    name: str\n"
+                    "wider: Wide = {'id':'1','name':'x'}\n"
+                    "partial_wider: ReadResult = {'user': wider}\n"
+                    "def narrow(value: ReadResult) -> str:\n"
+                    "    user = value['user']\n"
+                    "    if 'name' in user:\n        return user['title']\n"
+                    "    return user['id']\n",
+                    encoding="utf-8",
+                )
+                runtime = subprocess.run(
+                    [sys.executable, "-c", "import generated"],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(runtime.returncode, 0, runtime.stderr)
+                mypy = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "mypy",
+                        "--strict",
+                        "--no-incremental",
+                        str(root),
+                    ],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+                self.assertIn(
+                    f"Found {expected_mypy_errors} errors in 1 file", mypy.stdout
+                )
+                (root / "pyrightconfig.json").write_text(
+                    json.dumps(
+                        {
+                            "include": ["fixture.py", "generated.py"],
+                            "pythonVersion": "3.10",
+                            "typeCheckingMode": "strict",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                pyright = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "pyright",
+                        "--project",
+                        str(root),
+                        "--pythonpath",
+                        sys.executable,
+                        "--outputjson",
+                    ],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(pyright.returncode, 1, pyright.stdout + pyright.stderr)
+                diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
+                self.assertEqual(len(diagnostics), 2, diagnostics)
+                self.assertEqual(
+                    {item["range"]["start"]["line"] for item in diagnostics}, {4, 9}
+                )
+
+    def test_nested_conditions_abstract_scopes_aliases_and_wrappers(self) -> None:
+        from graphql import graphql_sync  # pyright: ignore[reportUnknownVariableType]
+
+        sdl = (
+            "interface Node { id: ID! label: String } "
+            "type User implements Node { id: ID! label: String! name: String! } "
+            "type Query { nodes: [Node] }"
+        )
+        schema = build_schema(sdl)
+        source = (
+            "query($a:Boolean!,$b:Boolean!){ nodes { kind:__typename id label "
+            "... on User @include(if:$a) { name ... @skip(if:$b) { strong:label } } } }"
+        )
+        output = render_operation_types(schema, source, name="Read")
+        self.assertIn("'nodes': 'list[ReadResult_nodes | None] | None'", output)
+        self.assertIn("'label': 'String | None'", output)
+        self.assertIn("'strong': 'String'", output)
+        self.assertIn("'kind': \"Literal['User']\"", output)
+        for a, b in ((False, False), (False, True), (True, False), (True, True)):
+            result = graphql_sync(
+                schema,
+                source,
+                root_value={
+                    "nodes": [
+                        None,
+                        {"__typename": "User", "id": "1", "label": "x", "name": "n"},
+                    ]
+                },
+                variable_values={"a": a, "b": b},
+            )
+            self.assertIsNone(result.errors)
+            expected = {"kind": "User", "id": "1", "label": "x"}
+            if a:
+                expected["name"] = "n"
+                if not b:
+                    expected["strong"] = "x"
+            self.assertEqual(result.data, {"nodes": [None, expected]})
+        alias = render_operation_types(
+            schema,
+            "{ nodes { kind:__typename ... @include(if:false) "
+            "{ __typename:id label } } }",
+            name="Alias",
+        )
+        self.assertIn("'__typename': 'ID'", alias)
+        self.assertNotIn("'__typename': NotRequired", alias)
+        self.assertIn(
+            "closed=True",
+            render_operation_types(
+                build_schema(
+                    "directive @defer(if: Boolean = true) on INLINE_FRAGMENT " + sdl
+                ),
+                "{ nodes { ... @defer { id label } } }",
+                name="Deferred",
+            ),
+        )
+
+    def test_conditional_shape_bounds_are_early_deduplicated_and_atomic(self) -> None:
+        schema = build_schema("type Query { value: String }")
+        blocks = [f"... @include(if:false) {{ f{i}:value }}" for i in range(7)]
+        six = render_operation_types(
+            schema, "{" + " ".join(blocks[:6]) + "}", name="Read"
+        )
+        self.assertEqual(six.count("closed=True"), 64)
+        with self.assertRaisesRegex(ValueError, "64 presence alternatives"):
+            render_operation_types(schema, "{" + " ".join(blocks) + "}", name="Read")
+        abstract = build_schema(
+            "interface Item { value: String } type A implements Item { value: String } "
+            "type B implements Item { value: String } type Query { item: Item }"
+        )
+        with self.assertRaisesRegex(ValueError, "64 presence alternatives"):
+            render_operation_types(
+                abstract, "{ item {" + " ".join(blocks[:6]) + "} }", name="Read"
+            )
+        duplicate = render_operation_types(
+            schema, "{" + " ".join([blocks[0]] * 100) + "}", name="Read"
+        )
+        self.assertEqual(duplicate.count("closed=True"), 2)
+        nested = build_schema("type Item { value: String } type Query { item: Item }")
+        children = " ".join(blocks[:6])
+        four = " ".join(f"a{i}:item {{ {children} }}" for i in range(4))
+        self.assertEqual(
+            render_operation_types(nested, "{" + four + "}", name="Read").count(
+                "closed=True"
+            ),
+            256,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "256 conditional presence alternatives"
+        ):
+            render_operation_types(
+                nested, "{" + four + f" a4:item {{ {children} }}" + "}", name="Read"
+            )
+        self.assertIn(
+            "ReadResult =", render_operation_types(schema, "{ value }", name="Read")
+        )
+
+    def test_conditional_occurrences_are_independent_and_preserve_guarantees(
+        self,
+    ) -> None:
+        schema = build_schema(
+            "type User { id: ID! name: String! } "
+            "type Query { user: User! value: String! }"
+        )
+        output = render_operation_types(
+            schema,
+            "query($flag:Boolean!){ ... @include(if:$flag){ a:value } "
+            "... @include(if:$flag){ b:value } }",
+            name="Read",
+        )
+        self.assertEqual(output.count("closed=True"), 4)
+        repeated = render_operation_types(
+            schema,
+            "{ user @include(if:false) { id } user @include(if:true) { name } }",
+            name="Read",
+        )
+        self.assertEqual(repeated.count("'user':"), 3)
+        self.assertNotIn("NotRequired[", repeated)
+        guaranteed = render_operation_types(
+            schema,
+            "{ value ... @include(if:false) { value other:value } }",
+            name="Read",
+        )
+        self.assertEqual(guaranteed.count("'value': 'String'"), 2)
+        self.assertNotIn("NotRequired['String']", guaranteed)
+
     def test_field_directives_preserve_outer_nullability_and_presence(self) -> None:
         schema = build_schema(
             "directive @defer(if: Boolean = true) on FIELD "
@@ -118,9 +357,6 @@ class OperationTypesTests(unittest.TestCase):
             "{ value @required value @optional }",
             "{ value value @required }",
             "{ kind:__typename @required kind:__typename @optional }",
-            "{ user { id } user @include(if:false) { name } }",
-            "{ user @include(if:true) { id } user @skip(if:false) { name } }",
-            "{ ... @include(if:true) { value } }",
             "{ ... @defer { value } }",
         ):
             with self.subTest(source=source), self.assertRaises(ValueError):
