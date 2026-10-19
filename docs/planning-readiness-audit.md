@@ -1,6 +1,6 @@
 # Final planning readiness audit — 2026-10-19
 
-**Planning specification and documentation readiness: PASSED, subject to docs review/landing. Product full parity: NOT PASSED. No product acceptance gate has passed.** The previously identified eight planning gaps now have explicit adopted defaults, rationale, source evidence and future acceptance criteria. No irreducible user product choice remains. This closes specification questions, not implementation feasibility or behavior tests. PR remains draft.
+**Planning specification and documentation readiness: PASSED, subject to docs review/landing. Product full parity: NOT PASSED. No product acceptance gate has passed.** The previously identified eight planning gaps now have explicit adopted defaults, rationale, source evidence and future acceptance criteria. No irreducible user product choice remains. This closes specification questions, not implementation feasibility or behavior tests.
 
 ## Gap disposition and evidence
 
@@ -32,7 +32,7 @@ Live typing has only one nullability/Pylance bridge proof; editor support only a
 
 Final planning review checks source-derived requirements, cross-contract consistency, evidence scope and unnecessary implementation commitments. Earlier readiness overstatement and highlighting omission were corrected; earlier narrow review does not override this audit. Selected defaults avoid new product options or dependencies beyond the required integration boundary. Planning is reviewable; no implementation is authorized before docs landing.
 
-Sequence: docs review and land → update issues/roadmap → small independent implementation PRs in parallel where appropriate. GitHub Actions starts with the first production PR; use Ponytail coding and pass Ponytail review before publication. Persisted operations and independent editor conveniences begin immediately after the live-typing product gate; remaining fragment/editor, schema/CLI/project and performance/release gates retain their order. Keep this PR draft until requested otherwise; do not mark ready, publish or merge it in this task.
+Sequence: docs review and land → update issues/roadmap → small independent implementation PRs in parallel where appropriate. GitHub Actions starts with the first production PR; use Ponytail coding and pass Ponytail review before publication. Persisted operations and independent editor conveniences begin immediately after the live-typing product gate; remaining fragment/editor, schema/CLI/project and performance/release gates retain their order.
 
 External limits: upstream suites/spikes were not rerun; no full npm runtime/source-build equivalence, Marketplace availability, transitive dependency approval, cross-platform product checks or benchmark was established. Every such limit has a future acceptance requirement; none is presented as a passed behavior gate.
 
@@ -44,4 +44,4 @@ Final independent Ponytail re-review: passed after aligning generated layout/omi
 
 Published/source capability correspondence required additional planning research and was completed using source-map originals in four integrity-verified tarballs. It found a material difference: published GraphQLSP 1.17.5 lacks several editor enhancements in the same-version pinned source commit. All four differing embedded source files were inspected. Keep the broader pinned-source editor contract (references/rename, fixes, extraction, richer hover, config safety, extension highlighting); label it source-only where absent from npm. Core helper and represented cli-utils/internal sources agree with their pins. Complete bit-for-bit build equivalence and all runtime/type declaration behavior remain unverified and belong to implementation/release reference validation, not a claim made by these docs.
 
-Verdict: planning specification is ready for docs review/landing; no remaining research/scoping blocker or irreducible user choice identified. Product gates all remain open. PR remains draft. The sequence remains docs review/land, issue/roadmap updates, then small parallel implementation PRs with CI from the first production PR and Ponytail review before publication.
+Verdict: planning specification is ready for docs review/landing; no remaining research/scoping blocker or irreducible user choice identified. Product gates all remain open. The sequence remains docs review/land, issue/roadmap updates, then small parallel implementation PRs with CI from the first production PR and Ponytail review before publication.

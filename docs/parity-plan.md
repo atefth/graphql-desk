@@ -4,7 +4,7 @@
 
 ## Current gate status
 
-**Planning specification/documentation readiness for review: PASSED (see [gap dispositions and evidence](planning-readiness-audit.md)). Product full-parity gate: NOT PASSED. No product acceptance gates have passed.** The requested parity gates are criteria for future implementation and acceptance testing; documentation checks and narrow feasibility proofs do not satisfy them. The final research pass specified all eight planning gaps and corrected an editor inventory omission; this PR remains draft as requested.
+**Planning specification/documentation readiness for review: PASSED (see [gap dispositions and evidence](planning-readiness-audit.md)). Product full-parity gate: NOT PASSED. No product acceptance gates have passed.** The requested parity gates are criteria for future implementation and acceptance testing; documentation checks and narrow feasibility proofs do not satisfy them. The final research pass specified all eight planning gaps and corrected an editor inventory omission.
 
 | Product area / ledger | Current status | Evidence limit |
 |---|---|---|
@@ -133,7 +133,7 @@ Reviewed the current docs-only PR diff, all five connected Markdown files and PR
 
 Corrected three substantive inconsistencies in the retained gql.tada audit: required user-facing sub-APIs were labeled optional; one acceptance case limited scalar mappings to output despite required variable/input mappings; cache wording implied a mandatory persistent cache. These now match API-01, SCALAR-01 and the optional-cache decision. Detailed requirements and ledger statuses are preserved.
 
-This earlier review was superseded by the [final planning readiness audit](planning-readiness-audit.md), which found additional planning blockers and the extension-highlighting omission. Documentation readiness for review passes; no product acceptance gate passes. PR remains draft by request. Relative links (including local section anchors), code fences and whitespace were checked. Remote targets, upstream suites, spike artifacts and production behavior were not revalidated.
+This earlier review was superseded by the [final planning readiness audit](planning-readiness-audit.md), which found additional planning blockers and the extension-highlighting omission. Documentation readiness for review passes; no product acceptance gate passes. Relative links (including local section anchors), code fences and whitespace were checked. Remote targets, upstream suites, spike artifacts and production behavior were not revalidated.
 
 ## Detailed adopted planning contracts
 
