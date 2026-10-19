@@ -6,6 +6,8 @@ from graphql import (
     FragmentDefinitionNode,
     build_schema,
     execute_sync,  # pyright: ignore[reportUnknownVariableType]
+    print_ast,
+    validate,
 )
 from graphql import (
     parse as core_parse,
@@ -16,6 +18,36 @@ from graphql_desk import TypedDocument, gql, graphql, init_graphql, parse
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_primary_fragment_unmask_is_removed_before_composition(self) -> None:
+        source = "fragment Card on User @_unmask { id }"
+        fragment = graphql(source)
+        self.assertNotIn("@_unmask", print_ast(fragment.ast))
+        assert fragment.ast.loc is not None
+        self.assertEqual(fragment.ast.loc.source.body, source)
+        document = graphql("{ user { ...Card } }", [fragment])
+        self.assertIs(document.ast.definitions[1], fragment.ast.definitions[0])
+        schema = build_schema("type User { id: ID! } type Query { user: User }")
+        self.assertEqual(validate(schema, document.ast), [])
+        self.assertEqual(
+            execute_sync(schema, document.ast, root_value={"user": {"id": "1"}}).data,
+            {"user": {"id": "1"}},
+        )
+        marked = graphql(
+            "fragment Card on User @keep @_unmask @keep { id } "
+            "fragment Other on User @_unmask { id }"
+        )
+        first, second = marked.ast.definitions
+        assert isinstance(first, FragmentDefinitionNode)
+        assert isinstance(second, FragmentDefinitionNode)
+        assert first.directives is not None and second.directives is not None
+        self.assertEqual(
+            [item.name.value for item in first.directives], ["keep", "keep"]
+        )
+        self.assertEqual([item.name.value for item in second.directives], ["_unmask"])
+        # The pinned upstream only strips the first fragment definition's marker.
+        operation_first = graphql("{ user { ...Card } } " + source)
+        self.assertIn("@_unmask", print_ast(operation_first.ast))
+
     def test_public_aliases_and_untyped_baseline(self) -> None:
         self.assertIs(gql, graphql)
         self.assertIs(parse, core_parse)
