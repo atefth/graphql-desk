@@ -10,8 +10,8 @@ import os
 import re
 import sys
 import unicodedata
-from collections.abc import Iterable
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -22,6 +22,7 @@ else:
     import tomli as tomllib
 
 _NAME = re.compile(r"[_A-Za-z][_0-9A-Za-z]*\Z")
+_ENV_REFERENCE = re.compile(r"\$\{env:([A-Za-z_][A-Za-z_0-9]*)\}")
 _EXCLUDE = (
     "**/.git/**",
     "**/.venv/**",
@@ -106,9 +107,12 @@ class ProjectConfig:
 
 
 def _table(value: object, label: str) -> dict[str, object]:
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping):
         raise ValueError(f"{label} must be a table")
-    return cast(dict[str, object], value)
+    mapping = cast(Mapping[object, object], value)
+    if any(not isinstance(key, str) for key in mapping):
+        raise ValueError(f"{label} keys must be strings")
+    return cast(dict[str, object], dict(mapping))
 
 
 def _known(table: dict[str, object], keys: set[str], label: str) -> None:
@@ -172,11 +176,17 @@ def _inside(path: Path, root: Path, label: str) -> None:
         raise ValueError(f"{label} must stay inside its owning directory")
 
 
+def _header_value(value: object) -> str:
+    if not isinstance(value, str) or any(char in value for char in "\r\n\x00"):
+        raise ValueError("Schema header values must be single-line strings")
+    return value
+
+
 def _origin(value: object, root: Path) -> SchemaOrigin:
     headers: tuple[tuple[str, str], ...] = ()
-    is_record = isinstance(value, dict)
+    is_record = isinstance(value, Mapping)
     if is_record:
-        table = cast(dict[str, object], value)
+        table = _table(cast(Mapping[object, object], value), "schema")
         _known(table, {"url", "headers"}, "schema")
         value = table.get("url")
         raw_headers = _table(table.get("headers", {}), "schema headers")
@@ -184,9 +194,8 @@ def _origin(value: object, root: Path) -> SchemaOrigin:
         for key, item in sorted(raw_headers.items()):
             if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key):
                 raise ValueError("Invalid schema header name")
-            if not isinstance(item, str) or any(c in item for c in "\r\n\x00"):
-                raise ValueError("Schema header values must be single-line strings")
-            remainder = re.sub(r"\$\{env:[A-Za-z_][A-Za-z_0-9]*\}", "", item)
+            item = _header_value(item)
+            remainder = _ENV_REFERENCE.sub("", item)
             if "${" in remainder:
                 raise ValueError("Unknown substitution in schema headers")
             pairs.append((key, item))
@@ -211,6 +220,37 @@ def _origin(value: object, root: Path) -> SchemaOrigin:
     if local_path.is_dir():
         raise ValueError("Local schema must be a file path")
     return SchemaOrigin(local_path=local_path)
+
+
+def resolve_schema_headers(
+    origin: SchemaOrigin, *, environment: Mapping[str, str]
+) -> SchemaOrigin:
+    """Expand explicit header references once, returning a new redacted origin.
+
+    The environment must be supplied by the caller; no process environment is
+    read. Expanded values are never interpreted as additional substitutions.
+    This does not load a schema, contact a URL or modify the config facts.
+    """
+
+    def substitute(match: re.Match[str]) -> str:
+        name = match.group(1)
+        try:
+            value = _header_value(environment[name])
+        except KeyError:
+            raise ValueError(f"Missing environment variable: {name}") from None
+        except ValueError:
+            raise ValueError(f"Invalid header environment variable: {name}") from None
+        return value
+
+    resolved: list[tuple[str, str]] = []
+    for key, value in origin.headers:
+        if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key):
+            raise ValueError("Invalid schema header name")
+        value = _header_value(value)
+        if "${" in _ENV_REFERENCE.sub("", value):
+            raise ValueError("Unknown substitution in schema headers")
+        resolved.append((key, _ENV_REFERENCE.sub(substitute, value)))
+    return replace(origin, headers=tuple(resolved))
 
 
 def _mappings(
@@ -308,9 +348,24 @@ def parse_project_config(text: str, *, config_path: Path) -> ProjectConfig | Non
     tool = _table(document.get("tool", {}), "tool")
     if "graphql-desk" not in tool:
         return None
-    table = _table(tool["graphql-desk"], "tool.graphql-desk")
+    return parse_project_settings(
+        _table(tool["graphql-desk"], "tool.graphql-desk"),
+        config_path=config_path.resolve(),
+    )
+
+
+def parse_project_settings(
+    settings: Mapping[str, object], *, config_path: Path
+) -> ProjectConfig:
+    """Validate project settings shared by TOML and the editor fallback object.
+
+    For editor fallback, config_path is a virtual workspace-relative context,
+    not a claim that a pyproject was read. This function does not write it.
+    """
+    table = _table(settings, "tool.graphql-desk")
     _known(table, _PROJECT_KEYS, "tool.graphql-desk")
-    path = config_path.resolve()
+    # A fallback's virtual filename must not follow an inactive pyproject symlink.
+    path = config_path.parent.resolve() / config_path.name
     root = path.parent
     package_name = _string(
         table.get("generated_package", "graphql_desk_generated"), "generated_package"
@@ -348,7 +403,7 @@ def parse_project_config(text: str, *, config_path: Path) -> ProjectConfig | Non
         schemas.append(_schema(table, "default", root, package))
     if len({item.name for item in schemas}) != len(schemas):
         raise ValueError("Schema names must be unique")
-    used = {os.path.normcase(str(path))}
+    used = {os.path.normcase(str(path)), os.path.normcase(str(path.resolve()))}
     for schema in schemas:
         if schema.origin.local_path is not None:
             used.add(os.path.normcase(str(schema.origin.local_path)))

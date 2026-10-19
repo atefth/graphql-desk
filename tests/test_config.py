@@ -4,9 +4,16 @@ import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import MappingProxyType
 from unittest.mock import patch
 
-from graphql_desk.config import load_project_config, parse_project_config
+from graphql_desk.config import (
+    SchemaOrigin,
+    load_project_config,
+    parse_project_config,
+    parse_project_settings,
+    resolve_schema_headers,
+)
 
 _BASE = """[tool.graphql-desk]
 schema = "schema.graphql"
@@ -64,6 +71,90 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.authoring_roots, ())
         with self.assertRaises(FrozenInstanceError):
             setattr(config, "generated_package", "other")
+
+    def test_editor_mapping_uses_identical_nested_validation_without_coercion(
+        self,
+    ) -> None:
+        origin: dict[str, object] = {"url": "https://example.test", "headers": {}}
+        settings: dict[str, object] = {
+            "schema": MappingProxyType(origin),
+            "schema_output": "graphql_desk_generated/default.pyi",
+            "scalars": {
+                "Date": {"input": "builtins.str", "output": "datetime.datetime"}
+            },
+        }
+        config = parse_project_settings(
+            MappingProxyType(settings), config_path=self.path
+        )
+        self.assertEqual(config.schemas[0].scalars[0].output, "datetime.datetime")
+        settings["schema_output"] = "changed"
+        self.assertEqual(config.schemas[0].schema_output.name, "default.pyi")
+        for invalid in (
+            {"schema": {"url": "https://example.test", "headers": {"Auth": 1}}},
+            {"track_field_usage": "true"},
+            {"schema_refresh_interval": True},
+            {"source_roots": (".",)},
+            {"scalars": {"Date": {"input": "builtins.str"}}},
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                parse_project_settings(
+                    {
+                        "schema": "schema.graphql",
+                        "schema_output": "graphql_desk_generated/default.pyi",
+                        **invalid,
+                    },
+                    config_path=self.path,
+                )
+
+    def test_header_environment_resolution_is_explicit_once_and_redacted(self) -> None:
+        origin = SchemaOrigin(
+            url="https://example.test?token=SECRET",
+            headers=(
+                ("Authorization", "Bearer ${env:TOKEN}:${env:EMPTY}:${env:TOKEN}"),
+                ("Literal", "unchanged"),
+            ),
+        )
+        resolved = resolve_schema_headers(
+            origin,
+            environment={
+                "TOKEN": "SECRET ${env:OTHER}",
+                "EMPTY": "",
+                "OTHER": "not-expanded",
+            },
+        )
+        self.assertEqual(
+            resolved.headers[0][1], "Bearer SECRET ${env:OTHER}::SECRET ${env:OTHER}"
+        )
+        self.assertEqual(resolved.headers[1], ("Literal", "unchanged"))
+        self.assertEqual(
+            origin.headers[0][1], "Bearer ${env:TOKEN}:${env:EMPTY}:${env:TOKEN}"
+        )
+        self.assertIsNot(resolved, origin)
+        self.assertNotIn("SECRET", repr(resolved))
+        self.assertNotIn("OTHER", repr(resolved))
+        with patch.dict("os.environ", {"TOKEN": "PROCESS_SECRET"}):
+            with self.assertRaisesRegex(
+                ValueError, "Missing environment variable: TOKEN"
+            ):
+                resolve_schema_headers(origin, environment={})
+
+    def test_header_environment_rejects_injection_without_exposing_secrets(
+        self,
+    ) -> None:
+        origin = SchemaOrigin(headers=(("Authorization", "Bearer ${env:TOKEN}"),))
+        for value in ("SECRET\rX: evil", "SECRET\nX: evil", "SECRET\x00"):
+            with self.subTest(value=value), self.assertRaises(ValueError) as caught:
+                resolve_schema_headers(origin, environment={"TOKEN": value})
+            self.assertIn("TOKEN", str(caught.exception))
+            self.assertNotIn("SECRET", str(caught.exception))
+        for invalid in (
+            SchemaOrigin(headers=(("Authorization", "${other:SECRET}"),)),
+            SchemaOrigin(headers=(("bad\nname", "SECRET"),)),
+            SchemaOrigin(headers=(("Authorization", "SECRET\r\n"),)),
+        ):
+            with self.assertRaises(ValueError) as caught:
+                resolve_schema_headers(invalid, environment={})
+            self.assertNotIn("SECRET", str(caught.exception))
 
     def test_read_explicit_config_and_resolve_config_dir(self) -> None:
         self.path.write_text(
