@@ -36,6 +36,41 @@ _SOURCE = """
 
 
 class OperationTypesTests(unittest.TestCase):
+    def test_one_of_operation_defaults_and_graphql_literal_validation(self) -> None:
+        schema = build_schema(
+            "input Choice @oneOf { text: String count: Int } "
+            "type Query { f(choice: Choice): Int }"
+        )
+        for source in (
+            '{ f(choice: {text: "x"}) }',
+            "{ f(choice: null) }",
+            "query($choice: Choice) { f(choice: $choice) }",
+            "query($text: String!) { f(choice: {text: $text}) }",
+            'query($choice: Choice = {text: "x"}) { f(choice: $choice) }',
+            'query($choice: Choice! = {text: "x"}) { f(choice: $choice) }',
+        ):
+            with self.subTest(source=source):
+                output = render_operation_types(schema, source, name="Run")
+                self.assertIn("RunResult =", output)
+        self.assertIn(
+            "'choice': NotRequired['Choice']",
+            render_operation_types(
+                schema,
+                'query($choice: Choice! = {text: "x"}) { f(choice: $choice) }',
+                name="Run",
+            ),
+        )
+        for source in (
+            "{ f(choice: {}) }",
+            '{ f(choice: {text: "x", count: 1}) }',
+            "{ f(choice: {text: null}) }",
+            '{ f(choice: {unknown: "x"}) }',
+            "query($choice: Choice = {}) { f(choice: $choice) }",
+            "query($text: String) { f(choice: {text: $text}) }",
+        ):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                render_operation_types(schema, source, name="Run")
+
     def test_mapped_types_runtime_and_checker_boundaries(self) -> None:
         schema = build_schema(
             "scalar Date scalar Loose scalar class scalar Literal scalar list "

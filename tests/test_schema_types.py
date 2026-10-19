@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import get_args
 
 from graphql import (
     GraphQLInputField,
@@ -37,6 +38,114 @@ _SCHEMA = """
 
 
 class SchemaTypesTests(unittest.TestCase):
+    def test_one_of_runtime_union_and_strict_checker_contract(self) -> None:
+        schema = build_schema(
+            "scalar Date enum Never { YES NO } "
+            "input Choice @oneOf { text: String count: Int "
+            "recursive: Choice dates: [Date] color: Never } "
+            'input Wrapper { choice: Choice required: Choice! = {text: "x"} '
+            "ordinary: Int! = 10 } type Query { f(choice: Choice): Int }"
+        )
+        output = render_schema_types(
+            schema,
+            scalars=(ScalarMapping("Date", "builtins.str", "datetime.datetime"),),
+        )
+        self.assertIn("'dates': 'list[DateInput | None]'", output)
+        self.assertIn("'required': NotRequired['Choice | None']", output)
+        self.assertIn("'ordinary': NotRequired['Int | None']", output)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            generated = root / "generated.py"
+            generated.write_text(output, encoding="utf-8")
+            spec = importlib.util.spec_from_file_location("generated", generated)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.assertEqual(len(get_args(module.Choice)), 5)
+            self.assertEqual(
+                {
+                    next(iter(item.__required_keys__))
+                    for item in get_args(module.Choice)
+                },
+                {"text", "count", "recursive", "dates", "color"},
+            )
+            for variant in get_args(module.Choice):
+                self.assertEqual(variant.__optional_keys__, set())
+                self.assertTrue(variant.__closed__)
+            self.assertEqual(set(get_args(module.Never)), {"NO", "YES"})
+            (root / "fixture.py").write_text(
+                "from datetime import datetime\n"
+                "from typing_extensions import TypedDict\n"
+                "from generated import Choice\n"
+                "text: Choice = {'text': 'x'}\n"
+                "count: Choice = {'count': 1}\n"
+                "nested: Choice = {'recursive': {'text': 'x'}}\n"
+                "dates: Choice = {'dates': ['x', None]}\n"
+                "missing: Choice = {}\n"
+                "null: Choice = {'text': None}\n"
+                "multiple: Choice = {'text': 'x', 'count': 1}\n"
+                "extra: Choice = {'text': 'x', 'unknown': 1}\n"
+                "wrong_mapping: Choice = {'dates': [datetime(2020, 1, 1)]}\n"
+                "class Both(TypedDict):\n text: str\n count: int\n"
+                "both: Both = {'text': 'x', 'count': 1}\n"
+                "wider: Choice = both\n"
+                "class Wider(TypedDict):\n text: str\n extra: int\n"
+                "extra_obj: Wider = {'text': 'x', 'extra': 1}\n"
+                "bad_wider_extra: Choice = extra_obj\n"
+                "class Closed(TypedDict, closed=True):\n text: str\n"
+                "closed_obj: Closed = {'text': 'x'}\n"
+                "good_closed: Choice = closed_obj\n"
+                "null_list: Choice = {'dates': None}\n"
+                "enum_choice: Choice = {'color': 'YES'}\n",
+                encoding="utf-8",
+            )
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+            self.assertIn("Found 8 errors in 1 file", mypy.stdout)
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["fixture.py", "generated.py"],
+                        "pythonVersion": "3.10",
+                        "typeCheckingMode": "strict",
+                    }
+                )
+            )
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(pyright.returncode, 1, pyright.stdout + pyright.stderr)
+            diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
+            self.assertEqual(len(diagnostics), 8, diagnostics)
+            self.assertEqual(
+                {item["range"]["start"]["line"] for item in diagnostics},
+                {7, 8, 9, 10, 11, 16, 21, 26},
+            )
+
     def test_mapping_aliases_are_directional_deterministic_and_explicit_any(
         self,
     ) -> None:
@@ -135,13 +244,21 @@ class SchemaTypesTests(unittest.TestCase):
     def test_unsupported_types_and_colliding_names_fail(self) -> None:
         for definition in (
             "scalar Date type Query { f: Date }",
-            "input I @oneOf { x: Int } type Query { f(i: I): Int }",
             "input class { x: Int } type Query { f(i: class): Int }",
             "enum Literal { A } type Query { f: Literal }",
             "input str { x: Int } type Query { f(i: str): Int }",
         ):
             with self.subTest(definition=definition), self.assertRaises(ValueError):
                 render_schema_types(build_schema(definition))
+
+    def test_invalid_one_of_member_definitions_are_rejected_by_core(self) -> None:
+        for member in ("x: Int!", "x: Int = 1"):
+            with self.subTest(member=member), self.assertRaises(TypeError):
+                render_schema_types(
+                    build_schema(
+                        f"input I @oneOf {{ {member} }} type Query {{ f(i: I): Int }}"
+                    )
+                )
 
     def test_generated_module_imports_and_passes_checkers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
