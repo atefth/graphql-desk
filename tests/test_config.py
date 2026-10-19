@@ -28,6 +28,42 @@ class ConfigTests(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.path = self.root / "pyproject.toml"
 
+    def test_external_source_roots_require_explicit_non_toml_scope(self) -> None:
+        text = (
+            _BASE + 'source_roots=["../external"]\n'
+            'authoring_roots=["../external/declarations"]\n'
+        )
+        with self.assertRaisesRegex(ValueError, "source_roots"):
+            parse_project_config(text, config_path=self.path)
+        config = parse_project_config(
+            text, config_path=self.path, source_scope="explicit_cli"
+        )
+        assert config is not None
+        self.assertEqual(config.source_scope, "explicit_cli")
+        self.assertEqual(config.source_roots, (self.root.parent / "external",))
+        self.path.write_text(text, encoding="utf-8")
+        self.assertEqual(
+            load_project_config(self.path, source_scope=config.source_scope), config
+        )
+        with self.assertRaises(ValueError):
+            parse_project_config(
+                _BASE + 'source_scope="explicit_cli"', config_path=self.path
+            )
+        for extra in (
+            'schema_output="../outside.pyi"',
+            'generated_package="../outside"',
+        ):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                parse_project_config(
+                    text.replace(
+                        'schema_output = "graphql_desk_generated/default.pyi"', extra
+                    )
+                    if extra.startswith("schema_output")
+                    else text + extra,
+                    config_path=self.path,
+                    source_scope="explicit_cli",
+                )
+
     def test_inactive_project_and_default_facts(self) -> None:
         self.assertIsNone(
             parse_project_config('[project]\nname="other"', config_path=self.path)

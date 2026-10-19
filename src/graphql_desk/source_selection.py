@@ -78,7 +78,6 @@ def select_project_sources(
     candidates: tuple[Path, ...],
     *,
     workspace: Path | None = None,
-    explicit_config: bool = False,
 ) -> tuple[SourceFile, ...]:
     """Select supplied paths; never enumerate directories or read Python text.
 
@@ -86,21 +85,25 @@ def select_project_sources(
     sources. Existing directories and broken symlinks are rejected. The first
     matching configured root owns an overlapping candidate. Root __init__.py
     cannot name a package; nested __init__.py names its containing package.
-    Caller-owned source/config/schema versions still require lifecycle checks.
+    External roots and workspace escape require explicit_cli config context.
+    Foreign configured projects retain nearest ownership. Caller-owned source/
+    config/schema versions still require lifecycle checks.
     """
     validate_project_ownership((config,))
     root = _resolved(config.root)
     boundary = _resolved(workspace) if workspace is not None else None
     if (
         boundary is not None
-        and not explicit_config
+        and config.source_scope != "explicit_cli"
         and not root.is_relative_to(boundary)
     ):
         raise ValueError("Source project escapes its workspace")
     roots = tuple(_resolved(path) for path in config.source_roots)
     if any(path.exists() and not path.is_dir() for path in roots):
         raise ValueError("Source roots must be directories")
-    if any(not path.is_relative_to(root) for path in roots):
+    if config.source_scope != "explicit_cli" and any(
+        not path.is_relative_to(root) for path in roots
+    ):
         raise ValueError("Source roots must stay inside their project")
     package = _resolved(root.joinpath(*config.generated_package.split(".")))
     outputs = {
@@ -150,7 +153,11 @@ def select_project_sources(
         ]
         if not eligible:
             continue
-        owner = find_project(path.parent, workspace=root)
+        owner = find_project(
+            path.parent,
+            workspace=root if path.is_relative_to(root) else None,
+            selected_config=config,
+        )
         if owner is not None and _identity(owner.path) != _identity(config.path):
             continue
         base = eligible[0]

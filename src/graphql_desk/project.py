@@ -24,7 +24,10 @@ def _canonical(path: Path) -> Path:
 
 
 def find_project(
-    directory: Path, *, workspace: Path | None = None
+    directory: Path,
+    *,
+    workspace: Path | None = None,
+    selected_config: ProjectConfig | None = None,
 ) -> ProjectConfig | None:
     """Find the nearest configured ancestor, including the workspace boundary.
 
@@ -44,7 +47,13 @@ def find_project(
         if boundary is not None and not resolved.is_relative_to(boundary):
             raise ValueError("Project configuration escapes its workspace")
         if resolved.is_file():
-            config = load_project_config(resolved)
+            scope = (
+                selected_config.source_scope
+                if selected_config is not None
+                and resolved == _canonical(selected_config.path)
+                else "project"
+            )
+            config = load_project_config(resolved, source_scope=scope)
             if config is not None:
                 return config
         elif candidate.exists() or candidate.is_symlink():
@@ -75,7 +84,9 @@ def effective_project(
     Command-specific option overrides belong to the future CLI dispatcher.
     """
     if explicit_config is not None:
-        selected = load_project_config(_canonical(directory / explicit_config))
+        selected = load_project_config(
+            _canonical(directory / explicit_config), source_scope="explicit_cli"
+        )
         if selected is None:
             raise ValueError("Explicit configuration has no GraphQL Desk project")
         return EffectiveProject(selected, "explicit")
