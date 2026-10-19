@@ -33,7 +33,7 @@ CI checks all five Python minors on Ubuntu 24.04 x64, with Windows Server 2025 x
 
 Runtime dependencies are pinned `graphql-core==3.3.0` (MIT) and `typing_extensions==4.16.0` (PSF-2.0), needed for generated declarations on Python 3.10. CI audits the locked runtime/development dependency set and rejects runtime dependencies outside the reviewed license inventory. Optional generators are absent. Builds use the locked Hatchling backend; smoke checks rebuild the source archive, then install both wheels into fresh environments outside the source tree.
 
-The pure [schema declaration renderer](docs/implementation/schema-types.md) currently covers built-in scalars, enums and input objects, independently of operation generation.
+The pure [schema declaration renderer](docs/implementation/schema-types.md) currently covers built-in scalars, enums and input objects, independently of operation generation. The [operation renderer](docs/implementation/operation-types.md) adds a validated object-selection subset with result/variable declarations; factory inference and live integration remain open.
 
 ## Typed-document boundary
 
