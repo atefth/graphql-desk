@@ -128,7 +128,7 @@ def render_schema_types(
 ) -> str:
     """Return importable Python 3.10 declarations for built-in schema inputs.
 
-    Unmapped custom scalars and oneOf inputs are rejected. Rendering never imports
+    Unmapped custom scalars are rejected. Rendering never imports
     configured symbols; importing the generated module does. Non-null input fields
     with defaults retain upstream's nullable
     static compatibility behavior; GraphQL execution may still reject null.
@@ -158,7 +158,19 @@ def render_schema_types(
             declarations.append(f"{name} = Literal[{values}]")
             continue
         if type_.is_one_of:
-            raise ValueError(f"oneOf input {name!r} is not supported yet")
+            variants: list[str] = []
+            for index, chosen in enumerate(sorted(type_.fields)):
+                variant = f"__graphql_desk_oneof_{name}_{index}"
+                variants.append(variant)
+                annotation = _input_type(
+                    parse_type(str(type_.fields[chosen].type)), inputs, nullable=False
+                )
+                declarations.append(
+                    f"{variant} = TypedDict({variant!r}, {{\n"
+                    f"    {chosen!r}: {annotation!r},\n}}, closed=True)"
+                )
+            declarations.append(f"{name} = " + " | ".join(variants))
+            continue
         fields: list[str] = []
         for field_name, field in sorted(type_.fields.items()):
             has_default = (
