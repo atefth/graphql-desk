@@ -4,12 +4,20 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from graphql import build_schema
 
 from graphql_desk.config import ScalarMapping
-from graphql_desk.operation_types import render_operation_types
+from graphql_desk.fragments import SchemaContext, index_fragments
+from graphql_desk.operation_types import (
+    render_indexed_operation_types,
+    render_operation_types,
+)
+from graphql_desk.source import Span
+from graphql_desk.source_graph import DocumentIdentity, ModuleSnapshot, resolve_project
 
 _SCHEMA = """
     enum Color { RED BLUE }
@@ -36,6 +44,262 @@ _SOURCE = """
 
 
 class OperationTypesTests(unittest.TestCase):
+    def test_indexed_named_fragments_use_actual_closure_scope_and_selected_operation(
+        self,
+    ) -> None:
+        schema = build_schema(
+            "scalar Date interface Node { id: ID! label: String when: Date } "
+            "type User implements Node { "
+            "id: ID! label: String! when: Date! name: String! } "
+            "type Org implements Node { id: ID! label: String when: Date } "
+            "type Query { nodes: [Node] greeting: String! }"
+        )
+        context = SchemaContext("main", schema, "generation-1")
+
+        def snapshot(name: str, source: str) -> ModuleSnapshot:
+            return ModuleSnapshot("p", name, f"file:///{name}.py", 7, source)
+
+        sources = resolve_project(
+            (
+                snapshot(
+                    "leaf",
+                    "from graphql_desk import gql\n"
+                    'f=gql("fragment Leaf on Node { id label when }")',
+                ),
+                snapshot(
+                    "left",
+                    "from graphql_desk import gql\nfrom leaf import f as leaf\n"
+                    'f=gql("fragment Left on Node { ...Leaf }",[leaf])',
+                ),
+                snapshot(
+                    "right",
+                    "from graphql_desk import gql\nfrom leaf import f as leaf\n"
+                    'f=gql("fragment Right on User { ...Leaf name }",[leaf])',
+                ),
+                snapshot(
+                    "bridge", "from left import f as left\nfrom right import f as right"
+                ),
+                snapshot(
+                    "main",
+                    "from graphql_desk import gql\nfrom bridge import left,right\n"
+                    'doc=gql("query Other { greeting } query Read($flag:Boolean!){'
+                    'nodes{kind:__typename ...Left ...Right @include(if:$flag)}}",'
+                    '[left,right,left],operation="Read")',
+                ),
+            )
+        )
+        self.assertEqual(sources.diagnostics, ())
+        indexed = index_fragments(sources, schemas={("p", None): context})
+        self.assertEqual(indexed.diagnostics, ())
+        document = next(
+            item for item in indexed.documents if item.call.binding == "doc"
+        )
+        mappings = (ScalarMapping("Date", "builtins.str", "datetime.datetime"),)
+        with self.assertRaisesRegex(ValueError, "Masked fragment spreads"):
+            render_indexed_operation_types(
+                context, document, name="Read", scalars=mappings
+            )
+        from graphql import parse
+
+        with patch("graphql_desk.operation_types.parse", wraps=parse) as parser:
+            output = render_indexed_operation_types(
+                context, document, name="Read", scalars=mappings, disable_masking=True
+            )
+        self.assertEqual(parser.call_count, 1)
+        self.assertIn("'nodes': 'list[ReadResult_nodes | None] | None'", output)
+        self.assertIn("'label': 'String | None'", output)
+        self.assertIn("'when': 'DateOutput | None'", output)
+        self.assertIn("'kind': \"Literal['User']\"", output)
+        self.assertIn("closed=True", output)
+        self.assertNotIn("'greeting':", output)
+        from graphql import graphql_sync  # pyright: ignore[reportUnknownVariableType]
+
+        for flag in (False, True):
+            result = graphql_sync(
+                schema,
+                "\n\n".join(fact.printed for fact in document.definitions),
+                root_value={
+                    "nodes": [
+                        None,
+                        {
+                            "__typename": "User",
+                            "id": "1",
+                            "label": "x",
+                            "when": "unchanged",
+                            "name": "n",
+                        },
+                    ]
+                },
+                variable_values={"flag": flag},
+                operation_name="Read",
+            )
+            self.assertIsNone(result.errors)
+            expected = {"kind": "User", "id": "1", "label": "x", "when": "unchanged"}
+            if flag:
+                expected["name"] = "n"
+            self.assertEqual(result.data, {"nodes": [None, expected]})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "generated.py").write_text(output, encoding="utf-8")
+            (root / "fixture.py").write_text(
+                "from datetime import datetime\nfrom generated import ReadResult\n"
+                "base: ReadResult = {'nodes':[None,{'kind':'User','id':'1',"
+                "'label':None,'when':None}]}\n"
+                "full: ReadResult = {'nodes':[{'kind':'User','id':'1','label':'x',"
+                "'when':datetime(2020,1,1),'name':'x'}]}\n"
+                "org: ReadResult = {'nodes':[{'kind':'Org','id':'1',"
+                "'label':None,'when':None}]}\n"
+                "bad: ReadResult = {'nodes':[{'kind':'Org','id':'1','label':None,"
+                "'when':None,'name':'x'}]}\n"
+                "bad_date: ReadResult = {'nodes':[{'kind':'User','id':'1',"
+                "'label':None,'when':'x'}]}\n",
+                encoding="utf-8",
+            )
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+            self.assertIn("Found 2 errors in 1 file", mypy.stdout)
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["fixture.py", "generated.py"],
+                        "typeCheckingMode": "strict",
+                        "pythonVersion": "3.10",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(pyright.returncode, 1, pyright.stdout + pyright.stderr)
+            diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
+            self.assertEqual(len(diagnostics), 2, diagnostics)
+            self.assertEqual(
+                {item["range"]["start"]["line"] for item in diagnostics}, {5, 6}
+            )
+
+    def test_indexed_adapter_rejects_context_and_selected_identity_mismatches(
+        self,
+    ) -> None:
+        schema = build_schema(_SCHEMA)
+        context = SchemaContext("main", schema, "generation-1")
+        source = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            1,
+            "from graphql_desk import gql\n"
+            'doc=gql("query One {greeting} query Two {alias:greeting}",'
+            'operation="Two")',
+        )
+        indexed = index_fragments(
+            resolve_project((source,)), schemas={("p", None): context}
+        )
+        self.assertEqual(indexed.diagnostics, ())
+        document = indexed.documents[0]
+        selected = document.selected_operation
+        assert selected is not None
+        output = render_indexed_operation_types(context, document, name="Read")
+        self.assertIn("'alias': 'String'", output)
+        self.assertNotIn("'greeting':", output)
+        for wrong_context in (
+            replace(context, schema_name="other"),
+            replace(context, token="old"),
+        ):
+            with self.subTest(context=wrong_context), self.assertRaises(ValueError):
+                render_indexed_operation_types(wrong_context, document, name="Read")
+        foreign = replace(
+            selected, document=DocumentIdentity(document.call.module, Span(0, 1))
+        )
+        for wrong in (
+            replace(document, selected_operation=None),
+            replace(
+                document,
+                definitions=tuple(f for f in document.definitions if f != selected),
+            ),
+            replace(document, selected_operation=foreign, definitions=(foreign,)),
+            replace(document, schema_identity=("other", "main")),
+            replace(document, call=replace(document.call, schema_name="other")),
+            replace(document, call=replace(document.call, operation="One")),
+        ):
+            with self.subTest(document=wrong), self.assertRaises(ValueError):
+                render_indexed_operation_types(context, wrong, name="Read")
+
+    def test_named_registry_validation_conditional_definitions_and_diamond(
+        self,
+    ) -> None:
+        schema = build_schema(_SCHEMA)
+        registry = "{greeting} fragment Unused on User {id}"
+        self.assertIn(
+            "'greeting': 'String'",
+            render_operation_types(schema, registry, name="Read"),
+        )
+        for source in (
+            '{user(id:"1"){...Missing}}',
+            '{user(id:"1"){...F}} fragment F on User {...F}',
+            '{user(id:"1"){...F}} fragment F on User {missing}',
+            "{greeting} fragment Unused on User {missing}",
+            '{user(id:"1"){...F}} fragment F on Query {greeting}',
+            "{greeting} type Extra {value:String}",
+        ):
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                render_operation_types(
+                    schema, source, name="Read", disable_masking=True
+                )
+        conditional_schema = build_schema(
+            "directive @defer on FRAGMENT_DEFINITION | FRAGMENT_SPREAD " + _SCHEMA
+        )
+        conditional = render_operation_types(
+            conditional_schema,
+            '{user(id:"1"){...F}} fragment F on User @defer {id name}',
+            name="Read",
+            disable_masking=True,
+        )
+        self.assertIn("closed=True", conditional)
+        self.assertIn(
+            "closed=True",
+            render_operation_types(
+                conditional_schema,
+                '{user(id:"1"){...F @defer}} fragment F on User {id name}',
+                name="Read",
+                disable_masking=True,
+            ),
+        )
+        fragments = ["fragment F0 on User {id}"]
+        for i in range(1, 19):
+            fragments.append(f"fragment F{i} on User {{...F{i - 1} ...F{i - 1}}}")
+        output = render_operation_types(
+            schema,
+            '{user(id:"1"){...F18}} ' + " ".join(fragments),
+            name="Read",
+            disable_masking=True,
+        )
+        self.assertEqual(output.count("'id': 'ID'"), 1)
+
     def test_conditional_blocks_and_repeated_composites_match_execution_and_checkers(
         self,
     ) -> None:

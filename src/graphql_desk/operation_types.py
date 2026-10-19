@@ -8,6 +8,8 @@ from collections.abc import Iterable
 from graphql import (
     DirectiveNode,
     FieldNode,
+    FragmentDefinitionNode,
+    FragmentSpreadNode,
     GraphQLCompositeType,
     GraphQLEnumType,
     GraphQLInterfaceType,
@@ -21,6 +23,7 @@ from graphql import (
     NamedTypeNode,
     Node,
     NonNullTypeNode,
+    NoUnusedFragmentsRule,
     OperationDefinitionNode,
     SelectionNode,
     TypeNode,
@@ -34,7 +37,9 @@ from graphql import (
 )
 
 from .config import ScalarMapping
+from .fragments import IndexedDocument, SchemaContext
 from .schema_types import mapped_type_declarations, render_schema_types
+from .source_graph import DocumentIdentity
 
 _CONDITIONAL = frozenset({"include", "skip", "defer"})
 # True marks a conditional occurrence chosen present in a correlated alternative.
@@ -62,7 +67,9 @@ _CLIENT_DIRECTIVES = frozenset(
 )
 
 
-def _directives(node: FieldNode | InlineFragmentNode) -> set[str]:
+def _directives(
+    node: FieldNode | InlineFragmentNode | FragmentSpreadNode | FragmentDefinitionNode,
+) -> set[str]:
     return {directive.name.value for directive in node.directives or ()}
 
 
@@ -76,12 +83,16 @@ def _null_override(node: FieldNode) -> bool | None:
 
 
 class _SupportedSyntax(Visitor):
+    def __init__(self, *, disable_masking: bool) -> None:
+        super().__init__()
+        self.disable_masking = disable_masking
+
     def enter(self, node: Node, *_args: object) -> None:
-        if node.kind in {
-            "fragment_definition",
-            "fragment_spread",
-        }:
-            raise ValueError(f"Unsupported operation syntax: {node.kind}")
+        if isinstance(node, FragmentSpreadNode) and not self.disable_masking:
+            raise ValueError(
+                "Masked fragment spreads are not supported yet; "
+                "disable masking explicitly"
+            )
 
 
 def _output_type(type_: TypeNode, leaf: str, *, nullable: bool = True) -> str:
@@ -112,11 +123,12 @@ def render_operation_types(
     scalars: tuple[ScalarMapping, ...] = (),
     enums: tuple[tuple[str, str], ...] = (),
     client_directives: tuple[str, ...] = (),
+    disable_masking: bool = False,
 ) -> str:
     """Render validated operation declarations, rejecting unsupported semantics.
 
-    Named fragments are not supported yet. Conditional shape expansion is
-    bounded; no execution or inference occurs.
+    Fragment spreads require explicit disable_masking=True until masking is
+    supported. Conditional expansion is bounded; no execution or inference occurs.
     """
     if (
         not name.isidentifier()
@@ -128,7 +140,7 @@ def render_operation_types(
     output = render_schema_types(schema, scalars=scalars, enums=enums)
     inputs, outputs, _ = mapped_type_declarations(schema, scalars, enums)
     document = parse(source)
-    visit(document, _SupportedSyntax())
+    visit(document, _SupportedSyntax(disable_masking=disable_masking))
     if any(
         re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", item) is None
         for item in client_directives
@@ -157,10 +169,17 @@ def render_operation_types(
         [
             KnownClientDirectives if rule is KnownDirectivesRule else rule
             for rule in specified_rules
+            if rule is not NoUnusedFragmentsRule
         ],
     )
     if errors:
         raise ValueError("; ".join(error.message for error in errors))
+    fragments = {
+        definition.name.value: definition
+        for definition in document.definitions
+        if isinstance(definition, FragmentDefinitionNode)
+    }
+    fragment_choices: dict[tuple[str, str], list[list[_Field]]] = {}
     operations = [
         definition
         for definition in document.definitions
@@ -252,21 +271,39 @@ def render_operation_types(
                     fields.append((scope, node, False))
                 continue
             else:
-                assert isinstance(node, InlineFragmentNode)
+                assert isinstance(node, (InlineFragmentNode, FragmentSpreadNode))
+                definition = (
+                    fragments[node.name.value]
+                    if isinstance(node, FragmentSpreadNode)
+                    else node
+                )
                 condition = (
-                    schema.get_type(node.type_condition.name.value)
-                    if node.type_condition
+                    schema.get_type(definition.type_condition.name.value)
+                    if definition.type_condition
                     else scope
                 )
                 assert isinstance(
                     condition,
                     (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType),
                 )
-                additions = collect(
-                    concrete,
-                    [(condition, child) for child in node.selection_set.selections],
+                cache_key = (
+                    (node.name.value, concrete.name)
+                    if isinstance(node, FragmentSpreadNode)
+                    else None
                 )
-                if _directives(node) & _CONDITIONAL:
+                if cache_key is not None and cache_key in fragment_choices:
+                    additions = fragment_choices[cache_key]
+                else:
+                    additions = collect(
+                        concrete,
+                        [
+                            (condition, child)
+                            for child in definition.selection_set.selections
+                        ],
+                    )
+                    if cache_key is not None:
+                        fragment_choices[cache_key] = additions
+                if (_directives(node) | _directives(definition)) & _CONDITIONAL:
                     additions = bounded([[], *additions])
             alternatives = bounded(
                 [*previous, *addition]
@@ -469,3 +506,46 @@ def render_operation_types(
     if needs_never:
         output += "\nfrom typing_extensions import Never as __graphql_desk_Never\n"
     return output + "\n" + "\n\n".join(declarations) + "\n"
+
+
+def render_indexed_operation_types(
+    context: SchemaContext,
+    document: IndexedDocument,
+    *,
+    name: str,
+    scalars: tuple[ScalarMapping, ...] = (),
+    enums: tuple[tuple[str, str], ...] = (),
+    client_directives: tuple[str, ...] = (),
+    disable_masking: bool = False,
+) -> str:
+    """Render trusted index facts with their selected operation and context.
+
+    The caller owns snapshot/config/schema freshness. This checks supplied
+    identities only; it neither reparses authored source nor loads project code.
+    """
+    call = document.call
+    if (
+        document.schema_identity != (call.module.project, context.schema_name)
+        or call.schema_name not in (None, context.schema_name)
+        or document.context_token != context.token
+    ):
+        raise ValueError("Indexed document schema identity or context token differs")
+    selected = document.selected_operation
+    if (
+        selected is None
+        or selected.kind == "fragment"
+        or selected not in document.definitions
+        or selected.document != DocumentIdentity(call.module, call.range)
+        or (call.operation is not None and call.operation != selected.name)
+    ):
+        raise ValueError("Indexed document selected operation identity differs")
+    return render_operation_types(
+        context.schema,
+        "\n\n".join(fact.printed for fact in document.definitions),
+        name=name,
+        operation=selected.name,
+        scalars=scalars,
+        enums=enums,
+        client_directives=client_directives,
+        disable_masking=disable_masking,
+    )
