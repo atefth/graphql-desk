@@ -56,3 +56,9 @@ document = TypedDocument[GreetingResult, GreetingVariables](
 ```
 
 An AST-consuming executor receives `document.ast` and `document.operation_name`; its data/error envelope remains unchanged. The carrier cannot verify that manual result/variable annotations describe the AST. A generic user-side signature `execute(document: TypedDocument[R, V], variables: V) -> R` can correlate the two types; this package supplies no execution client. Use an explicitly typed `Variables` binding at that boundary: mypy does not reliably infer the correlated variable type from an inline dictionary. The frozen carrier prevents rebinding its fields; it does not freeze graphql-core's mutable AST internals.
+
+## Incremental live-typing primitives
+
+`graphql_desk.lifecycle` supplies a pure `Snapshot` / `Coordinator[T]` publication guard. Each request gets a fresh ticket; completion requires the active ticket and a newly observed matching source/dependency/schema/config snapshot. New work, cancellation, failure and invalidation hide older values. Callers must serialize transitions and recheck before external writes: this coordinator cannot make VS Code document edits atomic.
+
+This is groundwork for the live bridge. It performs no editor/file mutation and does not prove Pylance refresh, owned-buffer restoration, dirty-state safety or any broader lifecycle gate.
