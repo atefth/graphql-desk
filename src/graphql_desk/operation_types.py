@@ -127,6 +127,7 @@ def _render_operation_types(
     client_directives: tuple[str, ...] = (),
     disable_masking: bool = False,
     fragment_keys: dict[str, str] | None = None,
+    selected_fragment: str | None = None,
 ) -> str:
     """Render validated operation declarations, rejecting unsupported semantics.
 
@@ -203,7 +204,11 @@ def _render_operation_types(
         for definition in document.definitions
         if isinstance(definition, OperationDefinitionNode)
     ]
-    if operation is None:
+    selected: OperationDefinitionNode | None = None
+    if selected_fragment is not None:
+        if operations or selected_fragment not in fragments:
+            raise ValueError("Select a primary fragment from a fragment-only document")
+    elif operation is None:
         if len(operations) != 1:
             raise ValueError("Select an operation explicitly for multiple operations")
         selected = operations[0]
@@ -231,7 +236,8 @@ def _render_operation_types(
 
     variables: list[tuple[str, str]] = []
     for variable in sorted(
-        selected.variable_definitions or (), key=lambda item: item.variable.name.value
+        (selected.variable_definitions or ()) if selected is not None else (),
+        key=lambda item: item.variable.name.value,
     ):
         leaf = _named_type(variable.type)
         annotation = _output_type(variable.type, inputs.get(leaf, leaf))
@@ -541,15 +547,30 @@ def _render_operation_types(
                 f"{class_name} = " + (" | ".join(branches) or "__graphql_desk_Never")
             )
 
-    root = schema.get_root_type(selected.operation)
-    assert root is not None
+    root: GraphQLCompositeType
+    if selected is not None:
+        operation_root = schema.get_root_type(selected.operation)
+        assert operation_root is not None
+        root = operation_root
+        root_nodes = selected.selection_set.selections
+    else:
+        assert selected_fragment is not None
+        definition = fragments[selected_fragment]
+        fragment_root = schema.get_type(definition.type_condition.name.value)
+        assert isinstance(
+            fragment_root, (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType)
+        )
+        root = fragment_root
+        root_nodes = definition.selection_set.selections
     selection(
         [root],
-        [(root, node) for node in selected.selection_set.selections],
+        [(root, node) for node in root_nodes],
         f"{name}Result",
     )
     if fragment_keys is not None:
         for fragment_name, definition in sorted(fragments.items()):
+            if fragment_name == selected_fragment:
+                continue
             parent = schema.get_type(definition.type_condition.name.value)
             assert isinstance(
                 parent, (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType)
@@ -588,22 +609,12 @@ def render_operation_types(
     )
 
 
-def render_indexed_operation_types(
+def _indexed_fragment_keys(
     context: SchemaContext,
     document: IndexedDocument,
-    *,
-    name: str,
-    scalars: tuple[ScalarMapping, ...] = (),
-    enums: tuple[tuple[str, str], ...] = (),
-    client_directives: tuple[str, ...] = (),
-    disable_masking: bool = False,
-    fragment_index: FragmentIndex | None = None,
-) -> str:
-    """Render trusted index facts with their selected operation and context.
-
-    The caller owns snapshot/config/schema freshness. This checks supplied
-    identities only; it neither reparses authored source nor loads project code.
-    """
+    fragment_index: FragmentIndex | None,
+    disable_masking: bool,
+) -> dict[str, str] | None:
     call = document.call
     if (
         document.schema_identity != (call.module.project, context.schema_name)
@@ -611,15 +622,6 @@ def render_indexed_operation_types(
         or document.context_token != context.token
     ):
         raise ValueError("Indexed document schema identity or context token differs")
-    selected = document.selected_operation
-    if (
-        selected is None
-        or selected.kind == "fragment"
-        or selected not in document.definitions
-        or selected.document != DocumentIdentity(call.module, call.range)
-        or (call.operation is not None and call.operation != selected.name)
-    ):
-        raise ValueError("Indexed document selected operation identity differs")
     keys: dict[str, str] | None = None
     if not disable_masking and fragment_index is not None:
         if document not in fragment_index.documents:
@@ -643,6 +645,36 @@ def render_indexed_operation_types(
                 raise ValueError("Fragment owner schema identity or context differs")
             assert fact.name is not None
             keys[fact.name] = fragment_identity_key(resolved_owner, fact)
+    return keys
+
+
+def render_indexed_operation_types(
+    context: SchemaContext,
+    document: IndexedDocument,
+    *,
+    name: str,
+    scalars: tuple[ScalarMapping, ...] = (),
+    enums: tuple[tuple[str, str], ...] = (),
+    client_directives: tuple[str, ...] = (),
+    disable_masking: bool = False,
+    fragment_index: FragmentIndex | None = None,
+) -> str:
+    """Render trusted index facts with their selected operation and context.
+
+    The caller owns snapshot/config/schema freshness. This checks supplied
+    identities only; it neither reparses authored source nor loads project code.
+    """
+    keys = _indexed_fragment_keys(context, document, fragment_index, disable_masking)
+    call = document.call
+    selected = document.selected_operation
+    if (
+        selected is None
+        or selected.kind == "fragment"
+        or selected not in document.definitions
+        or selected.document != DocumentIdentity(call.module, call.range)
+        or (call.operation is not None and call.operation != selected.name)
+    ):
+        raise ValueError("Indexed document selected operation identity differs")
     return _render_operation_types(
         context.schema,
         "\n\n".join(fact.printed for fact in document.definitions),
@@ -653,4 +685,47 @@ def render_indexed_operation_types(
         client_directives=client_directives,
         disable_masking=disable_masking,
         fragment_keys=keys,
+    )
+
+
+def render_indexed_fragment_types(
+    context: SchemaContext,
+    document: IndexedDocument,
+    *,
+    name: str,
+    scalars: tuple[ScalarMapping, ...] = (),
+    enums: tuple[tuple[str, str], ...] = (),
+    client_directives: tuple[str, ...] = (),
+    disable_masking: bool = False,
+    fragment_index: FragmentIndex | None = None,
+) -> str:
+    """Render the primary fragment's payload without inventing an operation.
+
+    Its own fields are visible; nested spreads follow the indexed masking policy.
+    Variables are empty because fragment definitions declare no operation variables.
+    The caller owns snapshot/config/schema freshness, as for indexed operations.
+    """
+    keys = _indexed_fragment_keys(context, document, fragment_index, disable_masking)
+    primary = document.primary_fragment
+    if (
+        primary is None
+        or primary.kind != "fragment"
+        or primary.name is None
+        or primary not in document.definitions
+        or primary.document
+        != DocumentIdentity(document.call.module, document.call.range)
+        or document.selected_operation is not None
+        or document.call.operation is not None
+    ):
+        raise ValueError("Indexed document primary fragment identity differs")
+    return _render_operation_types(
+        context.schema,
+        "\n\n".join(fact.printed for fact in document.definitions),
+        name=name,
+        scalars=scalars,
+        enums=enums,
+        client_directives=client_directives,
+        disable_masking=disable_masking,
+        fragment_keys=keys,
+        selected_fragment=primary.name,
     )
