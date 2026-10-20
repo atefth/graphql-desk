@@ -657,6 +657,12 @@ BadResult() # error
                 True,
             ),
             ("class _Text(str): pass\nText:_Text=_Text", False),
+            (
+                "from typing import TypeAlias\n"
+                "class _Text(str): pass\n"
+                "Marker=TypeAlias\nText:Marker=_Text",
+                False,
+            ),
             ("class Other: pass", False),
             ("def Text() -> str: return 'x'", False),
             ("Text='PRIVATE_VALUE'", False),
