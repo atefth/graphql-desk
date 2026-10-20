@@ -3,6 +3,7 @@
 import json
 import tempfile
 import unittest
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import cast
@@ -139,27 +140,28 @@ class EditorSnapshotTests(unittest.TestCase):
             )
         )
 
-    def test_dirty_root_new_nested_and_mismatched_clean_config_fail_closed(
+    def test_dirty_root_and_new_nested_config_buffers_are_authoritative(
         self,
     ) -> None:
         self.project()
         source = self.write("child/q.py", _QUERY)
         config = self.root / "pyproject.toml"
+        self.write("child/schema.graphql", _SDL)
         for buffer in (
             OpenBuffer(config, 2, _BASE, True),
             OpenBuffer(config, 2, _BASE + "\n", False),
             OpenBuffer(source.parent / "pyproject.toml", 1, _BASE, True),
             OpenBuffer(source.parent / "pyproject.toml", 1, _BASE, False),
         ):
-            with (
-                self.subTest(buffer=buffer.path),
-                self.assertRaisesRegex(ValueError, "Unsaved"),
-            ):
-                acquire_editor_snapshot(
+            with self.subTest(buffer=buffer.path):
+                captured = acquire_editor_snapshot(
                     workspace=self.root,
                     candidates=(source,),
                     buffers=(buffer,),
                     generation=1,
+                )
+                self.assertEqual(
+                    analyze_editor_snapshot(captured.request)["diagnostics"], []
                 )
         matching = OpenBuffer(config, 3, _BASE)
         snapshot = acquire_editor_snapshot(
@@ -174,7 +176,7 @@ class EditorSnapshotTests(unittest.TestCase):
             is_editor_snapshot_current(
                 snapshot,
                 candidates=(source,),
-                buffers=(replace(matching, is_dirty=True),),
+                buffers=(replace(matching, version=4),),
             )
         )
 
@@ -383,7 +385,7 @@ class EditorSnapshotTests(unittest.TestCase):
                         buffers=(OpenBuffer(source, cast(int, invalid), _QUERY),),
                     )
 
-    def test_config_aba_requires_full_reacquisition_before_publish(self) -> None:
+    def test_config_aba_helpers_use_the_same_captured_text(self) -> None:
         self.project()
         source = self.write("q.py", _QUERY)
         config = self.root / "pyproject.toml"
@@ -394,13 +396,16 @@ class EditorSnapshotTests(unittest.TestCase):
             *,
             workspace: Path,
             editor_fallback: object,
+            config_texts: Mapping[Path, str | None],
         ) -> EffectiveProject | None:
             self.assertIsNone(editor_fallback)
             config.write_bytes(
                 _BASE.replace("schema.graphql", "other.graphql").encode()
             )
             try:
-                return effective_project(directory, workspace=workspace)
+                return effective_project(
+                    directory, workspace=workspace, config_texts=config_texts
+                )
             finally:
                 config.write_bytes(_BASE.encode())
 
@@ -408,9 +413,11 @@ class EditorSnapshotTests(unittest.TestCase):
             snapshot = acquire_editor_snapshot(
                 workspace=self.root, candidates=(source,), generation=1
             )
-        # The end byte check sees A again, but helper parsing observed B.
+        # Helpers see captured A even while the disk temporarily contains B.
         schemas = cast(list[dict[str, object]], snapshot.request["schemas"])
-        self.assertEqual(schemas[0]["uri"], (self.root / "other.graphql").as_uri())
+        self.assertEqual(schemas[0]["uri"], (self.root / "schema.graphql").as_uri())
+        self.assertTrue(is_editor_snapshot_current(snapshot, candidates=(source,)))
+        config.write_bytes(_BASE.replace("schema.graphql", "other.graphql").encode())
         self.assertFalse(is_editor_snapshot_current(snapshot, candidates=(source,)))
 
     def test_change_during_acquisition_is_rejected(self) -> None:
@@ -434,6 +441,91 @@ class EditorSnapshotTests(unittest.TestCase):
         ):
             acquire_editor_snapshot(
                 workspace=self.root, candidates=(source,), generation=1
+            )
+
+    def test_dirty_root_config_changes_module_and_schema_routing(self) -> None:
+        self.project()
+        source = self.write("src/q.py", _QUERY.replace("{ id }", "{ added }"))
+        other = self.write(
+            "other.graphql", _SDL.replace("id: ID!", "id: ID! added: Int")
+        )
+        text = (
+            _BASE.replace("schema.graphql", "other.graphql") + 'source_roots=["src"]\n'
+        )
+        buffer = OpenBuffer(self.root / "pyproject.toml", 9, text, True)
+        snapshot = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), buffers=(buffer,), generation=1
+        )
+        self.assertEqual(analyze_editor_snapshot(snapshot.request)["diagnostics"], [])
+        self.assertEqual(
+            cast(list[dict[str, object]], snapshot.request["modules"])[0]["module"], "q"
+        )
+        self.assertEqual(
+            cast(list[dict[str, object]], snapshot.request["schemas"])[0]["uri"],
+            other.as_uri(),
+        )
+        self.assertFalse(is_editor_snapshot_current(snapshot, candidates=(source,)))
+        self.assertTrue(
+            is_editor_snapshot_current(
+                snapshot, candidates=(source,), buffers=(buffer,)
+            )
+        )
+
+    def test_new_nested_config_and_unsaved_inactive_table_select_consistently(
+        self,
+    ) -> None:
+        self.project()
+        source = self.write("child/q.py", _QUERY)
+        self.write("child/schema.graphql", _SDL)
+        path = source.parent / "pyproject.toml"
+        buffer = OpenBuffer(path, 1, _BASE, True)
+        snapshot = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), buffers=(buffer,), generation=1
+        )
+        modules = cast(list[dict[str, object]], snapshot.request["modules"])
+        self.assertEqual(modules[0]["module"], "q")
+        self.assertEqual(modules[0]["project"], path.as_uri())
+        self.assertEqual(analyze_editor_snapshot(snapshot.request)["diagnostics"], [])
+        self.assertFalse(path.exists())
+        inactive = replace(buffer, version=2, text="[project]\nname='inactive'")
+        next_snapshot = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), buffers=(inactive,), generation=2
+        )
+        modules = cast(list[dict[str, object]], next_snapshot.request["modules"])
+        self.assertEqual(modules[0]["module"], "child.q")
+        self.assertEqual(modules[0]["project"], (self.root / "pyproject.toml").as_uri())
+        invalid = replace(buffer, text="[tool.graphql-desk]\nunknown=true")
+        with self.assertRaises(ValueError):
+            acquire_editor_snapshot(
+                workspace=self.root,
+                candidates=(source,),
+                buffers=(invalid,),
+                generation=3,
+            )
+
+    def test_buffered_config_cannot_adopt_a_directory_or_broken_symlink(self) -> None:
+        source = self.write("q.py", _QUERY)
+        config = self.root / "pyproject.toml"
+        config.mkdir()
+        buffer = OpenBuffer(config, 1, _BASE, True)
+        with self.assertRaisesRegex(ValueError, "must be a file"):
+            acquire_editor_snapshot(
+                workspace=self.root,
+                candidates=(source,),
+                buffers=(buffer,),
+                generation=1,
+            )
+        config.rmdir()
+        try:
+            config.symlink_to(self.root / "missing.toml")
+        except OSError as error:
+            self.skipTest(f"Host does not permit symlink fixtures: {error}")
+        with self.assertRaisesRegex(ValueError, "must be a file"):
+            acquire_editor_snapshot(
+                workspace=self.root,
+                candidates=(source,),
+                buffers=(buffer,),
+                generation=2,
             )
 
 

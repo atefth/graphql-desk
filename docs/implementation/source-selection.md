@@ -6,8 +6,14 @@ Matching uses full source-root-relative paths, case-sensitively on every platfor
 
 Selection rechecks canonical containment, symlink targets and nearest configured ownership. Nested active projects own their files; inactive configurations do not, and invalid nearer configuration fails closed. Exact configured entrypoints must identify one eligible file. Directories, broken file symlinks, root escapes and invalid Python module components reject. Configuration files may be read to establish ownership.
 
+The optional `config_texts` closed mapping supplies captured configuration text
+to every ownership lookup instead of independent disk reads. It shares the
+discovery parser and canonical alias checks; explicit `None` means absence and
+missing keys reject. This preserves new/dirty nested configuration ownership from
+the same [editor snapshot](editor-snapshots.md) used for source analysis.
+
 `ProjectConfig.source_scope` carries non-TOML context: ordinary `project` scope keeps roots inside the project/workspace; `explicit_cli` permits external roots and selection outside the workspace. Parsing/loading defaults to ordinary scope, while `effective_project(explicit_config=...)` supplies explicit scope. Callers reloading a selected config preserve its scope. `find_project(..., selected_config=config)` applies that context only to the same canonical config path; foreign configs stay ordinary and retain nearest ownership, including ancestors of external roots. Explicit selection cannot steal their files. Generated-output boundaries and root-contained symlink checks remain unchanged.
 
 The selector consumes this fact instead of a separate permission flag. Broader source/config/schema freshness remains the lifecycle caller's responsibility, rather than a second proof in this path selector. These APIs provide the exception's backend; actual CLI dispatch is still absent.
 
-This is a #27 foundation for shared editor/CLI discovery. Actual enumeration, snapshot acquisition, command dispatch and live integration remain open, as do SCHEMA-01 and the live-typing gate. Tests cover defaults/globs, canonical aliases, nested ownership, unsaved paths, entrypoints and module collisions without executing source files.
+This is a #27 foundation for shared editor/CLI discovery. Actual enumeration, command dispatch and live integration remain open, as do SCHEMA-01 and the live-typing gate. Tests cover defaults/globs, canonical aliases, nested ownership, unsaved paths, entrypoints and module collisions without executing source files.

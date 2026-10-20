@@ -4,11 +4,16 @@ import keyword
 import os
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ProjectConfig, generated_output_paths
-from .project import find_project, validate_project_ownership
+from .project import (
+    find_project,
+    normalize_config_texts,
+    validate_project_ownership,
+)
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,7 @@ def select_project_sources(
     candidates: tuple[Path, ...],
     *,
     workspace: Path | None = None,
+    config_texts: Mapping[Path, str | None] | None = None,
 ) -> tuple[SourceFile, ...]:
     """Select supplied paths; never enumerate directories or read Python text.
 
@@ -87,8 +93,10 @@ def select_project_sources(
     cannot name a package; nested __init__.py names its containing package.
     External roots and workspace escape require explicit_cli config context.
     Foreign configured projects retain nearest ownership. Caller-owned source/
-    config/schema versions still require lifecycle checks.
+    config/schema versions still require lifecycle checks. A supplied closed
+    config_texts map also governs every nearest-owner lookup.
     """
+    texts = normalize_config_texts(config_texts)
     validate_project_ownership((config,))
     root = _resolved(config.root)
     boundary = _resolved(workspace) if workspace is not None else None
@@ -157,6 +165,7 @@ def select_project_sources(
             path.parent,
             workspace=root if path.is_relative_to(root) else None,
             selected_config=config,
+            config_texts=texts,
         )
         if owner is not None and _identity(owner.path) != _identity(config.path):
             continue
