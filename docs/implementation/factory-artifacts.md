@@ -19,8 +19,24 @@ entry points. Typed export facts combine aliases from different schemas into the
 same `<package>.sources.<source_module>` companion. Same-basename source modules
 retain their full package paths; conflicting normalized public aliases reject
 rather than silently choosing a schema. Configured output, context, source/index
-identity and package-parent failures reject atomically. An error-bearing index
-still returns no files; this does not implement per-document recovery.
+identity and package-parent failures reject atomically. Resolver/index/parser
+errors still return no files; semantic validation has the bounded recovery below.
+
+Original-AST GraphQL validation runs before rendering. A semantically invalid
+indexed document and its fragment dependents receive nominal, abstract
+`Unavailable` views instead of trusted result/variable types. Existing companion
+Result/Variables/FragmentRef aliases remain importable as that error view, alongside
+a binding-specific Unavailable alias. The view permits read-only AST metadata
+inspection but cannot enter a typed executor, expose result keys or be constructed
+as a result fixture. Runtime factories still return the ordinary carriers.
+
+Independent valid documents, including calls in the same source module and other
+schemas, retain their declarations. Identical constructor signatures involving an
+unavailable owner coalesce conservatively, including fragment-dependent signatures,
+with explicit diagnostics. Stale facts, unsafe output identities, invalid schema
+or mapping preludes and collisions remain atomic failures. Syntax/resolver/index
+recovery, ownership-aware publication and the full invalid-buffer lifecycle remain
+open.
 
 The generated `<package>.<schema>.graphql` runtime callable delegates to the
 ordinary schema-bound constructor. Its stub correlates exact decoded source,
@@ -69,7 +85,7 @@ The generated callable protocol also includes the [scalar member](scalar-helpers
 using the same schema declarations and configured input aliases once. The runtime
 factory remains the ordinary schema-name binding.
 
-Thirteen focused tests check unchanged original Python source with both strict
+Fifteen focused tests check unchanged original Python source with both strict
 checkers and actual generated runtime imports, generic client inference and
 negative variable/result cases, exact ASTs, explicit fallback limits, aliases,
 source packages, diagnostics and stale/collision failures. Dynamic discovery,

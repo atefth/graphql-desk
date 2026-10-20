@@ -9,6 +9,7 @@ from typing import Any
 
 from . import TypedDocument
 from .config import ProjectConfig, ScalarMapping
+from .document_validation import validate_indexed_document
 from .fragment_refs import fragment_identity_key
 from .fragments import FragmentIndex, IndexedDocument, SchemaContext
 from .literal_ast import render_document_ast_types
@@ -190,6 +191,8 @@ def _generate_factory_artifacts(
         raise ValueError("Schema binding must be a normalized Python name")
     if index.diagnostics:
         return _SchemaArtifacts(FactoryArtifacts((), index.diagnostics), ())
+    if index.unavailable:
+        raise ValueError("Rejected indexed documents cannot generate factory artifacts")
     snapshots = {(item.project, item.module): item for item in modules}
     if len(snapshots) != len(modules):
         raise ValueError("Source module identities must be unique")
@@ -250,7 +253,8 @@ def _generate_factory_artifacts(
         schema_text = render_schema_types(context.schema, scalars=scalars, enums=enums)
         if "graphql" in context.schema.type_map:
             raise ValueError("Schema aliases collide with generated factory exports")
-        for number, document in enumerate(documents):
+        rejected: set[DocumentIdentity] = set()
+        for document in documents:
             call = document.call
             error_call = call
             snapshot = snapshots.get((call.module.project, call.module.module))
@@ -279,6 +283,76 @@ def _generate_factory_artifacts(
             build_source_map(call, modules)
             diagnostics.extend(_precision_diagnostics(document, snapshot))
             identity = DocumentIdentity(call.module, call.range)
+            selected = document.selected_operation
+            primary = document.primary_fragment
+            if primary is not None:
+                if (
+                    primary.kind != "fragment"
+                    or primary.name is None
+                    or primary not in document.definitions
+                    or primary.document != identity
+                    or selected is not None
+                    or call.operation is not None
+                ):
+                    raise ValueError("Indexed primary fragment identity differs")
+            elif (
+                selected is None
+                or selected.kind == "fragment"
+                or selected not in document.definitions
+                or selected.document != identity
+                or carrier(document).operation_name != selected.name
+            ):
+                raise ValueError("Indexed selected operation identity differs")
+            errors = validate_indexed_document(
+                context,
+                document,
+                fragment_index=index,
+                modules=modules,
+                client_directives=client_directives,
+            )
+            if errors:
+                rejected.add(identity)
+                diagnostics.extend(errors)
+            carrier(document)
+        representatives = {identity: identity for identity in owners}
+        # Coalesced fragment views also make their consumers indistinguishable.
+        changed = True
+        while changed:
+            previous_rejected = rejected.copy()
+            previous_representatives = representatives.copy()
+            for document in documents:
+                identity = DocumentIdentity(document.call.module, document.call.range)
+                if any(ref.target in rejected for ref in document.call.fragments):
+                    rejected.add(identity)
+            groups: dict[
+                tuple[str, str | None, tuple[DocumentIdentity, ...]],
+                list[DocumentIdentity],
+            ] = {}
+            for document in documents:
+                selected = document.selected_operation
+                group_signature = (
+                    document.call.source,
+                    selected.name if selected else None,
+                    tuple(
+                        representatives[ref.target] for ref in document.call.fragments
+                    ),
+                )
+                groups.setdefault(group_signature, []).append(
+                    DocumentIdentity(document.call.module, document.call.range)
+                )
+            for group in groups.values():
+                if any(identity in rejected for identity in group):
+                    rejected.update(group)
+                    for identity in group:
+                        representatives[identity] = group[0]
+            changed = (
+                rejected != previous_rejected
+                or representatives != previous_representatives
+            )
+        for number, document in enumerate(documents):
+            call = document.call
+            error_call = call
+            identity = DocumentIdentity(call.module, call.range)
             label = _pascal(call.binding) if call.binding else f"Inline{number}"
             if not _identifier(label):
                 raise ValueError("Document binding has no safe generated alias")
@@ -297,76 +371,131 @@ def _generate_factory_artifacts(
             ):
                 name += "Generated"
             primary = document.primary_fragment
-            render = (
-                render_indexed_fragment_types
-                if primary is not None
-                else render_indexed_operation_types
-            )
-            text = render(
-                context,
-                document,
-                name=name,
-                scalars=scalars,
-                enums=enums,
-                client_directives=client_directives,
-                disable_masking=disable_masking,
-                fragment_index=index,
-            )
-            if primary is not None:
-                key = fragment_identity_key(document, primary)
-                text += (
-                    "\nfrom graphql_desk.fragment_refs import "
-                    "FragmentIdentity as __graphql_desk_Identity, "
-                    "FragmentRef as __graphql_desk_Ref\n"
-                    f"{name}Identity = __graphql_desk_Identity[Literal[{key!r}]]\n"
-                    f"{name}FragmentRef = __graphql_desk_Ref[{name}Identity]\n"
+            if identity in rejected:
+                diagnostics.append(
+                    GraphDiagnostic(
+                        call.module,
+                        "factory-unavailable",
+                        "Document or indistinguishable constructor "
+                        "depends on invalid GraphQL",
+                        call.range,
+                    )
                 )
-            runtime = carrier(document)
-            ast_text = render_document_ast_types(runtime.ast, name="Exact")
-            packages(path + ".py")
-            put(path + ".py", text)
-            put(
-                path + "_ast.py",
-                '"""Literal AST views exist only in the matching stub."""\n',
-            )
-            put(path + "_ast.pyi", ast_text)
-            base_type = (
-                f"__graphql_desk_FragmentDocument[{name}Identity, "
-                f"{name}Result, {name}Variables]"
-                if primary is not None
-                else f"__graphql_desk_TypedDocument[{name}Result, {name}Variables]"
-            )
-            superclass_import = (
-                "from graphql_desk.fragment_refs import "
-                "FragmentDocument as __graphql_desk_FragmentDocument\n"
-                if primary is not None
-                else "from graphql_desk import "
-                "TypedDocument as __graphql_desk_TypedDocument\n"
-            )
-            stub = (
-                text
-                + "\n"
-                + superclass_import
-                + (
-                    f"from .d{number}_ast import ExactDocument as __graphql_desk_Ast\n"
-                    f"\nclass {name}Document({base_type}):\n"
-                    "    ast: __graphql_desk_Ast\n"
-                    f"    operation_name: Literal[{runtime.operation_name!r}]\n"
-                    f"    schema_name: Literal[{context.schema_name!r}]\n"
+                representative = representatives[identity]
+                if representative != identity:
+                    module, name, _ = declarations[representative]
+                else:
+                    packages(path + ".py")
+                    put(
+                        path + ".py",
+                        "from abc import ABC, abstractmethod\n"
+                        "from graphql import DocumentNode\n"
+                        f"class {name}Unavailable(ABC):\n"
+                        '    """Annotation-only unavailable document view."""\n'
+                        "    @property\n    @abstractmethod\n"
+                        "    def ast(self) -> DocumentNode: raise NotImplementedError\n"
+                        "    @property\n    @abstractmethod\n"
+                        "    def operation_name(self) -> str | None: "
+                        "raise NotImplementedError\n"
+                        "    @property\n    @abstractmethod\n"
+                        "    def schema_name(self) -> str | None: "
+                        "raise NotImplementedError\n",
+                    )
+                    put(
+                        path + ".pyi",
+                        (
+                            "from abc import ABC, abstractmethod\n"
+                            "from graphql import DocumentNode\n"
+                            f"class {name}Unavailable(ABC):\n"
+                            "    @property\n    @abstractmethod\n"
+                            "    def ast(self) -> DocumentNode: ...\n"
+                            "    @property\n    @abstractmethod\n"
+                            "    def operation_name(self) -> str | None: ...\n"
+                            "    @property\n    @abstractmethod\n"
+                            "    def schema_name(self) -> str | None: ...\n"
+                        ),
+                    )
+            else:
+                render = (
+                    render_indexed_fragment_types
+                    if primary is not None
+                    else render_indexed_operation_types
                 )
-            )
-            put(path + ".pyi", stub)
+                text = render(
+                    context,
+                    document,
+                    name=name,
+                    scalars=scalars,
+                    enums=enums,
+                    client_directives=client_directives,
+                    disable_masking=disable_masking,
+                    fragment_index=index,
+                )
+                if primary is not None:
+                    key = fragment_identity_key(document, primary)
+                    text += (
+                        "\nfrom graphql_desk.fragment_refs import "
+                        "FragmentIdentity as __graphql_desk_Identity, "
+                        "FragmentRef as __graphql_desk_Ref\n"
+                        f"{name}Identity = __graphql_desk_Identity[Literal[{key!r}]]\n"
+                        f"{name}FragmentRef = __graphql_desk_Ref[{name}Identity]\n"
+                    )
+                runtime = carrier(document)
+                ast_text = render_document_ast_types(runtime.ast, name="Exact")
+                packages(path + ".py")
+                put(path + ".py", text)
+                put(
+                    path + "_ast.py",
+                    '"""Literal AST views exist only in the matching stub."""\n',
+                )
+                put(path + "_ast.pyi", ast_text)
+                base_type = (
+                    f"__graphql_desk_FragmentDocument[{name}Identity, "
+                    f"{name}Result, {name}Variables]"
+                    if primary is not None
+                    else f"__graphql_desk_TypedDocument[{name}Result, {name}Variables]"
+                )
+                superclass_import = (
+                    "from graphql_desk.fragment_refs import "
+                    "FragmentDocument as __graphql_desk_FragmentDocument\n"
+                    if primary is not None
+                    else "from graphql_desk import "
+                    "TypedDocument as __graphql_desk_TypedDocument\n"
+                )
+                stub = (
+                    text
+                    + "\n"
+                    + superclass_import
+                    + (
+                        f"from .d{number}_ast import "
+                        "ExactDocument as __graphql_desk_Ast\n"
+                        f"\nclass {name}Document({base_type}):\n"
+                        "    ast: __graphql_desk_Ast\n"
+                        f"    operation_name: Literal[{runtime.operation_name!r}]\n"
+                        f"    schema_name: Literal[{context.schema_name!r}]\n"
+                    )
+                )
+                put(path + ".pyi", stub)
             declarations[identity] = (module, name, label)
             if call.binding is not None:
                 names = public_names.setdefault(call.module.module, set())
                 if label in names:
                     raise ValueError("Normalized document binding aliases collide")
                 names.add(label)
-                for suffix in ("Result", "Variables", "FragmentRef"):
+                for suffix in (
+                    ("Result", "Variables", "FragmentRef", "Unavailable")
+                    if identity in rejected
+                    else ("Result", "Variables", "FragmentRef")
+                ):
                     if suffix == "FragmentRef" and primary is None:
                         continue
                     exports.append(
-                        _SourceExport(identity, module, name + suffix, label + suffix)
+                        _SourceExport(
+                            identity,
+                            module,
+                            name + ("Unavailable" if identity in rejected else suffix),
+                            label + suffix,
+                        )
                     )
         for number, document in enumerate(documents):
             error_call = document.call
@@ -378,12 +507,15 @@ def _generate_factory_artifacts(
             for reference in document.call.fragments:
                 owner = owners[reference.target]
                 assert owner.primary_fragment is not None
-                key = fragment_identity_key(owner, owner.primary_fragment)
+                canonical = owners[representatives[reference.target]]
+                assert canonical.primary_fragment is not None
+                key = fragment_identity_key(canonical, canonical.primary_fragment)
                 reference_keys.append(key)
                 owner_module, owner_name, _ = declarations[reference.target]
                 alias = f"__graphql_desk_Fragment{number}_{len(reference_types)}"
+                suffix = "Unavailable" if reference.target in rejected else "Document"
                 reference_imports.append(
-                    f"from {owner_module} import {owner_name}Document as {alias}\n"
+                    f"from {owner_module} import {owner_name}{suffix} as {alias}\n"
                 )
                 reference_types.append(alias)
             selected = document.selected_operation
@@ -391,7 +523,7 @@ def _generate_factory_artifacts(
             signature = (document.call.source, operation_name, tuple(reference_keys))
             previous = signatures.get(signature)
             if previous is not None:
-                if document.primary_fragment is not None:
+                if document.primary_fragment is not None and identity not in rejected:
                     raise ValueError(
                         "Identical fragment call signatures have "
                         "distinct owner identities"
@@ -400,7 +532,8 @@ def _generate_factory_artifacts(
             signatures[signature] = module
             imports.extend(reference_imports)
             return_alias = f"__graphql_desk_Document{number}"
-            imports.append(f"from {module} import {name}Document as {return_alias}\n")
+            suffix = "Unavailable" if identity in rejected else "Document"
+            imports.append(f"from {module} import {name}{suffix} as {return_alias}\n")
             fragments = (
                 "tuple[" + ", ".join(reference_types) + "]"
                 if reference_types
@@ -550,6 +683,23 @@ def _assemble(
             )
             text += f"\n__all__ = {[item.name for item in aliases]!r}\n"
             files[path + ".py"] = files[path + ".pyi"] = text
+        paths: dict[str, str] = {}
+        module_paths: dict[str, tuple[str, bool]] = {}
+        for path in files:
+            previous = paths.setdefault(path.casefold(), path)
+            if previous != path:
+                raise ValueError("Generated file paths collide ignoring case")
+            if path.endswith(".py"):
+                module_path = path.removesuffix(".py")
+                package = module_path.endswith("/__init__")
+                if package:
+                    module_path = module_path.removesuffix("/__init__")
+                identity = (module_path, package)
+                previous_module = module_paths.setdefault(
+                    module_path.casefold(), identity
+                )
+                if previous_module != identity:
+                    raise ValueError("Generated module and package paths collide")
     except ValueError as error:
         if owner is None:
             raise

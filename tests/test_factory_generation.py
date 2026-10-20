@@ -416,6 +416,152 @@ def dynamic(name:str)->None:
                 },
             )
 
+    def test_semantic_failures_keep_independent_calls_and_importable_error_aliases(
+        self,
+    ) -> None:
+        source = """from typing import TYPE_CHECKING,TypeVar
+from typing_extensions import assert_type
+from graphql import DocumentNode
+from graphql_desk import TypedDocument
+from generated.main import graphql
+from generated.sources.main import (
+ GoodResult,GoodVariables,BadResult,BadVariables,BadUnavailable,
+ FieldsResult,FieldsFragmentRef,DependentResult,AgainResult,SameDependentResult)
+fields=graphql('fragment F on Book { missing }')
+same_fields=graphql('fragment F on Book { missing }')
+bad=graphql('query Bad { missing }')
+again=graphql('query Bad { missing }')
+dependent=graphql('query Dependent {book(id:"1"){...F}}',(fields,))
+same_dependent=graphql('query Dependent {book(id:"1"){...F}}',(same_fields,))
+good=graphql('query Good {greeting}')
+assert bad.ast.definitions
+assert dependent.ast.definitions
+if TYPE_CHECKING:
+ R=TypeVar('R')
+ V=TypeVar('V')
+ def execute(document:TypedDocument[R,V],variables:V)->R: raise RuntimeError
+ assert_type(execute(good,GoodVariables()),GoodResult)
+ assert_type(bad,BadUnavailable)
+ assert_type(bad,BadResult)
+ assert_type(bad,BadVariables)
+ assert_type(again,AgainResult)
+ assert_type(fields,FieldsResult)
+ assert_type(fields,FieldsFragmentRef)
+ assert_type(dependent,DependentResult)
+ assert_type(same_dependent,SameDependentResult)
+ assert_type(bad.ast,DocumentNode)
+"""
+        modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+        artifacts = self.generate(modules)
+        self.assertTrue(artifacts.files)
+        self.assertTrue(
+            any(d.code == "graphql-validation" for d in artifacts.diagnostics)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            self.check(root)
+            runtime = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import inspect, main; from graphql_desk import TypedDocument; "
+                    "assert inspect.isabstract(main.BadResult); "
+                    "assert type(main.bad) is TypedDocument",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+            negative = """from main import bad,fields,dependent
+from generated.sources.main import GoodResult,BadResult,BadVariables
+from graphql_desk import TypedDocument
+from typing import TypeVar
+R=TypeVar('R')
+V=TypeVar('V')
+def execute(document:TypedDocument[R,V],variables:V)->R: raise RuntimeError
+execute(bad,{}) # error
+execute(fields,{}) # error
+execute(dependent,{}) # error
+precise:TypedDocument[GoodResult,dict[str,str]]=bad # error
+bad['missing'] # error
+result:BadResult={} # error
+variables:BadVariables={} # error
+bad.ast=bad.ast # error
+BadResult() # error
+"""
+            (root / "bad.py").write_text(negative, encoding="utf8")
+            self.check(
+                root,
+                {
+                    "bad.py": {
+                        line
+                        for line, text in enumerate(negative.splitlines(), 1)
+                        if "# error" in text
+                    }
+                },
+            )
+        config, contexts, project_modules, index = self.multi_schema()
+        changed = replace(
+            project_modules[0],
+            source=project_modules[0].source.replace(
+                "query A {item {id ...Fields @local}}", "query A {missing}"
+            ),
+        )
+        project_modules = (changed, *project_modules[1:])
+        index = index_fragments(
+            resolve_project(
+                project_modules, bindings=(project_bindings(config, project_id="p"),)
+            ),
+            schemas={("p", context.schema_name): context for context in contexts},
+        )
+        result = generate_project_factory_artifacts(
+            config, contexts, index, modules=project_modules, project_id="p"
+        )
+        self.assertTrue(result.files)
+        self.assertTrue(result.diagnostics)
+        permuted = generate_project_factory_artifacts(
+            replace(config, schemas=tuple(reversed(config.schemas))),
+            tuple(reversed(contexts)),
+            replace(index, documents=tuple(reversed(index.documents))),
+            modules=tuple(reversed(project_modules)),
+            project_id="p",
+        )
+        self.assertEqual(result, permuted)
+        beta = next(
+            file.text
+            for file in result.files
+            if file.relative_path == "generated/beta.pyi"
+        )
+        self.assertIn("__graphql_desk_Document", beta)
+        invalid = replace(
+            index,
+            documents=(
+                *(
+                    replace(document, selected_operation=None)
+                    if document.call.binding == "alpha_query"
+                    else document
+                    for document in index.documents
+                ),
+            ),
+        )
+        result = generate_project_factory_artifacts(
+            config, contexts, invalid, modules=project_modules, project_id="p"
+        )
+        self.assertEqual(result.files, ())
+        stale = replace(
+            index,
+            documents=(
+                replace(index.documents[0], context_token="stale"),
+                *index.documents[1:],
+            ),
+        )
+        result = generate_project_factory_artifacts(
+            config, contexts, stale, modules=project_modules, project_id="p"
+        )
+        self.assertEqual(result.files, ())
+
     def context(self) -> SchemaContext:
         return SchemaContext(
             "main",
@@ -425,6 +571,24 @@ def dynamic(name:str)->None:
             ),
             "generation-1",
         )
+
+    def test_companion_paths_reject_case_and_module_package_collisions(self) -> None:
+        for names in (("Case", "case"), ("foo", "Foo.bar")):
+            with self.subTest(names=names):
+                modules = tuple(
+                    ModuleSnapshot(
+                        "p",
+                        name,
+                        f"file:///{name}.py",
+                        1,
+                        "from generated.main import graphql\n"
+                        "query=graphql('{greeting}')",
+                    )
+                    for name in names
+                )
+                artifacts = self.generate(modules)
+                self.assertEqual(artifacts.files, ())
+                self.assertEqual(artifacts.diagnostics[0].code, "factory-generation")
 
     def generate(self, modules: tuple[ModuleSnapshot, ...]) -> FactoryArtifacts:
         context = self.context()
@@ -792,7 +956,6 @@ def dynamic(name:str)->None:
 
     def test_invalid_graph_collision_and_snapshot_inputs_never_publish(self) -> None:
         for source in (
-            'q=graphql("query Bad{missing}")',
             'foo_bar=graphql("query A{greeting}")\nFooBar=graphql("query B{greeting}")',
             'first=graphql("fragment F on Book{title}")\n'
             'second=graphql("fragment F on Book{title}")',
