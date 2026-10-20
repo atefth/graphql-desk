@@ -644,6 +644,25 @@ BadResult() # error
         )
         for declaration, valid in (
             ("class Text(str): pass", True),
+            (
+                "from typing import TypeAlias\n"
+                "class _Text(str): pass\n"
+                "Text:TypeAlias=_Text",
+                True,
+            ),
+            (
+                "import typing_extensions as t\n"
+                "class _Text(str): pass\n"
+                "Text:t.TypeAlias=_Text",
+                True,
+            ),
+            ("class _Text(str): pass\nText:_Text=_Text", False),
+            (
+                "from typing import TypeAlias\n"
+                "class _Text(str): pass\n"
+                "Marker=TypeAlias\nText:Marker=_Text",
+                False,
+            ),
             ("class Other: pass", False),
             ("def Text() -> str: return 'x'", False),
             ("Text='PRIVATE_VALUE'", False),

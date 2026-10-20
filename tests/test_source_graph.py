@@ -88,6 +88,141 @@ class SourceGraphTests(unittest.TestCase):
             source_graph.IncrementalResolver().resolve(snapshots),
         )
 
+    def test_explicit_type_aliases_reuse_captured_class_and_reexport_resolution(
+        self,
+    ) -> None:
+        snapshots = (
+            module("pkg", "from .aliases import Public", package=True),
+            module(
+                "pkg.aliases",
+                "import typing as t\n"
+                "import pkg.types as models\n"
+                "Public:t.TypeAlias=models.Alias",
+            ),
+            module(
+                "pkg.types",
+                "from typing_extensions import TypeAlias as TA\n"
+                "from enum import Enum\n"
+                "from typing_extensions import TypedDict\n"
+                "class Plain: pass\n"
+                "class Payload(TypedDict):\n"
+                " value:str\n"
+                "class Choice(Enum):\n"
+                " RED='red'\n"
+                "Alias:TA=Plain\n"
+                "Data:TA=Payload\n"
+                "Color:TA=Choice\n"
+                "Text:TA=str",
+            ),
+        )
+        symbols = (
+            "pkg.Public",
+            "pkg.types.Alias",
+            "pkg.types.Data",
+            "pkg.types.Color",
+            "pkg.types.Text",
+        )
+        with (
+            patch("builtins.open", side_effect=AssertionError("No files")),
+            patch(
+                "importlib.import_module",
+                side_effect=AssertionError("No project imports"),
+            ),
+        ):
+            results = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
+        self.assertEqual([item.status for item in results], ["resolved"] * len(symbols))
+        self.assertEqual(
+            {item.symbol: item.target for item in results},
+            {
+                "pkg.Public": "pkg.types.Plain",
+                "pkg.types.Alias": "pkg.types.Plain",
+                "pkg.types.Data": "pkg.types.Payload",
+                "pkg.types.Color": "pkg.types.Choice",
+                "pkg.types.Text": "builtins.str",
+            },
+        )
+        self.assertEqual(
+            results,
+            resolve_type_symbols(
+                tuple(reversed(symbols)),
+                modules=tuple(reversed(snapshots)),
+                project_id="app",
+            ),
+        )
+        self.assertNotEqual(
+            results[0].dependencies,
+            resolve_type_symbols(
+                symbols,
+                modules=(*snapshots[:2], replace(snapshots[2], version=2)),
+                project_id="app",
+            )[0].dependencies,
+        )
+        self.assertEqual(
+            resolve_project(snapshots), IncrementalResolver().resolve(snapshots)
+        )
+
+    def test_explicit_type_aliases_reject_untrusted_markers_and_unsupported_targets(
+        self,
+    ) -> None:
+        cases = (
+            "Alias:Plain=Plain",
+            "from typing import TypeAlias\nMarker=TypeAlias\nAlias:Marker=Plain",
+            "import typing_extensions as t\nMarker=t.TypeAlias\nAlias:Marker=Plain",
+            "TypeAlias=Plain\nAlias:TypeAlias=Plain",
+            "TypeAlias='typing.TypeAlias'\nAlias:TypeAlias=Plain",
+            "from typing import TypeAlias\nTypeAlias=Plain\nAlias:TypeAlias=Plain",
+            "from typing import TypeAlias\nAlias:TypeAlias='Plain'",
+            "from typing import TypeAlias\nAlias:TypeAlias=list[Plain]",
+            "from typing import TypeAlias\nAlias:TypeAlias=Plain|None",
+            "from typing import TypeAlias\nAlias:TypeAlias=make()",
+            "from typing import TypeAlias\nvalue=42\nAlias:TypeAlias=value",
+            "from typing import TypeAlias\nAlias:TypeAlias=Later\nclass Later: pass",
+            "from typing import TypeAlias\nAlias:TypeAlias=Plain\nAlias=Plain",
+            "from typing import TypeAlias\n"
+            "Alias:TypeAlias=Plain\n"
+            "globals()['Alias']=other",
+        )
+        for declaration in cases:
+            with self.subTest(declaration=declaration):
+                (result,) = resolve_type_symbols(
+                    ("types.Alias",),
+                    modules=(module("types", "class Plain: pass\n" + declaration),),
+                    project_id="app",
+                )
+                self.assertEqual(result.status, "unresolved", result)
+        for marker_module in ("typing", "typing_extensions"):
+            with self.subTest(marker_module=marker_module):
+                snapshots = (
+                    module(marker_module, "class TypeAlias: pass"),
+                    module(
+                        "types",
+                        f"from {marker_module} import TypeAlias\n"
+                        "class Plain: pass\n"
+                        "Alias:TypeAlias=Plain",
+                    ),
+                )
+                (result,) = resolve_type_symbols(
+                    ("types.Alias",), modules=snapshots, project_id="app"
+                )
+                self.assertEqual(result.status, "unresolved")
+        cycle = (
+            module("a", "from typing import TypeAlias\nfrom b import B\nA:TypeAlias=B"),
+            module("b", "from typing import TypeAlias\nfrom a import A\nB:TypeAlias=A"),
+        )
+        (result,) = resolve_type_symbols(("a.A",), modules=cycle, project_id="app")
+        self.assertEqual(result.status, "unresolved")
+        # An ordinary variable annotation stays unsupported for mapping preflight.
+        ordinary = (
+            module(
+                "values", "Text:str='text'\nfrom graphql_desk import gql\nq=gql(Text)"
+            ),
+        )
+        (result,) = resolve_type_symbols(
+            ("values.Text",), modules=ordinary, project_id="app"
+        )
+        self.assertEqual(result.status, "unresolved")
+        self.assertEqual(resolve_project(ordinary).calls[0].source, "text")
+
     def test_captured_type_symbols_distinguish_known_failures_and_unknown_forms(
         self,
     ) -> None:
