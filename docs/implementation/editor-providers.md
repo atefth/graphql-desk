@@ -10,7 +10,7 @@ Incomplete GraphQL inside valid Python still has real maps and can complete. Com
 
 Definitions cover schema fields, arguments, directives, named types, enum/input members, local variables and explicit indexed fragments. They use original SDL/node locations and raw call maps; printed definition offsets are never treated as authored positions. Introspection schemas lack authored SDL definitions, so no schema location is invented. Definition traversal requires parseable GraphQL. Missing or unresolved fragment facts do not become trusted navigation targets.
 
-`registerLanguageFeatures(vscode, options)` adds supplemental Python completion/hover/definition providers and a separate diagnostic collection. The returned `refresh(document, token)`, `close(uri)` and `dispose()` functions are lifecycle hooks for the future activation owner. Per-document generations prevent an older diagnostic refresh from overwriting a newer one. No source or generated buffer is edited, saved or reverted.
+`registerLanguageFeatures(vscode, options)` adds supplemental Python completion/hover/definition providers and a separate diagnostic collection. The returned `refresh(document, token)`, `close(uri)` and `dispose()` functions are lifecycle hooks for the activation owner. Per-document generations prevent an older diagnostic refresh from overwriting a newer one. No source or generated buffer is edited, saved or reverted.
 
 `editor/src/highlighting.js` exposes `createHighlighting(options)` and `registerHighlighting(vscode, options)`. Resolved GraphQL tokens project through actual maps into literal spans. Existing theme colors are applied as confined decorations, without replacing Python semantic-token providers. In incomplete Python, or an untrusted workspace, a separate lexical candidate mode recognizes a limited set of direct imported constructors. It never supplies diagnostics, navigation, types or trusted source facts, and untrusted mode never calls analysis. This fallback skips interpolated/byte strings and escaped ordinary literals requiring semantic decoding; it is not complete Python name resolution or the full highlighting grammar acceptance matrix.
 
@@ -27,6 +27,37 @@ cache and uses fresh temporary profiles/workspaces. It does not alter the user's
 profile. Hosted CI runs the native feature tests and dependency audit on Linux
 and Windows; these manual host observations do not establish other host platforms.
 
-The host fixture registers providers directly. Production activation,
-acquisition/worker wiring, schema refresh, full supported-platform/performance
-matrices and live typing remain separate; #39/#40 and all broad gates remain open.
+## Read-only extension activation
+
+The extension activates for Python documents and the **GraphQL Desk: Refresh
+Schema** command. Set `graphqlDesk.pythonPath` to an absolute interpreter with
+GraphQL Desk installed. `graphqlDesk.project` supplies the existing validated
+fallback configuration when no active pyproject table exists. Semantic analysis
+requires workspace trust; untrusted workspaces retain lexical highlighting only.
+
+The controller owns one worker per local workspace, enumerates Python candidates,
+unions associated untitled/open buffers and captures source/configuration/schema
+buffers without saving them. Watchers request early invalidation; complete capture
+and worker freshness checks guard publication even when a watcher misses a change.
+Only one wire job and one latest pending job are retained during edit storms.
+Provider cancellation suppresses that caller; explicit refresh cancellation,
+interpreter changes, trust loss and disposal terminate the relevant worker.
+
+Remote schemas load only through the explicit refresh command. Unavailable schemas
+show a status item linked to that command. Credential fingerprints stay private;
+only random opaque revisions cross the protocol. Changed configuration/credentials
+remove trusted schema precision, while unrelated source edits can retain explicitly
+fetched schemas without HTTP. URI mapping preserves associated untitled documents
+at the provider boundary. Missing buffers inherit existing parent path aliases;
+the deepest canonical workspace owns analysis, and ambiguous duplicate owners
+produce no semantic results.
+
+Run `npm run test:host -- 1.141.0 activation` or `1.142.0 activation` for the actual
+activation suite. Checked-in observations cover the two pinned hosts, dirty source,
+configuration, fragment and schema buffers, native Pylance coexistence and explicit
+remote refresh with no HTTP during typing. Source files remain unchanged on disk.
+The earlier feature fixture still directly registers providers.
+
+Interpreter selection remains explicit. Full supported-platform/performance
+matrices, complete discovery/lifecycle acceptance, VSIX release and live generated
+typing remain open under #39/#40 and the broad gates.

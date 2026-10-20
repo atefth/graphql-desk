@@ -1,0 +1,117 @@
+"use strict";
+const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const vscode = require("vscode");
+const http = require("node:http");
+const { buildSchema, introspectionFromSchema } = require("graphql");
+const { schema } = require("./featureFixtures.cjs");
+const hoverText = values => (values ?? []).flatMap(value => value.contents ?? []).map(value => typeof value === "string" ? value : value.value ?? "").join("\n");
+const target = value => ({ uri: value.uri ?? value.targetUri, range: value.range ?? value.targetSelectionRange ?? value.targetRange });
+async function until(action, accept, message) {
+  const deadline = Date.now() + 30000;
+  let value;
+  do { value = await action(); if (accept(value)) return value; await new Promise(resolve => setTimeout(resolve, 100)); } while (Date.now() < deadline);
+  assert.fail(message);
+}
+async function replace(document, text) {
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length)), text);
+  assert.equal(await vscode.workspace.applyEdit(edit), true);
+}
+async function run() {
+  const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
+  const resultPath = process.env.GRAPHQL_DESK_RESULT_PATH;
+  const fixtures = {
+    "schema.graphql": schema,
+    "pyproject.toml": '[tool.graphql-desk]\nschema="schema.graphql"\nclient_directives=["local"]\nschema_output="graphql_desk_generated/default.pyi"\n',
+    "main.py": 'raise RuntimeError("PROJECT_MUST_NOT_EXECUTE")\nfrom graphql_desk import gql\nq=gql("{ user { missing old } }")\n',
+    "partial.py": 'from graphql_desk import gql\nq=gql("{ user { na")\n',
+    "selected.py": 'outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql("{ user { name @local ...Card } }",[card])\n',
+    "fragments.py": 'from graphql_desk import gql\ncard=gql("fragment Card on User { id }")\n',
+  };
+  for (const [name, text] of Object.entries(fixtures)) await fs.writeFile(path.join(workspace, name), text, { encoding: "utf8", flag: "wx" });
+  const documents = new Map();
+  for (const name of Object.keys(fixtures)) {
+    let document = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(workspace, name)));
+    if (name.endsWith(".py") && document.languageId !== "python") document = await vscode.languages.setTextDocumentLanguage(document, "python");
+    documents.set(name, document);
+  }
+  const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
+  assert.ok(extension); await extension.activate(); assert.equal(extension.isActive, true);
+  for (const [id, version] of [["ms-python.python", "2026.10.0"], ["ms-python.vscode-pylance", "2026.4.1"]]) {
+    const native = vscode.extensions.getExtension(id); assert.ok(native); assert.equal(native.packageJSON.version, version); await native.activate();
+  }
+  const diagnostics = document => vscode.languages.getDiagnostics(document.uri).filter(item => item.source === "GraphQL Desk");
+  const main = documents.get("main.py");
+  await vscode.window.showTextDocument(main);
+  const invalid = await until(() => diagnostics(main), values => values.some(item => item.code === "graphql.validation"), "Activated controller must publish actual diagnostics");
+  assert.equal(main.getText(invalid.find(item => item.code === "graphql.validation").range), "missing");
+  assert.ok(invalid.some(item => item.code === "graphql.deprecation"));
+  const partial = documents.get("partial.py");
+  const completion = await until(() => vscode.commands.executeCommand("vscode.executeCompletionItemProvider", partial.uri, partial.positionAt(partial.getText().indexOf('na"') + 2)), value => value.items.some(item => item.label === "name"), "Real activated completion");
+  assert.equal(partial.getText(completion.items.find(item => item.label === "name").range), "na");
+  const selected = documents.get("selected.py");
+  await vscode.window.showTextDocument(selected);
+  const position = selected.positionAt(selected.getText().indexOf("name") + 1);
+  await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", selected.uri, position), value => /Display name/.test(hoverText(value)), "Activated GraphQL hover");
+  const pythonHover = await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", selected.uri, selected.positionAt(selected.getText().indexOf("outside") + 2)), value => /outside/.test(hoverText(value)) && /int|Literal/.test(hoverText(value)), "Pylance native hover must coexist");
+  assert.doesNotMatch(hoverText(pythonHover), /Display name/);
+  const definitions = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", selected.uri, position);
+  assert.ok(definitions.map(target).some(value => value.uri.toString() === documents.get("schema.graphql").uri.toString()));
+  const fragments = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", selected.uri, selected.positionAt(selected.getText().indexOf("...Card") + 4));
+  assert.ok(fragments.map(target).some(value => value.uri.toString() === documents.get("fragments.py").uri.toString()));
+  await until(() => diagnostics(selected), values => !values.some(item => /Unknown directive/.test(item.message)), "Configured client directive must survive production capture");
+  const configDoc = documents.get("pyproject.toml");
+  await replace(configDoc, fixtures["pyproject.toml"].replace('client_directives=["local"]', 'client_directives=[]'));
+  await until(() => diagnostics(selected), values => values.some(item => /Unknown directive.*local/.test(item.message)), "Dirty config updates client directives");
+  await replace(configDoc, fixtures["pyproject.toml"]);
+  const fragmentDoc = documents.get("fragments.py");
+  await replace(fragmentDoc, fixtures["fragments.py"].replace("{ id }", "{ fragmentMissing }"));
+  await vscode.window.showTextDocument(fragmentDoc);
+  await until(() => diagnostics(fragmentDoc), values => values.some(item => /fragmentMissing/.test(item.message)), "Dirty fragment dependency receives exact diagnostics");
+  await replace(fragmentDoc, fixtures["fragments.py"]);
+  // Source edits use buffer text; no file save or generated overlay is involved.
+  await vscode.window.showTextDocument(main);
+  await replace(main, 'from graphql_desk import gql\nq=gql("{user {name}}")\n');
+  await until(() => diagnostics(main), values => values.length === 0, "Repair clears stale diagnostics");
+  await replace(main, 'from graphql_desk import gql\nq=gql("{user {differentMissing}}")\n');
+  const changed = await until(() => diagnostics(main), values => values.some(item => /differentMissing/.test(item.message)), "Unsaved source publishes only new diagnostics");
+  assert.equal(main.getText(changed.find(item => /differentMissing/.test(item.message)).range), "differentMissing");
+  // An associated new source is absent from findFiles and still has actual URI features.
+  const unsavedPath = path.join(workspace, "new_unsaved.py");
+  let unsaved = await vscode.workspace.openTextDocument(vscode.Uri.file(unsavedPath).with({ scheme: "untitled" }));
+  unsaved = await vscode.languages.setTextDocumentLanguage(unsaved, "python");
+  await replace(unsaved, 'from graphql_desk import gql\nq=gql("{user {name}}")\n');
+  await vscode.window.showTextDocument(unsaved);
+  const unsavedPosition = unsaved.positionAt(unsaved.getText().indexOf("name") + 1);
+  await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition), value => /Display name/.test(hoverText(value)), "Associated untitled source must receive GraphQL hover");
+  const schemaDoc = documents.get("schema.graphql");
+  await replace(schemaDoc, schema.replace("name: String", "renamed: String"));
+  await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition), value => !/Display name/.test(hoverText(value)), "Dirty schema invalidates old semantic hover");
+  let remoteRequests = 0;
+  const payload = JSON.stringify({ data: introspectionFromSchema(buildSchema(schema)) });
+  const remote = http.createServer((request, response) => {
+    remoteRequests += 1; request.resume();
+    response.setHeader("Content-Type", "application/json"); response.end(payload);
+  });
+  await new Promise(resolve => remote.listen(0, "127.0.0.1", resolve));
+  try {
+    await replace(configDoc, `[tool.graphql-desk]\nschema="http://127.0.0.1:${remote.address().port}/graphql"\nschema_output="graphql_desk_generated/default.pyi"\n`);
+    await vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition);
+    assert.equal(remoteRequests, 0, "Typing/config capture must never fetch automatically");
+    await vscode.commands.executeCommand("graphqlDesk.refreshSchema");
+    await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition), value => /Display name/.test(hoverText(value)), "Explicit production refresh restores remote features");
+    assert.ok(remoteRequests > 0);
+    const fetched = remoteRequests;
+    await replace(unsaved, unsaved.getText() + "# another unsaved edit\n");
+    await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition), value => /Display name/.test(hoverText(value)), "Fetched remote context survives source typing");
+    assert.equal(remoteRequests, fetched, "Source edits retain schema without automatic HTTP");
+  } finally { await new Promise(resolve => remote.close(resolve)); }
+  assert.equal(main.isDirty, true); assert.equal(schemaDoc.isDirty, true); assert.equal(unsaved.isDirty, true);
+  for (const [name, text] of Object.entries(fixtures)) assert.equal(await fs.readFile(path.join(workspace, name), "utf8"), text);
+  await assert.rejects(fs.stat(unsavedPath), { code: "ENOENT" });
+  await assert.rejects(fs.stat(path.join(workspace, "graphql_desk_generated")), { code: "ENOENT" });
+  await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-activation-observed", vscode: vscode.version, actualActivation: true, actualWorker: true, diagnostics: true, completion: true, hover: true, definitions: true, configuredDirectives: true, dirtyConfiguration: true, dirtyFragment: true, sourceRepair: true, dirtySchema: true, associatedUntitled: true, explicitRemoteRefresh: true, remoteTypingRetention: true, noAutomaticHttp: true, nativePylanceCoexistence: true, diskUnchanged: true, dirtyBuffersPreserved: true }, null, 2));
+}
+module.exports = { run };
