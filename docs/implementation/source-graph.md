@@ -62,13 +62,16 @@ uncaptured external symbols, unsupported forms, missing exports and known non-ty
 Class aliases and package reexports reuse the existing source graph. Simple explicit
 PEP613 aliases (`Alias: TypeAlias = ClassName`) also reuse those checks when the
 marker resolves to uncaptured `typing.TypeAlias` or `typing_extensions.TypeAlias`.
-Named or qualified targets and the bounded container forms `list[N]`,
-`tuple[N, ...]` and `typing.Sequence[N]` are supported, with one named or qualified
-type argument. Trusted `tuple` and `typing.Tuple` aliases also accept finite
+Named or qualified type targets are supported. Unary collection aliases accept
+one existing named/qualified type operand. Trusted constructors include `list`, `set`,
+`frozenset`, `typing.List`, `typing.Set`, `typing.FrozenSet`, `typing.AbstractSet`,
+`typing.Sequence`, `collections.abc.Sequence` and `collections.abc.Set`.
+Variadic `tuple[N, ...]` retains its named/qualified element rule. Trusted `tuple` and `typing.Tuple` aliases also accept finite
 nonempty fixed tuples of named/qualified types, preserving variadic behavior,
 dependency/external propagation and valid class-base availability without element
 TypedDict provenance. Empty shapes, inline/nested expressions and misplaced
-ellipses remain unsupported. Mapping aliases support `dict[K, V]`, trusted `typing.Mapping[K, V]`
+ellipses remain unsupported. Mapping aliases support `dict[K, V]`, trusted `typing.Dict[K, V]`,
+`typing.Mapping[K, V]`
 and `collections.abc.Mapping[K, V]` with exactly two existing named/qualified types.
 They retain valid class-base availability and drop element TypedDict provenance;
 either external operand keeps the alias unverified. Captured or mutated namespace
@@ -124,10 +127,12 @@ Parameters, local imports/assignments, exception and pattern bindings, and named
 expressions cannot silently select a same-named module global. Rebound or later
 initial globals remain unresolved. Function calls keep their original owner/span
 and may have no export binding; existing inline artifact generation handles them.
+Unrelated directives inside nested helper scopes no longer disable proven outer
+calls; projectwide blocked-name checks still reject relevant global mutations.
 
 Functions with inline type parameters, closures/nested functions, classes, lambdas, comprehensions,
-calls inside default/decorator/annotation expressions and global/nonlocal
-declarations remain outside
+calls inside default/decorator/annotation expressions and direct outer-body
+global/nonlocal declarations remain outside
 this bounded subset. Actual function/async source fixtures exercise both strict
 checkers and runtime identity. This does not complete static-source or live typing
 acceptance or authorize any generated-file publication.

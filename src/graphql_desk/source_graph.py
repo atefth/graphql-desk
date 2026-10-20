@@ -953,7 +953,7 @@ class _Graph:
             return self.expression(module, node, before, active)
         if (
             isinstance(node.value, ast.Name)
-            and node.value.id in {"list", "tuple", "dict"}
+            and node.value.id in {"list", "tuple", "dict", "set", "frozenset"}
             and node.value.id not in module.bindings
             and node.value.id not in module.blocked
             and not module.star
@@ -1002,6 +1002,15 @@ class _Graph:
             )
         if constructor.kind != "external" or constructor.text not in {
             "builtins.list",
+            "builtins.set",
+            "builtins.frozenset",
+            "typing.List",
+            "typing.Set",
+            "typing.FrozenSet",
+            "typing.AbstractSet",
+            "collections.abc.Sequence",
+            "collections.abc.Set",
+            "typing.Dict",
             "builtins.tuple",
             "typing.Tuple",
             "builtins.dict",
@@ -1028,6 +1037,7 @@ class _Graph:
                 raise _Unresolved("Tuple aliases require at least one named type")
         if constructor.text in {
             "builtins.dict",
+            "typing.Dict",
             "typing.Mapping",
             "collections.abc.Mapping",
         }:
@@ -1465,9 +1475,18 @@ class _CallScopes(ast.NodeVisitor):
             item.arg for item in ast.walk(node.args) if isinstance(item, ast.arg)
         )
         self.shadowed = local
-        self.function_body = not any(
-            isinstance(item, (ast.Global, ast.Nonlocal)) for item in ast.walk(node)
-        )
+        self.function_body = True
+        pending: list[ast.AST] = list(node.body)
+        while pending:
+            item = pending.pop()
+            if isinstance(item, (ast.Global, ast.Nonlocal)):
+                self.function_body = False
+                break
+            if isinstance(
+                item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+            ):
+                continue
+            pending.extend(ast.iter_child_nodes(item))
         for statement in node.body:
             self.visit(statement)
         self.scoped, self.function_body, self.shadowed = previous
