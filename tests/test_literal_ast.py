@@ -8,9 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from graphql import parse
+from graphql import FragmentDefinitionNode, parse
 
-from graphql_desk.literal_ast import render_literal_ast_types
+from graphql_desk import gql
+from graphql_desk.literal_ast import render_document_ast_types, render_literal_ast_types
 
 _SOURCE = """query Read(
   $v:[Int!]=[1,2] @var(flag:{nested:[true,null]})
@@ -24,6 +25,83 @@ fragment F on User { label }
 
 
 class LiteralAstTests(unittest.TestCase):
+    def test_existing_composed_runtime_ast_retains_empty_directive_tuples(self) -> None:
+        fields = gql("fragment Fields on Book @_unmask { title }")
+        other = gql("fragment Other on Book { id }")
+        document = gql("query Q {book {...Fields ...Other}}", (fields, other))
+        original_definitions = document.ast.definitions
+        stripped = original_definitions[1]
+        ordinary = original_definitions[2]
+        assert isinstance(stripped, FragmentDefinitionNode)
+        assert isinstance(ordinary, FragmentDefinitionNode)
+        self.assertEqual(stripped.directives, ())
+        self.assertIsNone(ordinary.directives)
+        output = render_document_ast_types(document.ast, name="Exact")
+        self.assertIs(document.ast.definitions, original_definitions)
+        self.assertIs(document.ast.definitions[1], fields.ast.definitions[0])
+        self.assertIn("directives: tuple[()]", output)
+        self.assertIn("directives: None", output)
+        for invalid in ("class", "__Unsafe"):
+            with self.assertRaises(ValueError):
+                render_document_ast_types(document.ast, name=invalid)
+        with self.assertRaisesRegex(ValueError, "executable"):
+            render_document_ast_types(parse("scalar Date"), name="Exact")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "exact.pyi").write_text(output, encoding="utf8")
+            (root / "exact.py").write_text("", encoding="utf8")
+            (root / "fixture.py").write_text(
+                "from typing import Literal, cast\n"
+                "from typing_extensions import assert_type\n"
+                "from exact import ExactDocument\n"
+                "value = cast(ExactDocument, None)\n"
+                "assert_type(value.definitions[0].name.value, Literal['Q'])\n"
+                "assert_type(value.definitions[1].name.value, Literal['Fields'])\n"
+                "assert_type(value.definitions[1].directives, tuple[()])\n"
+                "assert_type(value.definitions[2].directives, None)\n",
+                encoding="utf8",
+            )
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(mypy.returncode, 0, mypy.stdout + mypy.stderr)
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["."],
+                        "typeCheckingMode": "strict",
+                        "pythonVersion": "3.10",
+                    }
+                ),
+                encoding="utf8",
+            )
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(pyright.returncode, 0, pyright.stdout + pyright.stderr)
+
     def test_executable_shapes_are_deterministic_and_schema_agnostic(self) -> None:
         output = render_literal_ast_types(_SOURCE, name="Read")
         self.assertEqual(output, render_literal_ast_types(_SOURCE, name="Read"))
