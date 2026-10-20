@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -1153,11 +1154,23 @@ class OperationTypesTests(unittest.TestCase):
         for source in (
             "{ value @required value @optional }",
             "{ value value @required }",
-            "{ kind:__typename @required kind:__typename @optional }",
-            "{ ... @defer { value } }",
+            "{ value @required value }",
         ):
-            with self.subTest(source=source), self.assertRaises(ValueError):
-                render_operation_types(schema, source, name="Read")
+            with self.subTest(source=source):
+                self.assertIn(
+                    "'value': 'String'",
+                    render_operation_types(schema, source, name="Read"),
+                )
+        self.assertIn(
+            "\"Literal['Query']\"",
+            render_operation_types(
+                schema,
+                "{ kind:__typename @required kind:__typename @optional }",
+                name="Read",
+            ),
+        )
+        with self.assertRaises(ValueError):
+            render_operation_types(schema, "{ ... @defer { value } }", name="Read")
         self.assertIn(
             "'user': NotRequired['ReadResult_user | None']",
             render_operation_types(
@@ -1831,3 +1844,214 @@ class OperationTypesTests(unittest.TestCase):
             self.assertEqual(
                 {item["range"]["start"]["line"] for item in diagnostics}, {4, 5, 6, 7}
             )
+
+    def test_repeated_nullability_merges_active_occurrences_and_preserves_wrappers(
+        self,
+    ) -> None:
+        from graphql import graphql_sync  # pyright: ignore[reportUnknownVariableType]
+
+        schema = build_schema(
+            "directive @required on FIELD directive @optional on FIELD "
+            "type User { id: ID! title: String } "
+            "type Query { value: String matrix: [[String!]!]! user: User }"
+        )
+        source = """query($flag:Boolean!) {
+            constant:value @required constant:value @optional
+            bothNullable:value bothNullable:value @optional
+            branch:value branch:value @required @include(if:$flag)
+            only:value @optional @include(if:$flag)
+            only:value @required @skip(if:$flag)
+            matrix @optional matrix @required
+            user { id } user @required { title }
+            kind:__typename @required kind:__typename @optional
+        }"""
+        output = render_operation_types(schema, source, name="Read")
+        self.assertIn("'constant': 'String'", output)
+        self.assertIn("'bothNullable': 'String | None'", output)
+        self.assertIn("'branch': 'String | None'", output)
+        self.assertIn("'branch': 'String'", output)
+        self.assertIn("'matrix': 'list[list[String]]'", output)
+        conditional_source = (
+            "query($flag:Boolean!) { user { id } "
+            "user @required @include(if:$flag) { title } }"
+        )
+        conditional_output = render_operation_types(
+            schema, conditional_source, name="Read"
+        )
+        for flag, user, expected_data in (
+            (False, None, {"user": None}),
+            (False, {"id": "1", "title": None}, {"user": {"id": "1"}}),
+            (True, {"id": "1", "title": None}, {"user": {"id": "1", "title": None}}),
+        ):
+            executed = graphql_sync(
+                schema,
+                conditional_source,
+                root_value={"user": user},
+                variable_values={"flag": flag},
+            )
+            self.assertIsNone(executed.errors)
+            self.assertEqual(executed.data, expected_data)
+        fixture = (
+            "from typing import Literal\n"
+            "from typing_extensions import assert_type\n"
+            "from generated import ReadResult\n"
+            "base: ReadResult = {'constant':'yes','bothNullable':None,'bran"
+            "ch':None,'matrix':[['x']],'user':{'id':'1','title':None},'kind"
+            "':'Query'}\n"
+            "nullable: ReadResult = {'constant':'yes','bothNullable':None,'"
+            "branch':None,'only':None,'matrix':[['x']],'user':{'id':'1','ti"
+            "tle':None},'kind':'Query'}\n"
+            "full: ReadResult = {'constant':'yes','bothNullable':'v','branc"
+            "h':'v','only':'v','matrix':[['x']],'user':{'id':'1','title':'t"
+            "'},'kind':'Query'}\n"
+            "def inspect(value: ReadResult) -> None:\n"
+            "    assert_type(value['constant'], str)\n"
+            "    assert_type(value['branch'], str | None)\n"
+            "    assert_type(value['matrix'], list[list[str]])\n"
+            "    assert_type(value['user']['id'], str)\n"
+            "    assert_type(value['user']['title'], str | None)\n"
+            "    assert_type(value['kind'], Literal['Query'])\n"
+            "    if 'only' in value:\n"
+            "        assert_type(value['only'], str | None)\n"
+            "bad_constant: ReadResult = {'constant':None,'bothNullable':Non"
+            "e,'branch':None,'matrix':[['x']],'user':{'id':'1','title':None"
+            "},'kind':'Query'}  # BAD\n"
+            "bad_outer: ReadResult = {'constant':'yes','bothNullable':None,"
+            "'branch':None,'matrix':None,'user':{'id':'1','title':None},'ki"
+            "nd':'Query'}  # BAD\n"
+            "bad_inner: ReadResult = {'constant':'yes','bothNullable':None,"
+            "'branch':None,'matrix':[None],'user':{'id':'1','title':None},'"
+            "kind':'Query'}  # BAD\n"
+            "bad_element: ReadResult = {'constant':'yes','bothNullable':Non"
+            "e,'branch':None,'matrix':[[None]],'user':{'id':'1','title':Non"
+            "e},'kind':'Query'}  # BAD\n"
+            "bad_user: ReadResult = {'constant':'yes','bothNullable':None,'"
+            "branch':None,'matrix':[['x']],'user':None,'kind':'Query'}  # B"
+            "AD\n"
+            "bad_selection: ReadResult = {'constant':'yes','bothNullable':N"
+            "one,'branch':None,'matrix':[['x']],'user':{'id':'1'},'kind':'Q"
+            "uery'}  # BAD\n"
+            "bad_typename: ReadResult = {'constant':'yes','bothNullable':No"
+            "ne,'branch':None,'matrix':[['x']],'user':{'id':'1','title':Non"
+            "e},'kind':'Other'}  # BAD\n"
+            "bad_alias: ReadResult = {'constant':'yes','bothNullable':None,"
+            "'branch':None,'matrix':[['x']],'user':{'id':'1','title':None},"
+            "'kind':'Query','value':'extra'}  # BAD\n"
+        )
+        fixture += """from composite import ReadResult as Composite
+absent: Composite = {'user': None}
+present_base: Composite = {'user': {'id': '1'}}
+present_both: Composite = {'user': {'id': '1', 'title': None}}
+bad_missing_id: Composite = {'user': {'title': 'x'}}  # BAD
+bad_title: Composite = {'user': {'id': '1', 'title': False}}  # BAD
+"""
+        expected = {
+            index
+            for index, line in enumerate(fixture.splitlines(), 1)
+            if "# BAD" in line
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "generated.py").write_text(output, encoding="utf-8")
+            (root / "composite.py").write_text(conditional_output, encoding="utf-8")
+            (root / "fixture.py").write_text(fixture, encoding="utf-8")
+            runtime = subprocess.run(
+                [sys.executable, "-c", "import generated"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stderr)
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+            self.assertEqual(
+                {
+                    int(line)
+                    for line in re.findall(r"fixture\.py:(\d+): error:", mypy.stdout)
+                },
+                expected,
+                mypy.stdout,
+            )
+            self.assertNotIn("generated.py:", mypy.stdout)
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["fixture.py", "generated.py"],
+                        "pythonVersion": "3.10",
+                        "typeCheckingMode": "strict",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(pyright.returncode, 1, pyright.stdout + pyright.stderr)
+            diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
+            self.assertTrue(
+                all(Path(item["file"]).name == "fixture.py" for item in diagnostics),
+                diagnostics,
+            )
+            self.assertEqual(
+                {item["range"]["start"]["line"] + 1 for item in diagnostics},
+                expected,
+                diagnostics,
+            )
+
+    def test_repeated_nullable_override_conditions_do_not_create_spurious_branches(
+        self,
+    ) -> None:
+        schema = build_schema("type Query { value: String }")
+        output = render_operation_types(
+            schema,
+            "{ "
+            + " ".join(
+                f"v{i}:value v{i}:value @optional @include(if:true)" for i in range(12)
+            )
+            + " }",
+            name="Read",
+        )
+        self.assertNotIn("__graphql_desk_variant_", output)
+        self.assertEqual(output.count(": 'String | None'"), 12)
+
+    def test_guaranteed_non_null_repetitions_do_not_expand_nullable_conditionals(
+        self,
+    ) -> None:
+        schema = build_schema("type Query { value: String fixed: String! }")
+        for repeated in (
+            "v{i}:value @required v{i}:value @optional @include(if:true)",
+            "v{i}:value @optional @include(if:true) v{i}:value @required",
+            "v{i}:fixed v{i}:fixed @optional @include(if:true)",
+        ):
+            with self.subTest(repeated=repeated):
+                output = render_operation_types(
+                    schema,
+                    "{ " + " ".join(repeated.format(i=i) for i in range(12)) + " }",
+                    name="Read",
+                )
+                self.assertNotIn("__graphql_desk_variant_", output)
+                self.assertEqual(output.count(": 'String'"), 12)
