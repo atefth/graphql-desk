@@ -14,6 +14,14 @@ Python 3.10 uses pinned MIT-licensed `tomli==2.5.0`; Python 3.11+ uses standard-
 
 Parsing/loading also accepts a non-TOML `source_scope` context, stored as a keyword-only `ProjectConfig` fact. Ordinary `project` scope keeps source roots bounded. Only `explicit_cli` permits external roots; `effective_project` supplies it for an explicitly selected configuration. Reloads preserve that context only when their canonical path matches `selected_config.path`; foreign and nearest/editor configurations stay ordinary. Generated output boundaries are unchanged. [Finite source selection](source-selection.md) consumes this fact and still respects foreign nearest-project ownership.
 
+`find_project`, `effective_project` and `select_project_sources` also accept
+`config_texts`, a closed mapping of configuration paths to captured text or `None`
+for captured absence. Canonical aliases must agree; missing entries reject rather
+than reread disk. This lets one captured set, including unsaved or new configs,
+govern both discovery and source ownership through the existing parser. Omitting
+the mapping keeps ordinary disk discovery. [Editor acquisition](editor-snapshots.md)
+captures this map and owns the file checks and later freshness comparison.
+
 `select_schema(project, binding=None)` accepts a resolved schema name; only a single `default` schema permits omission. It does not infer bindings from filenames or source text. `validate_project_ownership(projects)` checks supplied project facts for shared generated trees, explicit/implicit output paths and input clobbering, including canonical symlink identities. Equal aliases deduplicate; conflicting snapshots fail. No registry, writes or source enumeration is introduced, and callers must supply every relevant project and recheck before writes.
 
 `project_bindings(config, project_id=...)` describes exact configured generated `graphql` factory identities and an optional template to the source resolver, without importing or creating those modules. `schema_for_call(config, call, project_id=...)` routes actual `ResolvedCall.schema_name` metadata to a configured schema. Both use the same explicit caller-owned project identity as module snapshots; Python assignment names never select a schema. Routing preserves call URI/version/dependency/contribution facts. Generated `gql` exports are not invented, and no source-file eligibility or freshness proof is implied.
