@@ -68,8 +68,13 @@ type argument. Supported builtin availability includes `bool`, while direct or
 aliased `bool` class bases remain rejected as non-subclassable. Constructors must resolve to trusted external builtins or typing
 exports; shadowing and mutations invalidate that proof. External arguments stay
 unverified, and containers do not inherit TypedDict provenance from their element.
+Explicit nullable aliases support only `N | None` or `None | N`, where `N` is an
+existing named or qualified type target. They retain their own alias identity and
+never confer class-base or TypedDict capabilities through aliases or reexports.
+External operands remain unverified.
 Shadowed markers, ordinary marker value assignments, ordinary variable annotations,
-strings, nested subscriptions, fixed tuples, unions, custom generic constructors,
+strings, nested subscriptions, fixed tuples, other union forms, custom generic
+constructors,
 cycles and mutations remain unresolved. Dependencies retain the entire captured
 project, including negative lookups.
 
