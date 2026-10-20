@@ -271,7 +271,7 @@ class SourceGraphTests(unittest.TestCase):
             "from typing import TypeAlias\nTypeAlias=Plain\nAlias:TypeAlias=Plain",
             "from typing import TypeAlias\nAlias:TypeAlias='Plain'",
             "from typing import TypeAlias\nAlias:TypeAlias=list[list[Plain]]",
-            "from typing import TypeAlias\nAlias:TypeAlias=Plain|None",
+            "from typing import TypeAlias\nAlias:TypeAlias=Plain|str",
             "from typing import TypeAlias\nAlias:TypeAlias=make()",
             "from typing import TypeAlias\nvalue=42\nAlias:TypeAlias=value",
             "from typing import TypeAlias\nAlias:TypeAlias=Later\nclass Later: pass",
@@ -561,6 +561,125 @@ class SourceGraphTests(unittest.TestCase):
                 ].status,
                 "unresolved",
             )
+
+    def test_nullable_aliases_preserve_availability_without_base_capabilities(
+        self,
+    ) -> None:
+        snapshots = (
+            module(
+                "models",
+                "from typing import TypeAlias\n"
+                "from typing_extensions import TypedDict\n"
+                "class Data(TypedDict):\n value: str\n"
+                "Maybe:TypeAlias=str|None\nReverse:TypeAlias=None|bool\n"
+                "Alias:TypeAlias=Maybe\nDataMaybe:TypeAlias=Data|None\n"
+                "Items:TypeAlias=list[Maybe]",
+            ),
+            module("exports", "from models import Alias as Public"),
+        )
+        symbols = (
+            "models.Maybe",
+            "models.Reverse",
+            "models.Alias",
+            "models.DataMaybe",
+            "models.Items",
+            "exports.Public",
+        )
+        result = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
+        self.assertEqual([r.status for r in result], ["resolved"] * len(symbols))
+        self.assertEqual(
+            result,
+            resolve_type_symbols(
+                symbols, modules=tuple(reversed(snapshots)), project_id="app"
+            ),
+        )
+        for declaration in (
+            "import models\nclass Bad(models.Maybe): pass",
+            "from exports import Public\nclass Bad(Public): pass",
+            "from models import DataMaybe\nclass Bad(DataMaybe,total=False): pass",
+            "from models import Reverse\nclass Bad(Reverse): pass",
+        ):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("bad.Bad",),
+                    modules=(*snapshots, module("bad", declaration)),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        for declaration in (
+            "value=42\nAlias:TypeAlias=value|None",
+            "Alias:TypeAlias=Missing|None",
+            "Alias:TypeAlias=Alias|None",
+            "Alias:TypeAlias=Later|None\nclass Later: pass",
+            "Alias:TypeAlias=str|None\nstr=other",
+            "Alias:TypeAlias=str|None\nAlias=other",
+            "Alias:TypeAlias=TypeAlias|None",
+            "Alias:TypeAlias='str'|None",
+            "Alias:TypeAlias=str|int",
+            "Alias:TypeAlias=(str|None)|None",
+            "Alias:TypeAlias=list[str]|None",
+            "Alias:TypeAlias=None|None",
+            "Marker=TypeAlias\nAlias:Marker=str|None",
+        ):
+            with self.subTest(declaration=declaration):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("bad.Alias",),
+                        modules=(
+                            module(
+                                "bad", "from typing import TypeAlias\n" + declaration
+                            ),
+                        ),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+        external = (
+            module(
+                "models",
+                "from typing import TypeAlias\nfrom unknown import Value\n"
+                "Alias:TypeAlias=Value|None",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("models.Alias",), modules=external, project_id="app")[
+                0
+            ].status,
+            "external",
+        )
+        for mutation in (
+            "import builtins\nbuiltins.str=42",
+            "import models\nmodels.Maybe=42",
+            "__builtins__['str']=42",
+        ):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("exports.Public",),
+                    modules=(*snapshots, module("mutator", mutation)),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        cycle = (
+            module(
+                "a", "from typing import TypeAlias\nfrom b import B\nA:TypeAlias=B|None"
+            ),
+            module(
+                "b", "from typing import TypeAlias\nfrom a import A\nB:TypeAlias=A|None"
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("a.A",), modules=cycle, project_id="app")[0].status,
+            "unresolved",
+        )
+        changed = (replace(snapshots[0], version=2), snapshots[1])
+        self.assertNotEqual(
+            result[0].dependencies,
+            resolve_type_symbols(symbols, modules=changed, project_id="app")[
+                0
+            ].dependencies,
+        )
 
     def test_boolean_alias_availability_does_not_prove_subclassability(self) -> None:
         snapshots = (

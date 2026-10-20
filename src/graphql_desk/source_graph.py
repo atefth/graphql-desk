@@ -163,6 +163,7 @@ class _Value:
     schema_name: str | None = None
     document: DocumentIdentity | None = None
     typed_dict: bool = False
+    class_base: bool = True
 
 
 class _Unresolved(Exception):
@@ -774,7 +775,8 @@ class _Graph:
                             and marker.text
                             in {"typing.TypeAlias", "typing_extensions.TypeAlias"}
                             and isinstance(
-                                alias.value, (ast.Name, ast.Attribute, ast.Subscript)
+                                alias.value,
+                                (ast.Name, ast.Attribute, ast.Subscript, ast.BinOp),
                             )
                         ):
                             raise _Unresolved(
@@ -805,7 +807,8 @@ class _Graph:
                             for base in declaration.bases
                         ]
                         if any(
-                            not (
+                            not base.class_base
+                            or not (
                                 base.kind == "type"
                                 and (
                                     base.text not in _BUILTIN_TYPES
@@ -885,6 +888,7 @@ class _Graph:
                 schema_name=value.schema_name,
                 document=value.document,
                 typed_dict=value.typed_dict,
+                class_base=value.class_base,
             )
             if factory is not None:
                 value = self.declared_factory(
@@ -914,6 +918,31 @@ class _Graph:
         before: tuple[int, int],
         active: set[tuple[str, str, str]],
     ) -> _Value:
+        if isinstance(node, ast.BinOp):
+            if not isinstance(node.op, ast.BitOr):
+                raise _Unresolved("Nullable aliases require a literal None union")
+            if isinstance(node.left, ast.Constant) and node.left.value is None:
+                argument = node.right
+            elif isinstance(node.right, ast.Constant) and node.right.value is None:
+                argument = node.left
+            else:
+                raise _Unresolved("Nullable aliases require a literal None union")
+            if not isinstance(argument, (ast.Name, ast.Attribute)):
+                raise _Unresolved(
+                    "Nullable aliases require one named type and literal None"
+                )
+            value = self.expression(module, argument, before, active)
+            if value.kind not in {"type", "external"} or value.text in {
+                "typing.TypeAlias",
+                "typing_extensions.TypeAlias",
+            }:
+                raise _Unresolved("Nullable alias operand is not an established type")
+            return _Value(
+                value.kind,
+                f"{module.snapshot.module}.{name}",
+                dependencies=value.dependencies,
+                class_base=False,
+            )
         if not isinstance(node, ast.Subscript):
             return self.expression(module, node, before, active)
         if (
@@ -1177,6 +1206,7 @@ class _Graph:
                     schema_name=value.schema_name,
                     document=value.document,
                     typed_dict=value.typed_dict,
+                    class_base=value.class_base,
                 )
         if isinstance(node, ast.Call):
             callee = self.expression(module, node.func, before, active, probe=probe)

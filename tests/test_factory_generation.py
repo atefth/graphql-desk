@@ -666,6 +666,19 @@ BadResult() # error
             ),
             ("from typing import TypeAlias\nText:TypeAlias=list[str]", True),
             ("from typing import TypeAlias\nText:TypeAlias=bool", True),
+            ("from typing import TypeAlias\nText:TypeAlias=str|None", True),
+            ("from typing import TypeAlias\nText:TypeAlias=None|str", True),
+            (
+                "from typing import TypeAlias\nMaybe:TypeAlias=str|None\n"
+                "Text:TypeAlias=Maybe",
+                True,
+            ),
+            ("from nullable_types import Maybe as Text\n__all__=['Text']", True),
+            (
+                "from typing import TypeAlias\nMaybe:TypeAlias=str|None\n"
+                "class Text(Maybe): pass",
+                False,
+            ),
             ("from bool_types import Flag as Text\n__all__=['Text']", True),
             (
                 "from typing import TypeAlias\nFlag:TypeAlias=bool\n"
@@ -704,6 +717,20 @@ BadResult() # error
             with self.subTest(declaration=declaration):
                 authored = source
                 if (
+                    "|None" in declaration
+                    or "None|" in declaration
+                    or "nullable_types" in declaration
+                ):
+                    authored = source.replace(
+                        "value=Text('hello')",
+                        "value:Text='hello'\nnone:Text=None\n"
+                        "assert graphql.scalar('String',none) is none",
+                    )
+                    authored += (
+                        " null_result:QueryResult={'greeting':none}\n"
+                        " bad=graphql.scalar('String',42)\n"
+                    )
+                elif (
                     "Text:TypeAlias=bool" in declaration
                     or "Text:TypeAlias=Flag" in declaration
                     or "from bool_types" in declaration
@@ -757,6 +784,16 @@ BadResult() # error
                             "file:///bool_types.py",
                             1,
                             "from typing import TypeAlias\nFlag:TypeAlias=bool",
+                        ),
+                    )
+                if "from nullable_types" in declaration:
+                    modules += (
+                        ModuleSnapshot(
+                            "p",
+                            "nullable_types",
+                            "file:///nullable_types.py",
+                            1,
+                            "from typing import TypeAlias\nMaybe:TypeAlias=str|None",
                         ),
                     )
                 resolved = resolve_project(
@@ -814,11 +851,17 @@ BadResult() # error
                     )
                     self.assertNotIn("PRIVATE_VALUE", artifacts.diagnostics[0].message)
 
-    def test_boolean_subclasses_reject_in_both_checkers_and_at_runtime(self) -> None:
+    def test_unsubclassable_aliases_reject_in_both_checkers_and_at_runtime(
+        self,
+    ) -> None:
         for source in (
             "class Bad(bool): pass\n",
             "from typing import TypeAlias\nFlag:TypeAlias=bool\n"
             "class Bad(Flag): pass\n",
+            "from typing import TypeAlias\nMaybe:TypeAlias=str|None\n"
+            "class Bad(Maybe): pass\n",
+            "from typing import TypeAlias\nMaybe:TypeAlias=str|None\n"
+            "Alias:TypeAlias=Maybe\nclass Bad(Alias): pass\n",
         ):
             with (
                 self.subTest(source=source),
@@ -837,7 +880,8 @@ BadResult() # error
                 )
                 self.assertNotEqual(runtime.returncode, 0)
                 self.assertIn("TypeError", runtime.stderr)
-                self.assertIn("bool", runtime.stderr)
+                if "bool" in source:
+                    self.assertIn("bool", runtime.stderr)
 
     def test_direct_function_and_async_calls_infer_in_original_source(self) -> None:
         source = """import asyncio
