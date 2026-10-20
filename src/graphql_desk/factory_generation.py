@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import TypedDocument
-from .config import ScalarMapping
+from .config import ProjectConfig, ScalarMapping
 from .fragment_refs import fragment_identity_key
 from .fragments import FragmentIndex, IndexedDocument, SchemaContext
 from .literal_ast import render_document_ast_types
@@ -33,6 +33,20 @@ class GeneratedFile:
 class FactoryArtifacts:
     files: tuple[GeneratedFile, ...]
     diagnostics: tuple[GraphDiagnostic, ...]
+
+
+@dataclass(frozen=True)
+class _SourceExport:
+    owner: DocumentIdentity
+    module: str
+    symbol: str
+    name: str
+
+
+@dataclass(frozen=True)
+class _SchemaArtifacts:
+    artifacts: FactoryArtifacts
+    exports: tuple[_SourceExport, ...]
 
 
 def _identifier(value: str) -> bool:
@@ -146,7 +160,7 @@ def _precision_diagnostics(
     ]
 
 
-def generate_factory_artifacts(
+def _generate_factory_artifacts(
     context: SchemaContext,
     index: FragmentIndex,
     *,
@@ -157,7 +171,7 @@ def generate_factory_artifacts(
     enums: tuple[tuple[str, str], ...] = (),
     client_directives: tuple[str, ...] = (),
     disable_masking: bool = False,
-) -> FactoryArtifacts:
+) -> _SchemaArtifacts:
     """Generate one schema's retained runtime/stub files without writing them.
 
     The caller supplies current, trusted resolver/index snapshots. The general str
@@ -175,7 +189,7 @@ def generate_factory_artifacts(
     if not _identifier(context.schema_name):
         raise ValueError("Schema binding must be a normalized Python name")
     if index.diagnostics:
-        return FactoryArtifacts((), index.diagnostics)
+        return _SchemaArtifacts(FactoryArtifacts((), index.diagnostics), ())
     snapshots = {(item.project, item.module): item for item in modules}
     if len(snapshots) != len(modules):
         raise ValueError("Source module identities must be unique")
@@ -195,7 +209,7 @@ def generate_factory_artifacts(
     overloads: list[str] = []
     error_call = documents[0].call if documents else None
     imports: list[str] = []
-    aliases: dict[str, list[str]] = {}
+    exports: list[_SourceExport] = []
     public_names: dict[str, set[str]] = {}
 
     def put(path: str, text: str) -> None:
@@ -268,8 +282,8 @@ def generate_factory_artifacts(
             label = _pascal(call.binding) if call.binding else f"Inline{number}"
             if not _identifier(label):
                 raise ValueError("Document binding has no safe generated alias")
-            path = f"{base}/_documents/d{number}"
-            module = f"{generated_package}._documents.d{number}"
+            path = f"{base}/_documents/{context.schema_name}/d{number}"
+            module = f"{generated_package}._documents.{context.schema_name}.d{number}"
             name = "GraphqlDesk"
             while any(
                 name + suffix in context.schema.type_map
@@ -348,12 +362,11 @@ def generate_factory_artifacts(
                 if label in names:
                     raise ValueError("Normalized document binding aliases collide")
                 names.add(label)
-                source_aliases = aliases.setdefault(call.module.module, [])
                 for suffix in ("Result", "Variables", "FragmentRef"):
                     if suffix == "FragmentRef" and primary is None:
                         continue
-                    source_aliases.append(
-                        f"from {module} import {name}{suffix} as {label}{suffix}\n"
+                    exports.append(
+                        _SourceExport(identity, module, name + suffix, label + suffix)
                     )
         for number, document in enumerate(documents):
             error_call = document.call
@@ -406,29 +419,6 @@ def generate_factory_artifacts(
                 f"fragments: {fragments}{default}, *, "
                 f"operation: {selector}) -> {return_alias}: ...\n"
             )
-        for source_module, source_aliases in aliases.items():
-            error_call = next(
-                item.call
-                for item in documents
-                if item.call.module.module == source_module
-            )
-            snapshot = snapshots[(project_id, source_module)]
-            path = f"{base}/sources/{source_module.replace('.', '/')}"
-            parts = source_module.split(".")
-            for length in range(1, len(parts)):
-                parent = snapshots.get((project_id, ".".join(parts[:length])))
-                if parent is not None and not parent.is_package:
-                    raise ValueError("Source companion has a non-package parent")
-            if snapshot.is_package:
-                path += "/__init__"
-            packages(path + ".py")
-            if snapshot.is_package:
-                files.pop(path + ".py", None)
-                files.pop(path + ".pyi", None)
-            exported = [line.strip().rsplit(" as ", 1)[1] for line in source_aliases]
-            text = "".join(source_aliases) + f"\n__all__ = {exported!r}\n"
-            put(path + ".py", text)
-            put(path + ".pyi", text)
         path = f"{base}/{context.schema_name}"
         packages(path + ".py")
         put(
@@ -492,9 +482,184 @@ def generate_factory_artifacts(
                 else "Invalid or excessive indexed factory graph",
                 call.range,
             )
-            return FactoryArtifacts((), (*diagnostics, diagnostic))
+            return _SchemaArtifacts(
+                FactoryArtifacts((), (*diagnostics, diagnostic)), ()
+            )
         raise ValueError("Cannot generate schema factory artifacts") from None
-    return FactoryArtifacts(
-        tuple(GeneratedFile(path, files[path]) for path in sorted(files)),
-        tuple(diagnostics),
+    return _SchemaArtifacts(
+        FactoryArtifacts(
+            tuple(GeneratedFile(path, files[path]) for path in sorted(files)),
+            tuple(diagnostics),
+        ),
+        tuple(exports),
     )
+
+
+def _assemble(
+    parts: tuple[_SchemaArtifacts, ...],
+    modules: tuple[ModuleSnapshot, ...],
+    project_id: str,
+    generated_package: str,
+) -> FactoryArtifacts:
+    diagnostics = tuple(item for part in parts for item in part.artifacts.diagnostics)
+    if any(not part.artifacts.files for part in parts):
+        return FactoryArtifacts((), diagnostics)
+    files: dict[str, str] = {}
+    exports = sorted(
+        (item for part in parts for item in part.exports),
+        key=lambda item: (item.owner.module.module, item.name),
+    )
+    snapshots = {(item.project, item.module): item for item in modules}
+    owner = exports[0].owner if exports else None
+    try:
+        for part in parts:
+            for file in part.artifacts.files:
+                if (
+                    file.relative_path in files
+                    and files[file.relative_path] != file.text
+                ):
+                    raise ValueError("Generated schema artifact paths collide")
+                files[file.relative_path] = file.text
+        grouped: dict[str, list[_SourceExport]] = {}
+        for export in exports:
+            grouped.setdefault(export.owner.module.module, []).append(export)
+        for module, aliases in grouped.items():
+            owner = aliases[0].owner
+            if len({item.name for item in aliases}) != len(aliases):
+                raise ValueError("Normalized document binding aliases collide")
+            snapshot = snapshots[(project_id, module)]
+            components = module.split(".")
+            for length in range(1, len(components)):
+                parent = snapshots.get((project_id, ".".join(components[:length])))
+                if parent is not None and not parent.is_package:
+                    raise ValueError("Source companion has a non-package parent")
+            base = generated_package.replace(".", "/")
+            path = f"{base}/sources/{module.replace('.', '/')}"
+            if snapshot.is_package:
+                path += "/__init__"
+            segments = path.split("/")
+            for length in range(1, len(segments)):
+                prefix = "/".join(segments[:length])
+                files.setdefault(
+                    prefix + "/__init__.py", '"""Generated GraphQL Desk package."""\n'
+                )
+                files.setdefault(prefix + "/__init__.pyi", "")
+            text = "".join(
+                f"from {item.module} import {item.symbol} as {item.name}\n"
+                for item in aliases
+            )
+            text += f"\n__all__ = {[item.name for item in aliases]!r}\n"
+            files[path + ".py"] = files[path + ".pyi"] = text
+    except ValueError as error:
+        if owner is None:
+            raise
+        return FactoryArtifacts(
+            (),
+            (
+                *diagnostics,
+                GraphDiagnostic(
+                    owner.module, "factory-generation", str(error), owner.call_range
+                ),
+            ),
+        )
+    return FactoryArtifacts(
+        tuple(GeneratedFile(path, files[path]) for path in sorted(files)), diagnostics
+    )
+
+
+def generate_factory_artifacts(
+    context: SchemaContext,
+    index: FragmentIndex,
+    *,
+    modules: tuple[ModuleSnapshot, ...],
+    project_id: str,
+    generated_package: str,
+    scalars: tuple[ScalarMapping, ...] = (),
+    enums: tuple[tuple[str, str], ...] = (),
+    client_directives: tuple[str, ...] = (),
+    disable_masking: bool = False,
+) -> FactoryArtifacts:
+    """Generate one schema's retained files; private documents are schema-scoped."""
+    part = _generate_factory_artifacts(
+        context,
+        index,
+        modules=modules,
+        project_id=project_id,
+        generated_package=generated_package,
+        scalars=scalars,
+        enums=enums,
+        client_directives=client_directives,
+        disable_masking=disable_masking,
+    )
+    return _assemble((part,), modules, project_id, generated_package)
+
+
+def generate_project_factory_artifacts(
+    config: ProjectConfig,
+    contexts: tuple[SchemaContext, ...],
+    index: FragmentIndex,
+    *,
+    modules: tuple[ModuleSnapshot, ...],
+    project_id: str,
+) -> FactoryArtifacts:
+    """Assemble all configured schemas atomically from trusted captured facts.
+
+    No configuration reload, schema loading, project imports or writes occur.
+    The caller owns freshness. Index errors remain fatal for this artifact set.
+    """
+    settings = {item.name: item for item in config.schemas}
+    schemas = {item.schema_name: item for item in contexts}
+    if (
+        not project_id
+        or not settings
+        or len(settings) != len(config.schemas)
+        or len(schemas) != len(contexts)
+        or settings.keys() != schemas.keys()
+        or any(not _identifier(part) for part in config.generated_package.split("."))
+        or any(item.project != project_id for item in modules)
+    ):
+        raise ValueError("Project schema/context/module identities differ")
+    package = config.root.joinpath(*config.generated_package.split("."))
+    if any(
+        item.schema_output != package / f"{item.name}.pyi" for item in config.schemas
+    ) or len({item.schema_output for item in config.schemas}) != len(config.schemas):
+        raise ValueError("Configured schema output differs from generated package")
+    if index.diagnostics:
+        return FactoryArtifacts((), index.diagnostics)
+    if index.unavailable:
+        raise ValueError("Rejected indexed documents cannot generate project artifacts")
+    identities = {
+        DocumentIdentity(document.call.module, document.call.range)
+        for document in index.documents
+    }
+    if len(identities) != len(index.documents):
+        raise ValueError("Indexed document identities must be unique")
+    if len({(item.project, item.module) for item in modules}) != len(modules):
+        raise ValueError("Source module identities must be unique")
+    for name in settings:
+        init_graphql(name)
+    if any(
+        document.call.module.project != project_id
+        or document.schema_identity[0] != project_id
+        or document.schema_identity[1] not in settings
+        for document in index.documents
+    ):
+        raise ValueError("Indexed document belongs to a foreign project or schema")
+    parts = tuple(
+        _generate_factory_artifacts(
+            schemas[name],
+            FragmentIndex(
+                tuple(doc for doc in index.documents if doc.schema_identity[1] == name),
+                (),
+            ),
+            modules=modules,
+            project_id=project_id,
+            generated_package=config.generated_package,
+            scalars=settings[name].scalars,
+            enums=settings[name].enums,
+            client_directives=config.client_directives,
+            disable_masking=settings[name].disable_masking,
+        )
+        for name in sorted(settings)
+    )
+    return _assemble(parts, modules, project_id, config.generated_package)

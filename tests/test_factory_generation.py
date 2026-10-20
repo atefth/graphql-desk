@@ -6,12 +6,18 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from graphql import build_schema
 
-from graphql_desk.config import ScalarMapping
-from graphql_desk.factory_generation import FactoryArtifacts, generate_factory_artifacts
-from graphql_desk.fragments import SchemaContext, index_fragments
+from graphql_desk.config import ProjectConfig, ScalarMapping, parse_project_config
+from graphql_desk.factory_generation import (
+    FactoryArtifacts,
+    generate_factory_artifacts,
+    generate_project_factory_artifacts,
+)
+from graphql_desk.fragments import FragmentIndex, SchemaContext, index_fragments
+from graphql_desk.project import project_bindings
 from graphql_desk.source_graph import (
     FactoryBinding,
     ModuleSnapshot,
@@ -21,6 +27,308 @@ from graphql_desk.source_graph import (
 
 
 class FactoryGenerationTests(unittest.TestCase):
+    def multi_schema(
+        self,
+    ) -> tuple[
+        ProjectConfig,
+        tuple[SchemaContext, ...],
+        tuple[ModuleSnapshot, ...],
+        FragmentIndex,
+    ]:
+        config = parse_project_config(
+            """[tool.graphql-desk]
+generated_package="generated"
+client_directives=["local"]
+[[tool.graphql-desk.schemas]]
+name="alpha"
+schema="alpha.graphql"
+schema_output="generated/alpha.pyi"
+scalars={Token={input="builtins.str",output="builtins.int"}}
+[[tool.graphql-desk.schemas]]
+name="beta"
+schema="beta.graphql"
+schema_output="generated/beta.pyi"
+disable_masking=true
+scalars={Token={input="builtins.int",output="builtins.bytes"}}
+""",
+            config_path=Path(tempfile.gettempdir()) / "assembly-facts/pyproject.toml",
+        )
+        assert config is not None
+        sdl = (
+            "scalar Token input Filter { token:Token! } "
+            "type Item { id:ID! value:Token! } type Query { item(input:Filter):Item! }"
+        )
+        contexts = tuple(
+            SchemaContext(name, build_schema(sdl), "v1:" + name)
+            for name in ("alpha", "beta")
+        )
+        source = """from typing import TYPE_CHECKING,TypeVar,Literal
+from typing_extensions import assert_type
+from graphql_desk import TypedDocument
+from generated.alpha import graphql as alpha,Filter
+from generated.beta import graphql as beta
+from generated.sources.main import (
+ AlphaQueryResult,BetaQueryResult,AlphaFieldsResult,BetaFieldsResult,
+ AlphaQueryVariables,BetaQueryVariables)
+from generated.sources.first.shared import SameResult as FirstResult
+from generated.sources.second.shared import SameResult as SecondResult
+alpha_fields=alpha('fragment Fields on Item { value }')
+beta_fields=beta('fragment Fields on Item { value }')
+alpha_query=alpha('query A {item {id ...Fields @local}}',(alpha_fields,))
+beta_query=beta('query B {item {id ...Fields}}',(beta_fields,))
+assert alpha_query.schema_name=='alpha'
+assert beta_query.schema_name=='beta'
+assert_type(alpha_query.schema_name,Literal['alpha'])
+payload:Filter={'token':'input'}
+assert alpha.scalar('Filter',payload) is payload
+assert_type(alpha.scalar('Token','value'),str)
+assert_type(beta.scalar('Token',1),int)
+if TYPE_CHECKING:
+ R=TypeVar('R')
+ V=TypeVar('V')
+ def execute(document:TypedDocument[R,V],variables:V)->R: raise RuntimeError
+ assert_type(execute(alpha_query,AlphaQueryVariables()),AlphaQueryResult)
+ assert_type(execute(beta_query,BetaQueryVariables()),BetaQueryResult)
+ def inspect(a:AlphaQueryResult,b:BetaQueryResult,
+             fa:AlphaFieldsResult,fb:BetaFieldsResult,
+             one:FirstResult,two:SecondResult)->None:
+  assert_type(a['item']['id'],str)
+  assert_type(b['item']['value'],bytes)
+  assert_type(fa['value'],int)
+  assert_type(fb['value'],bytes)
+  assert_type(one['item']['value'],int)
+  assert_type(two['item']['value'],bytes)
+"""
+        modules = (
+            ModuleSnapshot("p", "main", "file:///main.py", 1, source),
+            ModuleSnapshot(
+                "p", "first", "file:///first/__init__.py", 1, "", is_package=True
+            ),
+            ModuleSnapshot(
+                "p", "second", "file:///second/__init__.py", 1, "", is_package=True
+            ),
+            ModuleSnapshot(
+                "p",
+                "first.shared",
+                "file:///first/shared.py",
+                1,
+                "from generated.alpha import graphql\nsame=graphql('{item{id value}}')",
+            ),
+            ModuleSnapshot(
+                "p",
+                "second.shared",
+                "file:///second/shared.py",
+                1,
+                "from generated.beta import graphql\nsame=graphql('{item{id value}}')",
+            ),
+        )
+        resolved = resolve_project(
+            modules, bindings=(project_bindings(config, project_id="p"),)
+        )
+        self.assertEqual(resolved.diagnostics, ())
+        index = index_fragments(
+            resolved, schemas={("p", item.schema_name): item for item in contexts}
+        )
+        self.assertEqual(index.diagnostics, ())
+        return config, contexts, modules, index
+
+    def test_project_assembly_merges_source_aliases_and_isolates_schema_files(
+        self,
+    ) -> None:
+        config, contexts, modules, index = self.multi_schema()
+        artifacts = generate_project_factory_artifacts(
+            config, contexts, index, modules=modules, project_id="p"
+        )
+        self.assertEqual(artifacts.diagnostics, ())
+        paths = {item.relative_path for item in artifacts.files}
+        self.assertIn("generated/_documents/alpha/d0.pyi", paths)
+        self.assertIn("generated/_documents/beta/d0.pyi", paths)
+        self.assertIn("generated/sources/first/shared.pyi", paths)
+        self.assertIn("generated/sources/second/shared.pyi", paths)
+        main = next(
+            item.text
+            for item in artifacts.files
+            if item.relative_path == "generated/sources/main.pyi"
+        )
+        self.assertIn("._documents.alpha.", main)
+        self.assertIn("._documents.beta.", main)
+        self.assertEqual(main.count(" as AlphaQueryResult"), 1)
+        self.assertEqual(main.count(" as BetaQueryResult"), 1)
+        permuted = generate_project_factory_artifacts(
+            replace(config, schemas=tuple(reversed(config.schemas))),
+            tuple(reversed(contexts)),
+            replace(index, documents=tuple(reversed(index.documents))),
+            modules=tuple(reversed(modules)),
+            project_id="p",
+        )
+        self.assertEqual(artifacts, permuted)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            self.check(root)
+            runtime = subprocess.run(
+                [sys.executable, str(root / "main.py")],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+            negative = """from main import beta_query,beta_fields
+from generated.alpha import graphql as alpha
+from generated.beta import graphql as beta
+from generated.sources.main import AlphaQueryResult,BetaQueryResult
+from graphql_desk import TypedDocument
+from typing import TypeVar
+R=TypeVar('R')
+V=TypeVar('V')
+def execute(document:TypedDocument[R,V],variables:V)->R: raise RuntimeError
+alpha.scalar('Token',1) # error
+beta.scalar('Token','value') # error
+wrong=alpha('query A {item {id ...Fields @local}}',(beta_fields,))
+execute(wrong,{}) # error
+def inspect(a:AlphaQueryResult,b:BetaQueryResult)->None:
+ a['item']['value'] # error
+ value:int=b['item']['value'] # error
+read:TypedDocument[AlphaQueryResult,dict[str,str]]=beta_query # error
+"""
+            (root / "bad.py").write_text(negative, encoding="utf8")
+            self.check(
+                root,
+                {
+                    "bad.py": {
+                        line
+                        for line, text in enumerate(negative.splitlines(), 1)
+                        if "# error" in text
+                    }
+                },
+            )
+            bad_runtime = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from main import alpha,beta_fields; "
+                    "alpha('query A {item {id ...Fields @local}}',(beta_fields,))",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(bad_runtime.returncode, 0)
+            self.assertIn("different schema", bad_runtime.stderr)
+
+    def test_project_assembly_context_index_and_alias_failures_are_atomic(self) -> None:
+        config, contexts, modules, index = self.multi_schema()
+        for invalid_contexts in (
+            contexts[:1],
+            contexts + contexts[:1],
+            (*contexts, replace(contexts[0], schema_name="extra")),
+        ):
+            with self.subTest(contexts=invalid_contexts), self.assertRaises(ValueError):
+                generate_project_factory_artifacts(
+                    config, invalid_contexts, index, modules=modules, project_id="p"
+                )
+        for invalid in (
+            replace(index, documents=index.documents + index.documents[:1]),
+            replace(
+                index,
+                documents=(
+                    replace(index.documents[0], schema_identity=("other", "alpha")),
+                ),
+            ),
+            replace(
+                index,
+                documents=(
+                    replace(index.documents[0], schema_identity=("p", "foreign")),
+                ),
+            ),
+        ):
+            with self.subTest(index=invalid), self.assertRaises(ValueError):
+                generate_project_factory_artifacts(
+                    config, contexts, invalid, modules=modules, project_id="p"
+                )
+        stale = replace(
+            index,
+            documents=(
+                replace(index.documents[0], context_token="stale"),
+                *index.documents[1:],
+            ),
+        )
+        result = generate_project_factory_artifacts(
+            config, contexts, stale, modules=modules, project_id="p"
+        )
+        self.assertEqual(result.files, ())
+        self.assertTrue(result.diagnostics)
+        collision_source = (
+            "from generated.alpha import graphql as alpha\n"
+            "from generated.beta import graphql as beta\n"
+            "get_book=alpha('{item{id}}')\nGetBook=beta('{item{id}}')\n"
+        )
+        collision = (replace(modules[0], source=collision_source),)
+        resolved = resolve_project(
+            collision, bindings=(project_bindings(config, project_id="p"),)
+        )
+        invalid = index_fragments(
+            resolved, schemas={("p", c.schema_name): c for c in contexts}
+        )
+        result = generate_project_factory_artifacts(
+            config, contexts, invalid, modules=collision, project_id="p"
+        )
+        self.assertEqual(result.files, ())
+        self.assertIn("aliases collide", result.diagnostics[-1].message)
+        mixed = (
+            replace(
+                modules[0],
+                source=modules[0].source.replace("(alpha_fields,)", "(beta_fields,)"),
+            ),
+            *modules[1:],
+        )
+        rejected = index_fragments(
+            resolve_project(
+                mixed, bindings=(project_bindings(config, project_id="p"),)
+            ),
+            schemas={("p", c.schema_name): c for c in contexts},
+        )
+        self.assertTrue(rejected.diagnostics)
+        result = generate_project_factory_artifacts(
+            config, contexts, rejected, modules=mixed, project_id="p"
+        )
+        self.assertEqual(result.files, ())
+        self.assertEqual(result.diagnostics, rejected.diagnostics)
+
+    def test_project_assembly_uses_captured_config_without_io_or_mapping_imports(
+        self,
+    ) -> None:
+        config, contexts, _, _ = self.multi_schema()
+        settings = replace(
+            config.schemas[0],
+            scalars=(ScalarMapping("Token", "absent.Input", "absent.Output"),),
+        )
+        config = replace(config, schemas=(settings, config.schemas[1]))
+        with (
+            patch("builtins.open", side_effect=AssertionError("No I/O")),
+            patch.object(Path, "open", side_effect=AssertionError("No I/O")),
+        ):
+            result = generate_project_factory_artifacts(
+                config, contexts, FragmentIndex((), ()), modules=(), project_id="p"
+            )
+        self.assertEqual(result.diagnostics, ())
+        self.assertTrue(result.files)
+        alpha = next(
+            item.text
+            for item in result.files
+            if item.relative_path == "generated/alpha.pyi"
+        )
+        self.assertIn("from absent import Input", alpha)
+        self.assertIn("from absent import Output", alpha)
+        invalid = replace(
+            config,
+            schemas=(replace(settings, schema_output=config.root / "outside.pyi"),),
+        )
+        with self.assertRaises(ValueError):
+            generate_project_factory_artifacts(
+                invalid, contexts[:1], FragmentIndex((), ()), modules=(), project_id="p"
+            )
+
     def test_generated_callable_scalar_methods_share_schema_input_types(self) -> None:
         context = SchemaContext(
             "main",
@@ -151,7 +459,8 @@ def dynamic(name:str)->None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(file.text, encoding="utf8")
         for module in modules:
-            path = root / (module.module.replace(".", "/") + ".py")
+            relative = module.module.replace(".", "/")
+            path = root / (relative + ("/__init__.py" if module.is_package else ".py"))
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(module.source, encoding="utf8")
 
