@@ -4,7 +4,12 @@ import unittest
 from dataclasses import replace
 
 from graphql_desk.source import Span
-from graphql_desk.source_graph import ModuleSnapshot, ResolvedCall, resolve_project
+from graphql_desk.source_graph import (
+    ModuleSnapshot,
+    ResolvedCall,
+    resolve_parse_sources,
+    resolve_project,
+)
 from graphql_desk.source_maps import (
     Position,
     SourceMap,
@@ -30,6 +35,18 @@ def mapped(expression: str) -> tuple[SourceMap, ResolvedCall, ModuleSnapshot]:
 
 
 class SourceMapTests(unittest.TestCase):
+    def test_parser_facts_use_the_same_versioned_literal_map(self) -> None:
+        module = snapshot(
+            "main", "from graphql_desk import parse\nq=parse('a' + '\\x62')"
+        )
+        (call,) = resolve_parse_sources((module,)).calls
+        mapping = build_source_map(call, (module,))
+        self.assertEqual(mapping.text, "ab")
+        (origin,) = mapping.to_host(Span(1, 2))
+        self.assertEqual(module.source[origin.range.start : origin.range.end], r"\x62")
+        with self.assertRaisesRegex(ValueError, "stale"):
+            build_source_map(call, (replace(module, version=2),))
+
     def test_decoding_corpus(self) -> None:
         cases = (
             ('"abc"', "abc"),

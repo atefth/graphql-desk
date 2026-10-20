@@ -11,12 +11,14 @@ from graphql import (
 )
 
 from .literal_ast import render_document_ast_types
+from .source import Span
 from .source_graph import (
     GraphDiagnostic,
     ModuleDependency,
     ModuleSnapshot,
     resolve_parse_sources,
 )
+from .source_maps import HostSpan, build_source_map
 
 
 @dataclass(frozen=True)
@@ -50,8 +52,9 @@ def render_captured_parse_companion(
     """Select one captured owner's declarations and diagnostics; never publish.
 
     Invalid parser strings are omitted while independent valid strings survive.
-    Syntax errors identify the host call and retain decoded parser locations in
-    their message. Root imports are not rewritten or automatically made precise.
+    Syntax diagnostics name actual contributing snapshots, which may differ from
+    the selected owner. Unavailable provenance falls back to the whole host call;
+    decoded parser locations remain in messages. Imports are not rewritten.
     """
     facts = resolve_parse_sources(modules)
     owners = [
@@ -64,40 +67,53 @@ def render_captured_parse_companion(
     diagnostics = [item for item in facts.diagnostics if item.module == identity]
     documents: dict[str, str] = {}
     seen: set[str] = set()
-    failures: dict[str, tuple[str, str]] = {}
+    failures: dict[str, tuple[str, str, tuple[int, ...]]] = {}
     for call in facts.calls:
         if call.module != identity:
             continue
-        if call.source in seen:
-            if call.source in failures:
-                code, message = failures[call.source]
-                diagnostics.append(GraphDiagnostic(identity, code, message, call.range))
-            continue
-        seen.add(call.source)
-        try:
-            document = parse(call.source)
-            if _executable(document):
-                documents[call.source] = render_document_ast_types(
-                    document, name=f"Parse{len(documents)}"
+        if call.source not in seen:
+            seen.add(call.source)
+            try:
+                document = parse(call.source)
+                if _executable(document):
+                    documents[call.source] = render_document_ast_types(
+                        document, name=f"Parse{len(documents)}"
+                    )
+            except GraphQLError as error:
+                failures[call.source] = (
+                    "parse-syntax",
+                    str(error),
+                    tuple(error.positions or ()),
                 )
-        except GraphQLError as error:
-            failures[call.source] = ("parse-syntax", str(error))
-            diagnostics.append(
-                GraphDiagnostic(identity, "parse-syntax", str(error), call.range)
-            )
-        except (RecursionError, ValueError) as error:
-            failures[call.source] = (
-                "parse-fallback",
-                str(error) or "Literal AST exceeds declaration nesting limits",
-            )
-            diagnostics.append(
-                GraphDiagnostic(
-                    identity,
+            except (RecursionError, ValueError) as error:
+                failures[call.source] = (
                     "parse-fallback",
                     str(error) or "Literal AST exceeds declaration nesting limits",
-                    call.range,
+                    (),
                 )
-            )
+        if call.source not in failures:
+            continue
+        code, message, positions = failures[call.source]
+        origins: tuple[HostSpan, ...] = ()
+        if positions:
+            try:
+                mapping = build_source_map(call, modules)
+                mapped = [
+                    mapping.to_host(Span(position, min(position + 1, len(call.source))))
+                    for position in positions
+                ]
+                if all(mapped):
+                    origins = tuple(
+                        dict.fromkeys(origin for group in mapped for origin in group)
+                    )
+            except (ValueError, RecursionError):
+                pass
+        if not origins:
+            origins = (HostSpan(call.module, call.range),)
+        diagnostics.extend(
+            GraphDiagnostic(origin.module, code, message, origin.range)
+            for origin in origins
+        )
     return CapturedParseCompanion(
         identity,
         _assemble_parse_companion(tuple(documents.items())),

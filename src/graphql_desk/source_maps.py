@@ -15,7 +15,12 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from .source import Span
-from .source_graph import ModuleDependency, ModuleSnapshot, ResolvedCall
+from .source_graph import (
+    ModuleDependency,
+    ModuleSnapshot,
+    ResolvedCall,
+    ResolvedParseCall,
+)
 
 Encoding = Literal["codepoint", "utf-8", "utf-16"]
 
@@ -309,7 +314,7 @@ def _tokens(source: str) -> tuple[tuple[int, Span], ...]:
 
 
 def build_source_map(
-    call: ResolvedCall, modules: tuple[ModuleSnapshot, ...]
+    call: ResolvedCall | ResolvedParseCall, modules: tuple[ModuleSnapshot, ...]
 ) -> SourceMap:
     """Verify provenance and decode literal tokens without executing project code."""
     snapshots: dict[tuple[str, str], ModuleSnapshot] = {}
