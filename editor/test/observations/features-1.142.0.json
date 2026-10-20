@@ -3,6 +3,7 @@
   "vscode": "1.142.0",
   "diagnostics": true,
   "completion": true,
+  "boundaryCompletion": true,
   "hover": true,
   "schemaDefinition": true,
   "fragmentDefinition": true,
