@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import FrozenInstanceError
+from inspect import Parameter, isfunction, signature
 from typing import TYPE_CHECKING, Any
 
 from graphql import (
@@ -14,10 +15,60 @@ from graphql import (
 )
 from typing_extensions import assert_type
 
+import graphql_desk.runtime as runtime
 from graphql_desk import TypedDocument, gql, graphql, init_graphql, parse
+from graphql_desk.runtime import scalar
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_root_scalar_retains_function_alias_and_call_signatures(self) -> None:
+        self.assertIs(graphql, gql)
+        self.assertIs(graphql, runtime.graphql)
+        self.assertIs(gql, runtime.gql)
+        self.assertTrue(isfunction(graphql))
+        self.assertIs(graphql.scalar, scalar)
+        self.assertIs(gql.scalar, scalar)
+        parameters = signature(graphql).parameters
+        self.assertEqual(tuple(parameters), ("source", "fragments", "operation"))
+        self.assertEqual(parameters["operation"].kind, Parameter.KEYWORD_ONLY)
+        self.assertEqual(parameters["fragments"].default, ())
+        values: list[dict[str, int]] = [{"id": 1}]
+        assert_type(graphql.scalar("UnresolvedInput", values), list[dict[str, int]])
+        self.assertIs(graphql.scalar("UnresolvedInput", values), values)
+        payload = {"id": "1"}
+        assert_type(gql.scalar(name="UnresolvedInput", value=payload), dict[str, str])
+        self.assertIs(gql.scalar("UnresolvedInput", payload), payload)
+        assert_type(graphql.scalar("UnresolvedInput", None), None)
+        self.assertIsNone(gql.scalar("UnresolvedInput", None))
+        fragment = gql(source="fragment F on User { id }")
+        document = graphql(
+            source="query Read { user { ...F } }",
+            fragments=[fragment],
+            operation="Read",
+        )
+        assert_type(document, TypedDocument[Any, Any])
+        self.assertEqual(document.operation_name, "Read")
+        self.assertEqual(len(document.ast.definitions), 2)
+
+    def test_scalar_is_untyped_schema_agnostic_identity(self) -> None:
+        factory = init_graphql("main")
+        values: list[dict[str, list[int]]] = [{"nested": [1]}]
+        viewed = factory.scalar("UnresolvedInput", values)
+        assert_type(viewed, list[dict[str, list[int]]])
+        self.assertIs(viewed, values)
+        self.assertIs(viewed[0], values[0])
+        viewed[0]["nested"].append(2)
+        self.assertEqual(values, [{"nested": [1, 2]}])
+        self.assertIs(scalar("UnresolvedInput", values), values)
+        self.assertEqual(set(values[0]), {"nested"})
+        self.assertIsNone(factory.scalar("UnresolvedInput", None))
+        assert_type(factory.scalar("UnresolvedInput", None), None)
+        assert_type(scalar("UnresolvedInt", 1), int)
+        payload = {"id": "1"}
+        self.assertIs(factory.scalar("UnresolvedInput", payload), payload)
+        marker = object()
+        self.assertIs(factory.scalar("NoRuntimeValidation", marker), marker)
+
     def test_primary_fragment_unmask_is_removed_before_composition(self) -> None:
         source = "fragment Card on User @_unmask { id }"
         fragment = graphql(source)
@@ -161,3 +212,8 @@ if TYPE_CHECKING:
     graphql("{ x }", 1)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
     init_graphql(1)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
     init_graphql("main")("{ x }", operation=1)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+
+    graphql("{ x }", operation=1)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+    graphql("{ x }", (), "Read")  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+    graphql.scalar(1, None)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+    gql.scalar("String")  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
