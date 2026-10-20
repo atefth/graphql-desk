@@ -27,6 +27,7 @@ async function run() {
     "schema.graphql": schema,
     "main.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('{ user { missing old } }')\r\n",
     "partial.py": "from graphql_desk import gql\nq=gql('{ user { na')\n",
+    "blank.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''\r\n\r\n''')\r\n",
     "selected.py": "outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql('{ user { name ...Card } }',[card])\n",
     "fragments.py": "from graphql_desk import gql\ncard=gql('fragment Card on User { id }')\n",
   };
@@ -68,7 +69,7 @@ async function run() {
   const native = vscode.languages.registerHoverProvider({ language: "python", scheme: "file" }, {
     provideHover() { return new vscode.Hover("native-python-fixture"); },
   });
-  const observations = { outcome: "read-only-features-observed", vscode: vscode.version, diagnostics: false, completion: false, hover: false,
+  const observations = { outcome: "read-only-features-observed", vscode: vscode.version, diagnostics: false, completion: false, boundaryCompletion: false, hover: false,
     schemaDefinition: false, fragmentDefinition: false, nativeCoexistence: false,
     highlighting: false, nativePythonHover: false, untrustedNoAnalysis: false, diskUnchanged: false, cleanBuffers: false };
   try {
@@ -87,6 +88,16 @@ async function run() {
     assert.ok(name);
     assert.equal(partial.getText(name.range), "na");
     observations.completion = true;
+    const blank = documents.get("blank.py");
+    const blankPosition = blank.positionAt(blank.getText().indexOf("'''\r\n") + 5);
+    const blankCompletion = await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", blank.uri, blankPosition);
+    const query = blankCompletion.items.find(item => item.label === "query");
+    assert.ok(query);
+    assert.equal(query.insertText, "query");
+    assert.ok(query.range.isEmpty);
+    assert.ok(query.range.start.isEqual(blankPosition));
+    assert.ok(query.range.end.isEqual(blankPosition));
+    observations.boundaryCompletion = true;
     const selected = documents.get("selected.py");
     const position = selected.positionAt(selected.getText().indexOf("name") + 1);
     const hover = await vscode.commands.executeCommand("vscode.executeHoverProvider", selected.uri, position);

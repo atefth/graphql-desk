@@ -6,7 +6,7 @@
 
 The pinned lower-level `graphql-language-service==5.7.0` and `graphql==16.12.0` supply online completion/hover and validation primitives. Validation uses separately parsed raw source ASTs with their original locations, rather than concatenating printed fragments or compensating for guessed range endpoints. Diagnostics retain separate syntax, validation, deprecation and source/index codes, with identical results deduplicated. Configured client directive names may be supplied through `clientDirectives(bundle, call)`; undeclared pinned client names are suppressed without bypassing validation of schema-declared directives.
 
-Incomplete GraphQL inside valid Python still has real maps and can complete. Completion inserts a plain GraphQL name/value label only where one linear current-file map span supplies an unambiguous replacement. It rejects atomic escape interiors, ranges crossing literal gaps and repeated/shared origins. It does not rewrite Python escaping, insert snippets, plan refactors or claim project-wide edit safety. Native hover signatures/descriptions/deprecation are retained; input-member qualification is corrected from actual input type metadata, and actual argument/input defaults are shown. Hover Markdown is untrusted and HTML-disabled.
+Incomplete GraphQL inside valid Python still has real maps and can complete. Completion inserts a plain GraphQL name/value label where one linear current-file map span supplies an unambiguous replacement, or inserts at a uniquely mapped zero-width boundary with no matching linear occurrence. The latter preserves escaped whitespace and physical CRLF bytes while allowing the existing language-service suggestions. Atomic escape interiors, ranges crossing literal gaps and repeated/shared origins remain rejected, including repeated empty constants whose identical origins deduplicate. It does not rewrite Python escaping, insert snippets, plan refactors or claim project-wide edit safety. Native hover signatures/descriptions/deprecation are retained; input-member qualification is corrected from actual input type metadata, and actual argument/input defaults are shown. Hover Markdown is untrusted and HTML-disabled.
 
 Definitions cover schema fields, arguments, directives, named types, enum/input members, local variables and explicit indexed fragments. They use original SDL/node locations and raw call maps; printed definition offsets are never treated as authored positions. Introspection schemas lack authored SDL definitions, so no schema location is invented. Definition traversal requires parseable GraphQL. Missing or unresolved fragment facts do not become trusted navigation targets.
 
@@ -20,6 +20,8 @@ The isolated host suite passed on VS Code 1.141.0 and 1.142.0 with official Pyth
 2026.10.0 and Pylance 2026.4.1. It exercised actual completion, hover and definition
 commands, diagnostics, decorations, native Python hover coexistence, trust
 revocation and disposal while preserving fixture disk bytes and clean buffers.
+The feature suites also verify an exact empty insertion range on a blank CRLF
+GraphQL line with preceding Unicode through the registered completion provider.
 Observations are under `editor/test/observations/`; reproduce with
 `npm run test:host -- 1.141.0` or `1.142.0` after the Python development environment
 is installed. The runner installs pinned official extensions into an isolated
