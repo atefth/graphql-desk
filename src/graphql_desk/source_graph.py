@@ -112,8 +112,24 @@ class _Unresolved(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class _Parsed:
+    # Private syntax is read-only; all per-run binding/mutation state lives in _Module.
+    tree: ast.Module | None
+    error: str | None = None
+
+
+def _parse(snapshot: ModuleSnapshot) -> _Parsed:
+    try:
+        tree = ast.parse(snapshot.source)
+        compile(tree, snapshot.uri, "exec")
+    except (SyntaxError, ValueError, UnicodeError, RecursionError) as error:
+        return _Parsed(None, str(error))
+    return _Parsed(tree)
+
+
 class _Module:
-    def __init__(self, snapshot: ModuleSnapshot) -> None:
+    def __init__(self, snapshot: ModuleSnapshot, parsed: _Parsed) -> None:
         self.snapshot = snapshot
         self.identity = ModuleDependency(
             snapshot.project, snapshot.module, snapshot.uri, snapshot.version
@@ -122,8 +138,9 @@ class _Module:
         self.starts = [0]
         for line in self.lines:
             self.starts.append(self.starts[-1] + len(line))
-        self.tree = ast.parse(snapshot.source)
-        compile(self.tree, snapshot.uri, "exec")
+        if parsed.tree is None:
+            raise ValueError(parsed.error)
+        self.tree = parsed.tree
         self.bindings: dict[
             str, list[tuple[tuple[int, int], ast.expr | tuple[str, str] | _Value]]
         ] = {}
@@ -271,91 +288,104 @@ class _Module:
         )
 
 
+def _validate_request(
+    snapshots: tuple[ModuleSnapshot, ...], bindings: tuple[ProjectBindings, ...]
+) -> tuple[dict[str, ProjectBindings], dict[tuple[str, str, str], FactoryBinding]]:
+    projects: dict[str, ProjectBindings] = {}
+    factories: dict[tuple[str, str, str], FactoryBinding] = {}
+    for project in bindings:
+        if not project.project or project.project in projects:
+            raise ValueError("Project binding identities must be nonempty and unique")
+        if not project.schemas or len(set(project.schemas)) != len(project.schemas):
+            raise ValueError("Project schemas must be nonempty and unique")
+        if any(
+            re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", name) is None
+            or keyword.iskeyword(name)
+            for name in project.schemas
+        ):
+            raise ValueError("Schema names must be valid configured binding names")
+        if (
+            project.default_schema is not None
+            and project.default_schema not in project.schemas
+        ):
+            raise ValueError("Default schema must name a configured schema")
+        projects[project.project] = project
+        for factory in project.factories:
+            if (
+                not factory.module
+                or any(
+                    not part.isidentifier() or keyword.iskeyword(part)
+                    for part in factory.module.split(".")
+                )
+                or unicodedata.normalize("NFKC", factory.module) != factory.module
+                or not factory.export.isidentifier()
+                or keyword.iskeyword(factory.export)
+                or unicodedata.normalize("NFKC", factory.export) != factory.export
+            ):
+                raise ValueError(
+                    "Factory identities must use canonical module/export names"
+                )
+            if (
+                factory.schema_name is not None
+                and factory.schema_name not in project.schemas
+            ):
+                raise ValueError("Factory schema must name a configured schema")
+            factory_key = (project.project, factory.module, factory.export)
+            if factory_key in factories or factory_key[1:] == (
+                "graphql_desk",
+                "init_graphql",
+            ):
+                raise ValueError("Duplicate or reserved factory identity")
+            factories[factory_key] = factory
+    uris: set[tuple[str, str]] = set()
+    keys: set[tuple[str, str]] = set()
+    for snapshot in snapshots:
+        key = (snapshot.project, snapshot.module)
+        if (
+            not snapshot.project
+            or not snapshot.uri
+            or not snapshot.module
+            or unicodedata.normalize("NFKC", snapshot.module) != snapshot.module
+            or any(
+                not part.isidentifier() or keyword.iskeyword(part)
+                for part in snapshot.module.split(".")
+            )
+        ):
+            raise ValueError(
+                "Snapshots require project, URI and a valid dotted module name"
+            )
+        if key in keys or (snapshot.project, snapshot.uri) in uris:
+            raise ValueError("Duplicate project module or URI identity")
+        uris.add((snapshot.project, snapshot.uri))
+        keys.add(key)
+    return projects, factories
+
+
 class _Graph:
     def __init__(
         self,
         snapshots: tuple[ModuleSnapshot, ...],
         bindings: tuple[ProjectBindings, ...],
+        parses: dict[tuple[str, str], _Parsed] | None = None,
     ) -> None:
         self.documents: dict[DocumentIdentity, ResolvedCall] = {}
         self.active_documents: set[DocumentIdentity] = set()
         self.failed_modules: set[ModuleDependency] = set()
         self.ready = False
-        self.bindings: dict[str, ProjectBindings] = {}
-        self.factories: dict[tuple[str, str, str], FactoryBinding] = {}
-        for project in bindings:
-            if not project.project or project.project in self.bindings:
-                raise ValueError(
-                    "Project binding identities must be nonempty and unique"
-                )
-            if not project.schemas or len(set(project.schemas)) != len(project.schemas):
-                raise ValueError("Project schemas must be nonempty and unique")
-            if any(
-                re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", name) is None
-                or keyword.iskeyword(name)
-                for name in project.schemas
-            ):
-                raise ValueError("Schema names must be valid configured binding names")
-            if (
-                project.default_schema is not None
-                and project.default_schema not in project.schemas
-            ):
-                raise ValueError("Default schema must name a configured schema")
-            self.bindings[project.project] = project
-            for factory in project.factories:
-                if (
-                    not factory.module
-                    or any(
-                        not part.isidentifier() or keyword.iskeyword(part)
-                        for part in factory.module.split(".")
-                    )
-                    or unicodedata.normalize("NFKC", factory.module) != factory.module
-                    or not factory.export.isidentifier()
-                    or keyword.iskeyword(factory.export)
-                    or unicodedata.normalize("NFKC", factory.export) != factory.export
-                ):
-                    raise ValueError(
-                        "Factory identities must use canonical module/export names"
-                    )
-                if (
-                    factory.schema_name is not None
-                    and factory.schema_name not in project.schemas
-                ):
-                    raise ValueError("Factory schema must name a configured schema")
-                factory_key = (project.project, factory.module, factory.export)
-                if factory_key in self.factories or factory_key[1:] == (
-                    "graphql_desk",
-                    "init_graphql",
-                ):
-                    raise ValueError("Duplicate or reserved factory identity")
-                self.factories[factory_key] = factory
+        self.bindings, self.factories = _validate_request(snapshots, bindings)
         self.modules: dict[tuple[str, str], _Module] = {}
         self.diagnostics: list[GraphDiagnostic] = []
         self.mutated: set[tuple[str, str]] = set()
-        uris: set[tuple[str, str]] = set()
-        keys: set[tuple[str, str]] = set()
-        self.supplied = keys
+        self.supplied = {(item.project, item.module) for item in snapshots}
         for snapshot in snapshots:
             key = (snapshot.project, snapshot.module)
-            if (
-                not snapshot.project
-                or not snapshot.uri
-                or not snapshot.module
-                or unicodedata.normalize("NFKC", snapshot.module) != snapshot.module
-                or any(
-                    not part.isidentifier() or keyword.iskeyword(part)
-                    for part in snapshot.module.split(".")
-                )
-            ):
-                raise ValueError(
-                    "Snapshots require project, URI and a valid dotted module name"
-                )
-            if key in keys or (snapshot.project, snapshot.uri) in uris:
-                raise ValueError("Duplicate project module or URI identity")
-            uris.add((snapshot.project, snapshot.uri))
-            keys.add(key)
             try:
-                self.modules[key] = _Module(snapshot)
+                parsed = (
+                    _parse(snapshot)
+                    if parses is None
+                    else parses[(snapshot.uri, snapshot.source)]
+                )
+                self.modules[key] = _Module(snapshot, parsed)
             except (SyntaxError, ValueError, UnicodeError, RecursionError) as error:
                 identity = ModuleDependency(
                     snapshot.project, snapshot.module, snapshot.uri, snapshot.version
@@ -986,7 +1016,15 @@ def resolve_project(
     modules: tuple[ModuleSnapshot, ...], *, bindings: tuple[ProjectBindings, ...] = ()
 ) -> ProjectSources:
     """Resolve stable module calls in caller-selected snapshots; no discovery."""
-    graph = _Graph(modules, bindings)
+    return _resolve(modules, bindings)
+
+
+def _resolve(
+    modules: tuple[ModuleSnapshot, ...],
+    bindings: tuple[ProjectBindings, ...],
+    parses: dict[tuple[str, str], _Parsed] | None = None,
+) -> ProjectSources:
+    graph = _Graph(modules, bindings, parses)
     calls: list[ResolvedCall] = []
     for module in graph.modules.values():
 
@@ -1099,3 +1137,81 @@ def resolve_project(
         if not graph.failed_modules.intersection(call.dependencies)
     )
     return ProjectSources(current, tuple(graph.diagnostics))
+
+
+@dataclass(frozen=True)
+class _ProjectResult:
+    modules: tuple[ModuleSnapshot, ...]
+    bindings: tuple[ProjectBindings, ...]
+    result: ProjectSources
+
+
+class IncrementalResolver:
+    """Reuse parsing and unchanged projects across explicit synchronous requests.
+
+    Changed projects rerun all semantic analysis, including failed and namespace
+    lookups. The caller still owns freshness and publication authorization.
+    """
+
+    def __init__(self) -> None:
+        self._parses: dict[tuple[str, str], _Parsed] = {}
+        self._projects: dict[str, _ProjectResult] = {}
+
+    def clear(self) -> None:
+        """Release all retained inputs and results."""
+        self._parses.clear()
+        self._projects.clear()
+
+    def resolve(
+        self,
+        modules: tuple[ModuleSnapshot, ...],
+        *,
+        bindings: tuple[ProjectBindings, ...] = (),
+    ) -> ProjectSources:
+        _validate_request(modules, bindings)
+        parses: dict[tuple[str, str], _Parsed] = {}
+        for snapshot in modules:
+            key = (snapshot.uri, snapshot.source)
+            if key not in parses:
+                parses[key] = (
+                    self._parses[key] if key in self._parses else _parse(snapshot)
+                )
+        grouped: dict[str, list[ModuleSnapshot]] = {}
+        for snapshot in modules:
+            grouped.setdefault(snapshot.project, []).append(snapshot)
+        contexts = {item.project: (item,) for item in bindings}
+        projects: dict[str, _ProjectResult] = {}
+        for project, snapshots in grouped.items():
+            selected = tuple(snapshots)
+            context = contexts.get(project, ())
+            previous = self._projects.get(project)
+            if previous is not None and (previous.modules, previous.bindings) == (
+                selected,
+                context,
+            ):
+                projects[project] = previous
+            else:
+                projects[project] = _ProjectResult(
+                    selected, context, _resolve(selected, context, parses)
+                )
+        order = {
+            (item.project, item.module): index for index, item in enumerate(modules)
+        }
+        calls = [call for project in projects.values() for call in project.result.calls]
+        diagnostics = [
+            diagnostic
+            for project in projects.values()
+            for diagnostic in project.result.diagnostics
+        ]
+        calls.sort(key=lambda call: order[(call.module.project, call.module.module)])
+        # Cold resolution reports every parse error before any call traversal error.
+        diagnostics.sort(
+            key=lambda item: (
+                item.code != "invalid-python",
+                order[(item.module.project, item.module.module)],
+            )
+        )
+        result = ProjectSources(tuple(calls), tuple(diagnostics))
+        self._parses = parses
+        self._projects = projects
+        return result

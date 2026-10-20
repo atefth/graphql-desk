@@ -2,7 +2,7 @@
 
 `graphql_desk.source_graph.resolve_project(modules, bindings=())` consumes a tuple of caller-selected `ModuleSnapshot(project, module, uri, version, source, is_package=False)` facts. It never discovers files, imports project modules or executes Python. Module identity and URI must be unique within a project; project boundaries isolate identical module names.
 
-The initial slice resolves stable module-level GraphQL Desk callable aliases, string constants, literal `+`, imports, relative imports, namespace access and transitive reexports. Each resolved call carries its source text, optional selected operation/binding, host call span, contributing literal spans and module URI/version dependencies. A fresh input snapshot recomputes facts; there is no persistent index or cache. Literal spans identify contributing expressions, not exact decoded-character mappings.
+The initial slice resolves stable module-level GraphQL Desk callable aliases, string constants, literal `+`, imports, relative imports, namespace access and transitive reexports. Each resolved call carries its source text, optional selected operation/binding, host call span, contributing literal spans and module URI/version dependencies. The cold function recomputes facts without a hidden global cache. Literal spans identify contributing expressions, not exact decoded-character mappings.
 
 The resolver rejects ambiguous/rebound or mutation-dependent bindings and reports unsupported static-source cases at known GraphQL call sites. Ordinary imported Python functions and local lookalike modules do not become GraphQL candidates. Namespace reflection and escaped module objects may prevent a stability proof and must not yield successful precise facts.
 
@@ -15,3 +15,31 @@ Root `init_graphql` calls resolve static schema strings/constants and preserve b
 Literal fragment argument lists/tuples resolve imported, reexported, qualified and inline document calls. `ResolvedCall.fragments` preserves caller order, including repeated references. Each `FragmentReference` carries an exact `DocumentIdentity(module, call_range)` target and the referring module/span; transitive dependencies retain actual URI/version facts. Source text is not concatenated. Static Python binding cycles, unresolved references and conflicting known schemas are diagnosed. GraphQL fragment definitions, spreads, type conditions and operation-as-fragment errors belong to #34, rather than these Python reference records.
 
 Document resolution caches are local to one invocation and are populated only after mutation guards. Writes through document AST aliases, projections and literal containers invalidate affected origins; ordinary `client.execute(document)` or `document.ast` consumption is allowed. This finite analysis does not prove the behavior of arbitrary external Python code. Traversal failures discard affected dependent records instead of publishing dangling fragment targets.
+
+`IncrementalResolver.resolve(modules, *, bindings=())` adds explicit in-memory
+cross-request reuse. Serialize calls to one instance, including `clear()`.
+Unchanged URI/source pairs reuse private parse/compile facts; every semantic run
+constructs fresh mutable module state. A project reuses its complete result only
+when its ordered full snapshots and binding facts match exactly. Source changes
+with unchanged versions still invalidate it. Added, removed or reordered modules
+and binding changes recompute that whole project; unrelated projects can reuse
+their results. Whole-project invalidation deliberately covers failed exports,
+missing package prefixes, shadowing and namespace-wide mutation reads that are
+absent from successful dependency lists.
+
+Complete request validation precedes reuse. New cache state replaces old state
+only after success; removed inputs are evicted, no historical generations remain,
+and `clear()` releases retained inputs/results. Calls and diagnostics preserve
+cold resolver order, including parse errors preceding traversal diagnostics.
+Chronology, cancellation and publication still belong to the caller's existing
+freshness/ticket guard.
+
+Eight cache tests compare cold and incremental results, count actual parse and
+semantic work, and cover unchanged inputs, project/binding changes, negative
+lookups, mutation/reexports, failure recovery, ordering and atomic cache updates.
+This is incremental parsing and project-level semantic reuse, not module-level
+semantic invalidation or a performance acceptance result. Worker integration,
+stable input identities across acquisition, schema/index caching and measured
+large-project responsiveness remain open. The current snapshot acquirer uses
+conservative generation-based disk versions; an integrated worker must address
+those identities before claiming unchanged-project reuse in that pipeline.
