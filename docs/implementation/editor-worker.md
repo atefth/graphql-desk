@@ -38,7 +38,9 @@ The protocol has four operations:
   explicit. A job can be analyzed only once.
 - `current` repeats those inputs and checks the active snapshot through full
   reacquisition. It returns `ok: true` and a boolean `current` for the active job.
-  Unknown/superseded IDs reject. False freshness invalidates state.
+  Unknown/superseded IDs reject. False freshness clears the active job and analysis
+  state; fetched remote records remain unadmitted until a later preparation
+  rechecks their configuration and credential revision.
 - `refresh` repeats the capture, `id` and local `schema_buffers`, selecting one
   prepared `project`/`schema_name` with explicit `credential_revision` and
   `environment` values. It fetches that private configured origin, rechecks the
@@ -48,6 +50,14 @@ The protocol has four operations:
   Changed configuration or credentials cannot inherit that state. Subsequent
   `analyze`/`current` calls must repeat the exact active `remote_revisions` list of
   project/name/revision records; the caller owns credential-change invalidation.
+
+An optional `remote_revisions` list on `prepare` enables the extended reply:
+redacted header environment variable names, deduplicated per-project client
+directive names, and retained opaque revisions. Only matching owning configuration
+observations and caller revisions retain a remote record. Unrelated source inventory
+changes may retain it without another HTTP request; changed credentials or owning
+configuration discard it. Legacy preparation omits these fields and retention.
+Environment values and private configuration tokens never appear in replies.
 
 One worker owns one workspace and one active job. New preparation supersedes old
 IDs; failure clears preparation, snapshots and source caches. Process restart

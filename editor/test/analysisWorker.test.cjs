@@ -307,3 +307,18 @@ test("refresh replies are redacted and guarded after the await", async t => {
   fake.children[1].stdout.write(JSON.stringify({ ...refreshed, environment: { TOKEN: "PRIVATE_MARKER" } }) + "\n");
   await assert.rejects(leaked, generic);
 });
+
+test("extended preparation validates redacted preferences, environment names and opaque active revisions", async t => {
+  const extended = { ...reply, project_preferences: [{ project: "p", client_directives: ["local"] }],
+    remote_schemas: [{ project: "p", schema_name: "default", environment_names: ["TOKEN"] }],
+    remote_revisions: [{ project: "p", schema_name: "default", revision: "opaque" }] };
+  for (const malformed of [null, { ...extended, project_preferences: [{ project: "p", client_directives: "local" }] },
+    { ...extended, remote_schemas: [{ project: "p", schema_name: "default", environment_names: ["TOKEN", "TOKEN"] }] },
+    { ...extended, remote_revisions: [{ project: "p", schema_name: "default", revision: 1 }] }]) {
+    const fake = fakeSpawn((child) => child.stdout.write(JSON.stringify(malformed ?? extended) + "\n"));
+    const { worker, workspace } = setup(t, fake);
+    const pending = worker.request({ ...message(workspace), remote_revisions: [] });
+    if (malformed === null) assert.deepEqual(await pending, extended);
+    else await assert.rejects(pending, generic);
+  }
+});

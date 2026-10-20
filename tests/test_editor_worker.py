@@ -58,6 +58,211 @@ class EditorWorkerTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_MARKER", json.dumps(result))
         return result
 
+    def test_prepare_retains_remote_only_with_matching_config_and_revision(
+        self,
+    ) -> None:
+        with endpoint() as (url, server):
+            capture, identity, project = self.remote_capture(url)
+            loaded = self.refresh(capture, identity, project)
+            revisions = [
+                {
+                    "project": project,
+                    "schema_name": "default",
+                    "revision": "credentials-1",
+                }
+            ]
+            self.source.write_text(
+                'from graphql_desk import gql\nq=gql("{title}") # edit\n',
+                encoding="utf8",
+            )
+            prepared = self.worker.handle(
+                {"op": "prepare", **capture, "remote_revisions": revisions}
+            )
+            self.assertTrue(prepared["ok"], prepared)
+            self.assertEqual(prepared["remote_revisions"], revisions)
+            self.assertEqual(
+                prepared["remote_schemas"],
+                [
+                    {
+                        "project": project,
+                        "schema_name": "default",
+                        "environment_names": ["TOKEN"],
+                    }
+                ],
+            )
+            self.assertEqual(
+                prepared["project_preferences"],
+                [{"project": project, "client_directives": []}],
+            )
+            analyzed = self.worker.handle(
+                {
+                    "op": "analyze",
+                    **capture,
+                    "id": prepared["id"],
+                    "schema_buffers": [],
+                    "remote_revisions": revisions,
+                }
+            )
+            self.assertTrue(analyzed["ok"], analyzed)
+            self.assertEqual(
+                len(cast(dict[str, list[object]], analyzed["request"])["schemas"]), 1
+            )
+            self.assertEqual(len(server.records), 2)
+            nested = self.root / "nested"
+            nested.mkdir()
+            dependency = nested / "extra.py"
+            dependency.write_text("value=1\n", encoding="utf8")
+            expanded = {**capture, "candidates": [str(self.source), str(dependency)]}
+            prepared = self.worker.handle(
+                {"op": "prepare", **expanded, "remote_revisions": revisions}
+            )
+            self.assertEqual(prepared["remote_revisions"], revisions)
+            self.assertEqual(len(server.records), 2)
+            nested_config = nested / "pyproject.toml"
+            nested_config.write_text(self.config.read_text(), encoding="utf8")
+            prepared = self.worker.handle(
+                {"op": "prepare", **expanded, "remote_revisions": revisions}
+            )
+            self.assertEqual(prepared["remote_revisions"], revisions)
+            expanded_result = self.worker.handle(
+                {
+                    "op": "analyze",
+                    **expanded,
+                    "id": prepared["id"],
+                    "schema_buffers": [],
+                    "remote_revisions": revisions,
+                }
+            )
+            self.assertEqual(
+                len(
+                    cast(dict[str, list[object]], expanded_result["request"])["schemas"]
+                ),
+                1,
+            )
+            self.assertIn(
+                (nested_config.as_uri(), "default"),
+                cast(
+                    tuple[tuple[str, str], ...], expanded_result["unavailable_schemas"]
+                ),
+            )
+            self.assertEqual(len(server.records), 2)
+            changed = [{**revisions[0], "revision": "credentials-2"}]
+            prepared = self.worker.handle(
+                {"op": "prepare", **capture, "remote_revisions": changed}
+            )
+            self.assertEqual(prepared["remote_revisions"], [])
+            analyzed = self.worker.handle(
+                {
+                    "op": "analyze",
+                    **capture,
+                    "id": prepared["id"],
+                    "schema_buffers": [],
+                    "remote_revisions": [],
+                }
+            )
+            self.assertEqual(
+                cast(dict[str, list[object]], analyzed["request"])["schemas"], []
+            )
+            self.assertEqual(len(server.records), 2)
+            # A fresh explicit refresh, then a real configuration change, also drops it.
+            loaded = self.refresh(capture, cast(str, prepared["id"]), project)
+            self.assertTrue(loaded["ok"], loaded)
+            self.config.write_text(
+                self.config.read_text().replace(
+                    "schema_output=",
+                    'client_directives=["local","local"]\nschema_output=',
+                ),
+                encoding="utf8",
+            )
+            prepared = self.worker.handle(
+                {"op": "prepare", **capture, "remote_revisions": revisions}
+            )
+            self.assertEqual(prepared["remote_revisions"], [])
+            self.assertEqual(
+                prepared["project_preferences"],
+                [{"project": project, "client_directives": ["local"]}],
+            )
+            self.assertNotIn("PRIVATE_MARKER", json.dumps(prepared))
+
+    def test_missed_disk_source_change_rebinds_remote_cache_without_http(self) -> None:
+        with endpoint() as (url, server):
+            capture, identity, project = self.remote_capture(url)
+            loaded = self.refresh(capture, identity, project)
+            revisions = [
+                {
+                    "project": project,
+                    "schema_name": "default",
+                    "revision": "credentials-1",
+                }
+            ]
+            request = {
+                **capture,
+                "id": loaded["id"],
+                "schema_buffers": [],
+                "remote_revisions": revisions,
+            }
+            self.assertTrue(self.worker.handle({"op": "analyze", **request})["ok"])
+            self.source.write_text(
+                self.source.read_text() + "# missed watcher edit\n", encoding="utf8"
+            )
+            self.assertEqual(
+                self.worker.handle({"op": "current", **request}),
+                {"ok": True, "current": False},
+            )
+            prepared = self.worker.handle(
+                {"op": "prepare", **capture, "remote_revisions": revisions}
+            )
+            self.assertNotEqual(prepared["id"], loaded["id"])
+            self.assertEqual(prepared["remote_revisions"], revisions)
+            rebound = self.worker.handle(
+                {"op": "analyze", **request, "id": prepared["id"]}
+            )
+            self.assertEqual(
+                len(cast(dict[str, list[object]], rebound["request"])["schemas"]), 1
+            )
+            self.assertEqual(len(server.records), 2)
+            # An old-ID protocol violation still invokes full invalidation.
+            self.assertFalse(self.worker.handle({"op": "current", **request})["ok"])
+            prepared = self.worker.handle(
+                {"op": "prepare", **capture, "remote_revisions": revisions}
+            )
+            self.assertEqual(prepared["remote_revisions"], [])
+
+    def test_prepare_retained_stale_remote_never_enters_analysis(self) -> None:
+        with endpoint() as (url, server):
+            capture, identity, project = self.remote_capture(url)
+            loaded = self.refresh(capture, identity, project)
+            server.mode = "auth"
+            stale = self.refresh(capture, cast(str, loaded["id"]), project)
+            self.assertEqual(stale["status"], "stale")
+            revisions = [
+                {
+                    "project": project,
+                    "schema_name": "default",
+                    "revision": "credentials-1",
+                }
+            ]
+            prepared = self.worker.handle(
+                {"op": "prepare", **capture, "remote_revisions": revisions}
+            )
+            self.assertEqual(prepared["remote_revisions"], revisions)
+            analyzed = self.worker.handle(
+                {
+                    "op": "analyze",
+                    **capture,
+                    "id": prepared["id"],
+                    "schema_buffers": [],
+                    "remote_revisions": revisions,
+                }
+            )
+            self.assertEqual(
+                cast(dict[str, list[object]], analyzed["request"])["schemas"], []
+            )
+            self.assertEqual(
+                cast(list[dict[str, object]], analyzed["remote_schemas"])[0]["status"],
+                "stale",
+            )
+
     def test_explicit_http_refresh_analysis_and_visible_stale_last_good(self) -> None:
         with endpoint() as (url, server):
             capture, identity, project = self.remote_capture(url)

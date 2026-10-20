@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -201,7 +202,7 @@ class EditorWorker:
         self._last_good: dict[tuple[str, str], RemoteSchemaSnapshot] = {}
         self._remote_revisions: dict[tuple[str, str], str] = {}
 
-    def invalidate(self) -> None:
+    def _clear_job(self) -> None:
         self._identity = None
         self._capture = None
         self._preparation = None
@@ -209,6 +210,9 @@ class EditorWorker:
         self._previous = None
         self._schema_buffers = ()
         self._resolver.clear()
+
+    def invalidate(self) -> None:
+        self._clear_job()
         self._remote.clear()
         self._last_good.clear()
         self._remote_revisions.clear()
@@ -238,7 +242,9 @@ class EditorWorker:
             keys |= {"id", "schema_buffers"}
         if operation == "refresh":
             keys |= {"project", "schema_name", "credential_revision", "environment"}
-        elif operation in {"analyze", "current"} and "remote_revisions" in raw:
+        elif (
+            operation in {"prepare", "analyze", "current"} and "remote_revisions" in raw
+        ):
             keys.add("remote_revisions")
         item = _object(raw, keys)
         capture = _capture(item)
@@ -250,8 +256,7 @@ class EditorWorker:
             self._identity = None
             self._snapshot = None
             self._schema_buffers = ()
-            self._remote.clear()
-            self._remote_revisions.clear()
+            revisions = self._revisions(item)
             preparation = prepare_editor_snapshot(
                 workspace=capture.workspace,
                 candidates=capture.candidates,
@@ -265,13 +270,22 @@ class EditorWorker:
                 (entry.project, entry.schema_name): entry
                 for entry in preparation.remote_origins
             }
+            self._remote = {
+                key: schema
+                for key, schema in self._remote.items()
+                if key in origins
+                and schema.config_token == origins[key].config_token
+                and revisions.get(key) == self._remote_revisions.get(key)
+                and key in revisions
+            }
+            self._remote_revisions = {key: revisions[key] for key in self._remote}
             self._last_good = {
                 key: schema
                 for key, schema in self._last_good.items()
                 if key in origins and schema.config_token == origins[key].config_token
             }
             required = {path.canonical_path for path in preparation.local_schemas}
-            return {
+            reply: dict[str, object] = {
                 "ok": True,
                 "id": self._identity,
                 "local_schemas": [
@@ -293,6 +307,32 @@ class EditorWorker:
                     if doc.canonical in required
                 ],
             }
+            if "remote_revisions" in item:
+                reply["project_preferences"] = [
+                    {"project": project, "client_directives": list(directives)}
+                    for project, directives in preparation.project_preferences
+                ]
+                reply["remote_revisions"] = [
+                    {"project": key[0], "schema_name": key[1], "revision": revision}
+                    for key, revision in sorted(self._remote_revisions.items())
+                ]
+                reply["remote_schemas"] = [
+                    {
+                        "project": entry.project,
+                        "schema_name": entry.schema_name,
+                        "environment_names": sorted(
+                            set(
+                                name
+                                for _, value in entry.origin.headers
+                                for name in re.findall(
+                                    r"\$\{env:([A-Za-z_][A-Za-z_0-9]*)\}", value
+                                )
+                            )
+                        ),
+                    }
+                    for entry in preparation.remote_origins
+                ]
+            return reply
         if (
             _string(item["id"]) != self._identity
             or self._preparation is None
@@ -312,13 +352,7 @@ class EditorWorker:
         buffers = capture.buffers + schema_buffers
         if operation == "refresh":
             return self._refresh(item, capture, buffers)
-        revisions: dict[tuple[str, str], str] = {}
-        for value in _array(item.get("remote_revisions", [])):
-            revision = _object(value, {"project", "schema_name", "revision"})
-            key = (_string(revision["project"]), _string(revision["schema_name"]))
-            if key in revisions:
-                raise ValueError("Duplicate credential revision")
-            revisions[key] = _string(revision["revision"])
+        revisions = self._revisions(item)
         if revisions != self._remote_revisions:
             raise ValueError("Remote credential revision changed")
         remote_schemas = tuple(self._remote[key] for key in sorted(self._remote))
@@ -335,7 +369,7 @@ class EditorWorker:
                 )
             )
             if not current:
-                self.invalidate()
+                self._clear_job()
             return {"ok": True, "current": current}
         if self._snapshot is not None:
             raise ValueError("Job already analyzed")
@@ -375,6 +409,17 @@ class EditorWorker:
                 for key in sorted(self._remote_revisions)
             ],
         }
+
+    @staticmethod
+    def _revisions(item: dict[str, object]) -> dict[tuple[str, str], str]:
+        revisions: dict[tuple[str, str], str] = {}
+        for value in _array(item.get("remote_revisions", [])):
+            revision = _object(value, {"project", "schema_name", "revision"})
+            key = (_string(revision["project"]), _string(revision["schema_name"]))
+            if key in revisions:
+                raise ValueError("Duplicate credential revision")
+            revisions[key] = _string(revision["revision"])
+        return revisions
 
     def _refresh(
         self,
