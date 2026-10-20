@@ -11,6 +11,7 @@ from .config import (
     SchemaConfig,
     generated_output_paths,
     load_project_config,
+    parse_project_config,
     parse_project_settings,
 )
 from .source_graph import FactoryBinding, ProjectBindings, ResolvedCall
@@ -23,18 +24,55 @@ def _canonical(path: Path) -> Path:
         raise ValueError("Cannot resolve a project path") from None
 
 
+def normalize_config_texts(
+    texts: Mapping[Path, str | None] | None,
+) -> dict[Path, str | None] | None:
+    if texts is None:
+        return None
+    captured: dict[Path, str | None] = {}
+    for path, text in texts.items():
+        identity = _canonical(path)
+        if identity in captured and captured[identity] != text:
+            raise ValueError("Conflicting captured configuration aliases")
+        captured[identity] = text
+    return captured
+
+
+def _load_config(
+    path: Path,
+    scope: Literal["project", "explicit_cli"],
+    texts: Mapping[Path, str | None] | None,
+) -> ProjectConfig | None:
+    if texts is None:
+        return load_project_config(path, source_scope=scope)
+    identity = _canonical(path)
+    if identity not in texts:
+        raise ValueError("Configuration path was not captured")
+    text = texts[identity]
+    return (
+        None
+        if text is None
+        else parse_project_config(text, config_path=identity, source_scope=scope)
+    )
+
+
 def find_project(
     directory: Path,
     *,
     workspace: Path | None = None,
     selected_config: ProjectConfig | None = None,
+    config_texts: Mapping[Path, str | None] | None = None,
 ) -> ProjectConfig | None:
     """Find the nearest configured ancestor, including the workspace boundary.
 
     Inactive pyprojects do not hide configured ancestors. No source enumeration,
     glob matching or document binding analysis is performed here. Supplying no
     workspace enables the CLI's upward search to the filesystem root.
+    config_texts, when supplied, is a closed captured map: None means absence,
+    and a missing key rejects instead of falling back to a later disk read.
+    Captured values are authoritative input facts, not current file-type claims.
     """
+    texts = normalize_config_texts(config_texts)
     current = _canonical(directory)
     boundary = _canonical(workspace) if workspace is not None else None
     if current.is_file():
@@ -46,14 +84,14 @@ def find_project(
         resolved = _canonical(candidate)
         if boundary is not None and not resolved.is_relative_to(boundary):
             raise ValueError("Project configuration escapes its workspace")
-        if resolved.is_file():
+        if texts is not None or resolved.is_file():
             scope = (
                 selected_config.source_scope
                 if selected_config is not None
                 and resolved == _canonical(selected_config.path)
                 else "project"
             )
-            config = load_project_config(resolved, source_scope=scope)
+            config = _load_config(resolved, scope, texts)
             if config is not None:
                 return config
         elif candidate.exists() or candidate.is_symlink():
@@ -75,6 +113,7 @@ def effective_project(
     explicit_config: Path | None = None,
     workspace: Path | None = None,
     editor_fallback: Mapping[str, object] | None = None,
+    config_texts: Mapping[Path, str | None] | None = None,
 ) -> EffectiveProject | None:
     """Choose one entire project config before considering editor fallback.
 
@@ -83,14 +122,15 @@ def effective_project(
     Fallback paths use the workspace root; its config.path is virtual context.
     Command-specific option overrides belong to the future CLI dispatcher.
     """
+    texts = normalize_config_texts(config_texts)
     if explicit_config is not None:
-        selected = load_project_config(
-            _canonical(directory / explicit_config), source_scope="explicit_cli"
+        selected = _load_config(
+            _canonical(directory / explicit_config), "explicit_cli", texts
         )
         if selected is None:
             raise ValueError("Explicit configuration has no GraphQL Desk project")
         return EffectiveProject(selected, "explicit")
-    selected = find_project(directory, workspace=workspace)
+    selected = find_project(directory, workspace=workspace, config_texts=texts)
     if selected is not None:
         return EffectiveProject(selected, "nearest")
     if editor_fallback is None:

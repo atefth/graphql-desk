@@ -15,9 +15,13 @@ text, Unicode and line endings. Schema URLs are not fetched or serialized:
 `unavailable_schemas` lists only project/name pairs and absent contexts remain
 visible to analysis. Credentials are excluded from analyzer requests and reprs.
 
-Configuration discovery currently reads saved configuration. A dirty, new or
-different captured configuration buffer at a candidate ancestor fails closed;
-unsaved configuration support requires the later shared overlay-aware reader.
+Configuration text is captured once for every candidate ancestor through the
+workspace boundary. Open buffers override saved text, including dirty or new
+configuration files. Both discovery and nearest source ownership consume this
+same closed map: `None` records captured absence, while a missing key rejects
+instead of reading disk later. The ordinary configuration parser still governs
+whole-object precedence, inactive tables, errors and scope. Disk directories and
+broken symlinks cannot masquerade as buffered configuration files.
 An editor must supply every relevant candidate, including new unsaved source
 paths, and all relevant captured configuration/schema buffers. This API cannot
 prove that the caller's finite enumeration is complete.
@@ -30,16 +34,18 @@ caller's latest job/cancellation guard. Reacquisition checks source/config/schem
 content and origin changes, buffer versions, ownership and candidate changes.
 Closing a buffer changes its origin to disk and invalidates the old snapshot.
 
-Reads are best-effort and non-atomic. End-of-read comparisons catch ordinary
-changes but cannot alone detect a configuration changing A-to-B-to-A between
-helper reads. The regression for that case demonstrates why full reacquisition
-before publication is mandatory. Generation-based schema tokens conservatively
+Source/schema reads are best-effort and non-atomic. Configuration discovery and
+ownership share one captured text set, preventing independent helper reads from
+observing different configurations. End-of-read comparisons do not replace full
+reacquisition and the latest-job guard before publication. Generation-based schema tokens conservatively
 invalidate contexts on every acquisition; incremental caching and performance
 acceptance are separate work.
 
-Fifteen focused tests cover real acquisition-to-analysis, imports/fragments,
+Eighteen focused acquisition tests cover real acquisition-to-analysis, imports/fragments,
 new source buffers, local schema overlays, nested/fallback projects, dirty/new
-configuration rejection, redaction, exclusions, entrypoints, stale input origins,
-Unicode/BOM/CRLF and symlink boundaries where the host permits them. No active
+configuration routing and malformed-file rejection, redaction, exclusions,
+entrypoints, stale input origins, Unicode/BOM/CRLF and symlink boundaries where
+the host permits them. Shared project/selector tests additionally exercise closed
+map absence, missing keys, aliases, explicit scope and nested ownership. No active
 extension, production analysis-file adapter or broad editor/live-typing gate is
 established by this foundation.
