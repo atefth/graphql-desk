@@ -26,4 +26,16 @@ captures this map and owns the file checks and later freshness comparison.
 
 `project_bindings(config, project_id=...)` describes exact configured generated `graphql` factory identities and an optional template to the source resolver, without importing or creating those modules. `schema_for_call(config, call, project_id=...)` routes actual `ResolvedCall.schema_name` metadata to a configured schema. Both use the same explicit caller-owned project identity as module snapshots; Python assignment names never select a schema. Routing preserves call URI/version/dependency/contribution facts. Generated `gql` exports are not invented, and no source-file eligibility or freshness proof is implied.
 
-Issue #27 remains open: command-specific overrides, source enumeration/freshness and worker integration, authenticated-loader integration, symbol resolution and writer integration still require implementation and acceptance. Local explicit-path schema loading is an independent backend. No full SCHEMA-01 or live-typing gate is claimed.
+The installed `graphql-desk doctor` command (also `python -m graphql_desk doctor`)
+selects the nearest configured project, or an explicit `--config PATH`. Optional
+`--schema NAME` limits inspection to one configured schema. Doctor reads local
+schemas or explicitly fetches configured HTTP(S) schemas using the current process
+environment for header references. It does not import project Python or write files.
+
+Doctor reports interpreter/checker distribution versions and schema availability on
+stderr. Its status remains degraded (exit 1): mapping symbols, generated ownership,
+active editor and live bridge health do not yet have authoritative CLI inputs.
+`--help` and `--version` exit 0; invalid arguments exit 2 without echoing supplied
+values. This command is a diagnostic foundation, not full doctor acceptance.
+
+Issue #27 remains open: command-specific overrides, source enumeration/freshness and worker integration, complete command integration, symbol resolution and writer integration still require implementation and acceptance. Local explicit-path schema loading is an independent backend. No full SCHEMA-01 or live-typing gate is claimed.
