@@ -64,7 +64,11 @@ PEP613 aliases (`Alias: TypeAlias = ClassName`) also reuse those checks when the
 marker resolves to uncaptured `typing.TypeAlias` or `typing_extensions.TypeAlias`.
 Named or qualified targets and the bounded container forms `list[N]`,
 `tuple[N, ...]` and `typing.Sequence[N]` are supported, with one named or qualified
-type argument. Mapping aliases support `dict[K, V]`, trusted `typing.Mapping[K, V]`
+type argument. Trusted `tuple` and `typing.Tuple` aliases also accept finite
+nonempty fixed tuples of named/qualified types, preserving variadic behavior,
+dependency/external propagation and valid class-base availability without element
+TypedDict provenance. Empty shapes, inline/nested expressions and misplaced
+ellipses remain unsupported. Mapping aliases support `dict[K, V]`, trusted `typing.Mapping[K, V]`
 and `collections.abc.Mapping[K, V]` with exactly two existing named/qualified types.
 They retain valid class-base availability and drop element TypedDict provenance;
 either external operand keeps the alias unverified. Captured or mutated namespace
@@ -89,7 +93,7 @@ preflight rejects Literal-based subclasses; the pinned Pyright accepts the teste
 invalid subclass, while mypy and runtime reject it. Mapping value negatives pass
 both checkers.
 Shadowed markers, ordinary marker value assignments, ordinary variable annotations,
-string forward targets, nested subscriptions, fixed tuples, other union forms,
+string forward targets, nested subscriptions, other union forms,
 custom generic
 constructors,
 cycles and mutations remain unresolved. Dependencies retain the entire captured
