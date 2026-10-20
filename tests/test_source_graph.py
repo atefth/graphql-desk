@@ -166,6 +166,8 @@ class SourceGraphTests(unittest.TestCase):
     ) -> None:
         cases = (
             "Alias:Plain=Plain",
+            "from typing import TypeAlias\nMarker=TypeAlias\nAlias:Marker=Plain",
+            "import typing_extensions as t\nMarker=t.TypeAlias\nAlias:Marker=Plain",
             "TypeAlias=Plain\nAlias:TypeAlias=Plain",
             "TypeAlias='typing.TypeAlias'\nAlias:TypeAlias=Plain",
             "from typing import TypeAlias\nTypeAlias=Plain\nAlias:TypeAlias=Plain",

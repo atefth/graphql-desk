@@ -1,0 +1,22 @@
+{
+  "outcome": "read-only-activation-observed",
+  "vscode": "1.141.0",
+  "actualActivation": true,
+  "actualWorker": true,
+  "diagnostics": true,
+  "completion": true,
+  "hover": true,
+  "definitions": true,
+  "configuredDirectives": true,
+  "dirtyConfiguration": true,
+  "dirtyFragment": true,
+  "sourceRepair": true,
+  "dirtySchema": true,
+  "associatedUntitled": true,
+  "explicitRemoteRefresh": true,
+  "remoteTypingRetention": true,
+  "noAutomaticHttp": true,
+  "nativePylanceCoexistence": true,
+  "diskUnchanged": true,
+  "dirtyBuffersPreserved": true
+}

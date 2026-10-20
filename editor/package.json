@@ -1,13 +1,48 @@
 {
   "name": "graphql-desk-editor",
+  "displayName": "GraphQL Desk",
+  "publisher": "graphql-desk",
   "version": "0.1.0",
   "private": true,
   "description": "Read-only embedded GraphQL language feature foundations",
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onLanguage:python",
+    "onCommand:graphqlDesk.refreshSchema"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Only lexical highlighting is available until the workspace is trusted."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {"command": "graphqlDesk.refreshSchema", "title": "GraphQL Desk: Refresh Schema"}
+    ],
+    "configuration": {
+      "title": "GraphQL Desk",
+      "properties": {
+        "graphqlDesk.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Absolute Python interpreter with graphql-desk installed."
+        },
+        "graphqlDesk.project": {
+          "type": ["object", "null"],
+          "default": null,
+          "scope": "resource",
+          "description": "Fallback project configuration when no active pyproject.toml table exists."
+        }
+      }
+    }
+  },
   "engines": {
     "vscode": "^1.141.0"
   },
   "scripts": {
-    "test": "node --test test/languageFeatures.test.cjs test/highlighting.test.cjs test/analysisWorker.test.cjs",
+    "test": "node --test test/languageFeatures.test.cjs test/highlighting.test.cjs test/analysisWorker.test.cjs test/analysisController.test.cjs",
     "test:host": "node test/run-host.cjs"
   },
   "dependencies": {

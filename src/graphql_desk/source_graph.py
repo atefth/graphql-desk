@@ -815,6 +815,13 @@ class _Graph:
                         active,
                         probe=probe,
                     )
+                    if (
+                        self.type_symbols
+                        and value.kind == "external"
+                        and value.text
+                        in {"typing.TypeAlias", "typing_extensions.TypeAlias"}
+                    ):
+                        raise _Unresolved("TypeAlias markers cannot be ordinary values")
             except _Unresolved:
                 if not probe:
                     raise
