@@ -668,6 +668,25 @@ BadResult() # error
             ("from typing import TypeAlias\nText:TypeAlias=bool", True),
             ("from typing import TypeAlias\nText:TypeAlias=str|None", True),
             (
+                "from typing_extensions import TypeAlias,Literal\n"
+                "Text:TypeAlias=Literal['hello','world']",
+                True,
+            ),
+            (
+                "import typing\nText:typing.TypeAlias=typing.Literal['hello','world']",
+                True,
+            ),
+            (
+                "from typing import TypeAlias,Literal as L\n"
+                "Text:TypeAlias=L['hello',1,-2,True,False,None,b'hello']",
+                True,
+            ),
+            (
+                "from typing import TypeAlias,Literal\n"
+                "Maybe:TypeAlias=Literal['hello']\nclass Text(Maybe): pass",
+                False,
+            ),
+            (
                 "from typing import TypeAlias\nimport typing\n"
                 "Text:TypeAlias=typing.Optional[str]",
                 True,
@@ -731,7 +750,20 @@ BadResult() # error
         ):
             with self.subTest(declaration=declaration):
                 authored = source
-                if (
+                if "Literal" in declaration:
+                    authored = source.replace(
+                        "value=Text('hello')", "value:Text='hello'"
+                    )
+                    authored += " bad=graphql.scalar('String','other')\n"
+                    if "True,False,None" in declaration:
+                        authored = authored.replace(
+                            "value:Text='hello'",
+                            "value:Text='hello'\n"
+                            "items:tuple[Text,...]=('hello',1,-2,True,False,None,b'hello')\n"
+                            "for item in items:\n"
+                            " assert graphql.scalar('String',item) is item",
+                        )
+                elif (
                     "|None" in declaration
                     or "None|" in declaration
                     or "nullable_types" in declaration
@@ -867,7 +899,72 @@ BadResult() # error
                     )
                     self.assertNotIn("PRIVATE_VALUE", artifacts.diagnostics[0].message)
 
-    def test_unsubclassable_aliases_reject_in_both_checkers_and_at_runtime(
+    def test_literal_enum_mapping_preserves_checker_values_and_runtime_identity(
+        self,
+    ) -> None:
+        source = """from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from generated.main import graphql
+from generated.sources.main import QueryResult
+from local_types import State
+query=graphql('{greeting}')
+value:State='HELLO'
+assert graphql.scalar('State',value) is value
+if TYPE_CHECKING:
+ result:QueryResult={'greeting':value}
+ assert_type(result['greeting'],State)
+ bad=graphql.scalar('State','OTHER')
+"""
+        main = ModuleSnapshot("p", "main", "file:///main.py", 1, source)
+        local = ModuleSnapshot(
+            "p",
+            "local_types",
+            "file:///local_types.py",
+            1,
+            "from typing import TypeAlias,Literal\n"
+            "State:TypeAlias=Literal['HELLO','WORLD']",
+        )
+        context = SchemaContext(
+            "main",
+            build_schema("enum State { HELLO WORLD } type Query { greeting:State! }"),
+            "literal-enum",
+        )
+        modules = (main, local)
+        resolved = resolve_project(
+            modules,
+            bindings=(
+                ProjectBindings(
+                    "p",
+                    ("main",),
+                    factories=(FactoryBinding("generated.main", "graphql", "main"),),
+                ),
+            ),
+        )
+        with patch(
+            "importlib.import_module", side_effect=AssertionError("No project imports")
+        ):
+            artifacts = generate_factory_artifacts(
+                context,
+                index_fragments(resolved, schemas={("p", "main"): context}),
+                modules=modules,
+                project_id="p",
+                generated_package="generated",
+                enums=(("State", "local_types.State"),),
+            )
+        self.assertEqual(artifacts.diagnostics, ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            errors = {
+                n for n, line in enumerate(source.splitlines(), 1) if "bad=" in line
+            }
+            self.check(root, {"main.py": errors})
+            runtime = subprocess.run(
+                [sys.executable, "main.py"], cwd=root, capture_output=True, text=True
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+
+    def test_unsubclassable_aliases_preserve_checker_evidence_and_runtime_rejection(
         self,
     ) -> None:
         for source in (
@@ -882,6 +979,10 @@ BadResult() # error
             "class Bad(Maybe): pass\n",
             "from typing import TypeAlias,Optional\nMaybe:TypeAlias=Optional[str]\n"
             "Alias:TypeAlias=Maybe\nclass Bad(Alias): pass\n",
+            "from typing import TypeAlias,Literal\nMaybe:TypeAlias=Literal['hello']\n"
+            "class Bad(Maybe): pass\n",
+            "from typing import TypeAlias,Literal\nMaybe:TypeAlias=Literal['hello']\n"
+            "Alias:TypeAlias=Maybe\nclass Bad(Alias): pass\n",
         ):
             with (
                 self.subTest(source=source),
@@ -894,7 +995,46 @@ BadResult() # error
                     for n, line in enumerate(source.splitlines(), 1)
                     if line.startswith("class Bad")
                 }
-                self.check(root, {"bad.py": errors})
+                if "Literal" in source:
+                    # Pinned Pyright accepts these bases; preflight and runtime reject.
+                    (root / "pyrightconfig.json").write_text(
+                        json.dumps(
+                            {"typeCheckingMode": "strict", "include": ["bad.py"]}
+                        ),
+                        encoding="utf8",
+                    )
+                    mypy = subprocess.run(
+                        [sys.executable, "-m", "mypy", "--strict", "bad.py"],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+                    self.assertTrue(
+                        any(f"bad.py:{line}: error:" in mypy.stdout for line in errors)
+                    )
+                    pyright = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "pyright",
+                            "--pythonpath",
+                            sys.executable,
+                            "--outputjson",
+                            "bad.py",
+                        ],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        pyright.returncode, 0, pyright.stdout + pyright.stderr
+                    )
+                    self.assertEqual(
+                        json.loads(pyright.stdout)["summary"]["errorCount"], 0
+                    )
+                else:
+                    self.check(root, {"bad.py": errors})
                 runtime = subprocess.run(
                     [sys.executable, "bad.py"], cwd=root, capture_output=True, text=True
                 )

@@ -562,6 +562,163 @@ class SourceGraphTests(unittest.TestCase):
                 "unresolved",
             )
 
+    def test_literal_aliases_use_only_trusted_flat_constants(self) -> None:
+        snapshots = (
+            module(
+                "models",
+                "from typing import TypeAlias,Literal as L\nimport typing as t\n"
+                "Text:TypeAlias=t.Literal['hello','world']\n"
+                "Values:TypeAlias=L[1,-2,True,False,None,b'hello']\nAlias:TypeAlias=Text\n"
+                "from typing_extensions import Literal as LE\n"
+                "Extra:TypeAlias=LE['hello']",
+            ),
+            module("exports", "from models import Alias as Public"),
+        )
+        symbols = (
+            "models.Text",
+            "models.Values",
+            "models.Alias",
+            "exports.Public",
+            "models.Extra",
+        )
+        result = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
+        self.assertEqual([r.status for r in result], ["resolved"] * len(symbols))
+        self.assertEqual(
+            result,
+            resolve_type_symbols(
+                symbols, modules=tuple(reversed(snapshots)), project_id="app"
+            ),
+        )
+        for source in (
+            "import models\nclass Bad(models.Text): pass",
+            "from exports import Public\nclass Bad(Public): pass",
+            "from exports import Public\nclass Bad(Public,total=False): pass",
+        ):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("bad.Bad",),
+                    modules=(*snapshots, module("bad", source)),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        for argument in (
+            "()",
+            "1.5",
+            "1j",
+            "VALUE",
+            "missing.Value",
+            "Literal['hello']",
+            "[1]",
+            "(1,(2,3))",
+            "*VALUES",
+            "-True",
+            "--1",
+            "-1.5",
+            "+1",
+        ):
+            source = (
+                "from typing import TypeAlias,Literal\nVALUE='hello'\n"
+                "VALUES=('hello',)\nAlias:TypeAlias=Literal[" + argument + "]"
+            )
+            with self.subTest(argument=argument):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("bad.Alias",),
+                        modules=(module("bad", source),),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+        for prefix in ("Literal=42\n", "from unknown import Literal\n"):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("bad.Alias",),
+                    modules=(
+                        module(
+                            "bad",
+                            "from typing import TypeAlias\n"
+                            + prefix
+                            + "Alias:TypeAlias=Literal['hello']",
+                        ),
+                    ),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        for namespace, marker in (
+            ("typing", "typing_extensions"),
+            ("typing_extensions", "typing"),
+        ):
+            fake = (
+                module(namespace, "class Literal: pass"),
+                module(
+                    "bad",
+                    f"from {marker} import TypeAlias\nfrom {namespace} import Literal\n"
+                    "Alias:TypeAlias=Literal['hello']",
+                ),
+            )
+            self.assertEqual(
+                resolve_type_symbols(("bad.Alias",), modules=fake, project_id="app")[
+                    0
+                ].status,
+                "unresolved",
+            )
+        late = module(
+            "bad",
+            "from typing import TypeAlias,Literal\n"
+            "Alias:TypeAlias=Literal['hello']\nLiteral=other",
+        )
+        self.assertEqual(
+            resolve_type_symbols(("bad.Alias",), modules=(late,), project_id="app")[
+                0
+            ].status,
+            "unresolved",
+        )
+        ext_mutation = module(
+            "mutator", "import typing_extensions\ntyping_extensions.Literal=42"
+        )
+        self.assertEqual(
+            resolve_type_symbols(
+                ("models.Extra",), modules=(*snapshots, ext_mutation), project_id="app"
+            )[0].status,
+            "unresolved",
+        )
+        for mutation in (
+            "import typing\ntyping.Literal=42",
+            "import models\nmodels.Text=42",
+            "__builtins__['str']=42",
+        ):
+            extra = module("mutator", mutation)
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("exports.Public",), modules=(*snapshots, extra), project_id="app"
+                )[0].status,
+                "unresolved",
+            )
+            isolated = replace(extra, project="another")
+            self.assertEqual(
+                resolve_type_symbols(
+                    symbols, modules=(*snapshots, isolated), project_id="app"
+                ),
+                result,
+            )
+        changed = (replace(snapshots[0], version=2), snapshots[1])
+        self.assertNotEqual(
+            result[0].dependencies,
+            resolve_type_symbols(symbols, modules=changed, project_id="app")[
+                0
+            ].dependencies,
+        )
+        cycle = (
+            module("a", "from b import B as A"),
+            module("b", "from a import A as B"),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("a.A",), modules=cycle, project_id="app")[0].status,
+            "unresolved",
+        )
+
     def test_optional_aliases_reuse_trusted_subscription_and_nullable_facts(
         self,
     ) -> None:

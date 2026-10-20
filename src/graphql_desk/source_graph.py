@@ -955,6 +955,34 @@ class _Graph:
             constructor = self.export(module, "builtins", node.value.id, active)
         else:
             constructor = self.expression(module, node.value, before, active)
+        if constructor.kind == "external" and constructor.text in {
+            "typing.Literal",
+            "typing_extensions.Literal",
+        }:
+            arguments = (
+                node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            )
+            if not arguments or not all(
+                isinstance(argument, ast.Constant)
+                and (
+                    argument.value is None
+                    or type(argument.value) in {str, bytes, int, bool}
+                )
+                or isinstance(argument, ast.UnaryOp)
+                and isinstance(argument.op, ast.USub)
+                and isinstance(argument.operand, ast.Constant)
+                and type(argument.operand.value) is int
+                for argument in arguments
+            ):
+                raise _Unresolved(
+                    "Literal aliases require supported flat literal values"
+                )
+            return _Value(
+                "type",
+                f"{module.snapshot.module}.{name}",
+                dependencies=constructor.dependencies,
+                class_base=False,
+            )
         if constructor.kind != "external" or constructor.text not in {
             "builtins.list",
             "builtins.tuple",

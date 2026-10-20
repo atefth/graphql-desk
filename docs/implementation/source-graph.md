@@ -72,8 +72,17 @@ Explicit nullable aliases support only `N | None`, `None | N` or trusted externa
 `typing.Optional[N]`, where `N` is an existing named or qualified type target. They retain their own alias identity and
 never confer class-base or TypedDict capabilities through aliases or reexports.
 External operands remain unverified.
+Trusted external `typing.Literal` and `typing_extensions.Literal` aliases accept
+one or more flat string, bytes, integer, boolean or None constants, plus one unary
+minus on an exact integer. They retain their own identity without class-base or
+TypedDict capability. Named values, enum-member expressions, floating/complex
+constants, empty arguments and nested expressions remain unsupported. Captured
+preflight rejects Literal-based subclasses; the pinned Pyright accepts the tested
+invalid subclass, while mypy and runtime reject it. Mapping value negatives pass
+both checkers.
 Shadowed markers, ordinary marker value assignments, ordinary variable annotations,
-strings, nested subscriptions, fixed tuples, other union forms, custom generic
+string forward targets, nested subscriptions, fixed tuples, other union forms,
+custom generic
 constructors,
 cycles and mutations remain unresolved. Dependencies retain the entire captured
 project, including negative lookups.
