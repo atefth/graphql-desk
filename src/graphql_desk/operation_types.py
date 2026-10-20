@@ -187,10 +187,8 @@ def _render_operation_types(
         if isinstance(definition, FragmentDefinitionNode)
     }
     identities: dict[str, str] = {}
-    if fragment_keys is not None:
+    if fragment_keys:
         output += (
-            "\nfrom collections.abc import Callable as __graphql_desk_Callable\n"
-            "from typing_extensions import ReadOnly as __graphql_desk_ReadOnly\n"
             "from graphql_desk.fragment_refs import "
             "FragmentIdentity as __graphql_desk_FragmentIdentity\n"
         )
@@ -252,6 +250,7 @@ def _render_operation_types(
 
     variant_index = 0
     needs_never = False
+    needs_capabilities = False
     conditional_alternatives = 0
 
     def possible(parent: GraphQLCompositeType) -> tuple[GraphQLObjectType, ...]:
@@ -388,6 +387,7 @@ def _render_operation_types(
         closed: bool = False,
     ) -> None:
         nonlocal variant_index, needs_never, conditional_alternatives
+        nonlocal needs_capabilities
         abstract = any(not isinstance(parent, GraphQLObjectType) for parent in parents)
         candidates = set(possible(parents[0]))
         for parent in parents[1:]:
@@ -439,6 +439,7 @@ def _render_operation_types(
                     groups.setdefault(key, []).append((scope, node, forced))
                 fields: list[tuple[str, str]] = []
                 if capabilities:
+                    needs_capabilities = True
                     identity = " | ".join(sorted(capabilities))
                     fields.append(
                         (
@@ -580,6 +581,11 @@ def _render_operation_types(
                 [(parent, node) for node in definition.selection_set.selections],
                 f"{name}Fragment_{fragment_name}",
             )
+    if needs_capabilities:
+        output += (
+            "\nfrom collections.abc import Callable as __graphql_desk_Callable\n"
+            "from typing_extensions import ReadOnly as __graphql_desk_ReadOnly\n"
+        )
     if needs_never:
         output += "\nfrom typing_extensions import Never as __graphql_desk_Never\n"
     return output + "\n" + "\n\n".join(declarations) + "\n"
