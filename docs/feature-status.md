@@ -1,6 +1,6 @@
 # Feature status and remaining work
 
-Implementation baseline: the 25 foundation PRs through #109, plus the implementation slices through #148, are merged: **63 foundation slices**, with 338 Python tests and 40 Node tests at this baseline. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
+Implementation baseline: the 25 foundation PRs through #109, plus the implementation slices through #148, are merged: **63 foundation slices**, with 338 Python tests and 43 Node tests at this baseline. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
 
 Merged #134–#137 preserve original-source validation and rejected resolver/index
 ownership, and type introspection selections. #138 assembles captured multi-schema

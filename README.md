@@ -80,6 +80,6 @@ The [static module graph](docs/implementation/source-graph.md) resolves a first 
 
 ## Read-only editor foundation
 
-Merged through #148, 63 foundation slices have 338 Python and 40 Node tests; no broad parity gate has passed. The [read-only providers and activation controller](docs/implementation/editor-providers.md) supply embedded diagnostics, completion, hover, definitions and highlighting through the trusted worker. Actual activation passed isolated VS Code1.141.0/1.142.0 hosts with pinned Python/Pylance extensions, dirty buffers and native Python coexistence.
+Merged through #148, 63 foundation slices have 338 Python and 43 Node tests; no broad parity gate has passed. The [read-only providers and activation controller](docs/implementation/editor-providers.md) supply embedded diagnostics, completion, hover, definitions and highlighting through the trusted worker. Actual activation passed isolated VS Code1.141.0/1.142.0 hosts with pinned Python/Pylance extensions, dirty buffers and native Python coexistence.
 
 Configure an absolute `graphqlDesk.pythonPath` interpreter with GraphQL Desk installed. Local candidate enumeration and captured source/configuration/schema buffers feed the worker; publication rechecks inventory and freshness. Remote schemas require the explicit refresh command, and typing does not fetch them. Complete discovery/lifecycle and supported-platform acceptance remain open. No VSIX release, generated-file writes or disk analysis adapter are installed. See [feature status](docs/feature-status.md) for all remaining gates.
