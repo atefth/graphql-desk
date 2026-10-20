@@ -667,6 +667,21 @@ BadResult() # error
             ("from typing import TypeAlias\nText:TypeAlias=list[str]", True),
             ("from typing import TypeAlias\nText:TypeAlias=bool", True),
             ("from typing import TypeAlias\nText:TypeAlias=str|None", True),
+            (
+                "from typing import TypeAlias\nimport typing\n"
+                "Text:TypeAlias=typing.Optional[str]",
+                True,
+            ),
+            (
+                "from typing import TypeAlias,Optional as Maybe\n"
+                "Text:TypeAlias=Maybe[str]",
+                True,
+            ),
+            (
+                "from typing import TypeAlias,Optional\nMaybe:TypeAlias=Optional[str]\n"
+                "class Text(Maybe): pass",
+                False,
+            ),
             ("from typing import TypeAlias\nText:TypeAlias=None|str", True),
             (
                 "from typing import TypeAlias\nMaybe:TypeAlias=str|None\n"
@@ -720,6 +735,7 @@ BadResult() # error
                     "|None" in declaration
                     or "None|" in declaration
                     or "nullable_types" in declaration
+                    or "Optional" in declaration
                 ):
                     authored = source.replace(
                         "value=Text('hello')",
@@ -861,6 +877,10 @@ BadResult() # error
             "from typing import TypeAlias\nMaybe:TypeAlias=str|None\n"
             "class Bad(Maybe): pass\n",
             "from typing import TypeAlias\nMaybe:TypeAlias=str|None\n"
+            "Alias:TypeAlias=Maybe\nclass Bad(Alias): pass\n",
+            "from typing import TypeAlias,Optional\nMaybe:TypeAlias=Optional[str]\n"
+            "class Bad(Maybe): pass\n",
+            "from typing import TypeAlias,Optional\nMaybe:TypeAlias=Optional[str]\n"
             "Alias:TypeAlias=Maybe\nclass Bad(Alias): pass\n",
         ):
             with (
