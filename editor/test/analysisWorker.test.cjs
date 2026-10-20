@@ -13,7 +13,7 @@ const { createAnalysisWorker, MAX_FRAME_BYTES } = require("../src/analysisWorker
 const root = path.resolve(__dirname, "../..");
 const python = process.env.GRAPHQL_DESK_PYTHON ?? path.join(root, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
 const message = workspace => ({ op: "prepare", workspace, candidates: [], buffers: [], documents: [], editor_fallback: null });
-const reply = { ok: true, id: "job", local_schemas: [], required_buffers: [] };
+const reply = { ok: true, id: "job", local_schemas: [], remote_schemas: [], required_buffers: [] };
 const generic = { message: "GraphQL Desk worker request failed" };
 
 function fakeSpawn(onWrite = () => {}) {
@@ -213,4 +213,97 @@ test("temporary-directory workspace falls back to an outside filesystem-root cwd
   assert.deepEqual(fake.calls[0][1], ["-I", "-X", "utf8", "-m", "graphql_desk.editor_worker"]);
   fake.children[0].stdout.write(JSON.stringify(reply) + "\n");
   assert.deepEqual(await active, reply);
+});
+const http = require("node:http");
+const gql = require("graphql");
+
+test("explicit remote refresh reaches real HTTP and analysis; aborted refresh cannot survive restart", async t => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-remote-"));
+  t.after(() => fs.rm(temporary, { recursive: true, force: true }));
+  const workspace = path.join(temporary, "workspace");
+  await fs.mkdir(workspace);
+  const source = path.join(workspace, "main.py");
+  await fs.writeFile(source, "from graphql_desk import gql\nq=gql('{value}')\n");
+  const schema = gql.buildSchema("type Query { value: String }");
+  let hits = 0;
+  let slow = false;
+  let contacted;
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    hits += 1;
+    assert.equal(req.headers["x-key"], "PRIVATE_MARKER");
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (slow) {
+      contacted?.();
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    const result = gql.graphqlSync({ schema, source: body.query });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(result));
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const config = path.join(workspace, "pyproject.toml");
+  await fs.writeFile(config, `[tool.graphql-desk]\nschema={url="http://127.0.0.1:${server.address().port}/PRIVATE_MARKER",headers={"X-Key"="\${env:TOKEN}"}}\nschema_output="graphql_desk_generated/default.pyi"\n`);
+  const worker = createAnalysisWorker({ python, workspace, isTrusted: () => true });
+  t.after(() => worker.dispose());
+  const capture = { ...message(workspace), candidates: [source] };
+  const prepared = await worker.request(capture);
+  assert.equal(hits, 0);
+  assert.equal(prepared.remote_schemas.length, 1);
+  const target = prepared.remote_schemas[0];
+  const refresh = { ...capture, op: "refresh", id: prepared.id, schema_buffers: [], ...target,
+    credential_revision: "credentials-1", environment: { TOKEN: "PRIVATE_MARKER" } };
+  const loaded = await worker.request(refresh);
+  assert.equal(loaded.status, "ready");
+  assert.notEqual(loaded.id, prepared.id);
+  assert.equal(hits, 2);
+  assert.equal(JSON.stringify(loaded).includes("PRIVATE_MARKER"), false);
+  const analyzedRequest = { ...capture, op: "analyze", id: loaded.id, schema_buffers: [],
+    remote_revisions: [{ ...target, revision: "credentials-1" }] };
+  const analyzed = await worker.request(analyzedRequest);
+  assert.equal(analyzed.request.schemas.length, 1);
+  assert.equal(analyzed.response.schemas.length, 1);
+  assert.equal(analyzed.response.calls.length, 1);
+  assert.deepEqual(await worker.request({ ...analyzedRequest, op: "current" }), { ok: true, current: true });
+  assert.equal(hits, 2);
+  slow = true;
+  const contactedPromise = new Promise(resolve => { contacted = resolve; });
+  const abort = new AbortController();
+  const active = worker.request({ ...refresh, id: loaded.id }, { signal: abort.signal });
+  const rejected = assert.rejects(active, generic);
+  await contactedPromise;
+  abort.abort();
+  await rejected;
+  slow = false;
+  const restarted = await worker.request(capture);
+  assert.notEqual(restarted.id, loaded.id);
+  await new Promise(resolve => setTimeout(resolve, 125));
+  const fresh = await worker.request({ ...refresh, id: restarted.id });
+  assert.equal(fresh.status, "ready");
+  await assert.rejects(worker.request({ ...analyzedRequest, op: "current" }), generic);
+});
+// A late refresh reply cannot pass the final trust check or pollute a restart.
+test("refresh replies are redacted and guarded after the await", async t => {
+  let trusted = true;
+  const fake = fakeSpawn();
+  const { worker, workspace } = setup(t, fake, { isTrusted: () => trusted });
+  const request = { ...message(workspace), op: "refresh", id: "previous", schema_buffers: [],
+    project: "project", schema_name: "default", credential_revision: "revision", environment: { TOKEN: "PRIVATE_MARKER" } };
+  const refreshed = { ok: true, id: "next", project: "project", schema_name: "default",
+    status: "ready", last_good: false, error: null };
+  const active = worker.request(request);
+  fake.children[0].stdout.write(JSON.stringify(refreshed) + "\n");
+  trusted = false;
+  await assert.rejects(active, generic);
+  assert.equal(fake.children[0].killed, true);
+  trusted = true;
+  const next = worker.request(message(workspace));
+  fake.children[0].stdout.emit("data", Buffer.from(JSON.stringify(refreshed) + "\n"));
+  fake.children[1].stdout.write(JSON.stringify(reply) + "\n");
+  assert.deepEqual(await next, reply);
+  const leaked = worker.request(request);
+  fake.children[1].stdout.write(JSON.stringify({ ...refreshed, environment: { TOKEN: "PRIVATE_MARKER" } }) + "\n");
+  await assert.rejects(leaked, generic);
 });

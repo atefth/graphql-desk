@@ -17,6 +17,7 @@ from graphql_desk.editor_analysis import analyze_editor_snapshot
 from graphql_desk.editor_snapshot import (
     EditorSnapshot,
     OpenBuffer,
+    RemoteSchemaSnapshot,
     acquire_editor_snapshot,
     is_editor_snapshot_current,
     prepare_editor_snapshot,
@@ -72,6 +73,78 @@ def graph_inputs(
 
 
 class EditorSnapshotTests(unittest.TestCase):
+    def test_supplied_remote_facts_are_explicit_current_and_stale_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "main.py"
+            source.write_text(_QUERY, encoding="utf8")
+            config = root / "pyproject.toml"
+            config.write_text(
+                '[tool.graphql-desk]\nschema={url="https://example.test/PRIVATE",'
+                'headers={Authorization="PRIVATE"}}\n'
+                'schema_output="graphql_desk_generated/default.pyi"\n',
+                encoding="utf8",
+            )
+            prepared = prepare_editor_snapshot(workspace=root, candidates=(source,))
+            origin = prepared.remote_origins[0]
+            self.assertNotIn("PRIVATE", repr(prepared))
+            text = json.dumps(introspection_from_schema(build_schema(_SDL)))
+            remote = RemoteSchemaSnapshot(
+                origin.project,
+                origin.schema_name,
+                origin.config_token,
+                "credential-token",
+                1,
+                "opaque-token",
+                text,
+            )
+            plain = acquire_editor_snapshot(
+                workspace=root, candidates=(source,), generation=1
+            )
+            self.assertTrue(plain.unavailable_schemas)
+            captured = acquire_editor_snapshot(
+                workspace=root,
+                candidates=(source,),
+                generation=2,
+                preparation=prepared,
+                remote_schemas=(remote,),
+            )
+            self.assertFalse(captured.unavailable_schemas)
+            self.assertNotIn("PRIVATE", json.dumps(captured.request))
+            self.assertTrue(
+                is_editor_snapshot_current(
+                    captured, candidates=(source,), remote_schemas=(remote,)
+                )
+            )
+            self.assertFalse(is_editor_snapshot_current(captured, candidates=(source,)))
+            self.assertFalse(
+                is_editor_snapshot_current(
+                    captured,
+                    candidates=(source,),
+                    remote_schemas=(replace(remote, credential_token="changed"),),
+                )
+            )
+            stale = acquire_editor_snapshot(
+                workspace=root,
+                candidates=(source,),
+                generation=3,
+                remote_schemas=(replace(remote, stale=True),),
+            )
+            self.assertTrue(stale.unavailable_schemas)
+            self.assertEqual(stale.request["schemas"], [])
+            for records in (
+                (remote, remote),
+                (replace(remote, config_token="foreign"),),
+                (replace(remote, project="foreign"),),
+            ):
+                with self.assertRaises(ValueError):
+                    acquire_editor_snapshot(
+                        workspace=root,
+                        candidates=(source,),
+                        generation=4,
+                        remote_schemas=records,
+                    )
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

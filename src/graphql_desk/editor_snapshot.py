@@ -3,12 +3,13 @@
 import hashlib
 import json
 import os
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import astuple, dataclass, field, replace
 from pathlib import Path
 from typing import cast
 
-from .config import ProjectConfig
+from .config import ProjectConfig, SchemaOrigin
 from .project import effective_project, project_bindings, validate_project_ownership
 from .source_graph import ModuleSnapshot
 from .source_selection import SourceFile, select_project_sources
@@ -40,14 +41,37 @@ class LocalSchemaPath:
 
 
 @dataclass(frozen=True)
+class RemoteSchemaOrigin:
+    project: str
+    schema_name: str
+    origin: SchemaOrigin = field(repr=False)
+    config_token: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class RemoteSchemaSnapshot:
+    """Explicitly fetched facts; stale last-good text never enters analysis."""
+
+    project: str
+    schema_name: str
+    config_token: str = field(repr=False)
+    credential_token: str = field(repr=False)
+    version: int
+    token: str
+    text: str = field(repr=False)
+    stale: bool = False
+
+
+@dataclass(frozen=True)
 class EditorPreparation:
-    """Local schema paths to capture; no source/schema contents or credentials."""
+    """Schema targets and redacted private origins; no source/schema contents."""
 
     local_schemas: tuple[LocalSchemaPath, ...]
     workspace: Path = field(repr=False)
     _candidates: tuple[Path, ...] = field(repr=False)
     _observations: tuple[_Observation, ...] = field(repr=False)
     _configs: tuple[tuple[str, str, str], ...] = field(repr=False)
+    remote_origins: tuple[RemoteSchemaOrigin, ...] = field(default=(), repr=False)
 
 
 @dataclass
@@ -72,6 +96,7 @@ class EditorSnapshot:
     _observations: tuple[_Observation, ...] = field(repr=False)
     _configs: tuple[tuple[str, str, str], ...] = field(repr=False)
     _disk_modules: tuple[ModuleSnapshot, ...] = field(repr=False)
+    _remote_schemas: tuple[RemoteSchemaSnapshot, ...] = field(default=(), repr=False)
 
     @property
     def request(self) -> dict[str, object]:
@@ -283,6 +308,13 @@ def _check_observations(observations: Iterable[_Observation]) -> None:
 
 
 def _preparation(captured: _CapturedProjects) -> EditorPreparation:
+    observations = tuple(
+        sorted(
+            captured.observations.values(),
+            key=lambda item: (str(item.path), item.origin),
+        )
+    )
+    config_token = _text_digest(repr((captured.config_facts, observations)))
     return EditorPreparation(
         tuple(
             LocalSchemaPath(
@@ -297,13 +329,19 @@ def _preparation(captured: _CapturedProjects) -> EditorPreparation:
         ),
         captured.workspace,
         tuple(sorted(set(captured.paths), key=str)),
-        tuple(
-            sorted(
-                captured.observations.values(),
-                key=lambda item: (str(item.path), item.origin),
-            )
-        ),
+        observations,
         captured.config_facts,
+        tuple(
+            RemoteSchemaOrigin(
+                config.path.as_uri(),
+                schema.name,
+                schema.origin,
+                config_token,
+            )
+            for config, _ in captured.projects
+            for schema in config.schemas
+            if schema.origin.url is not None
+        ),
     )
 
 
@@ -336,6 +374,7 @@ def acquire_editor_snapshot(
     editor_fallback: Mapping[str, object] | None = None,
     previous: EditorSnapshot | None = None,
     preparation: EditorPreparation | None = None,
+    remote_schemas: tuple[RemoteSchemaSnapshot, ...] = (),
 ) -> EditorSnapshot:
     """Acquire exact analyzer facts without processes, imports, writes or fetching.
 
@@ -350,6 +389,9 @@ def acquire_editor_snapshot(
     A supplied preparation must match that capture before source/schema reads.
     Before publishing, recheck newly captured buffers/candidates/fallback and the
     caller's latest-job guard. Source/schema reads remain best effort, not atomic.
+    Remote schemas must be explicitly supplied from the same captured config;
+    callers own credential revision and refresh/cancellation. Stale last-good
+    records remain unavailable and never provide trusted analyzer contexts.
     """
     _check_version(generation)
     captured = _capture_projects(workspace, candidates, buffers, editor_fallback)
@@ -358,6 +400,24 @@ def acquire_editor_snapshot(
         _validate_previous(previous, base, generation)
     if preparation is not None and preparation != _preparation(captured):
         raise ValueError("Prepared editor configuration changed before acquisition")
+    remote = {(item.project, item.schema_name): item for item in remote_schemas}
+    origins = {
+        (item.project, item.schema_name): item
+        for item in _preparation(captured).remote_origins
+    }
+    if len(remote) != len(remote_schemas):
+        raise ValueError("Duplicate remote schema snapshot")
+    remote_schemas = tuple(remote[key] for key in sorted(remote))
+    for key, item in remote.items():
+        _check_version(item.version)
+        if (
+            key not in origins
+            or item.config_token != origins[key].config_token
+            or not item.credential_token
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", item.token)
+            or not item.text
+        ):
+            raise ValueError("Remote schema capture differs from configuration")
     open_files = captured.buffers
     observations = captured.observations
     disk_modules: list[ModuleSnapshot] = []
@@ -421,7 +481,21 @@ def acquire_editor_snapshot(
             )
         for schema in config.schemas:
             if schema.origin.local_path is None:
-                unavailable.append((project_id, schema.name))
+                supplied = remote.get((project_id, schema.name))
+                if supplied is None or supplied.stale:
+                    unavailable.append((project_id, schema.name))
+                    continue
+                schemas.append(
+                    {
+                        "project": project_id,
+                        "schema_name": schema.name,
+                        "uri": f"untitled:/graphql-desk/remote/{supplied.token}",
+                        "version": supplied.version,
+                        "token": supplied.token,
+                        "format": "introspection",
+                        "text": supplied.text,
+                    }
+                )
                 continue
             schema_path = _path(schema.origin.local_path)
             suffix = schema_path.suffix.lower()
@@ -463,6 +537,7 @@ def acquire_editor_snapshot(
         ),
         captured.config_facts,
         tuple(disk_modules),
+        remote_schemas,
     )
     return snapshot.reuse_disk_sources(previous) if previous is not None else snapshot
 
@@ -473,6 +548,7 @@ def is_editor_snapshot_current(
     candidates: tuple[Path, ...],
     buffers: tuple[OpenBuffer, ...] = (),
     editor_fallback: Mapping[str, object] | None = None,
+    remote_schemas: tuple[RemoteSchemaSnapshot, ...] = (),
 ) -> bool:
     """Reobserve finite inputs; a true result still needs the latest-job guard."""
     try:
@@ -483,6 +559,7 @@ def is_editor_snapshot_current(
             generation=snapshot.generation,
             editor_fallback=editor_fallback,
             previous=snapshot,
+            remote_schemas=remote_schemas,
         )
     except (OSError, ValueError, RuntimeError):
         return False

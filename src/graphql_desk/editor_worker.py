@@ -1,23 +1,28 @@
 """Trusted-caller, read-only editor worker; UTF-8 NDJSON on standard streams."""
 
+import hashlib
 import json
 import math
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import BinaryIO, cast
 from uuid import uuid4
+
+from graphql import introspection_from_schema
 
 from .editor_analysis import analyze_editor_snapshot
 from .editor_snapshot import (
     EditorPreparation,
     EditorSnapshot,
     OpenBuffer,
+    RemoteSchemaSnapshot,
     acquire_editor_snapshot,
     is_editor_snapshot_current,
     prepare_editor_snapshot,
 )
+from .schema_url import load_from_url
 from .source_graph import IncrementalResolver
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
@@ -175,7 +180,12 @@ def _check_buffers(
 
 
 class EditorWorker:
-    """One workspace and active job; callers own trust, cancellation and freshness."""
+    """One workspace/job; callers own trust, cancellation and credential revisions.
+
+    Only explicit refresh fetches a prepared target. Analyze/current must repeat
+    every active remote credential revision; changes require refresh/invalidation.
+    Failed refresh retains matching last-good only as visible, unavailable state.
+    """
 
     def __init__(self) -> None:
         self._workspace: Path | None = None
@@ -187,6 +197,9 @@ class EditorWorker:
         self._previous: EditorSnapshot | None = None
         self._schema_buffers: tuple[OpenBuffer, ...] = ()
         self._resolver = IncrementalResolver()
+        self._remote: dict[tuple[str, str], RemoteSchemaSnapshot] = {}
+        self._last_good: dict[tuple[str, str], RemoteSchemaSnapshot] = {}
+        self._remote_revisions: dict[tuple[str, str], str] = {}
 
     def invalidate(self) -> None:
         self._identity = None
@@ -196,6 +209,9 @@ class EditorWorker:
         self._previous = None
         self._schema_buffers = ()
         self._resolver.clear()
+        self._remote.clear()
+        self._last_good.clear()
+        self._remote_revisions.clear()
 
     def handle(self, value: object) -> dict[str, object]:
         """Malformed/failed messages invalidate all previously issued job IDs."""
@@ -214,11 +230,16 @@ class EditorWorker:
             "prepare",
             "analyze",
             "current",
+            "refresh",
         }:
             raise ValueError("Invalid operation")
         keys = {"op"} | _CAPTURE_KEYS
         if operation != "prepare":
             keys |= {"id", "schema_buffers"}
+        if operation == "refresh":
+            keys |= {"project", "schema_name", "credential_revision", "environment"}
+        elif operation in {"analyze", "current"} and "remote_revisions" in raw:
+            keys.add("remote_revisions")
         item = _object(raw, keys)
         capture = _capture(item)
         workspace = _canonical(capture.workspace)
@@ -229,6 +250,8 @@ class EditorWorker:
             self._identity = None
             self._snapshot = None
             self._schema_buffers = ()
+            self._remote.clear()
+            self._remote_revisions.clear()
             preparation = prepare_editor_snapshot(
                 workspace=capture.workspace,
                 candidates=capture.candidates,
@@ -238,6 +261,15 @@ class EditorWorker:
             self._capture = capture
             self._preparation = preparation
             self._identity = uuid4().hex
+            origins = {
+                (entry.project, entry.schema_name): entry
+                for entry in preparation.remote_origins
+            }
+            self._last_good = {
+                key: schema
+                for key, schema in self._last_good.items()
+                if key in origins and schema.config_token == origins[key].config_token
+            }
             required = {path.canonical_path for path in preparation.local_schemas}
             return {
                 "ok": True,
@@ -250,6 +282,10 @@ class EditorWorker:
                         "canonical_path": str(path.canonical_path),
                     }
                     for path in preparation.local_schemas
+                ],
+                "remote_schemas": [
+                    {"project": entry.project, "schema_name": entry.schema_name}
+                    for entry in preparation.remote_origins
                 ],
                 "required_buffers": [
                     doc.identity
@@ -274,6 +310,18 @@ class EditorWorker:
         if {_canonical(buffer.path) for buffer in schema_buffers} != expected:
             raise ValueError("Schema buffer set mismatch")
         buffers = capture.buffers + schema_buffers
+        if operation == "refresh":
+            return self._refresh(item, capture, buffers)
+        revisions: dict[tuple[str, str], str] = {}
+        for value in _array(item.get("remote_revisions", [])):
+            revision = _object(value, {"project", "schema_name", "revision"})
+            key = (_string(revision["project"]), _string(revision["schema_name"]))
+            if key in revisions:
+                raise ValueError("Duplicate credential revision")
+            revisions[key] = _string(revision["revision"])
+        if revisions != self._remote_revisions:
+            raise ValueError("Remote credential revision changed")
+        remote_schemas = tuple(self._remote[key] for key in sorted(self._remote))
         if operation == "current":
             current = (
                 self._snapshot is not None
@@ -283,6 +331,7 @@ class EditorWorker:
                     candidates=capture.candidates,
                     buffers=buffers,
                     editor_fallback=capture.fallback,
+                    remote_schemas=remote_schemas,
                 )
             )
             if not current:
@@ -299,6 +348,7 @@ class EditorWorker:
             editor_fallback=capture.fallback,
             preparation=self._preparation,
             previous=self._previous,
+            remote_schemas=remote_schemas,
         )
         request = snapshot.request
         response = analyze_editor_snapshot(request, resolver=self._resolver)
@@ -310,6 +360,107 @@ class EditorWorker:
             "request": request,
             "response": response,
             "unavailable_schemas": snapshot.unavailable_schemas,
+            "remote_schemas": [
+                {
+                    "project": key[0],
+                    "schema_name": key[1],
+                    "status": (
+                        "unavailable"
+                        if key not in self._remote
+                        else "stale"
+                        if self._remote[key].stale
+                        else "ready"
+                    ),
+                }
+                for key in sorted(self._remote_revisions)
+            ],
+        }
+
+    def _refresh(
+        self,
+        item: dict[str, object],
+        capture: _Capture,
+        buffers: tuple[OpenBuffer, ...],
+    ) -> dict[str, object]:
+        assert self._preparation is not None
+        key = (_string(item["project"]), _string(item["schema_name"]))
+        origins = {
+            (entry.project, entry.schema_name): entry
+            for entry in self._preparation.remote_origins
+        }
+        if key not in origins:
+            raise ValueError("Unprepared remote schema")
+        revision = _string(item["credential_revision"])
+        raw_environment = item["environment"]
+        if not isinstance(raw_environment, dict):
+            raise ValueError("Invalid explicit environment")
+        environment: dict[str, str] = {}
+        for name, value in cast(dict[object, object], raw_environment).items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise ValueError("Invalid explicit environment")
+            environment[name] = value
+        credential_token = hashlib.sha256(
+            json.dumps(
+                [revision, environment], sort_keys=True, ensure_ascii=True
+            ).encode()
+        ).hexdigest()
+
+        def recheck() -> None:
+            if (
+                prepare_editor_snapshot(
+                    workspace=capture.workspace,
+                    candidates=capture.candidates,
+                    buffers=capture.buffers,
+                    editor_fallback=capture.fallback,
+                )
+                != self._preparation
+            ):
+                raise ValueError("Configuration changed during schema refresh")
+
+        recheck()
+        origin = origins[key]
+        self._snapshot = None
+        self._previous = None
+        self._resolver.clear()
+        self._generation += 1
+        try:
+            schema = load_from_url(origin.origin, environment=environment)
+            text = json.dumps(introspection_from_schema(schema))
+        except ValueError:
+            previous = self._last_good.get(key)
+            if (
+                previous is not None
+                and previous.config_token == origin.config_token
+                and previous.credential_token == credential_token
+            ):
+                self._remote[key] = replace(previous, stale=True)
+            else:
+                self._remote.pop(key, None)
+            status = "stale" if key in self._remote else "unavailable"
+        else:
+            record = RemoteSchemaSnapshot(
+                key[0],
+                key[1],
+                origin.config_token,
+                credential_token,
+                self._generation,
+                uuid4().hex,
+                text,
+            )
+            self._remote[key] = self._last_good[key] = record
+            status = "ready"
+        recheck()
+        self._remote_revisions[key] = revision
+        self._schema_buffers = buffers[len(capture.buffers) :]
+        self._identity = uuid4().hex
+        return {
+            "ok": True,
+            "id": self._identity,
+            "project": key[0],
+            "schema_name": key[1],
+            "status": status,
+            "last_good": status == "stale",
+            "error": None if status == "ready" else "schema-refresh-failed",
         }
 
 

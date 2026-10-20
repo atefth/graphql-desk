@@ -66,11 +66,18 @@ caching, worker integration and performance acceptance remain open.
 Source/schema reads are best-effort and non-atomic. Configuration discovery and
 ownership share one captured text set, preventing independent helper reads from
 observing different configurations. End-of-read comparisons do not replace full
-reacquisition and the latest-job guard before publication. Generation-based schema tokens conservatively
+reacquisition and the latest-job guard before publication. Generation-based local schema tokens conservatively
 invalidate contexts on every acquisition; incremental caching and performance
 acceptance are separate work.
 
-Twenty-eight focused acquisition tests cover real acquisition-to-analysis, imports/fragments,
+Explicit `RemoteSchemaSnapshot` records can supply introspection text from the
+same captured configuration. Their private config/credential identity, version and
+opaque token participate in freshness. Stale records remain unavailable and never
+enter analyzer schema contexts. Synthetic untitled URIs avoid disclosing endpoint
+or header values. Acquisition and current checks still perform no network I/O;
+the worker's explicit refresh operation owns fetching and cancellation.
+
+Twenty-nine focused acquisition tests cover real acquisition-to-analysis, imports/fragments,
 new source buffers, local schema overlays, nested/fallback projects, dirty/new
 configuration routing and malformed-file rejection, redaction, exclusions,
 entrypoints, stale input origins, Unicode/BOM/CRLF and symlink boundaries where

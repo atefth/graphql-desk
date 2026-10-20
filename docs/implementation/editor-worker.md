@@ -3,8 +3,8 @@
 Launch the installed package with an explicitly selected absolute interpreter:
 `python -I -X utf8 -m graphql_desk.editor_worker`. The trusted editor caller owns
 workspace authorization, interpreter selection, process lifetime and cancellation.
-The worker performs finite local acquisition and pure analysis; it does not execute
-project Python, fetch remote schemas or write generated files.
+The worker performs finite acquisition and pure analysis. Only an explicit refresh
+fetches a prepared remote schema; it does not execute project Python or write files.
 
 Standard input/output carry UTF-8 NDJSON, one request/reply per line. Both request
 and serialized reply, including newline, are limited to 8 MiB. Malformed, duplicate
@@ -23,21 +23,31 @@ candidate sources and ancestor configurations. Document metadata contains `id`,
 inventory. Unrelated document text is rejected. Versions are nonnegative integers,
 not booleans; conflicting canonical aliases reject.
 
-The protocol has three operations:
+The protocol has four operations:
 
 - `prepare` uses the shared configuration preflight, returning `ok`, an opaque
-  job `id`, `local_schemas` path facts and `required_buffers` document IDs. Missing
+  job `id`, `local_schemas` path facts, redacted `remote_schemas` project/name targets
+  and `required_buffers` document IDs. Missing
   files and unsupported schema suffixes remain visible. Remote schemas are not
   fetched. No source/schema contents are read during preparation.
 - `analyze` repeats the same capture and adds `id` and `schema_buffers`. Schema
   buffers must exactly cover open documents matching configured local schemas,
   including external paths, with current text/version/dirty facts. Changed capture
   or preparation rejects. Success returns `ok`, `id`, the actual analyzer `request`
-  and `response`, and `unavailable_schemas`; unavailable remote contexts remain
+  and `response`, `unavailable_schemas` and remote schema status records; unavailable remote contexts remain
   explicit. A job can be analyzed only once.
 - `current` repeats those inputs and checks the active snapshot through full
   reacquisition. It returns `ok: true` and a boolean `current` for the active job.
   Unknown/superseded IDs reject. False freshness invalidates state.
+- `refresh` repeats the capture, `id` and local `schema_buffers`, selecting one
+  prepared `project`/`schema_name` with explicit `credential_revision` and
+  `environment` values. It fetches that private configured origin, rechecks the
+  closed configuration and rotates the job ID. Replies contain only target names,
+  `ready`/`stale`/`unavailable`, `last_good` and a fixed failure code. Matching
+  last-good state is retained after failure but excluded from trusted analysis.
+  Changed configuration or credentials cannot inherit that state. Subsequent
+  `analyze`/`current` calls must repeat the exact active `remote_revisions` list of
+  project/name/revision records; the caller owns credential-change invalidation.
 
 One worker owns one workspace and one active job. New preparation supersedes old
 IDs; failure clears preparation, snapshots and source caches. Process restart
@@ -53,11 +63,12 @@ stop the process. Synchronous work cannot consume a cancellation message while
 busy; the caller must terminate/restart it. This module supplies neither that
 editor adapter nor production activation, automatic discovery or live typing.
 
-Fourteen tests include a persistent isolated subprocess outside the repository,
+Nineteen tests include a persistent isolated subprocess outside the repository,
 Unicode pipes, dirty external SDL and missing buffered introspection, named schema
 preflight, exact buffer metadata/canonical sets, source/config/disk changes,
 supersession/restart, retained source versions, remote unavailability, redaction
-and bounded malformed/oversized request/reply recovery. No broad acceptance gate
+and bounded malformed/oversized request/reply recovery, explicit HTTP refresh,
+credential/configuration changes and stale-context exclusion. No broad acceptance gate
 is passed by this transport foundation.
 
 ## Editor-side connection
@@ -81,7 +92,7 @@ work and permits restart; `close()` and `dispose()` permanently close the client
 Trust, abort, disposal and process epoch are checked after the final await.
 Callers still own trust-event invalidation, complete captures, latest-job checks
 and publication. This connection does not automatically enumerate files, register
-providers or activate an extension. Ten tests include a real persistent Python
+providers or activate an extension. Twelve tests include a real persistent Python
 round trip, Unicode/external schema buffers, process restart, framed faults,
-timeout/cancellation and final-await races; provider/highlighting tests remain
+timeout/cancellation, HTTP refresh/abort/restart and final-await races; provider/highlighting tests remain
 separate. No generated analysis files are written.
