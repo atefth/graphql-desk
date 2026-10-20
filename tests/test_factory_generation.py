@@ -186,32 +186,52 @@ class FactoryGenerationTests(unittest.TestCase):
                 [sys.executable, "main.py"], cwd=root, capture_output=True, text=True
             )
             self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
-            (root / "bad.py").write_text(
-                "from generated.sources.main import BookQueryVariables\n"
+            bad = (
+                "from generated.sources.main import "
+                "BookQueryResult, BookQueryVariables\n"
                 "from main import book_query, other, execute\n"
                 "from leaf import book_fields, other_fields\n"
                 "from generated.main import graphql\n"
-                "from typing import Any\n"
                 "from typing_extensions import assert_type\n"
+                "from graphql import DocumentNode\n"
                 "from graphql_desk import TypedDocument\n"
                 "variables: BookQueryVariables = {'id': 1}  # error\n"
                 "valid: BookQueryVariables = {'id':'1'}\n"
                 "result = execute(book_query, valid)\n"
                 "hidden = result['book']['title']  # error\n"
                 "execute(book_query, 1)  # error\n"
-                "assert_type(graphql('query Book($id:ID!){book(id:$id){id ...Fields}}',"
-                "()), TypedDocument[Any,Any])\n"
-                "assert_type(graphql('query Book($id:ID!){book(id:$id){id ...Fields}}',"
-                "(book_fields,book_fields)), TypedDocument[Any,Any])\n"
-                "assert_type(graphql('query Book($id:ID!){book(id:$id){id ...Fields}}',"
-                "(other,)), TypedDocument[Any,Any])\n"
-                "assert_type(graphql('query Book($id:ID!){book(id:$id){id ...Fields}}',"
-                "(other_fields,)), TypedDocument[Any,Any])\n",
-                encoding="utf8",
+                "missing=graphql("
+                "'query Book($id:ID!){book(id:$id){id ...Fields}}',())\n"
+                "extra=graphql('query Book($id:ID!){book(id:$id){id ...Fields}}',"
+                "(book_fields,book_fields))\n"
+                "operation_doc=graphql("
+                "'query Book($id:ID!){book(id:$id){id ...Fields}}',"
+                "(other,))\n"
+                "wrong_fragment=graphql("
+                "'query Book($id:ID!){book(id:$id){id ...Fields}}',"
+                "(other_fields,))\n"
+                "for opaque in [missing,extra,operation_doc,wrong_fragment]:\n"
+                "    assert_type(opaque.ast, DocumentNode)\n"
+                "    execute(opaque, valid)  # error\n"
+                "    precise: TypedDocument[BookQueryResult,BookQueryVariables] "
+                "= opaque  # error\n"
+                "    selected = opaque['book']  # error\n"
             )
-            self.check(root, {"bad.py": {8, 11, 12}})
+            (root / "bad.py").write_text(bad, encoding="utf8")
+            self.check(
+                root,
+                {
+                    "bad.py": {
+                        i
+                        for i, line in enumerate(bad.splitlines(), 1)
+                        if "# error" in line
+                    }
+                },
+            )
 
-    def test_explicit_fallback_accepts_known_bad_calls_as_any(self) -> None:
+    def test_opaque_fallback_preserves_dynamic_ast_access_without_precise_types(
+        self,
+    ) -> None:
         modules = (
             ModuleSnapshot(
                 "p",
@@ -226,21 +246,87 @@ class FactoryGenerationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.write(root, artifacts, modules)
-            (root / "boundary.py").write_text(
-                "from typing import Any\nfrom typing_extensions import assert_type\n"
+            boundary = (
+                "from typing import TypeVar\n"
+                "from typing_extensions import assert_type\n"
+                "from graphql import DocumentNode\n"
                 "from graphql_desk import TypedDocument\n"
+                "from generated.sources.main import QResult, QVariables\n"
                 "from generated.main import graphql\n"
-                "assert_type(graphql('query Missing{greeting}'), "
-                "TypedDocument[Any,Any])\n"
-                "assert_type(graphql('query Q{greeting}',operation='Wrong'), "
-                "TypedDocument[Any,Any])\n"
-                "assert_type(graphql('query Q{greeting}',[graphql('{greeting}')]), "
-                "TypedDocument[Any,Any])\n"
-                "def dynamic(source: str) -> None:\n"
-                "    assert_type(graphql(source), TypedDocument[Any,Any])\n",
-                encoding="utf8",
+                "R=TypeVar('R')\nV=TypeVar('V')\n"
+                "def execute(doc: TypedDocument[R,V], variables: V) -> R: "
+                "raise RuntimeError\n"
+                "wrong_source=graphql('query Missing{greeting}')\n"
+                "wrong_selector=graphql('query Q{greeting}',operation='Wrong')\n"
+                "wrong_fragments=graphql('query Q{greeting}',[graphql('{greeting}')])\n"
+                "for opaque in [wrong_source,wrong_selector,wrong_fragments]:\n"
+                "    assert_type(opaque.ast,DocumentNode)\n"
+                "    assert_type(opaque.operation_name,str | None)\n"
+                "    assert_type(opaque.schema_name,str | None)\n"
+                "    precise: TypedDocument[QResult,QVariables] = opaque  # error\n"
+                "    execute(opaque,QVariables())  # error\n"
+                "    value=opaque['greeting']  # error\n"
+                "    opaque.ast=opaque.ast  # error\n"
+                "    opaque.operation_name='Q'  # error\n"
+                "    opaque.schema_name='main'  # error\n"
+                "def dynamic(source: str) -> DocumentNode:\n"
+                "    doc=graphql(source)\n"
+                "    assert_type(doc.ast,DocumentNode)\n"
+                "    assert_type(doc.operation_name,str | None)\n"
+                "    assert_type(doc.schema_name,str | None)\n"
+                "    execute(doc,QVariables())  # error\n"
+                "    return doc.ast\n"
+                "def compose(fragment_source: str, source: str) -> DocumentNode:\n"
+                "    fragment=graphql(fragment_source)\n"
+                "    doc=graphql(source,(fragment,))\n"
+                "    assert_type(doc.ast,DocumentNode)\n"
+                "    execute(doc,QVariables())  # error\n"
+                "    return doc.ast\n"
             )
-            self.check(root)
+            (root / "boundary.py").write_text(boundary, encoding="utf8")
+            runtime = (
+                "from generated.main import graphql\n"
+                "from graphql_desk import TypedDocument\n"
+                "from graphql import build_schema\n"
+                "from graphql import execute_sync  "
+                "# pyright: ignore[reportUnknownVariableType]\n"
+                "def dynamic(source: str) -> None:\n"
+                "    doc=graphql(source)\n"
+                "    assert type(doc) is TypedDocument\n"
+                "    assert doc.operation_name=='Dynamic' and doc.schema_name=='main'\n"
+                "    response=execute_sync("
+                "build_schema('type Query{greeting:String!}'),"
+                "doc.ast,root_value={'greeting':'hi'})\n"
+                "    assert response.errors is None and "
+                "response.data=={'greeting':'hi'}\n"
+                "dynamic('query Dynamic{greeting}')\n"
+                "def compose(fragment_source: str, source: str) -> None:\n"
+                "    fragment=graphql(fragment_source)\n"
+                "    doc=graphql(source,(fragment,))\n"
+                "    assert type(doc) is TypedDocument\n"
+                "    assert doc.ast.definitions[1] is fragment.ast.definitions[0]\n"
+                "    response=execute_sync("
+                "build_schema('type Query{greeting:String!}'),"
+                "doc.ast,root_value={'greeting':'hi'})\n"
+                "    assert response.errors is None and "
+                "response.data=={'greeting':'hi'}\n"
+                "compose('fragment F on Query{greeting}','query Composed{...F}')\n"
+            )
+            (root / "runtime.py").write_text(runtime, encoding="utf8")
+            self.check(
+                root,
+                {
+                    "boundary.py": {
+                        i
+                        for i, line in enumerate(boundary.splitlines(), 1)
+                        if "# error" in line
+                    }
+                },
+            )
+            executed = subprocess.run(
+                [sys.executable, "runtime.py"], cwd=root, capture_output=True, text=True
+            )
+            self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
 
     def test_primary_unmask_ast_refinement_and_annotated_literal_sources(self) -> None:
         modules = (
@@ -379,10 +465,10 @@ class FactoryGenerationTests(unittest.TestCase):
             root = Path(directory)
             self.write(root, empty, ())
             (root / "fixture.py").write_text(
-                "from typing import Any\nfrom typing_extensions import assert_type\n"
-                "from graphql_desk import TypedDocument\n"
+                "from typing_extensions import assert_type\n"
+                "from graphql import DocumentNode\n"
                 "from generated.main import graphql\n"
-                "assert_type(graphql('{greeting}'), TypedDocument[Any,Any])\n",
+                "assert_type(graphql('{greeting}').ast, DocumentNode)\n",
                 encoding="utf8",
             )
             self.check(root)

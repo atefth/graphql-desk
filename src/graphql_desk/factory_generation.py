@@ -160,7 +160,8 @@ def generate_factory_artifacts(
     """Generate one schema's retained runtime/stub files without writing them.
 
     The caller supplies current, trusted resolver/index snapshots. The general str
-    fallback is explicitly Any: checkers also use it for incorrect known calls.
+    fallback exposes AST metadata only, without trusted result/variable types.
+    Checkers also use this opaque view for incorrect known constructor calls.
     Index errors prevent publication; precision diagnostics accompany usable
     artifacts and identify syntax that cannot reliably select precise overloads.
     """
@@ -440,12 +441,12 @@ def generate_factory_artifacts(
         )
         fallback = (
             "def graphql(source: str, "
-            "fragments: __graphql_desk_Iterable[__graphql_desk_TypedDocument["
-            "__graphql_desk_Any, __graphql_desk_Any]] = (), "
-            "*, operation: str | None = None) -> __graphql_desk_TypedDocument["
-            "__graphql_desk_Any, __graphql_desk_Any]: ...\n"
+            "fragments: __graphql_desk_Iterable["
+            "__graphql_desk_UnresolvedDocument] = (), "
+            "*, operation: str | None = None) -> "
+            "__graphql_desk_UnresolvedDocument: ...\n"
         )
-        typing_import = "from typing import Any as __graphql_desk_Any"
+        typing_import = "from typing import Protocol as __graphql_desk_Protocol"
         if overloads:
             typing_import += (
                 ", Literal as __graphql_desk_Literal, "
@@ -454,16 +455,20 @@ def generate_factory_artifacts(
         stub = (
             schema_text
             + (
-                "\n# Dynamic/nonmatching calls retain the untyped baseline.\n"
+                "\n# Dynamic/nonmatching calls expose AST metadata only.\n"
+                "from graphql import DocumentNode as __graphql_desk_DocumentNode\n"
                 "from collections.abc import Iterable as __graphql_desk_Iterable\n"
-                "from graphql_desk import "
-                "TypedDocument as __graphql_desk_TypedDocument\n"
             )
             + typing_import
             + "\n"
             + "".join(imports)
-            + "\n"
-            + "\n".join(overloads)
+            + "\nclass __graphql_desk_UnresolvedDocument(__graphql_desk_Protocol):\n"
+            "    @property\n"
+            "    def ast(self) -> __graphql_desk_DocumentNode: ...\n"
+            "    @property\n"
+            "    def operation_name(self) -> str | None: ...\n"
+            "    @property\n"
+            "    def schema_name(self) -> str | None: ...\n\n" + "\n".join(overloads)
         )
         stub += ("@__graphql_desk_overload\n" if overloads else "") + fallback + "\n"
         put(path + ".pyi", stub)
