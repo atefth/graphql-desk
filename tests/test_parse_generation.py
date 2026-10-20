@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from graphql import GraphQLError
+from graphql import DocumentNode, GraphQLError
 
+from graphql_desk.literal_ast import render_document_ast_types
 from graphql_desk.parse_generation import (
     render_captured_parse_companion,
     render_parse_companion,
@@ -86,7 +87,7 @@ class ParseGenerationTests(unittest.TestCase):
 
     def test_captured_nesting_failures_preserve_independent_declarations(self) -> None:
         parser_limit = "{" + "a{" * 350 + "id" + "}" * 351
-        declaration_limit = "{" + "a{" * 150 + "id" + "}" * 151
+        declaration_limit = "{ nested { id } }"
         module = ModuleSnapshot(
             "p",
             "main",
@@ -98,9 +99,20 @@ class ParseGenerationTests(unittest.TestCase):
             f"too_nested=parse({declaration_limit!r})\n"
             "also_good=parse('{ other }')\n",
         )
-        output = render_captured_parse_companion(
-            (module,), project_id="p", module="main"
-        )
+
+        def render(document: DocumentNode, *, name: str) -> str:
+            # Declaration recursion thresholds vary across Python versions.
+            if document.loc and document.loc.source.body == declaration_limit:
+                raise ValueError("Controlled declaration nesting failure")
+            return render_document_ast_types(document, name=name)
+
+        with patch(
+            "graphql_desk.parse_generation.render_document_ast_types",
+            side_effect=render,
+        ):
+            output = render_captured_parse_companion(
+                (module,), project_id="p", module="main"
+            )
         self.assertEqual(
             output.companion.stub.count("def parse(source: _ParseLiteral["), 2
         )
@@ -108,6 +120,13 @@ class ParseGenerationTests(unittest.TestCase):
         self.assertIn("_ParseLiteral['{ other }']", output.companion.stub)
         self.assertEqual(
             [item.code for item in output.diagnostics], ["parse-fallback"] * 2
+        )
+        self.assertEqual(
+            sum(
+                item.message == "Controlled declaration nesting failure"
+                for item in output.diagnostics
+            ),
+            1,
         )
         self.assertTrue(
             all(item.range.end > item.range.start for item in output.diagnostics)
