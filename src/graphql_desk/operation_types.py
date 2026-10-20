@@ -1,12 +1,10 @@
 """Render the supported operation subset as static dictionary declarations."""
 
 import keyword
-import re
 import unicodedata
 from collections.abc import Iterable
 
 from graphql import (
-    DirectiveNode,
     FieldNode,
     FragmentDefinitionNode,
     FragmentSpreadNode,
@@ -18,13 +16,11 @@ from graphql import (
     GraphQLSchema,
     GraphQLUnionType,
     InlineFragmentNode,
-    KnownDirectivesRule,
     ListTypeNode,
     NamedTypeNode,
     NameNode,
     Node,
     NonNullTypeNode,
-    NoUnusedFragmentsRule,
     OperationDefinitionNode,
     SelectionNode,
     TypeNode,
@@ -32,8 +28,6 @@ from graphql import (
     parse,
     parse_type,
     print_ast,
-    specified_rules,
-    validate,
     visit,
 )
 
@@ -42,31 +36,11 @@ from .fragment_refs import fragment_identity_key
 from .fragments import FragmentIndex, IndexedDocument, SchemaContext
 from .schema_types import mapped_type_declarations, render_schema_types
 from .source_graph import DocumentIdentity
+from .validation import validate_document
 
 _CONDITIONAL = frozenset({"include", "skip", "defer"})
 # True marks a conditional occurrence chosen present in a correlated alternative.
 _Field = tuple[GraphQLCompositeType, FieldNode, bool]
-# GraphQLSP's pinned built-in unknown-directive suppression list.
-_CLIENT_DIRECTIVES = frozenset(
-    {
-        "populate",
-        "client",
-        "unmask",
-        "_unmask",
-        "_optional",
-        "_relayPagination",
-        "_simplePagination",
-        "_required",
-        "optional",
-        "required",
-        "arguments",
-        "argumentDefinitions",
-        "connection",
-        "refetchable",
-        "relay",
-        "inline",
-    }
-)
 
 
 def _directives(
@@ -148,37 +122,7 @@ def _render_operation_types(
         document,
         _SupportedSyntax(disable_masking=disable_masking or fragment_keys is not None),
     )
-    if any(
-        re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", item) is None
-        for item in client_directives
-    ):
-        raise ValueError("Client directives must be GraphQL names without @")
-    client_names = _CLIENT_DIRECTIVES | set(client_directives)
-
-    class KnownClientDirectives(KnownDirectivesRule):
-        def enter_directive(
-            self,
-            node: DirectiveNode,
-            key: object,
-            parent: object,
-            path: object,
-            ancestors: list[Node],
-        ) -> None:
-            if node.name.value in client_names and not schema.get_directive(
-                node.name.value
-            ):
-                return
-            super().enter_directive(node, key, parent, path, ancestors)
-
-    errors = validate(
-        schema,
-        document,
-        [
-            KnownClientDirectives if rule is KnownDirectivesRule else rule
-            for rule in specified_rules
-            if rule is not NoUnusedFragmentsRule
-        ],
-    )
+    errors = validate_document(schema, document, client_directives=client_directives)
     if errors:
         raise ValueError("; ".join(error.message for error in errors))
     fragments = {
