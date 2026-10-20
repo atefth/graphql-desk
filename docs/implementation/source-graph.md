@@ -72,10 +72,14 @@ prefixes cannot establish a trusted external alias constructor. Supported builti
 aliased `bool` class bases remain rejected as non-subclassable. Constructors must resolve to supported external `builtins`, `typing`,
 `typing_extensions` or `collections.abc` exports; shadowing and mutations invalidate that proof. External arguments stay
 unverified, and containers do not inherit TypedDict provenance from their element.
-Explicit nullable aliases support only `N | None`, `None | N` or trusted external
-`typing.Optional[N]`, where `N` is an existing named or qualified type target. They retain their own alias identity and
+Explicit binary unions accept two direct named/qualified type operands or literal
+None, with at least one named operand: `N | M`, `N | None` or `None | N`. Trusted
+external `typing.Optional[N]` retains its one named/qualified operand. They retain their own alias identity and
 never confer class-base or TypedDict capabilities through aliases or reexports.
-External operands remain unverified.
+External operands remain unverified. Duplicate union operands also retain the
+conservative non-base policy: runtime and Pyright allow the tested reduced class
+base, while pinned mypy rejects it. Nested/direct multi-operand expressions and
+general Union evaluation remain unsupported.
 Trusted external `typing.Literal` and `typing_extensions.Literal` aliases accept
 one or more flat string, bytes, integer, boolean or None constants, plus one unary
 minus on an exact integer. They retain their own identity without class-base or

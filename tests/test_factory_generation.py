@@ -667,6 +667,8 @@ BadResult() # error
             ("from typing import TypeAlias\nText:TypeAlias=list[str]", True),
             ("from typing import TypeAlias\nText:TypeAlias=bool", True),
             ("from typing import TypeAlias\nText:TypeAlias=str|None", True),
+            ("from typing import TypeAlias\nText:TypeAlias=str|int", True),
+            ("from typing import TypeAlias\nText:TypeAlias=int|str", True),
             (
                 "from typing_extensions import TypeAlias,Literal\n"
                 "Text:TypeAlias=Literal['hello','world']",
@@ -750,7 +752,18 @@ BadResult() # error
         ):
             with self.subTest(declaration=declaration):
                 authored = source
-                if "Literal" in declaration:
+                if "str|int" in declaration or "int|str" in declaration:
+                    authored = source.replace(
+                        "value=Text('hello')",
+                        "value:Text='hello'\nnumber:Text=7\n"
+                        "assert graphql.scalar('String',number) is number",
+                    )
+                    authored += (
+                        " int_result:QueryResult={'greeting':number}\n"
+                        " bad=graphql.scalar('String',1.5)\n"
+                        " bad=graphql.scalar('String',[1])\n"
+                    )
+                elif "Literal" in declaration:
                     authored = source.replace(
                         "value=Text('hello')", "value:Text='hello'"
                     )
@@ -1054,7 +1067,7 @@ if TYPE_CHECKING:
                         runtime.returncode, 0, runtime.stdout + runtime.stderr
                     )
 
-    def test_unsubclassable_aliases_preserve_checker_evidence_and_runtime_rejection(
+    def test_alias_bases_preserve_checker_evidence_and_runtime_behavior(
         self,
     ) -> None:
         for source in (
@@ -1062,6 +1075,10 @@ if TYPE_CHECKING:
             "from typing import TypeAlias\nFlag:TypeAlias=bool\n"
             "class Bad(Flag): pass\n",
             "from typing import TypeAlias\nMaybe:TypeAlias=str|None\n"
+            "class Bad(Maybe): pass\n",
+            "from typing import TypeAlias\nMaybe:TypeAlias=str|int\n"
+            "class Bad(Maybe): pass\n",
+            "from typing import TypeAlias\nMaybe:TypeAlias=str|str\n"
             "class Bad(Maybe): pass\n",
             "from typing import TypeAlias\nMaybe:TypeAlias=str|None\n"
             "Alias:TypeAlias=Maybe\nclass Bad(Alias): pass\n",
@@ -1085,8 +1102,9 @@ if TYPE_CHECKING:
                     for n, line in enumerate(source.splitlines(), 1)
                     if line.startswith("class Bad")
                 }
-                if "Literal" in source:
-                    # Pinned Pyright accepts these bases; preflight and runtime reject.
+                if "Literal" in source or "str|str" in source:
+                    # Pyright accepts these bases; mypy and preflight reject.
+                    # Duplicate unions also reduce to a valid base at runtime.
                     (root / "pyrightconfig.json").write_text(
                         json.dumps(
                             {"typeCheckingMode": "strict", "include": ["bad.py"]}
@@ -1128,8 +1146,11 @@ if TYPE_CHECKING:
                 runtime = subprocess.run(
                     [sys.executable, "bad.py"], cwd=root, capture_output=True, text=True
                 )
-                self.assertNotEqual(runtime.returncode, 0)
-                self.assertIn("TypeError", runtime.stderr)
+                if "str|str" in source:
+                    self.assertEqual(runtime.returncode, 0, runtime.stderr)
+                else:
+                    self.assertNotEqual(runtime.returncode, 0)
+                    self.assertIn("TypeError", runtime.stderr)
                 if "bool" in source:
                     self.assertIn("bool", runtime.stderr)
 
