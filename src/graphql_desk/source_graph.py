@@ -1003,6 +1003,7 @@ class _Graph:
         if constructor.kind != "external" or constructor.text not in {
             "builtins.list",
             "builtins.tuple",
+            "typing.Tuple",
             "builtins.dict",
             "typing.Mapping",
             "collections.abc.Mapping",
@@ -1013,16 +1014,18 @@ class _Graph:
                 "Type alias subscriptions require a trusted supported constructor"
             )
         argument = node.slice
-        if constructor.text == "builtins.tuple":
-            if not (
-                isinstance(argument, ast.Tuple)
-                and len(argument.elts) == 2
-                and isinstance(argument.elts[1], ast.Constant)
-                and argument.elts[1].value is Ellipsis
-            ):
-                raise _Unresolved("Tuple aliases require one named type and ellipsis")
-            argument = argument.elts[0]
         arguments = [argument]
+        if constructor.text in {"builtins.tuple", "typing.Tuple"}:
+            if isinstance(argument, ast.Tuple):
+                arguments = argument.elts
+                if (
+                    len(arguments) == 2
+                    and isinstance(arguments[1], ast.Constant)
+                    and arguments[1].value is Ellipsis
+                ):
+                    arguments = arguments[:1]
+            if not arguments:
+                raise _Unresolved("Tuple aliases require at least one named type")
         if constructor.text in {
             "builtins.dict",
             "typing.Mapping",

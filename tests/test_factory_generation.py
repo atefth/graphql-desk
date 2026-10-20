@@ -977,6 +977,101 @@ if TYPE_CHECKING:
             )
             self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
 
+    def test_fixed_tuple_aliases_check_original_factory_values_and_class_bases(
+        self,
+    ) -> None:
+        context = self.context()
+        for constructor in ("tuple", "Tuple"):
+            for arguments, value, wrong in (
+                ("int", "(1,)", "('bad',)"),
+                ("float,float", "(1.0,2.0)", "(1.0,'bad')"),
+                ("str,int,float", "('x',2,3.0)", "('x',2,'bad')"),
+                ("str,...", "('x','y')", "('x',2)"),
+            ):
+                with self.subTest(constructor=constructor, arguments=arguments):
+                    imports = "from typing import TypeAlias\n"
+                    if constructor == "Tuple":
+                        imports += "from typing import Tuple\n"
+                    declaration = (
+                        imports + f"Text:TypeAlias={constructor}[{arguments}]\n"
+                        "class Direct(Text): pass\n"
+                    )
+                    source = f"""from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from generated.main import graphql
+from generated.sources.main import QueryResult
+from exports import Text
+query=graphql('{{greeting}}')
+value:Text={value}
+assert graphql.scalar('String',value) is value
+class Reexported(Text): pass
+if TYPE_CHECKING:
+ result:QueryResult={{'greeting':value}}
+ assert_type(result['greeting'],Text)
+ bad=graphql.scalar('String',{wrong}) # error
+ bad2=graphql.scalar('String',[]) # error
+"""
+                    if "..." not in arguments:
+                        source += " bad3=graphql.scalar('String',()) # error\n"
+                    modules = (
+                        ModuleSnapshot("p", "main", "file:///main.py", 1, source),
+                        ModuleSnapshot(
+                            "p", "local_types", "file:///local_types.py", 1, declaration
+                        ),
+                        ModuleSnapshot(
+                            "p",
+                            "exports",
+                            "file:///exports.py",
+                            1,
+                            "from local_types import Text as Text",
+                        ),
+                    )
+                    resolved = resolve_project(
+                        modules,
+                        bindings=(
+                            ProjectBindings(
+                                "p",
+                                ("main",),
+                                factories=(
+                                    FactoryBinding("generated.main", "graphql", "main"),
+                                ),
+                            ),
+                        ),
+                    )
+                    with patch(
+                        "importlib.import_module",
+                        side_effect=AssertionError("No project import"),
+                    ):
+                        artifacts = generate_factory_artifacts(
+                            context,
+                            index_fragments(resolved, schemas={("p", "main"): context}),
+                            modules=modules,
+                            project_id="p",
+                            generated_package="generated",
+                            scalars=(
+                                ScalarMapping("String", "exports.Text", "exports.Text"),
+                            ),
+                        )
+                    self.assertEqual(artifacts.diagnostics, ())
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        self.write(root, artifacts, modules)
+                        errors = {
+                            n
+                            for n, line in enumerate(source.splitlines(), 1)
+                            if "# error" in line
+                        }
+                        self.check(root, {"main.py": errors})
+                        runtime = subprocess.run(
+                            [sys.executable, "main.py"],
+                            cwd=root,
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(
+                            runtime.returncode, 0, runtime.stdout + runtime.stderr
+                        )
+
     def test_mapping_aliases_type_original_scalar_calls_and_valid_class_bases(
         self,
     ) -> None:

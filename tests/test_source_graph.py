@@ -620,7 +620,6 @@ class SourceGraphTests(unittest.TestCase):
             "list=42\nAlias:TypeAlias=list[str]",
             "Alias:TypeAlias=list[str]\nlist=other",
             "Alias:TypeAlias=list[list[str]]",
-            "Alias:TypeAlias=tuple[str,int]",
             "Alias:TypeAlias=list[str,int]",
             "Alias:TypeAlias=list['str']",
             "Alias:TypeAlias=list[TypeAlias]",
@@ -658,6 +657,172 @@ class SourceGraphTests(unittest.TestCase):
                 ].status,
                 "unresolved",
             )
+
+    def test_fixed_tuple_aliases_keep_each_named_operand_and_base_capability(
+        self,
+    ) -> None:
+        snapshots = (
+            module("keys", "class Key(str): pass"),
+            module(
+                "values",
+                "from typing_extensions import TypedDict\n"
+                "class Value(TypedDict):\n item:int",
+            ),
+            module(
+                "models",
+                "from typing import TypeAlias,Tuple as T\n"
+                "import typing as t\nimport keys,values\n"
+                "One:TypeAlias=tuple[keys.Key]\nPair:TypeAlias=T[keys.Key,values.Value]\n"
+                "Three:TypeAlias=t.Tuple[str,keys.Key,values.Value]\n"
+                "Variable:TypeAlias=T[keys.Key,...]\nclass Child(Pair): pass\n"
+                "class Bad(Pair,total=False): pass",
+            ),
+            module("exports", "from models import Pair as Public"),
+            module(
+                "consumer",
+                "from exports import Public\nclass Child(Public): pass\n"
+                "class Bad(Public,total=False): pass",
+            ),
+        )
+        names = (
+            "models.One",
+            "models.Pair",
+            "models.Three",
+            "models.Variable",
+            "models.Child",
+            "exports.Public",
+            "consumer.Child",
+        )
+        results = resolve_type_symbols(names, modules=snapshots, project_id="app")
+        self.assertEqual(
+            [result.status for result in results], ["resolved"] * len(names)
+        )
+        self.assertEqual(
+            results,
+            resolve_type_symbols(
+                tuple(reversed(names)),
+                modules=tuple(reversed(snapshots)),
+                project_id="app",
+            ),
+        )
+        for name in ("models.Bad", "consumer.Bad"):
+            self.assertEqual(
+                resolve_type_symbols((name,), modules=snapshots, project_id="app")[
+                    0
+                ].status,
+                "unresolved",
+            )
+        for index in (0, 1):
+            changed = list(snapshots)
+            changed[index] = replace(changed[index], version=2)
+            self.assertNotEqual(
+                results[1].dependencies,
+                resolve_type_symbols(names, modules=tuple(changed), project_id="app")[
+                    1
+                ].dependencies,
+            )
+        for arguments in ("Missing,str", "str,Missing", "str,int,Missing"):
+            external = module(
+                "models",
+                "from typing import TypeAlias\nfrom unknown import Missing\n"
+                "Alias:TypeAlias=tuple[" + arguments + "]",
+            )
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("models.Alias",), modules=(external,), project_id="app"
+                )[0].status,
+                "external",
+            )
+        for mutation in (
+            "import typing\ntyping.Tuple=object",
+            "import keys\nkeys.Key=42",
+            "import values\nvalues.Value=42",
+        ):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("models.Pair",),
+                    modules=(*snapshots, module("mutator", mutation)),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        for mutation in (
+            "import builtins\nbuiltins.tuple=object",
+            "import keys\nkeys.Key=42",
+        ):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("models.One",),
+                    modules=(*snapshots, module("mutator", mutation)),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        for declaration in (
+            "Alias:TypeAlias=tuple[()]",
+            "Alias:TypeAlias=Tuple[()]",
+            "Alias:TypeAlias=tuple[...]",
+            "Alias:TypeAlias=tuple[...,str]",
+            "Alias:TypeAlias=tuple[str,int,...]",
+            "Alias:TypeAlias=tuple[str,list[int]]",
+            "Alias:TypeAlias=tuple[str,'int']",
+            "Alias:TypeAlias=tuple[str,42]",
+            "Alias:TypeAlias=tuple[str,TypeAlias]",
+            "Alias:TypeAlias=tuple[Alias,str]",
+            "tuple=42\nAlias:TypeAlias=tuple[str,int]",
+            "Tuple=42\nAlias:TypeAlias=Tuple[str,int]",
+        ):
+            with self.subTest(declaration=declaration):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Alias",),
+                        modules=(
+                            module(
+                                "models",
+                                "from typing import TypeAlias,Tuple\n" + declaration,
+                            ),
+                        ),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+        cycle = (
+            module(
+                "a",
+                "from typing import TypeAlias\nfrom b import B\n"
+                "A:TypeAlias=tuple[str,B]",
+            ),
+            module(
+                "b",
+                "from typing import TypeAlias\nfrom a import A\n"
+                "B:TypeAlias=tuple[A,int]",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("a.A",), modules=cycle, project_id="app")[0].status,
+            "unresolved",
+        )
+        fake = (
+            module("typing", "class Tuple: pass"),
+            module(
+                "models",
+                "from typing_extensions import TypeAlias\nfrom typing import Tuple\n"
+                "Alias:TypeAlias=Tuple[str,int]",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("models.Alias",), modules=fake, project_id="app")[
+                0
+            ].status,
+            "unresolved",
+        )
+        isolated = (*snapshots, replace(module("keys", "Key=42"), project="other"))
+        self.assertEqual(
+            resolve_type_symbols(("models.Pair",), modules=isolated, project_id="app")[
+                0
+            ].status,
+            "resolved",
+        )
 
     def test_mapping_aliases_preserve_both_operands_and_constructor_trust(self) -> None:
         snapshots = (
