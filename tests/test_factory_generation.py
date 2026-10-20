@@ -741,6 +741,37 @@ BadResult() # error
                     )
                     self.assertNotIn("PRIVATE_VALUE", artifacts.diagnostics[0].message)
 
+    def test_direct_function_and_async_calls_infer_in_original_source(self) -> None:
+        source = """import asyncio
+from typing import Literal
+from typing_extensions import assert_type
+from generated.main import graphql
+fields=graphql("fragment F on Query { greeting }")
+def build() -> None:
+ doc=graphql("query Q { ...F }",(fields,),operation="Q")
+ assert_type(doc.ast.definitions[0].name.value,Literal["Q"])
+ assert doc.operation_name=="Q"
+ assert len(doc.ast.definitions)==2
+async def async_build() -> None:
+ doc=graphql("query Async { greeting }")
+ assert_type(doc.ast.definitions[0].name.value,Literal["Async"])
+ assert doc.operation_name=="Async"
+build()
+asyncio.run(async_build())
+"""
+        modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+        artifacts = self.generate(modules)
+        self.assertEqual(artifacts.diagnostics, ())
+        self.assertEqual(artifacts, self.generate(modules))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            self.check(root)
+            runtime = subprocess.run(
+                [sys.executable, "main.py"], cwd=root, capture_output=True, text=True
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+
     def generate(self, modules: tuple[ModuleSnapshot, ...]) -> FactoryArtifacts:
         context = self.context()
         sources = resolve_project(

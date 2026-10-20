@@ -1,3 +1,4 @@
+import sys
 import unittest
 from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
@@ -88,8 +89,8 @@ class SourceGraphTests(unittest.TestCase):
         self.assertEqual(len(documents.calls), 1)
         self.assertEqual(documents.diagnostics, ())
         facts = resolve_parse_sources(snapshots)
-        self.assertEqual(facts.calls, ())
-        self.assertEqual(len(facts.diagnostics), 8)
+        self.assertEqual(len(facts.calls), 1)
+        self.assertEqual(len(facts.diagnostics), 7)
         self.assertEqual({item.code for item in facts.diagnostics}, {"parse-fallback"})
         self.assertEqual(resolve_project(snapshots), documents)
 
@@ -787,13 +788,14 @@ alias('{ id }')
             self.assertEqual(result.calls, ())
             self.assertTrue(result.diagnostics)
 
-    def test_nested_scopes_are_explicit_and_existing_extractor_is_unchanged(
+    def test_direct_functions_resolve_and_shadowed_callees_remain_untrusted(
         self,
     ) -> None:
         source = 'from graphql_desk import gql\ndef f():\n return gql("{ id }")'
         result = resolve_project((module("main", source),))
-        self.assertEqual(result.calls, ())
-        self.assertIn("Nested scopes", result.diagnostics[0].message)
+        self.assertEqual(len(result.calls), 1)
+        self.assertIsNone(result.calls[0].binding)
+        self.assertEqual(result.diagnostics, ())
         self.assertEqual(len(extract_calls(source).calls), 1)
         shadowed = resolve_project(
             (
@@ -805,6 +807,112 @@ alias('{ id }')
         )
         self.assertEqual(shadowed.calls, ())
         self.assertEqual(shadowed.diagnostics, ())
+
+    def test_function_inputs_never_substitute_module_globals_for_local_names(
+        self,
+    ) -> None:
+        prefix = "from graphql_desk import gql,parse\nTEXT='{ id }'\n"
+        bodies = (
+            "def f(TEXT): return CALL(TEXT)",
+            "def f():\n q=CALL(TEXT)\n TEXT='{ other }'\n return q",
+            "def f():\n from other import TEXT\n return CALL(TEXT)",
+            "def f():\n import other as TEXT\n return CALL(TEXT)",
+            "def f():\n try: pass\n except Exception as TEXT: return CALL(TEXT)",
+            "def f(value):\n match value:\n  case {'x':TEXT}: return CALL(TEXT)",
+            "def f(): return CALL(TEXT:='{ other }')",
+            "def f():\n global TEXT\n return CALL(TEXT)",
+            "def outer(TEXT):\n def f(): return CALL(TEXT)\n return f",
+            "def outer():\n TEXT='{ other }'\n def f():\n"
+            "  nonlocal TEXT\n  return CALL(TEXT)\n return f",
+            "class C:\n q=CALL(TEXT)",
+            "f=lambda: CALL(TEXT)",
+            "q=[CALL(TEXT) for _ in ()]",
+            "def f(x=CALL(TEXT)): pass",
+            "@CALL(TEXT)\ndef f(): pass",
+            "def f(x:CALL(TEXT)): pass",
+            "def f():\n def TEXT(): pass\n return CALL(TEXT)",
+            "def f():\n class TEXT: pass\n return CALL(TEXT)",
+        )
+        for callable_ in ("gql", "parse"):
+            resolve = resolve_project if callable_ == "gql" else resolve_parse_sources
+            for body in bodies:
+                with self.subTest(callable_=callable_, body=body):
+                    result = resolve(
+                        (module("main", prefix + body.replace("CALL", callable_)),)
+                    )
+                    self.assertEqual(result.calls, ())
+                    self.assertTrue(result.diagnostics)
+            for suffix in (
+                "\nTEXT='{ other }'",
+                f"\n{callable_}=other",
+            ):
+                source = prefix + f"def f(): return {callable_}(TEXT)" + suffix
+                self.assertEqual(resolve((module("main", source),)).calls, ())
+            source = (
+                f"from graphql_desk import {callable_}\n"
+                f"def f(): return {callable_}(TEXT)\nTEXT='{{id}}'"
+            )
+            self.assertEqual(resolve((module("main", source),)).calls, ())
+            for local in (
+                f"from other import {callable_}",
+                f"import other as {callable_}",
+            ):
+                source = prefix + f"def f():\n {local}\n return {callable_}('{{id}}')"
+                result = resolve((module("main", source),))
+                self.assertEqual(result.calls, ())
+                self.assertEqual(result.diagnostics, ())
+
+    @unittest.skipIf(sys.version_info < (3, 12), "Generic functions require Python3.12")
+    def test_generic_function_type_parameters_never_use_module_globals(self) -> None:
+        for callable_ in ("gql", "parse"):
+            resolve = resolve_project if callable_ == "gql" else resolve_parse_sources
+            for declaration in (
+                f"def f[TEXT](): return {callable_}(TEXT)",
+                f"async def f[TEXT](): return {callable_}(TEXT)",
+                f"def f[{callable_}](): return {callable_}('{{ id }}')",
+                f"def f[T:{callable_}(TEXT)](): pass",
+            ):
+                source = (
+                    f"from graphql_desk import {callable_}\nTEXT='{{ id }}'\n"
+                    + declaration
+                )
+                with self.subTest(source=source):
+                    self.assertEqual(resolve((module("main", source),)).calls, ())
+
+    def test_function_globals_fragments_and_async_calls_keep_existing_identities(
+        self,
+    ) -> None:
+        snapshots = (
+            module(
+                "leaf",
+                "from graphql_desk import gql\nf=gql('fragment F on Query { id }')",
+            ),
+            module(
+                "main",
+                "from graphql_desk import gql,parse\nfrom leaf import f\n"
+                "TEXT='query Q { ...F }'\n"
+                "def build(): return gql(TEXT,(f,),operation='Q')\n"
+                "async def other(): return parse('{ id }')",
+            ),
+        )
+        result = resolve_project(snapshots)
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual(len(result.calls), 2)
+        self.assertEqual(result.calls[1].operation, "Q")
+        self.assertIsNone(result.calls[1].binding)
+        self.assertEqual(result.calls[1].fragments[0].target.module.module, "leaf")
+        self.assertEqual(result, source_graph.IncrementalResolver().resolve(snapshots))
+        self.assertEqual(len(resolve_parse_sources(snapshots).calls), 1)
+        for body in (
+            "def f(frag): return gql('{...F}',(frag,))",
+            "def f(operation): return gql('query Q{id}',operation=operation)",
+        ):
+            self.assertEqual(
+                resolve_project(
+                    (module("main", "from graphql_desk import gql\n" + body),)
+                ).calls,
+                (),
+            )
 
     def test_unicode_crlf_and_opaque_code_are_not_executed(self) -> None:
         source = (

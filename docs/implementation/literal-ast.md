@@ -50,3 +50,9 @@ differ from the selected call owner. Each call maps its own provenance even when
 parsing is deduplicated by decoded source. Unavailable or unverifiable maps retain
 an honest whole-call diagnostic; resource fallbacks also remain on the call.
 This does not attach companions to original imports or complete location acceptance.
+
+Captured parser discovery also accepts direct ordinary/async function-body calls
+when inputs are literals or proven stable module globals. Whole-function local
+bindings and unsupported scopes remain conservative, using the same scope checks
+as schema-bound calls. Explicit companion imports are still caller-owned; no
+automatic import attachment or writes are introduced.
