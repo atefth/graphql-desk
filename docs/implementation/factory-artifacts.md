@@ -28,10 +28,14 @@ Ordinary aliases, concatenations, nonliteral selectors and fragment lists receiv
 explicit precision diagnostics because their checker types can widen. Fixed
 tuples carry exact fragment order and arity for precise overload selection.
 
-The general `str` fallback returns `TypedDocument[Any, Any]`. Both checkers also
-accept incorrect known source, selector or fragment arguments through that
-fallback; this is a real limitation, not static rejection. A source/index error
-prevents the artifact set from being returned. In particular, a discovered dynamic
+The general `str` fallback exposes a private read-only protocol containing only
+`ast`, `operation_name` and `schema_name`. It carries no trusted result/variable
+generics and cannot satisfy a precise `TypedDocument` client or assignment. Both
+checkers also accept incorrect known constructor arguments through this opaque
+fallback; the constructor call itself is not statically rejected. Source
+diagnostics remain required. Dynamic AST execution and untyped fragment
+composition still use the original runtime carriers without wrappers or copies.
+A source/index error prevents the artifact set from being returned. A discovered dynamic
 source still produces the resolver's `source-not-static` diagnostic and no files;
 the fallback test for external callers does not establish dynamic discovery.
 These gaps keep #36 open.
