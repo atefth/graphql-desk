@@ -8,7 +8,12 @@ const { createAnalysisWorker } = require("./analysisWorker");
 const key = target => JSON.stringify([target.project, target.schema_name]);
 const canonical = value => {
   let result;
-  try { result = fs.realpathSync.native(value); } catch { result = path.resolve(value); }
+  try { result = fs.realpathSync.native(value); } catch {
+    // Unsaved paths still inherit existing parent junctions and Windows short-name expansion.
+    const absolute = path.resolve(value);
+    const parent = path.dirname(absolute);
+    result = parent === absolute ? absolute : path.join(canonical(parent), path.basename(absolute));
+  }
   return process.platform === "win32" ? result.toLowerCase() : result;
 };
 const inside = (root, value) => {
@@ -35,7 +40,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   };
   function stateFor(snapshot) {
     const uri = vscode.Uri.parse(snapshot.uri);
-    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    if (uri.scheme !== "file" || !path.isAbsolute(uri.fsPath)) return null;
+    const filename = canonical(uri.fsPath);
+    // Worker facts use real paths; lexical aliases must not hide a deeper owner.
+    const owners = (vscode.workspace.workspaceFolders ?? [])
+      .filter(item => item.uri.scheme === "file" && inside(canonical(item.uri.fsPath), filename))
+      .sort((left, right) => canonical(right.uri.fsPath).length - canonical(left.uri.fsPath).length);
+    const deepest = owners.filter(item => canonical(item.uri.fsPath) === (owners[0] && canonical(owners[0].uri.fsPath)));
+    const folder = deepest.length === 1 ? deepest[0] : null;
     if (!folder || folder.uri.scheme !== "file") return null;
     const root = canonical(folder.uri.fsPath);
     const python = vscode.workspace.getConfiguration("graphqlDesk", folder.uri).get("pythonPath", "");
