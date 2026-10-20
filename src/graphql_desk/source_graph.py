@@ -959,6 +959,7 @@ class _Graph:
             "builtins.list",
             "builtins.tuple",
             "typing.Sequence",
+            "typing.Optional",
         }:
             raise _Unresolved(
                 "Type alias subscriptions require a trusted supported constructor"
@@ -974,17 +975,22 @@ class _Graph:
                 raise _Unresolved("Tuple aliases require one named type and ellipsis")
             argument = argument.elts[0]
         if not isinstance(argument, (ast.Name, ast.Attribute)):
-            raise _Unresolved("Container aliases require one supported named type")
+            raise _Unresolved(
+                "Subscribed type aliases require one supported named type"
+            )
         element = self.expression(module, argument, before, active)
         if element.kind not in {"type", "external"} or element.text in {
             "typing.TypeAlias",
             "typing_extensions.TypeAlias",
         }:
-            raise _Unresolved("Container alias argument is not an established type")
+            raise _Unresolved(
+                "Subscribed type alias argument is not an established type"
+            )
         return _Value(
             "external" if element.kind == "external" else "type",
             f"{module.snapshot.module}.{name}",
             dependencies=constructor.dependencies | element.dependencies,
+            class_base=constructor.text != "typing.Optional",
         )
 
     def export(

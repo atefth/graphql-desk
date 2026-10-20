@@ -562,6 +562,141 @@ class SourceGraphTests(unittest.TestCase):
                 "unresolved",
             )
 
+    def test_optional_aliases_reuse_trusted_subscription_and_nullable_facts(
+        self,
+    ) -> None:
+        snapshots = (
+            module(
+                "models",
+                "from typing import TypeAlias,Optional as Maybe\n"
+                "import typing as t\nfrom typing_extensions import TypedDict\n"
+                "class Data(TypedDict):\n value: str\n"
+                "Text:TypeAlias=t.Optional[str]\nFlag:TypeAlias=Maybe[bool]\n"
+                "DataMaybe:TypeAlias=Maybe[Data]\nAlias:TypeAlias=Text\n"
+                "Items:TypeAlias=list[Alias]",
+            ),
+            module("exports", "from models import Alias as Public"),
+        )
+        symbols = (
+            "models.Text",
+            "models.Flag",
+            "models.DataMaybe",
+            "models.Alias",
+            "models.Items",
+            "exports.Public",
+        )
+        result = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
+        self.assertEqual([r.status for r in result], ["resolved"] * len(symbols))
+        self.assertEqual(
+            result,
+            resolve_type_symbols(
+                symbols, modules=tuple(reversed(snapshots)), project_id="app"
+            ),
+        )
+        for source in (
+            "import models\nclass Bad(models.Text): pass",
+            "from exports import Public\nclass Bad(Public): pass",
+            "from models import DataMaybe\nclass Bad(DataMaybe,total=False): pass",
+        ):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("bad.Bad",),
+                    modules=(*snapshots, module("bad", source)),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        for declaration in (
+            "value=42\nAlias:TypeAlias=Optional[value]",
+            "Alias:TypeAlias=Optional[Missing]",
+            "Alias:TypeAlias=Optional[Alias]",
+            "Alias:TypeAlias=Optional[Later]\nclass Later: pass",
+            "Optional=42\nAlias:TypeAlias=Optional[str]",
+            "Alias:TypeAlias=Optional[str]\nOptional=other",
+            "Alias:TypeAlias=Optional[str,int]",
+            "Alias:TypeAlias=Optional[tuple[str,...]]",
+            "Alias:TypeAlias=Optional['str']",
+            "Alias:TypeAlias=Optional[None]",
+            "Alias:TypeAlias=Optional[TypeAlias]",
+        ):
+            with self.subTest(declaration=declaration):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("bad.Alias",),
+                        modules=(
+                            module(
+                                "bad",
+                                "from typing import TypeAlias,Optional\n" + declaration,
+                            ),
+                        ),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+        fake = (
+            module("typing", "class Optional: pass"),
+            module(
+                "bad",
+                "from typing_extensions import TypeAlias\nfrom typing import Optional\n"
+                "Alias:TypeAlias=Optional[str]",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("bad.Alias",), modules=fake, project_id="app")[
+                0
+            ].status,
+            "unresolved",
+        )
+        external = (
+            module(
+                "models",
+                "from typing import TypeAlias,Optional\nfrom unknown import Value\n"
+                "Alias:TypeAlias=Optional[Value]",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("models.Alias",), modules=external, project_id="app")[
+                0
+            ].status,
+            "external",
+        )
+        for mutation in (
+            "import typing\ntyping.Optional=42",
+            "import builtins\nbuiltins.str=42",
+            "import models\nmodels.Text=42",
+        ):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("exports.Public",),
+                    modules=(*snapshots, module("mutator", mutation)),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        cycle = (
+            module(
+                "a",
+                "from typing import TypeAlias,Optional\nfrom b import B\n"
+                "A:TypeAlias=Optional[B]",
+            ),
+            module(
+                "b",
+                "from typing import TypeAlias,Optional\nfrom a import A\n"
+                "B:TypeAlias=Optional[A]",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("a.A",), modules=cycle, project_id="app")[0].status,
+            "unresolved",
+        )
+        changed = (replace(snapshots[0], version=2), snapshots[1])
+        self.assertNotEqual(
+            result[0].dependencies,
+            resolve_type_symbols(symbols, modules=changed, project_id="app")[
+                0
+            ].dependencies,
+        )
+
     def test_nullable_aliases_preserve_availability_without_base_capabilities(
         self,
     ) -> None:
