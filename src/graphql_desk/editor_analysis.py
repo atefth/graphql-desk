@@ -10,6 +10,7 @@ from .source import Span
 from .source_graph import (
     DocumentIdentity,
     FactoryBinding,
+    IncrementalResolver,
     ModuleDependency,
     ModuleSnapshot,
     ProjectBindings,
@@ -116,12 +117,15 @@ def analyze_editor_json(text: str) -> str:
     return json.dumps(analyze_editor_snapshot(_json(text)), ensure_ascii=True)
 
 
-def analyze_editor_snapshot(request: object) -> dict[str, object]:
+def analyze_editor_snapshot(
+    request: object, *, resolver: IncrementalResolver | None = None
+) -> dict[str, object]:
     """Resolve supplied facts without reading files or executing project Python.
 
     The caller must authorize workspace analysis and verify every source, config
     and schema version before publishing. This response is not a freshness proof.
     Invalid GraphQL leaves resolved source maps available for online completion.
+    An explicit serialized resolver reuses source facts only, not schema/index work.
     """
     payload = _object(
         request, {"request_id", "modules", "bindings", "schemas"}, "request"
@@ -182,7 +186,8 @@ def analyze_editor_snapshot(request: object) -> dict[str, object]:
                 package,
             )
         )
-    sources = resolve_project(tuple(modules), bindings=tuple(bindings))
+    resolve = resolve_project if resolver is None else resolver.resolve
+    sources = resolve(tuple(modules), bindings=tuple(bindings))
     schemas: dict[tuple[str, str | None], SchemaContext] = {}
     schema_facts: list[dict[str, object]] = []
     seen_schemas: set[tuple[str, str]] = set()
