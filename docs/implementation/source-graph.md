@@ -39,7 +39,8 @@ semantic work, and cover unchanged inputs, project/binding changes, negative
 lookups, mutation/reexports, failure recovery, ordering and atomic cache updates.
 This is incremental parsing and project-level semantic reuse, not module-level
 semantic invalidation or a performance acceptance result. Worker integration,
-stable input identities across acquisition, schema/index caching and measured
-large-project responsiveness remain open. The current snapshot acquirer uses
-conservative generation-based disk versions; an integrated worker must address
-those identities before claiming unchanged-project reuse in that pipeline.
+schema/index caching and measured
+large-project responsiveness remain open. Snapshot acquisition can retain exact
+unchanged disk-source identities through an explicit previous-snapshot baseline;
+schema tokens still conservatively change on every acquisition. Worker use of
+these primitives remains separate work.
