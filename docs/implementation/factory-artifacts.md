@@ -7,6 +7,21 @@ Each `GeneratedFile` has a relative path and text. This pure backend accepts one
 schema's complete trusted index and snapshots. It does not write files, import
 authoring modules, launch workers or refresh an editor.
 
+`generate_project_factory_artifacts(config, contexts, index, *, modules,
+project_id)` assembles all configured schemas into one immutable artifact set.
+It reuses captured `ProjectConfig` settings and requires exactly one context per
+configured schema. Each schema retains its scalar/enum mappings and masking
+policy; client directives follow the shared project setting. No configuration or
+schema is reloaded.
+
+Private document modules are scoped as `<package>._documents.<schema>.dN` for both
+entry points. Typed export facts combine aliases from different schemas into the
+same `<package>.sources.<source_module>` companion. Same-basename source modules
+retain their full package paths; conflicting normalized public aliases reject
+rather than silently choosing a schema. Configured output, context, source/index
+identity and package-parent failures reject atomically. An error-bearing index
+still returns no files; this does not implement per-document recovery.
+
 The generated `<package>.<schema>.graphql` runtime callable delegates to the
 ordinary schema-bound constructor. Its stub correlates exact decoded source,
 literal operation selection and fixed ordered tuples of nominal fragment document
@@ -54,10 +69,10 @@ The generated callable protocol also includes the [scalar member](scalar-helpers
 using the same schema declarations and configured input aliases once. The runtime
 factory remains the ordinary schema-name binding.
 
-Ten focused tests check unchanged original Python source with both strict
+Thirteen focused tests check unchanged original Python source with both strict
 checkers and actual generated runtime imports, generic client inference and
 negative variable/result cases, exact ASTs, explicit fallback limits, aliases,
-source packages, diagnostics and stale/collision failures. Multi-schema artifact
-assembly, dynamic discovery, persisted/reader helpers, writer integration,
+source packages, diagnostics and stale/collision failures. Dynamic discovery,
+persisted/reader helpers, writer integration,
 incremental generation and the full editor/client matrix remain separate work.
 No broad typing, API or live-typing gate is passed.
