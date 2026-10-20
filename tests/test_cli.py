@@ -34,7 +34,7 @@ class CLITests(unittest.TestCase):
 
     def invoke(self, argv: list[str], cwd: Path | None = None) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        with patch("pathlib.Path.cwd", return_value=cwd or self.root):
+        with patch.object(Path, "cwd", return_value=cwd or self.root):
             with redirect_stdout(out), redirect_stderr(err):
                 code = main(argv)
         return code, out.getvalue(), err.getvalue()
