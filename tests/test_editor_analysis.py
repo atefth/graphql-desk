@@ -9,7 +9,9 @@ from unittest.mock import patch
 
 from graphql import build_schema, introspection_from_schema
 
+from graphql_desk import source_graph
 from graphql_desk.editor_analysis import analyze_editor_json, analyze_editor_snapshot
+from graphql_desk.source_graph import IncrementalResolver
 
 
 def module(
@@ -64,6 +66,41 @@ def array(value: object) -> list[object]:
 
 
 class EditorAnalysisTests(unittest.TestCase):
+    def test_explicit_resolver_reuses_only_source_facts(self) -> None:
+        payload = request()
+        resolver = IncrementalResolver()
+        cold = analyze_editor_snapshot(payload)
+        self.assertEqual(analyze_editor_snapshot(payload, resolver=resolver), cold)
+        with patch.object(
+            source_graph, "_parse", wraps=getattr(source_graph, "_parse")
+        ) as parse:
+            self.assertEqual(analyze_editor_snapshot(payload, resolver=resolver), cold)
+            changed = copy.deepcopy(payload)
+            changed["request_id"] = "new-request"
+            schema = object_(array(changed["schemas"])[0])
+            schema["token"] = "new-schema"
+            schema["text"] = "type User { name: String } type Query { user: User }"
+            response = analyze_editor_snapshot(changed, resolver=resolver)
+            self.assertEqual(response, analyze_editor_snapshot(changed))
+            self.assertEqual(response["request_id"], "new-request")
+            self.assertEqual(
+                object_(array(response["schemas"])[0])["token"], "new-schema"
+            )
+            schema["text"] = "not valid SDL"
+            with self.assertRaisesRegex(ValueError, "Invalid supplied local schema"):
+                analyze_editor_snapshot(changed, resolver=resolver)
+            # The cold comparison parsed once; both warm requests reused source facts.
+            self.assertEqual(parse.call_count, 1)
+            object_(array(payload["modules"])[0])["source"] = (
+                "from graphql_desk import gql\nq=gql('{ user { name } }')"
+            )
+            self.assertFalse(
+                array(
+                    analyze_editor_snapshot(payload, resolver=resolver)["diagnostics"]
+                )
+            )
+            self.assertEqual(parse.call_count, 2)
+
     def test_json_real_resolver_index_and_no_source_io(self) -> None:
         payload = request()
         array(payload["modules"]).append(
