@@ -17,6 +17,12 @@ _REFLECTION = frozenset(
     f"builtins.{name}" for name in ("globals", "locals", "vars", "exec", "eval")
 )
 _SETTERS = frozenset({"builtins.setattr", "builtins.delattr"})
+_CLASS_DECORATORS = frozenset({"dataclasses.dataclass", "typing.final"})
+_CLASS_DECORATOR_NAMESPACES = {
+    identity + suffix: identity.rsplit(".", 1)[0]
+    for identity in _CLASS_DECORATORS
+    for suffix in ("", ".__setattr__", ".__delattr__")
+}
 _TYPE_BASES = frozenset(
     {
         "builtins.object",
@@ -164,6 +170,7 @@ class _Value:
     document: DocumentIdentity | None = None
     typed_dict: bool = False
     class_base: bool = True
+    enum_class: bool = False
 
 
 class _Unresolved(Exception):
@@ -237,8 +244,6 @@ class _Module:
                     statement,
                     _Value("type", f"{snapshot.module}.{statement.name}"),
                 )
-                if statement.decorator_list:
-                    self.blocked.add(statement.name)
             elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.add(statement.name, statement, _Value("opaque", statement.name))
                 if statement.decorator_list:
@@ -540,6 +545,18 @@ class _Graph:
                             set(),
                         )
                         trusted = callee.kind in {"callable", "initializer", "parser"}
+                        if (
+                            type_symbols
+                            and callee.kind == "external"
+                            and callee.text in _CLASS_DECORATOR_NAMESPACES
+                            and callee.text not in _CLASS_DECORATORS
+                        ):
+                            self.mutated.add(
+                                (
+                                    module.snapshot.project,
+                                    _CLASS_DECORATOR_NAMESPACES[callee.text],
+                                )
+                            )
                     except (_Unresolved, RecursionError):
                         trusted = False
                     if not trusted:
@@ -571,9 +588,18 @@ class _Graph:
                             self.mutated.add((module.snapshot.project, value.text))
                             if value.text == "builtins":
                                 module.star = True
-                        elif value.kind in {"callable", "initializer", "parser"}:
+                        elif value.kind in {"callable", "initializer", "parser"} or (
+                            self.type_symbols
+                            and value.kind == "external"
+                            and value.text in _CLASS_DECORATOR_NAMESPACES
+                        ):
                             self.mutated.add(
-                                (module.snapshot.project, value.text.rsplit(".", 1)[0])
+                                (
+                                    module.snapshot.project,
+                                    _CLASS_DECORATOR_NAMESPACES.get(
+                                        value.text, value.text.rsplit(".", 1)[0]
+                                    ),
+                                )
                             )
                         elif value.kind == "document-candidate" and mutates:
                             target = self.modules.get(
@@ -605,13 +631,19 @@ class _Graph:
                     set(),
                     probe=True,
                 )
-                if capability and value.kind in {
-                    "module",
-                    "callable",
-                    "initializer",
-                    "document-candidate",
-                    "parser",
-                }:
+                if capability and (
+                    value.kind
+                    in {
+                        "module",
+                        "callable",
+                        "initializer",
+                        "document-candidate",
+                        "parser",
+                    }
+                    or self.type_symbols
+                    and value.kind == "external"
+                    and value.text in _CLASS_DECORATOR_NAMESPACES
+                ):
                     origins.append(value)
                     continue
             except (_Unresolved, RecursionError):
@@ -822,6 +854,61 @@ class _Graph:
                             raise _Unresolved(
                                 "Class bases are not statically established types"
                             )
+                        decorators: set[str] = set()
+                        decorator_dependencies = frozenset[ModuleDependency]()
+                        for decorator in declaration.decorator_list:
+                            target = (
+                                decorator.func
+                                if isinstance(decorator, ast.Call)
+                                else decorator
+                            )
+                            if not isinstance(target, (ast.Name, ast.Attribute)):
+                                raise _Unresolved(
+                                    "Class decorator is not a supported name"
+                                )
+                            resolved = self.expression(
+                                module,
+                                target,
+                                (declaration.lineno, declaration.col_offset),
+                                active,
+                            )
+                            if (
+                                not self.trusted_external(module, resolved)
+                                or resolved.text not in _CLASS_DECORATORS
+                                or resolved.text in decorators
+                            ):
+                                raise _Unresolved(
+                                    "Class decorator is not trusted or distinct"
+                                )
+                            if isinstance(decorator, ast.Call) and not (
+                                resolved.text == "dataclasses.dataclass"
+                                and not decorator.args
+                                and len({item.arg for item in decorator.keywords})
+                                == len(decorator.keywords)
+                                and all(
+                                    item.arg in {"frozen", "slots"}
+                                    and isinstance(item.value, ast.Constant)
+                                    and type(item.value.value) is bool
+                                    for item in decorator.keywords
+                                )
+                            ):
+                                raise _Unresolved(
+                                    "Dataclass options require literal booleans"
+                                )
+                            decorators.add(resolved.text)
+                            decorator_dependencies |= resolved.dependencies
+                        enum_class = any(
+                            base.enum_class
+                            or base.kind == "external"
+                            and base.text
+                            in {
+                                "enum.Enum",
+                                "enum.IntEnum",
+                                "enum.Flag",
+                                "enum.IntFlag",
+                            }
+                            for base in bases
+                        )
                         typed_dict_bases = [
                             base.typed_dict
                             or base.kind == "external"
@@ -834,7 +921,25 @@ class _Graph:
                             raise _Unresolved(
                                 "TypedDict bases cannot mix with ordinary class bases"
                             )
-                        value = replace(value, typed_dict=typed_dict)
+                        if decorators and (typed_dict or enum_class):
+                            raise _Unresolved(
+                                "Decorated special classes are unsupported"
+                            )
+                        # shortcut: inherited dataclasses stay blocked until frozen/
+                        # mutable base compatibility is proven in both checkers.
+                        if "dataclasses.dataclass" in decorators and any(
+                            base.text != "builtins.object" for base in bases
+                        ):
+                            raise _Unresolved(
+                                "Inherited dataclass decoration is unsupported"
+                            )
+                        value = replace(
+                            value,
+                            typed_dict=typed_dict,
+                            enum_class=enum_class,
+                            class_base="typing.final" not in decorators,
+                            dependencies=value.dependencies | decorator_dependencies,
+                        )
                         keywords = {"total"}
                         if any(
                             base.kind == "external"
@@ -889,6 +994,7 @@ class _Graph:
                 document=value.document,
                 typed_dict=value.typed_dict,
                 class_base=value.class_base,
+                enum_class=value.enum_class,
             )
             if factory is not None:
                 value = self.declared_factory(
@@ -909,6 +1015,16 @@ class _Graph:
         if fallback is not None:
             return fallback
         raise _Unresolved(f"Binding {name!r} cannot be resolved")
+
+    def trusted_external(self, module: _Module, value: _Value) -> bool:
+        parts = value.text.split(".")
+        return value.kind == "external" and all(
+            identity not in self.supplied and identity not in self.mutated
+            for identity in (
+                (module.snapshot.project, ".".join(parts[:index]))
+                for index in range(1, len(parts))
+            )
+        )
 
     def alias_target(
         self,
@@ -961,14 +1077,7 @@ class _Graph:
             constructor = self.export(module, "builtins", node.value.id, active)
         else:
             constructor = self.expression(module, node.value, before, active)
-        constructor_modules = (
-            (module.snapshot.project, ".".join(constructor.text.split(".")[:index]))
-            for index in range(1, len(constructor.text.split(".")))
-        )
-        if constructor.kind == "external" and any(
-            identity in self.mutated or identity in self.supplied
-            for identity in constructor_modules
-        ):
+        if not self.trusted_external(module, constructor):
             raise _Unresolved(
                 "Type alias constructor namespace is not trusted external"
             )
@@ -1279,6 +1388,17 @@ class _Graph:
             return self.name(module, node.id, before, active, probe=probe)
         if isinstance(node, ast.Attribute):
             parent = self.expression(module, node.value, before, active, probe=probe)
+            if (
+                self.type_symbols
+                and parent.kind == "external"
+                and parent.text in _CLASS_DECORATORS
+                and node.attr in {"__setattr__", "__delattr__"}
+            ):
+                return _Value(
+                    "external",
+                    f"{parent.text}.{node.attr}",
+                    dependencies=parent.dependencies,
+                )
             if parent.kind == "module":
                 value = self.export(module, parent.text, node.attr, active, probe=probe)
                 return _Value(
@@ -1290,6 +1410,7 @@ class _Graph:
                     document=value.document,
                     typed_dict=value.typed_dict,
                     class_base=value.class_base,
+                    enum_class=value.enum_class,
                 )
         if isinstance(node, ast.Call):
             callee = self.expression(module, node.func, before, active, probe=probe)
