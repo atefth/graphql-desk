@@ -50,7 +50,7 @@ async function setup(t, config = 'schema="schema.graphql"\n') {
     getWorkspaceFolder: value => workspace.workspaceFolders.includes(folder) && value.fsPath.toLowerCase().startsWith(root.toLowerCase()) ? folder : undefined,
     getConfiguration: () => ({ get: (name, fallback) => name === "pythonPath" ? selectedPython : fallback }),
     findFiles: async (_pattern, exclude) => { assert.equal(exclude, null); return candidates; },
-    createFileSystemWatcher: () => { const e = event(); const watcher = { onDidChange: e.subscribe, onDidCreate: e.subscribe, onDidDelete: e.subscribe, dispose() {}, fire: e.fire }; watchers.push(watcher); return watcher; },
+    createFileSystemWatcher: pattern => { const e = event(); const watcher = { pattern, disposed: false, disposals: 0, onDidChange: e.subscribe, onDidCreate: e.subscribe, onDidDelete: e.subscribe, dispose() { this.disposed = true; this.disposals += 1; }, fire: e.fire }; watchers.push(watcher); return watcher; },
   };
   for (const name of ["onDidOpenTextDocument", "onDidChangeTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument", "onDidChangeConfiguration", "onDidChangeWorkspaceFolders", "onDidGrantWorkspaceTrust"]) {
     events[name] = event(); workspace[name] = events[name].subscribe;
@@ -92,6 +92,69 @@ test("real worker captures unsaved source/config/schema, shares concurrent provi
   assert.equal(await fs.readFile(path.join(root, "schema.graphql"), "utf8"), "type Query { title: String }");
   assert.equal(unsaved.isDirty, true);
   await assert.rejects(fs.stat(path.join(root, "new.py")), { code: "ENOENT" });
+});
+
+test("workspace folder watchers follow additions and removals and refresh closed source/config changes", async t => {
+  const fixture = await setup(t);
+  const added = await setup(t);
+  const { workspace } = fixture.vscode;
+  const originalFolder = workspace.workspaceFolders[0];
+  const addedFolder = added.vscode.workspace.workspaceFolders[0];
+  const dependency = path.join(added.root, "dependency.py");
+  await fs.writeFile(dependency, 'from graphql_desk import gql\nq=gql("{beforeMissing}")\n');
+  workspace.textDocuments.push(added.main);
+  workspace.findFiles = async pattern => pattern.base === addedFolder
+    ? [Uri.file(path.join(added.root, "main.py")), Uri.file(dependency)]
+    : [Uri.file(path.join(fixture.root, "main.py"))];
+  let invalidations = 0;
+  let refresh;
+  let active;
+  const controller = createAnalysisController(fixture.vscode, { changed() {
+    invalidations += 1;
+    if (active) refresh = controller.analyze(controller.snapshot(active));
+  } });
+  t.after(() => controller.dispose());
+  const broad = () => fixture.watchers.filter(watcher => watcher.pattern.pattern === "**/*");
+  assert.equal(broad().length, 1);
+  const originalWatch = broad()[0];
+  active = added.main;
+  workspace.workspaceFolders.push(addedFolder);
+  fixture.events.onDidChangeWorkspaceFolders.fire({ added: [addedFolder], removed: [] });
+  const first = await refresh; assert.ok(first);
+  const addedWatch = broad().find(watcher => watcher.pattern.base === addedFolder);
+  assert.ok(addedWatch); assert.equal(originalWatch.disposals, 0);
+  fixture.events.onDidChangeWorkspaceFolders.fire({ added: [], removed: [] });
+  await refresh;
+  assert.equal(broad().length, 2, "Unchanged folders keep their watcher");
+  const features = createLanguageFeatures(controller);
+  const dependencySnapshot = bundle => {
+    const module = bundle.request.modules.find(item => item.module === "dependency");
+    return { uri: module.uri, version: module.version, text: module.source };
+  };
+  assert.ok((await features.diagnostics(dependencySnapshot(first))).some(item => /beforeMissing/.test(item.message)));
+  await fs.writeFile(dependency, 'from graphql_desk import gql\nq=gql("{afterMissing @local}")\n');
+  const beforeEdit = invalidations;
+  addedWatch.fire(Uri.file(dependency));
+  assert.equal(invalidations, beforeEdit + 1);
+  const second = await refresh; assert.ok(second); assert.notEqual(second, first);
+  const changed = await features.diagnostics(dependencySnapshot(second));
+  assert.ok(changed.some(item => /afterMissing/.test(item.message)));
+  assert.ok(changed.some(item => /Unknown directive.*local/.test(item.message)));
+  assert.equal(changed.some(item => /beforeMissing/.test(item.message)), false);
+  await fs.appendFile(path.join(added.root, "pyproject.toml"), 'client_directives=["local"]\n');
+  addedWatch.fire(Uri.file(path.join(added.root, "pyproject.toml")));
+  const third = await refresh; assert.ok(third);
+  assert.equal((await features.diagnostics(dependencySnapshot(third))).some(item => /Unknown directive.*local/.test(item.message)), false);
+  active = undefined;
+  workspace.workspaceFolders = [originalFolder];
+  fixture.events.onDidChangeWorkspaceFolders.fire({ added: [], removed: [addedFolder] });
+  assert.equal(addedWatch.disposals, 1);
+  const afterRemoval = invalidations;
+  addedWatch.fire(Uri.file(dependency));
+  assert.equal(invalidations, afterRemoval, "Removed watcher subscriptions cannot refresh");
+  controller.dispose();
+  assert.equal(originalWatch.disposals, 1);
+  assert.equal(addedWatch.disposals, 1);
 });
 
 test("fresh enumeration and document inventory reject stale success even without watcher events", async t => {

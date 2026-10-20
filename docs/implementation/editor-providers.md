@@ -72,3 +72,10 @@ assert the officially selected executable before the semantic feature checks.
 Full supported-platform/performance
 matrices, complete discovery/lifecycle acceptance, VSIX release and live generated
 typing remain open under #39/#40 and the broad gates.
+
+Broad local-folder file watchers follow workspace-folder additions and removals.
+Unchanged folders retain their watcher; removed folders release the watcher and
+its listeners. Real-worker regression coverage verifies that closed source and
+configuration edits in an added folder trigger refreshed analysis, and removed
+watcher callbacks stop invalidating it. This bounded coverage does not establish
+complete watcher discovery, supported-platform or lifecycle acceptance.
