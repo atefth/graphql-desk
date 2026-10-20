@@ -3,6 +3,7 @@
 import ast
 import keyword
 import re
+import symtable
 import unicodedata
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +22,7 @@ from .operation_types import (
 from .runtime import init_graphql
 from .scalar_types import render_scalar_method
 from .schema_types import mapped_type_declarations, render_schema_types
+from .source import Span
 from .source_graph import (
     DocumentIdentity,
     GraphDiagnostic,
@@ -71,7 +73,7 @@ def _pascal(value: str) -> str:
 
 
 def _precision_diagnostics(
-    document: IndexedDocument, snapshot: ModuleSnapshot
+    document: IndexedDocument, snapshot: ModuleSnapshot, annotation_symbols: set[str]
 ) -> list[GraphDiagnostic]:
     """Check host syntax at an already resolved call, without resolving names again."""
     tree = ast.parse(snapshot.source)
@@ -112,19 +114,67 @@ def _precision_diagnostics(
     literal_source = isinstance(source, ast.Constant) and isinstance(source.value, str)
     if isinstance(source, ast.Name):
         typing_names: dict[str, str] = {}
+        try:
+            symbols = symtable.symtable(
+                snapshot.source, snapshot.module, "exec"
+            ).get_symbols()
+        except SyntaxError:
+            symbols = []
+        rebound = {
+            symbol.get_name()
+            for symbol in symbols
+            if symbol.is_assigned() or symbol.is_annotated()
+        }
+        if not symbols:
+            rebound.update(
+                node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+            )
+        rebound.update(
+            name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Global)
+            for name in node.names
+        )
+        imported: list[str] = []
+        pending: list[ast.AST] = [tree]
+        while pending:
+            node = pending.pop()
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+            ):
+                continue
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                imported.extend(
+                    alias.asname
+                    or (
+                        alias.name.split(".")[0]
+                        if isinstance(node, ast.Import)
+                        else alias.name
+                    )
+                    for alias in node.names
+                )
+            pending.extend(ast.iter_child_nodes(node))
         for statement in tree.body:
             if statement.lineno >= call.lineno:
                 break
-            if isinstance(statement, ast.ImportFrom) and statement.module in {
-                "typing",
-                "typing_extensions",
-            }:
-                typing_names.update(
-                    {
-                        alias.asname or alias.name: alias.name
-                        for alias in statement.names
-                    }
-                )
+            if isinstance(statement, ast.Import):
+                for alias in statement.names:
+                    local = alias.asname or alias.name
+                    if (
+                        alias.name in {"typing", "typing_extensions"}
+                        and imported.count(local) == 1
+                    ):
+                        typing_names[local] = alias.name
+            elif isinstance(statement, ast.ImportFrom) and statement.level == 0:
+                if statement.module in {"typing", "typing_extensions"}:
+                    typing_names.update(
+                        {
+                            alias.asname
+                            or alias.name: f"{statement.module}.{alias.name}"
+                            for alias in statement.names
+                            if imported.count(alias.asname or alias.name) == 1
+                        }
+                    )
             if (
                 not isinstance(statement, ast.AnnAssign)
                 or not isinstance(statement.target, ast.Name)
@@ -132,39 +182,74 @@ def _precision_diagnostics(
             ):
                 continue
             annotation = statement.annotation
-            literal_source = (
-                isinstance(annotation, ast.Name)
-                and typing_names.get(annotation.id) == "Final"
-                and isinstance(statement.value, ast.Constant)
-                and statement.value.value == document.call.source
-            ) or (
-                isinstance(annotation, ast.Subscript)
-                and isinstance(annotation.value, ast.Name)
-                and typing_names.get(annotation.value.id) == "Literal"
-                and isinstance(annotation.slice, ast.Constant)
-                and annotation.slice.value == document.call.source
+            marker = (
+                annotation.value
+                if isinstance(annotation, ast.Subscript)
+                else annotation
             )
-    messages: list[str] = []
+            if isinstance(marker, ast.Name):
+                symbol = (
+                    typing_names.get(marker.id) if marker.id not in rebound else None
+                )
+            elif isinstance(marker, ast.Attribute) and isinstance(
+                marker.value, ast.Name
+            ):
+                root = marker.value.id
+                namespace = typing_names.get(root) if root not in rebound else None
+                symbol = f"{namespace}.{marker.attr}" if namespace else None
+            else:
+                symbol = None
+            literal_source = symbol in annotation_symbols and (
+                (
+                    symbol in {"typing.Final", "typing_extensions.Final"}
+                    and not isinstance(annotation, ast.Subscript)
+                    and isinstance(statement.value, ast.Constant)
+                    and statement.value.value == document.call.source
+                )
+                or (
+                    symbol in {"typing.Literal", "typing_extensions.Literal"}
+                    and isinstance(annotation, ast.Subscript)
+                    and isinstance(annotation.slice, ast.Constant)
+                    and annotation.slice.value == document.call.source
+                )
+            )
+    messages: list[tuple[ast.expr, str]] = []
     if not literal_source:
+        assert source is not None
         messages.append(
-            "Exact overload inference requires an inline string literal; "
-            "resolved aliases and concatenations may widen to str in a checker"
+            (
+                source,
+                "Exact overload inference requires an inline string literal; "
+                "resolved aliases and concatenations may widen to str in a checker",
+            )
         )
     if fragments is not None and not isinstance(fragments, ast.Tuple):
         messages.append(
-            "Exact fragment overload inference requires a fixed tuple; "
-            "lists and widened fragment collections use the untyped fallback"
+            (
+                fragments,
+                "Exact fragment overload inference requires a fixed tuple; "
+                "lists and widened fragment collections use the untyped fallback",
+            )
         )
     if operation is not None and not (
         isinstance(operation, ast.Constant)
         and isinstance(operation.value, (str, type(None)))
     ):
-        messages.append("Exact operation selection requires a literal keyword value")
+        messages.append(
+            (operation, "Exact operation selection requires a literal keyword value")
+        )
     return [
         GraphDiagnostic(
-            document.call.module, "factory-precision", message, document.call.range
+            document.call.module,
+            "factory-precision",
+            message,
+            Span(
+                offset(node.lineno, node.col_offset),
+                offset(node.end_lineno, node.end_col_offset),
+            ),
         )
-        for message in messages
+        for node, message in messages
+        if node.end_lineno is not None and node.end_col_offset is not None
     ]
 
 
@@ -257,6 +342,20 @@ def _generate_factory_artifacts(
         return value
 
     try:
+        annotation_symbols = {
+            item.symbol
+            for item in resolve_type_symbols(
+                (
+                    "typing.Final",
+                    "typing.Literal",
+                    "typing_extensions.Final",
+                    "typing_extensions.Literal",
+                ),
+                modules=modules,
+                project_id=project_id,
+            )
+            if item.status == "external" and item.target == item.symbol
+        }
         schema_text = render_schema_types(context.schema, scalars=scalars, enums=enums)
         symbols = tuple(
             {
@@ -307,7 +406,9 @@ def _generate_factory_artifacts(
                 ) != (dependency.uri, dependency.version):
                     raise ValueError("Indexed dependency source snapshot differs")
             build_source_map(call, modules)
-            diagnostics.extend(_precision_diagnostics(document, snapshot))
+            diagnostics.extend(
+                _precision_diagnostics(document, snapshot, annotation_symbols)
+            )
             identity = DocumentIdentity(call.module, call.range)
             selected = document.selected_operation
             primary = document.primary_fragment

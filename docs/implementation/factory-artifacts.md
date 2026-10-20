@@ -54,10 +54,15 @@ including primary `@_unmask` removal; they do not reparse printed GraphQL or
 construct runtime subclasses. Source companions never import the authoring modules.
 
 Inline, adjacent, raw and escaped literals can select precise overloads. Tested
-top-level `Final` and `Literal` sources also work in both pinned checkers.
-Ordinary aliases, concatenations, nonliteral selectors and fragment lists receive
-explicit precision diagnostics because their checker types can widen. Fixed
-tuples carry exact fragment order and arity for precise overload selection.
+top-level `Final` and `Literal` sources also work in both pinned checkers,
+including qualified `typing` and `typing_extensions` annotations. Precision
+warnings recognize only proven external annotation identities and stable module
+bindings; captured, rebound or mutated markers remain conservative. Ordinary
+aliases, concatenations, nonliteral selectors and fragment lists receive explicit
+precision diagnostics because their checker types can widen. Warnings point to
+the source, fragment-collection or operation operand using physical Python line
+and UTF-8 column offsets, including Unicode and CRLF source. Fixed tuples carry
+exact fragment order and arity for precise overload selection.
 
 The general `str` fallback exposes a private read-only protocol containing only
 `ast`, `operation_name` and `schema_name`. It carries no trusted result/variable
