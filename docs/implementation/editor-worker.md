@@ -59,3 +59,29 @@ preflight, exact buffer metadata/canonical sets, source/config/disk changes,
 supersession/restart, retained source versions, remote unavailability, redaction
 and bounded malformed/oversized request/reply recovery. No broad acceptance gate
 is passed by this transport foundation.
+
+## Editor-side connection
+
+`editor/src/analysisWorker.js` exports
+`createAnalysisWorker({python, workspace, isTrusted, timeoutMs=10000})`. The caller
+selects an absolute interpreter/workspace and supplies the current trust callback.
+The transport launches the isolated UTF-8 worker without a shell or visible
+Windows console, using the system temporary directory or filesystem root outside
+the supplied workspace path. If neither is outside, construction rejects.
+
+`request(message, {signal})` permits one active wire request; concurrent calls
+reject immediately without a queue. Request/reply frames retain the 8 MiB limit.
+Reply decoding rejects invalid UTF-8, duplicate keys, nonfinite numbers, unexpected
+top-level shapes and mismatched analysis IDs. Errors, stderr, process exit,
+timeout or abort terminate the process and return only a generic error. The next
+request may start a fresh worker, whose old job IDs are invalid. Old-process
+events cannot invalidate a replacement process. `invalidate()` terminates active
+work and permits restart; `close()` and `dispose()` permanently close the client.
+
+Trust, abort, disposal and process epoch are checked after the final await.
+Callers still own trust-event invalidation, complete captures, latest-job checks
+and publication. This connection does not automatically enumerate files, register
+providers or activate an extension. Ten tests include a real persistent Python
+round trip, Unicode/external schema buffers, process restart, framed faults,
+timeout/cancellation and final-await races; provider/highlighting tests remain
+separate. No generated analysis files are written.
