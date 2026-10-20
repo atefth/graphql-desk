@@ -486,6 +486,97 @@ schemas=[{name="shop",schema="shop.graphql",schema_output="generated/types/shop.
             validate_project_ownership((config,))
         self.assertEqual(external.read_text(), "# untouched")
 
+    def test_closed_config_capture_overrides_disk_and_requires_absence_records(
+        self,
+    ) -> None:
+        parent = self.write_config(self.root)
+        child = self.root / "child"
+        child.mkdir()
+        child_path = child / "pyproject.toml"
+        captured = {parent.path: _BASE, child_path: None}
+        self.assertEqual(
+            find_project(child, workspace=self.root, config_texts=captured), parent
+        )
+        captured[child_path] = _BASE
+        nested = find_project(child, workspace=self.root, config_texts=captured)
+        assert nested is not None
+        self.assertEqual(nested.root, child)
+        self.assertFalse(child_path.exists())
+        with self.assertRaisesRegex(ValueError, "not captured"):
+            find_project(child, workspace=self.root, config_texts={parent.path: _BASE})
+        captured[child_path] = "[tool.graphql-desk]\nunknown=true"
+        with self.assertRaises(ValueError):
+            find_project(child, workspace=self.root, config_texts=captured)
+        # Captured inactive/absent facts never reread the invalid saved table.
+        parent.path.write_text("[tool.graphql-desk]\nunknown=true", encoding="utf-8")
+        self.assertIsNone(
+            find_project(
+                self.root, workspace=self.root, config_texts={parent.path: None}
+            )
+        )
+
+    def test_capture_alias_conflict_and_effective_whole_object_precedence(self) -> None:
+        path = self.root / "pyproject.toml"
+        alias = self.root / "child" / ".." / "pyproject.toml"
+        with self.assertRaisesRegex(ValueError, "aliases"):
+            find_project(
+                self.root, workspace=self.root, config_texts={path: _BASE, alias: None}
+            )
+        selected = effective_project(
+            self.root,
+            workspace=self.root,
+            config_texts={path: _BASE},
+            editor_fallback={"unknown": True},
+        )
+        assert selected is not None
+        self.assertEqual(selected.origin, "nearest")
+        fallback = effective_project(
+            self.root,
+            workspace=self.root,
+            config_texts={path: "[project]\nname='inactive'"},
+            editor_fallback={
+                "schema": "fallback.graphql",
+                "schema_output": "graphql_desk_generated/default.pyi",
+            },
+        )
+        assert fallback is not None
+        self.assertEqual(fallback.origin, "editor_fallback")
+        self.assertEqual(
+            fallback.config.schemas[0].origin.local_path, self.root / "fallback.graphql"
+        )
+
+    def test_explicit_and_selected_scope_is_preserved_with_captured_config(
+        self,
+    ) -> None:
+        path = self.root / "pyproject.toml"
+        text = _BASE + 'source_roots=["../shared"]\n'
+        capture = {path: text}
+        with self.assertRaises(ValueError):
+            find_project(self.root, workspace=self.root, config_texts=capture)
+        selected = effective_project(
+            self.root, explicit_config=path, workspace=self.root, config_texts=capture
+        )
+        assert selected is not None
+        self.assertEqual(selected.config.source_scope, "explicit_cli")
+        self.assertEqual(
+            find_project(
+                self.root,
+                workspace=self.root,
+                selected_config=selected.config,
+                config_texts=capture,
+            ),
+            selected.config,
+        )
+
+    def test_captured_absence_is_authoritative_even_over_a_disk_directory(self) -> None:
+        path = self.root / "pyproject.toml"
+        path.mkdir()
+        with self.assertRaisesRegex(ValueError, "must be a file"):
+            find_project(self.root, workspace=self.root)
+        self.assertIsNone(
+            find_project(self.root, workspace=self.root, config_texts={path: None})
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -94,11 +94,10 @@ def acquire_editor_snapshot(
     new monotonic generation for every acquisition. No directory enumeration or
     complete-project discovery is implied. Local schema paths explicitly selected
     by config may be outside the workspace; Python source candidates may not.
-    Open buffers override disk. Dirty/new config buffers fail closed until shared
-    overlay-aware configuration discovery exists. Before publishing, recheck with
-    newly captured buffers/candidates/fallback and the caller's latest-job guard.
-    Reads are best effort, not atomic: config can change A-to-B-to-A across the
-    existing helpers' separate reads without the final byte check noticing.
+    Open source/schema/config buffers override disk, including new configs. One
+    closed config-text capture governs discovery and source ownership throughout.
+    Before publishing, recheck newly captured buffers/candidates/fallback and the
+    caller's latest-job guard. Source/schema reads remain best effort, not atomic.
     """
     _check_version(generation)
     base = _path(workspace)
@@ -120,36 +119,46 @@ def acquire_editor_snapshot(
     configs: dict[Path, ProjectConfig] = {}
     config_facts: dict[str, tuple[str, str, str]] = {}
 
-    def config_guard(path: Path) -> None:
+    config_texts: dict[Path, str | None] = {}
+
+    def capture_config(path: Path) -> None:
         canonical = _identity(path)
         if not canonical.is_relative_to(_identity(base)):
             raise ValueError("Project configuration escapes its workspace")
+        if canonical in config_texts:
+            return
+        if not path.is_file() and (path.exists() or path.is_symlink()):
+            raise ValueError("Project configuration must be a file")
         buffer = open_files.get(canonical)
-        if buffer is not None and buffer.is_dirty:
-            raise ValueError("Unsaved project configuration is not supported yet")
-        if path.is_file():
+        if buffer is not None:
+            text: str | None = buffer.text
+            digest = _text_digest(buffer.text)
+            origin = "config-buffer"
+        elif path.is_file():
             text, digest = _read(path)
-            if buffer is not None and buffer.text != text:
-                raise ValueError("Unsaved project configuration is not supported yet")
+            origin = "config-disk"
         else:
-            if path.exists() or path.is_symlink():
-                raise ValueError("Project configuration must be a file")
-            if buffer is not None:
-                raise ValueError("Unsaved project configuration is not supported yet")
-            digest = None
+            text = digest = None
+            origin = "config-disk"
+        config_texts[canonical] = text
         observations[(path, "config")] = _Observation(
-            path, canonical, "config", buffer.version if buffer else None, digest
+            path, canonical, origin, buffer.version if buffer else None, digest
         )
 
+    # Complete the closed capture before any discovery or ownership helper runs.
     for path in paths:
         current = _path(path).parent
         while True:
-            config_guard(current / "pyproject.toml")
+            capture_config(current / "pyproject.toml")
             if current == base:
                 break
             current = current.parent
+    for path in paths:
         selected = effective_project(
-            _path(path).parent, workspace=base, editor_fallback=editor_fallback
+            _path(path).parent,
+            workspace=base,
+            editor_fallback=editor_fallback,
+            config_texts=config_texts,
         )
         if selected is None:
             continue
@@ -187,7 +196,9 @@ def acquire_editor_snapshot(
 
     for config in sorted(configs.values(), key=lambda item: str(item.path)):
         project_id = config.path.as_uri()
-        selected_files = select_project_sources(config, paths, workspace=base)
+        selected_files = select_project_sources(
+            config, paths, workspace=base, config_texts=config_texts
+        )
         facts = project_bindings(config, project_id=project_id)
         bindings.append(
             {
@@ -238,12 +249,12 @@ def acquire_editor_snapshot(
                     "text": text,
                 }
             )
-    # Best-effort change detection; mandatory reacquisition still guards publish.
-    # In particular, ABA across separate config-helper reads can escape this check.
+    # Helpers consumed one captured config map; remaining reads are best effort.
+    # Mandatory full reacquisition and the latest-job guard still govern publish.
     for observation in observations.values():
         if _identity(observation.path) != observation.canonical:
             raise ValueError("Inputs changed during snapshot acquisition")
-        if observation.origin == "config":
+        if observation.origin == "config-disk":
             digest = _read(observation.path)[1] if observation.path.is_file() else None
             if digest != observation.digest:
                 raise ValueError("Inputs changed during snapshot acquisition")

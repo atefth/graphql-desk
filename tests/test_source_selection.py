@@ -310,6 +310,25 @@ class SourceSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "symlink"):
             select_project_sources(config, (link,))
 
+    def test_closed_capture_governs_nested_source_ownership(self) -> None:
+        config = self.config()
+        source = self.file("child/q.py")
+        child_path = source.parent / "pyproject.toml"
+        capture = {config.path: _BASE, child_path: _BASE}
+        self.assertEqual(
+            select_project_sources(config, (source,), config_texts=capture), ()
+        )
+        nested = self.config(root=source.parent)
+        selected = select_project_sources(nested, (source,), config_texts=capture)
+        self.assertEqual(selected[0].module, "q")
+        capture[child_path] = "[project]\nname='inactive'"
+        self.assertEqual(
+            select_project_sources(config, (source,), config_texts=capture)[0].module,
+            "child.q",
+        )
+        with self.assertRaisesRegex(ValueError, "not captured"):
+            select_project_sources(config, (source,), config_texts={config.path: _BASE})
+
 
 if __name__ == "__main__":
     unittest.main()
