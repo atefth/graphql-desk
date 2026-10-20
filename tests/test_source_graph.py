@@ -27,6 +27,104 @@ def module(
 
 
 class SourceGraphTests(unittest.TestCase):
+    def test_two_operand_unions_keep_availability_but_no_base_capabilities(
+        self,
+    ) -> None:
+        base = module("base", "class Known: pass")
+        models = module(
+            "models",
+            "from typing import TypeAlias\nimport base\n"
+            "from typing_extensions import TypedDict\n"
+            "class Data(TypedDict):\n value:str\n"
+            "Text:TypeAlias=str|int\nReverse:TypeAlias=int|str\n"
+            "Known:TypeAlias=base.Known|str\nAlias:TypeAlias=Text\n"
+            "Duplicate:TypeAlias=Data|Data\n",
+        )
+        exports = module("exports", "from models import Alias as Public")
+        snapshots = (base, models, exports)
+        symbols = (
+            "models.Text",
+            "models.Reverse",
+            "models.Known",
+            "models.Duplicate",
+            "exports.Public",
+        )
+        result = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
+        self.assertEqual([r.status for r in result], ["resolved"] * len(symbols))
+        self.assertEqual(
+            result,
+            resolve_type_symbols(
+                symbols, modules=tuple(reversed(snapshots)), project_id="app"
+            ),
+        )
+        self.assertNotEqual(
+            result,
+            resolve_type_symbols(
+                symbols,
+                modules=(replace(base, version=2), models, exports),
+                project_id="app",
+            ),
+        )
+        for declaration in (
+            "from exports import Public\nclass Bad(Public):pass",
+            "from models import Duplicate\nclass Bad(Duplicate,total=False):pass",
+        ):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("bad.Bad",),
+                    modules=(*snapshots, module("bad", declaration)),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        for declaration in (
+            "Alias:TypeAlias=str|Missing",
+            "Alias:TypeAlias=str|Alias",
+            "Alias:TypeAlias=str|TypeAlias",
+            "Alias:TypeAlias=str|'int'",
+            "Alias:TypeAlias=str|list[int]",
+            "Alias:TypeAlias=(str|int)|None",
+            "value=42\nAlias:TypeAlias=str|value",
+            "Alias:TypeAlias=str|int\nint=other",
+        ):
+            with self.subTest(declaration=declaration):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("bad.Alias",),
+                        modules=(
+                            module(
+                                "bad", "from typing import TypeAlias\n" + declaration
+                            ),
+                        ),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+        external = module(
+            "unknown_use",
+            "from typing import TypeAlias\n"
+            "from external import Value\nAlias:TypeAlias=str|Value",
+        )
+        self.assertEqual(
+            resolve_type_symbols(
+                ("unknown_use.Alias",), modules=(external,), project_id="app"
+            )[0].status,
+            "external",
+        )
+        for mutation in (
+            "import builtins\nbuiltins.int=42",
+            "import base\nbase.Known=42",
+        ):
+            target = "models.Text" if "builtins" in mutation else "models.Known"
+            self.assertEqual(
+                resolve_type_symbols(
+                    (target,),
+                    modules=(*snapshots, module("mutator", mutation)),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+
     def test_parser_sources_reuse_imports_constants_scopes_and_provenance(self) -> None:
         snapshots = (
             module("constants", 'TEXT="query Q { id }"'),
@@ -271,7 +369,6 @@ class SourceGraphTests(unittest.TestCase):
             "from typing import TypeAlias\nTypeAlias=Plain\nAlias:TypeAlias=Plain",
             "from typing import TypeAlias\nAlias:TypeAlias='Plain'",
             "from typing import TypeAlias\nAlias:TypeAlias=list[list[Plain]]",
-            "from typing import TypeAlias\nAlias:TypeAlias=Plain|str",
             "from typing import TypeAlias\nAlias:TypeAlias=make()",
             "from typing import TypeAlias\nvalue=42\nAlias:TypeAlias=value",
             "from typing import TypeAlias\nAlias:TypeAlias=Later\nclass Later: pass",
@@ -1105,7 +1202,6 @@ class SourceGraphTests(unittest.TestCase):
             "Alias:TypeAlias=str|None\nAlias=other",
             "Alias:TypeAlias=TypeAlias|None",
             "Alias:TypeAlias='str'|None",
-            "Alias:TypeAlias=str|int",
             "Alias:TypeAlias=(str|None)|None",
             "Alias:TypeAlias=list[str]|None",
             "Alias:TypeAlias=None|None",

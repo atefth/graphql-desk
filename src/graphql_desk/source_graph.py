@@ -920,27 +920,33 @@ class _Graph:
     ) -> _Value:
         if isinstance(node, ast.BinOp):
             if not isinstance(node.op, ast.BitOr):
-                raise _Unresolved("Nullable aliases require a literal None union")
-            if isinstance(node.left, ast.Constant) and node.left.value is None:
-                argument = node.right
-            elif isinstance(node.right, ast.Constant) and node.right.value is None:
-                argument = node.left
-            else:
-                raise _Unresolved("Nullable aliases require a literal None union")
-            if not isinstance(argument, (ast.Name, ast.Attribute)):
-                raise _Unresolved(
-                    "Nullable aliases require one named type and literal None"
-                )
-            value = self.expression(module, argument, before, active)
-            if value.kind not in {"type", "external"} or value.text in {
-                "typing.TypeAlias",
-                "typing_extensions.TypeAlias",
-            }:
-                raise _Unresolved("Nullable alias operand is not an established type")
+                raise _Unresolved("Union aliases require two direct type operands")
+            values: list[_Value] = []
+            for argument in (node.left, node.right):
+                if isinstance(argument, ast.Constant) and argument.value is None:
+                    continue
+                if not isinstance(argument, (ast.Name, ast.Attribute)):
+                    raise _Unresolved(
+                        "Union alias operands require named types or literal None"
+                    )
+                value = self.expression(module, argument, before, active)
+                if value.kind not in {"type", "external"} or value.text in {
+                    "typing.TypeAlias",
+                    "typing_extensions.TypeAlias",
+                }:
+                    raise _Unresolved("Union alias operand is not an established type")
+                values.append(value)
+            if not values:
+                raise _Unresolved("Union aliases require at least one named type")
             return _Value(
-                value.kind,
+                "external"
+                if any(value.kind == "external" for value in values)
+                else "type",
                 f"{module.snapshot.module}.{name}",
-                dependencies=value.dependencies,
+                dependencies=frozenset(
+                    dependency for value in values for dependency in value.dependencies
+                ),
+                # shortcut: duplicate union bases stay blocked until mypy accepts them.
                 class_base=False,
             )
         if not isinstance(node, ast.Subscript):
