@@ -93,9 +93,20 @@ class GraphDiagnostic:
 
 
 @dataclass(frozen=True)
+class RejectedCall:
+    """Recognized document call ownership without resolved semantic facts."""
+
+    module: ModuleDependency
+    range: Span
+    binding: str | None
+    diagnostics: tuple[GraphDiagnostic, ...]
+
+
+@dataclass(frozen=True)
 class ProjectSources:
     calls: tuple[ResolvedCall, ...]
     diagnostics: tuple[GraphDiagnostic, ...]
+    unavailable: tuple[RejectedCall, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1026,6 +1037,7 @@ def _resolve(
 ) -> ProjectSources:
     graph = _Graph(modules, bindings, parses)
     calls: list[ResolvedCall] = []
+    unavailable: list[RejectedCall] = []
     for module in graph.modules.values():
 
         class Calls(ast.NodeVisitor):
@@ -1040,12 +1052,27 @@ def _resolve(
                     self.generic_visit(node)
                     return
                 candidate = False
+                document_candidate = False
+
+                def reject(diagnostic: GraphDiagnostic) -> None:
+                    graph.diagnostics.append(diagnostic)
+                    if document_candidate:
+                        unavailable.append(
+                            RejectedCall(
+                                module.identity,
+                                module.span(node),
+                                module.call_bindings.get(id(node)),
+                                (diagnostic,),
+                            )
+                        )
+
                 try:
                     callable_ = graph.expression(
                         module, node.func, (node.lineno, node.col_offset), set()
                     )
                     if callable_.kind in {"callable", "initializer"}:
                         candidate = True
+                        document_candidate = callable_.kind == "callable"
                         if self.scoped:
                             raise _Unresolved(
                                 "Nested scopes require a later project resolver slice"
@@ -1058,7 +1085,7 @@ def _resolve(
                             calls.append(graph.document(module, node, callable_))
                 except RecursionError:
                     if candidate:
-                        graph.diagnostics.append(
+                        reject(
                             GraphDiagnostic(
                                 module.identity,
                                 "source-too-complex",
@@ -1077,10 +1104,11 @@ def _resolve(
                                 probe=True,
                             )
                             candidate = origin.kind in {"callable", "initializer"}
+                            document_candidate = origin.kind == "callable"
                         except (_Unresolved, RecursionError):
                             pass
                     if candidate:
-                        graph.diagnostics.append(
+                        reject(
                             GraphDiagnostic(
                                 module.identity,
                                 "source-not-static",
@@ -1117,10 +1145,12 @@ def _resolve(
             visit_GeneratorExp = visit_FunctionDef
 
         start = len(calls)
+        rejected_start = len(unavailable)
         try:
             Calls().visit(module.tree)
         except RecursionError:
             del calls[start:]
+            del unavailable[rejected_start:]
             module.star = True
             graph.failed_modules.add(module.identity)
             graph.diagnostics.append(
@@ -1136,7 +1166,25 @@ def _resolve(
         for call in calls
         if not graph.failed_modules.intersection(call.dependencies)
     )
-    return ProjectSources(current, tuple(graph.diagnostics))
+    for call in calls:
+        failed = graph.failed_modules.intersection(call.dependencies)
+        if failed:
+            unavailable.append(
+                RejectedCall(
+                    call.module,
+                    call.range,
+                    call.binding,
+                    tuple(item for item in graph.diagnostics if item.module in failed),
+                )
+            )
+    order = {(item.project, item.module): index for index, item in enumerate(modules)}
+    unavailable.sort(
+        key=lambda item: (
+            order[(item.module.project, item.module.module)],
+            item.range.start,
+        )
+    )
+    return ProjectSources(current, tuple(graph.diagnostics), tuple(unavailable))
 
 
 @dataclass(frozen=True)
@@ -1211,7 +1259,16 @@ class IncrementalResolver:
                 order[(item.module.project, item.module.module)],
             )
         )
-        result = ProjectSources(tuple(calls), tuple(diagnostics))
+        unavailable = [
+            item for project in projects.values() for item in project.result.unavailable
+        ]
+        unavailable.sort(
+            key=lambda item: (
+                order[(item.module.project, item.module.module)],
+                item.range.start,
+            )
+        )
+        result = ProjectSources(tuple(calls), tuple(diagnostics), tuple(unavailable))
         self._parses = parses
         self._projects = projects
         return result

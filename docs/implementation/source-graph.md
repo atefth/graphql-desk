@@ -1,5 +1,16 @@
 # Static module source graph
 
+`ProjectSources.unavailable` retains frozen `RejectedCall` ownership records for
+recognized document calls that cannot resolve: module URI/version, call span,
+known binding and causal diagnostics. No source, selector or schema facts are
+invented. Failed initializer calls remain diagnostics only. Dependency failures
+also retain ownership for previously resolved calls that become unavailable.
+
+Module-wide traversal failure discards partial call records and keeps its module
+diagnostic. Incremental results preserve cold ordering and can reuse unchanged
+rejected records. These facts do not establish unavailable factory overloads,
+artifact replacement or editor recovery; the generator still rejects errors.
+
 `graphql_desk.source_graph.resolve_project(modules, bindings=())` consumes a tuple of caller-selected `ModuleSnapshot(project, module, uri, version, source, is_package=False)` facts. It never discovers files, imports project modules or executes Python. Module identity and URI must be unique within a project; project boundaries isolate identical module names.
 
 The initial slice resolves stable module-level GraphQL Desk callable aliases, string constants, literal `+`, imports, relative imports, namespace access and transitive reexports. Each resolved call carries its source text, optional selected operation/binding, host call span, contributing literal spans and module URI/version dependencies. The cold function recomputes facts without a hidden global cache. Literal spans identify contributing expressions, not exact decoded-character mappings.
