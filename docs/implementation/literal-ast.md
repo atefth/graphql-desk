@@ -24,9 +24,21 @@ renderer. Dynamic strings, `Source` objects, SDL and nondefault options retain t
 ordinary `DocumentNode` return. Sources deduplicate deterministically; invalid
 syntax raises the original parser error, and unknown schema fields still parse.
 
-This is a retained-source opt-in companion foundation for #25. Automatic parse-call
-discovery, attachment to original imports, regeneration/editor publication and
+This is a retained-source opt-in companion foundation for #25. Attachment to original imports, regeneration/editor publication and
 complete exact-location acceptance remain open. API-01 and the live-typing gate
 have not passed. Tests cover actual generated imports and exact positive/negative
 bindings in both strict checkers, runtime identity, fallback/options, schema-independent
 parsing, syntax errors, complex defaults, unsafe names and excessive nesting.
+
+`source_graph.resolve_parse_sources(modules)` separately resolves captured default-mode
+parser calls through existing import/reexport, static-string, provenance and mutation
+rules. Its immutable facts are independent of schema-bound factory documents and
+fragment indexes. Dynamic inputs, nondefault options and unsupported scopes retain
+ordinary ASTs with local fallback diagnostics. No project modules are imported.
+
+`render_captured_parse_companion(modules, *, project_id, module)` selects one unique
+captured owner and returns its identity, opt-in companion and local diagnostics.
+Independent valid literals survive invalid parser syntax. Sources deduplicate
+deterministically and remain schema-independent. Callers still own publication and
+explicit companion imports; neither function rewrites original imports or writes
+files. Full automatic attachment and exact-location acceptance remain open.
