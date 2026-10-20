@@ -38,9 +38,9 @@ The pure [schema declaration renderer](docs/implementation/schema-types.md) curr
 The [scalar helpers](docs/implementation/scalar-helpers.md) return identical values, with configured input checks on generated schema factories. Static symbol resolution and full helper/API acceptance remain open.
 
 The [runtime factories](docs/implementation/runtime-factories.md) provide untyped `graphql`/`gql` construction and schema-name binding; precise generated inference remains open.
-The [local schema loaders](docs/implementation/schema-loading.md) validate explicit SDL or introspection JSON inputs; configuration, remote fetching and refresh remain separate work.
+The [schema loaders](docs/implementation/schema-loading.md) validate explicit SDL, introspection JSON and configured HTTP(S) inputs. The trusted worker supports explicit remote refresh; the complete schema workflow remains open.
 
-The [configuration model](docs/implementation/configuration.md) supplies single/named-schema facts, nearest-project ownership/routing and captured configuration text. Finite [editor snapshots](docs/implementation/editor-snapshots.md) acquire explicit candidates and current buffers without executing project Python; production enumeration, authenticated loading and actual CLI dispatch remain open under #27.
+The [configuration model](docs/implementation/configuration.md) supplies single/named-schema facts, nearest-project ownership/routing and captured configuration text. Finite [editor snapshots](docs/implementation/editor-snapshots.md) acquire explicit candidates and current buffers without executing project Python; the installed `graphql-desk doctor` command inspects configuration and schemas without writes, and explicitly reports unverified editor/bridge health as degraded. Complete CLI integration remains open under #27.
 
 ## Typed-document boundary
 
