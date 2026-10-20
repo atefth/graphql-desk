@@ -34,6 +34,19 @@ caller's latest job/cancellation guard. Reacquisition checks source/config/schem
 content and origin changes, buffer versions, ownership and candidate changes.
 Closing a buffer changes its origin to disk and invalidates the old snapshot.
 
+An optional `previous` snapshot from the same workspace and no later generation
+retains unchanged disk-source versions. Reuse requires identical project/module/
+package identity, URI, canonical path, disk origin, raw bytes and decoded text.
+Open buffers retain their actual editor versions. Without a baseline, disk
+versions retain the acquisition generation. Freshness reacquisition uses the
+snapshot itself as its baseline; private observations, configuration facts and
+schema tokens still participate in full comparison. Request IDs remain specific
+to the current generation, and the latest-job guard remains mandatory.
+
+Actual `IncrementalResolver` counter tests prove unchanged-project reuse across
+three later generations and recomputation of only a changed project. Schema/index
+caching, worker integration and performance acceptance remain open.
+
 Source/schema reads are best-effort and non-atomic. Configuration discovery and
 ownership share one captured text set, preventing independent helper reads from
 observing different configurations. End-of-read comparisons do not replace full
@@ -41,7 +54,7 @@ reacquisition and the latest-job guard before publication. Generation-based sche
 invalidate contexts on every acquisition; incremental caching and performance
 acceptance are separate work.
 
-Eighteen focused acquisition tests cover real acquisition-to-analysis, imports/fragments,
+Twenty-three focused acquisition tests cover real acquisition-to-analysis, imports/fragments,
 new source buffers, local schema overlays, nested/fallback projects, dirty/new
 configuration routing and malformed-file rejection, redaction, exclusions,
 entrypoints, stale input origins, Unicode/BOM/CRLF and symlink boundaries where

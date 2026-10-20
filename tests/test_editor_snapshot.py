@@ -11,13 +11,21 @@ from unittest.mock import patch
 
 from graphql import build_schema, introspection_from_schema
 
+import graphql_desk.source_graph as source_graph
 from graphql_desk.editor_analysis import analyze_editor_snapshot
 from graphql_desk.editor_snapshot import (
+    EditorSnapshot,
     OpenBuffer,
     acquire_editor_snapshot,
     is_editor_snapshot_current,
 )
 from graphql_desk.project import EffectiveProject, effective_project
+from graphql_desk.source_graph import (
+    FactoryBinding,
+    IncrementalResolver,
+    ModuleSnapshot,
+    ProjectBindings,
+)
 
 _SDL = "type User { id: ID! name: String } type Query { user: User hello: String }"
 _BASE = """[tool.graphql-desk]
@@ -25,6 +33,40 @@ schema="schema.graphql"
 schema_output="graphql_desk_generated/default.pyi"
 """
 _QUERY = 'from graphql_desk import graphql\nq=graphql("{ user { id } }")\n'
+
+
+def graph_inputs(
+    snapshot: EditorSnapshot,
+) -> tuple[tuple[ModuleSnapshot, ...], tuple[ProjectBindings, ...]]:
+    request = snapshot.request
+    modules = tuple(
+        ModuleSnapshot(
+            cast(str, item["project"]),
+            cast(str, item["module"]),
+            cast(str, item["uri"]),
+            cast(int, item["version"]),
+            cast(str, item["source"]),
+            cast(bool, item["is_package"]),
+        )
+        for item in cast(list[dict[str, object]], request["modules"])
+    )
+    bindings = tuple(
+        ProjectBindings(
+            cast(str, item["project"]),
+            tuple(cast(list[str], item["schemas"])),
+            cast(str | None, item["default_schema"]),
+            tuple(
+                FactoryBinding(
+                    cast(str, factory["module"]),
+                    cast(str, factory["export"]),
+                    cast(str | None, factory["schema_name"]),
+                )
+                for factory in cast(list[dict[str, object]], item["factories"])
+            ),
+        )
+        for item in cast(list[dict[str, object]], request["bindings"])
+    )
+    return modules, bindings
 
 
 class EditorSnapshotTests(unittest.TestCase):
@@ -527,6 +569,178 @@ class EditorSnapshotTests(unittest.TestCase):
                 buffers=(buffer,),
                 generation=2,
             )
+
+    def test_previous_snapshot_reuses_actual_incremental_project_across_generations(
+        self,
+    ) -> None:
+        self.project()
+        source = self.write("q.py", _QUERY)
+        first = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), generation=1
+        )
+        resolver = IncrementalResolver()
+        modules, bindings = graph_inputs(first)
+        expected = resolver.resolve(modules, bindings=bindings)
+        with (
+            patch.object(
+                source_graph, "_parse", wraps=getattr(source_graph, "_parse")
+            ) as parse,
+            patch.object(
+                source_graph, "_resolve", wraps=getattr(source_graph, "_resolve")
+            ) as resolve,
+        ):
+            previous = first
+            for generation in (2, 3, 4):
+                current = acquire_editor_snapshot(
+                    workspace=self.root,
+                    candidates=(source,),
+                    generation=generation,
+                    previous=previous,
+                )
+                modules, bindings = graph_inputs(current)
+                self.assertEqual(modules[0].version, 1)
+                self.assertEqual(resolver.resolve(modules, bindings=bindings), expected)
+                self.assertTrue(
+                    is_editor_snapshot_current(current, candidates=(source,))
+                )
+                self.assertNotEqual(
+                    current.request["request_id"], previous.request["request_id"]
+                )
+                self.assertNotEqual(
+                    current.request["schemas"], previous.request["schemas"]
+                )
+                previous = current
+            self.assertEqual((parse.call_count, resolve.call_count), (0, 0))
+
+    def test_previous_snapshot_changed_project_leaves_other_project_reusable(
+        self,
+    ) -> None:
+        self.project("one/")
+        self.project("two/")
+        one = self.write("one/q.py", _QUERY)
+        two = self.write("two/q.py", _QUERY)
+        candidates = (one, two)
+        first = acquire_editor_snapshot(
+            workspace=self.root, candidates=candidates, generation=1
+        )
+        resolver = IncrementalResolver()
+        modules, bindings = graph_inputs(first)
+        resolver.resolve(modules, bindings=bindings)
+        self.write("one/q.py", _QUERY.replace("id", "name"))
+        second = acquire_editor_snapshot(
+            workspace=self.root, candidates=candidates, generation=2, previous=first
+        )
+        modules, bindings = graph_inputs(second)
+        self.assertEqual([item.version for item in modules], [2, 1])
+        with (
+            patch.object(
+                source_graph, "_parse", wraps=getattr(source_graph, "_parse")
+            ) as parse,
+            patch.object(
+                source_graph, "_resolve", wraps=getattr(source_graph, "_resolve")
+            ) as resolve,
+        ):
+            resolver.resolve(modules, bindings=bindings)
+            self.assertEqual((parse.call_count, resolve.call_count), (1, 1))
+        self.assertFalse(is_editor_snapshot_current(first, candidates=candidates))
+        self.assertTrue(is_editor_snapshot_current(second, candidates=candidates))
+
+    def test_previous_snapshot_preserves_origin_and_exact_disk_byte_guards(
+        self,
+    ) -> None:
+        self.project()
+        source = self.write("q.py", _QUERY)
+        first = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), generation=1
+        )
+        # BOM-only change decodes to identical source but is a new disk observation.
+        source.write_bytes(b"\xef\xbb\xbf" + _QUERY.encode())
+        second = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), generation=2, previous=first
+        )
+        self.assertEqual(graph_inputs(second)[0][0].version, 2)
+        self.assertFalse(is_editor_snapshot_current(first, candidates=(source,)))
+        buffer = OpenBuffer(source, 17, _QUERY)
+        opened = acquire_editor_snapshot(
+            workspace=self.root,
+            candidates=(source,),
+            buffers=(buffer,),
+            generation=3,
+            previous=second,
+        )
+        self.assertEqual(graph_inputs(opened)[0][0].version, 17)
+        changed = replace(buffer, text=_QUERY.replace("id", "name"))
+        self.assertFalse(
+            is_editor_snapshot_current(opened, candidates=(source,), buffers=(changed,))
+        )
+        closed = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), generation=4, previous=opened
+        )
+        self.assertEqual(graph_inputs(closed)[0][0].version, 4)
+        self.assertFalse(is_editor_snapshot_current(opened, candidates=(source,)))
+        self.assertFalse(
+            is_editor_snapshot_current(closed, candidates=(source,), buffers=(buffer,))
+        )
+
+    def test_previous_snapshot_does_not_hide_schema_config_or_ownership_changes(
+        self,
+    ) -> None:
+        self.project()
+        source = self.write("nested/q.py", _QUERY)
+        first = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), generation=1
+        )
+        self.write("schema.graphql", _SDL + "\nscalar Extra")
+        second = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), generation=2, previous=first
+        )
+        self.assertEqual(graph_inputs(second)[0], graph_inputs(first)[0])
+        self.assertFalse(is_editor_snapshot_current(first, candidates=(source,)))
+        self.write("pyproject.toml", _BASE + "# changed config capture\n")
+        third = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), generation=3, previous=second
+        )
+        self.assertEqual(graph_inputs(third)[0], graph_inputs(second)[0])
+        self.assertFalse(is_editor_snapshot_current(second, candidates=(source,)))
+        self.project("nested/")
+        fourth = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), generation=4, previous=third
+        )
+        self.assertNotEqual(
+            graph_inputs(fourth)[0][0].project, graph_inputs(third)[0][0].project
+        )
+        self.assertEqual(graph_inputs(fourth)[0][0].version, 4)
+        self.assertFalse(is_editor_snapshot_current(third, candidates=(source,)))
+
+    def test_previous_snapshot_baseline_validation_and_no_baseline_behavior(
+        self,
+    ) -> None:
+        self.project()
+        source = self.write("q.py", _QUERY)
+        first = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), generation=5
+        )
+        for previous in (
+            replace(first, workspace=self.root / "other"),
+            replace(first, generation=6),
+        ):
+            with self.subTest(previous=previous):
+                with self.assertRaisesRegex(ValueError, "Previous snapshot"):
+                    acquire_editor_snapshot(
+                        workspace=self.root,
+                        candidates=(source,),
+                        generation=5,
+                        previous=previous,
+                    )
+        no_baseline = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), generation=6
+        )
+        self.assertEqual(graph_inputs(no_baseline)[0][0].version, 6)
+        empty = acquire_editor_snapshot(
+            workspace=self.root, candidates=(), generation=7, previous=first
+        )
+        self.assertEqual(graph_inputs(empty), ((), ()))
+        self.assertTrue(is_editor_snapshot_current(empty, candidates=()))
 
 
 if __name__ == "__main__":

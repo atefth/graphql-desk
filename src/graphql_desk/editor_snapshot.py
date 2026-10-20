@@ -4,12 +4,13 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import astuple, dataclass, field
+from dataclasses import astuple, dataclass, field, replace
 from pathlib import Path
 from typing import cast
 
 from .config import ProjectConfig
 from .project import effective_project, project_bindings, validate_project_ownership
+from .source_graph import ModuleSnapshot
 from .source_selection import select_project_sources
 
 
@@ -41,11 +42,53 @@ class EditorSnapshot:
     _request_json: str = field(repr=False)
     _observations: tuple[_Observation, ...] = field(repr=False)
     _configs: tuple[tuple[str, str, str], ...] = field(repr=False)
+    _disk_modules: tuple[ModuleSnapshot, ...] = field(repr=False)
 
     @property
     def request(self) -> dict[str, object]:
         # A frozen dataclass alone would not freeze a nested caller-mutable dict.
         return cast(dict[str, object], json.loads(self._request_json))
+
+    def reuse_disk_sources(self, previous: "EditorSnapshot") -> "EditorSnapshot":
+        """Retain only exactly matching captured disk module versions."""
+        _validate_previous(previous, self.workspace, self.generation)
+        old_modules = {
+            (item.project, item.module, item.uri): item
+            for item in previous._disk_modules
+        }
+        old_observations = set(previous._observations)
+        observations = {
+            item.path.as_uri(): item
+            for item in self._observations
+            if item.origin == "disk"
+        }
+        retained: list[ModuleSnapshot] = []
+        for module in self._disk_modules:
+            old = old_modules.get((module.project, module.module, module.uri))
+            if (
+                old is not None
+                and replace(old, version=module.version) == module
+                and observations.get(module.uri) in old_observations
+            ):
+                module = old
+            retained.append(module)
+        versions = {
+            (item.project, item.module, item.uri): item.version for item in retained
+        }
+        request = self.request
+        for item in cast(list[dict[str, object]], request["modules"]):
+            key = (
+                cast(str, item["project"]),
+                cast(str, item["module"]),
+                cast(str, item["uri"]),
+            )
+            if key in versions:
+                item["version"] = versions[key]
+        return replace(
+            self,
+            _request_json=json.dumps(request, ensure_ascii=True),
+            _disk_modules=tuple(retained),
+        )
 
 
 def _path(path: Path) -> Path:
@@ -80,6 +123,19 @@ def _check_version(value: object) -> None:
         raise ValueError("Snapshot versions must be nonnegative integers")
 
 
+def _validate_previous(
+    previous: EditorSnapshot, workspace: Path, generation: int
+) -> None:
+    _check_version(previous.generation)
+    if (
+        _identity(previous.workspace) != _identity(workspace)
+        or previous.generation > generation
+    ):
+        raise ValueError(
+            "Previous snapshot requires the same workspace and no later generation"
+        )
+
+
 def acquire_editor_snapshot(
     *,
     workspace: Path,
@@ -87,13 +143,16 @@ def acquire_editor_snapshot(
     buffers: tuple[OpenBuffer, ...] = (),
     generation: int,
     editor_fallback: Mapping[str, object] | None = None,
+    previous: EditorSnapshot | None = None,
 ) -> EditorSnapshot:
     """Acquire exact analyzer facts without processes, imports, writes or fetching.
 
     The trusted caller must authorize these finite local candidates and supply a
     new monotonic generation for every acquisition. No directory enumeration or
-    complete-project discovery is implied. Local schema paths explicitly selected
-    by config may be outside the workspace; Python source candidates may not.
+    complete-project discovery is implied. An optional previous snapshot retains
+    exact unchanged disk-source versions; it grants no publication permission.
+    Local schema paths explicitly selected by config may be outside the workspace;
+    Python source candidates may not.
     Open source/schema/config buffers override disk, including new configs. One
     closed config-text capture governs discovery and source ownership throughout.
     Before publishing, recheck newly captured buffers/candidates/fallback and the
@@ -103,6 +162,9 @@ def acquire_editor_snapshot(
     base = _path(workspace)
     if not base.is_dir():
         raise ValueError("Editor workspace must be a directory")
+    if previous is not None:
+        _validate_previous(previous, base, generation)
+    disk_modules: list[ModuleSnapshot] = []
     open_files: dict[Path, OpenBuffer] = {}
     for buffer in buffers:
         _check_version(buffer.version)
@@ -217,6 +279,17 @@ def acquire_editor_snapshot(
         )
         for source in selected_files:
             text, version = contents(source.path)
+            observation = observations[(source.path, "text")]
+            if observation.origin == "disk":
+                module_fact = ModuleSnapshot(
+                    project_id,
+                    source.module,
+                    source.path.as_uri(),
+                    version,
+                    text,
+                    source.is_package,
+                )
+                disk_modules.append(module_fact)
             modules.append(
                 {
                     "project": project_id,
@@ -269,7 +342,7 @@ def acquire_editor_snapshot(
         "bindings": bindings,
         "schemas": schemas,
     }
-    return EditorSnapshot(
+    snapshot = EditorSnapshot(
         tuple(unavailable),
         base,
         generation,
@@ -281,7 +354,9 @@ def acquire_editor_snapshot(
             )
         ),
         tuple(sorted(config_facts.values())),
+        tuple(disk_modules),
     )
+    return snapshot.reuse_disk_sources(previous) if previous is not None else snapshot
 
 
 def is_editor_snapshot_current(
@@ -299,6 +374,7 @@ def is_editor_snapshot_current(
             buffers=buffers,
             generation=snapshot.generation,
             editor_fallback=editor_fallback,
+            previous=snapshot,
         )
     except (OSError, ValueError, RuntimeError):
         return False
