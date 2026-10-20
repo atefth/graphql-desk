@@ -4,6 +4,14 @@
 
 Private subclasses remain compatible with ordinary `Node`/`DocumentNode` consumers in both strict checkers. They are static views, not runtime classes: no import, construction or `isinstance` promise applies to generated refinements. Future generated bindings must preserve the original parser objects without wrappers or copying. Tests check real object identity and ordinary AST consumers.
 
+`render_document_ast_types(document, *, name)` renders the same declarations
+directly from an existing `DocumentNode`. It does not print, reparse, copy or
+normalize nodes. This matters for composed runtime documents: removing a primary
+`@_unmask` directive leaves an empty tuple, while reparsing its printed text would
+produce `None`. The direct renderer preserves that distinction, definition order,
+shared nodes and actual location presence. The source API parses then delegates
+to this same renderer. Neither entry point mutates the supplied runtime AST.
+
 Variable defaults and variable-directive arguments use const-required checker bases. The pinned parser actually returns ordinary list/object/directive classes there, while its annotations require corresponding `Const*` types. These refinements follow the real node attributes without claiming the runtime object changed class.
 
 Location presence is precise (`Location` or `None`), but numeric offsets, tokens and source metadata keep ordinary mutable types. Narrowing mutable `Location.start` to a numeric literal is rejected by Pyright and becomes false after legal mutation through a normal `Location` consumer. This limitation remains explicit rather than publishing unsound precision.

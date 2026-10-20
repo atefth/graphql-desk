@@ -26,6 +26,19 @@ def render_literal_ast_types(
     Locations retain ordinary mutable metadata; their presence alone is refined.
     Parsing does not imply schema validity. Type-system definitions are unsupported.
     """
+    try:
+        document = parse(source, no_location=no_location)
+    except RecursionError:
+        raise ValueError("Literal AST exceeds declaration nesting limits") from None
+    return render_document_ast_types(document, name=name)
+
+
+def render_document_ast_types(document: DocumentNode, *, name: str) -> str:
+    """Refine an existing executable AST without reparsing or normalizing it.
+
+    These declarations describe the supplied nodes and location presence exactly;
+    they do not construct runtime subclasses or change mutable location metadata.
+    """
     if (
         not name.isidentifier()
         or keyword.iskeyword(name)
@@ -33,10 +46,6 @@ def render_literal_ast_types(
         or unicodedata.normalize("NFKC", name) != name
     ):
         raise ValueError(f"Unsafe Python declaration name: {name!r}")
-    try:
-        document = parse(source, no_location=no_location)
-    except RecursionError:
-        raise ValueError("Literal AST exceeds declaration nesting limits") from None
     if any(
         not isinstance(definition, (OperationDefinitionNode, FragmentDefinitionNode))
         for definition in document.definitions
