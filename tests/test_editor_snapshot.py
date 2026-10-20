@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from graphql import build_schema, introspection_from_schema
 
+import graphql_desk.editor_snapshot as editor_snapshot
 import graphql_desk.source_graph as source_graph
 from graphql_desk.editor_analysis import analyze_editor_snapshot
 from graphql_desk.editor_snapshot import (
@@ -18,6 +19,7 @@ from graphql_desk.editor_snapshot import (
     OpenBuffer,
     acquire_editor_snapshot,
     is_editor_snapshot_current,
+    prepare_editor_snapshot,
 )
 from graphql_desk.project import EffectiveProject, effective_project
 from graphql_desk.source_graph import (
@@ -741,6 +743,214 @@ class EditorSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(graph_inputs(empty), ((), ()))
         self.assertTrue(is_editor_snapshot_current(empty, candidates=()))
+
+    def test_preparation_lists_external_missing_schema_without_reading_contents(
+        self,
+    ) -> None:
+        for suffix, schema_text in (
+            (".graphql", _SDL),
+            (".json", json.dumps(introspection_from_schema(build_schema(_SDL)))),
+        ):
+            with self.subTest(suffix=suffix):
+                external = self.root.parent / (self.root.name + "-missing" + suffix)
+                self.project(text=_BASE.replace("schema.graphql", external.as_posix()))
+                source = self.root / "new.py"
+                with patch.object(
+                    editor_snapshot, "_read", wraps=getattr(editor_snapshot, "_read")
+                ) as read:
+                    prepared = prepare_editor_snapshot(
+                        workspace=self.root, candidates=(source,)
+                    )
+                    self.assertTrue(
+                        all(
+                            call.args[0].name == "pyproject.toml"
+                            for call in read.call_args_list
+                        )
+                    )
+                self.assertEqual(len(prepared.local_schemas), 1)
+                schema = prepared.local_schemas[0]
+                self.assertEqual(
+                    (schema.path, schema.canonical_path),
+                    (external.resolve(), external.resolve()),
+                )
+                self.assertEqual(schema.schema_name, "default")
+                self.assertEqual(
+                    schema.project, (self.root / "pyproject.toml").as_uri()
+                )
+                with self.assertRaises(FrozenInstanceError):
+                    setattr(prepared, "local_schemas", ())
+                buffers = (
+                    OpenBuffer(source, 1, _QUERY, True),
+                    OpenBuffer(external, 9, schema_text, True),
+                )
+                snapshot = acquire_editor_snapshot(
+                    workspace=self.root,
+                    candidates=(source,),
+                    buffers=buffers,
+                    generation=1,
+                    preparation=prepared,
+                )
+                self.assertEqual(
+                    analyze_editor_snapshot(snapshot.request)["diagnostics"], []
+                )
+                self.assertFalse(source.exists())
+                self.assertFalse(external.exists())
+                with self.assertRaisesRegex(ValueError, "Cannot read"):
+                    acquire_editor_snapshot(
+                        workspace=self.root,
+                        candidates=(source,),
+                        buffers=(buffers[0],),
+                        generation=2,
+                        preparation=prepared,
+                    )
+
+    def test_preparation_named_dirty_config_and_unsupported_schema_manifest(
+        self,
+    ) -> None:
+        self.project()
+        source = self.write("q.py", _QUERY)
+        config = """[tool.graphql-desk]
+[[tool.graphql-desk.schemas]]
+name="local"
+schema="missing.unsupported"
+schema_output="graphql_desk_generated/local.pyi"
+[[tool.graphql-desk.schemas]]
+name="second"
+schema="second.json"
+schema_output="graphql_desk_generated/second.pyi"
+[[tool.graphql-desk.schemas]]
+name="remote"
+schema={url="https://example.test/SECRET", headers={Authorization="TOP_SECRET"}}
+schema_output="graphql_desk_generated/remote.pyi"
+"""
+        buffer = OpenBuffer(self.root / "pyproject.toml", 2, config, True)
+        prepared = prepare_editor_snapshot(
+            workspace=self.root, candidates=(source,), buffers=(buffer,)
+        )
+        self.assertEqual(
+            [item.schema_name for item in prepared.local_schemas], ["local", "second"]
+        )
+        self.assertEqual(
+            [item.path.name for item in prepared.local_schemas],
+            ["missing.unsupported", "second.json"],
+        )
+        self.assertNotIn("SECRET", repr(prepared))
+        with self.assertRaisesRegex(ValueError, "Unsupported local schema format"):
+            acquire_editor_snapshot(
+                workspace=self.root,
+                candidates=(source,),
+                buffers=(buffer,),
+                generation=1,
+                preparation=prepared,
+            )
+
+    def test_preparation_rejects_config_phase_changes_before_source_reads(self) -> None:
+        self.project()
+        source = self.write("q.py", _QUERY)
+        prepared = prepare_editor_snapshot(workspace=self.root, candidates=(source,))
+        self.write("pyproject.toml", _BASE + "# new capture\n")
+        with patch.object(
+            editor_snapshot, "_read", wraps=getattr(editor_snapshot, "_read")
+        ) as read:
+            with self.assertRaisesRegex(
+                ValueError, "Prepared editor configuration changed"
+            ):
+                acquire_editor_snapshot(
+                    workspace=self.root,
+                    candidates=(source,),
+                    generation=1,
+                    preparation=prepared,
+                )
+            self.assertTrue(
+                all(
+                    call.args[0].name == "pyproject.toml"
+                    for call in read.call_args_list
+                )
+            )
+        # Same text from a newly opened config buffer is still a changed origin.
+        self.write("pyproject.toml", _BASE)
+        with self.assertRaisesRegex(
+            ValueError, "Prepared editor configuration changed"
+        ):
+            acquire_editor_snapshot(
+                workspace=self.root,
+                candidates=(source,),
+                buffers=(OpenBuffer(self.root / "pyproject.toml", 1, _BASE),),
+                generation=1,
+                preparation=prepared,
+            )
+
+    def test_preparation_schema_syntax_is_analyzer_work_and_new_nested_config_rejects(
+        self,
+    ) -> None:
+        self.project()
+        source = self.write("nested/q.py", _QUERY)
+        self.write("schema.graphql", "not valid SDL")
+        prepared = prepare_editor_snapshot(workspace=self.root, candidates=(source,))
+        snapshot = acquire_editor_snapshot(
+            workspace=self.root,
+            candidates=(source,),
+            generation=1,
+            preparation=prepared,
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid supplied local schema"):
+            analyze_editor_snapshot(snapshot.request)
+        nested = OpenBuffer(self.root / "nested/pyproject.toml", 1, _BASE, True)
+        with self.assertRaisesRegex(
+            ValueError, "Prepared editor configuration changed"
+        ):
+            acquire_editor_snapshot(
+                workspace=self.root,
+                candidates=(source,),
+                buffers=(nested,),
+                generation=2,
+                preparation=prepared,
+            )
+
+    def test_preparation_preserves_fallback_validation_and_credential_changes(
+        self,
+    ) -> None:
+        source = self.write("q.py", _QUERY)
+        fallback: dict[str, object] = {
+            "schema": {
+                "url": "https://example.test/SECRET",
+                "headers": {"Authorization": "SECRET"},
+            },
+            "schema_output": "graphql_desk_generated/default.pyi",
+        }
+        prepared = prepare_editor_snapshot(
+            workspace=self.root, candidates=(source,), editor_fallback=fallback
+        )
+        self.assertEqual(prepared.local_schemas, ())
+        self.assertNotIn("SECRET", repr(prepared))
+        snapshot = acquire_editor_snapshot(
+            workspace=self.root,
+            candidates=(source,),
+            editor_fallback=fallback,
+            preparation=prepared,
+            generation=1,
+        )
+        self.assertEqual(snapshot.unavailable_schemas[0][1], "default")
+        changed = {
+            **fallback,
+            "schema": {
+                "url": "https://example.test/SECRET",
+                "headers": {"Authorization": "CHANGED"},
+            },
+        }
+        with self.assertRaisesRegex(
+            ValueError, "Prepared editor configuration changed"
+        ):
+            acquire_editor_snapshot(
+                workspace=self.root,
+                candidates=(source,),
+                editor_fallback=changed,
+                preparation=prepared,
+                generation=2,
+            )
+        self.write("pyproject.toml", "[tool.graphql-desk]\nunknown=true")
+        with self.assertRaises(ValueError):
+            prepare_editor_snapshot(workspace=self.root, candidates=(source,))
 
 
 if __name__ == "__main__":

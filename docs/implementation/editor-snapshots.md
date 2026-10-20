@@ -43,6 +43,22 @@ snapshot itself as its baseline; private observations, configuration facts and
 schema tokens still participate in full comparison. Request IDs remain specific
 to the current generation, and the latest-job guard remains mandatory.
 
+`prepare_editor_snapshot(...)` returns an immutable `EditorPreparation` with
+`local_schemas` path facts before reading source/schema contents. It shares
+configuration capture, ownership and selection with acquisition. Each fact gives
+the project, schema name, validated resolved path and canonical identity; original
+TOML path spelling is not retained. Missing files and unsupported suffixes remain
+listed, so a caller can capture matching open schema buffers, including explicit
+external paths. Remote origins are not fetched or included as local paths.
+
+Pass `preparation=...` to acquisition to reject changed configuration observations,
+private credential hashes, candidate identities or schema paths before content
+reads. This does not verify the caller's open-document inventory: newly opened,
+closed or changed schema buffers must still invalidate the editor job and enter
+fresh acquisition/current checks. Invalid schema contents and unsupported formats
+retain the existing analyzer/acquisition errors; preparation does not validate
+schemas or permit publication. Worker transport remains separate work.
+
 Actual `IncrementalResolver` counter tests prove unchanged-project reuse across
 three later generations and recomputation of only a changed project. Schema/index
 caching, worker integration and performance acceptance remain open.
@@ -54,7 +70,7 @@ reacquisition and the latest-job guard before publication. Generation-based sche
 invalidate contexts on every acquisition; incremental caching and performance
 acceptance are separate work.
 
-Twenty-three focused acquisition tests cover real acquisition-to-analysis, imports/fragments,
+Twenty-eight focused acquisition tests cover real acquisition-to-analysis, imports/fragments,
 new source buffers, local schema overlays, nested/fallback projects, dirty/new
 configuration routing and malformed-file rejection, redaction, exclusions,
 entrypoints, stale input origins, Unicode/BOM/CRLF and symlink boundaries where

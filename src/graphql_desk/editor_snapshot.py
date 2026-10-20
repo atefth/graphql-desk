@@ -3,7 +3,7 @@
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import astuple, dataclass, field, replace
 from pathlib import Path
 from typing import cast
@@ -11,7 +11,7 @@ from typing import cast
 from .config import ProjectConfig
 from .project import effective_project, project_bindings, validate_project_ownership
 from .source_graph import ModuleSnapshot
-from .source_selection import select_project_sources
+from .source_selection import SourceFile, select_project_sources
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,35 @@ class _Observation:
     origin: str
     version: int | None
     digest: str | None
+
+
+@dataclass(frozen=True)
+class LocalSchemaPath:
+    project: str
+    schema_name: str
+    path: Path
+    canonical_path: Path
+
+
+@dataclass(frozen=True)
+class EditorPreparation:
+    """Local schema paths to capture; no source/schema contents or credentials."""
+
+    local_schemas: tuple[LocalSchemaPath, ...]
+    workspace: Path = field(repr=False)
+    _candidates: tuple[Path, ...] = field(repr=False)
+    _observations: tuple[_Observation, ...] = field(repr=False)
+    _configs: tuple[tuple[str, str, str], ...] = field(repr=False)
+
+
+@dataclass
+class _CapturedProjects:
+    workspace: Path
+    paths: tuple[Path, ...]
+    buffers: dict[Path, OpenBuffer]
+    observations: dict[tuple[Path, str], _Observation]
+    projects: tuple[tuple[ProjectConfig, tuple[SourceFile, ...]], ...]
+    config_facts: tuple[tuple[str, str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -136,35 +165,15 @@ def _validate_previous(
         )
 
 
-def acquire_editor_snapshot(
-    *,
+def _capture_projects(
     workspace: Path,
     candidates: tuple[Path, ...],
-    buffers: tuple[OpenBuffer, ...] = (),
-    generation: int,
-    editor_fallback: Mapping[str, object] | None = None,
-    previous: EditorSnapshot | None = None,
-) -> EditorSnapshot:
-    """Acquire exact analyzer facts without processes, imports, writes or fetching.
-
-    The trusted caller must authorize these finite local candidates and supply a
-    new monotonic generation for every acquisition. No directory enumeration or
-    complete-project discovery is implied. An optional previous snapshot retains
-    exact unchanged disk-source versions; it grants no publication permission.
-    Local schema paths explicitly selected by config may be outside the workspace;
-    Python source candidates may not.
-    Open source/schema/config buffers override disk, including new configs. One
-    closed config-text capture governs discovery and source ownership throughout.
-    Before publishing, recheck newly captured buffers/candidates/fallback and the
-    caller's latest-job guard. Source/schema reads remain best effort, not atomic.
-    """
-    _check_version(generation)
+    buffers: tuple[OpenBuffer, ...],
+    editor_fallback: Mapping[str, object] | None,
+) -> _CapturedProjects:
     base = _path(workspace)
     if not base.is_dir():
         raise ValueError("Editor workspace must be a directory")
-    if previous is not None:
-        _validate_previous(previous, base, generation)
-    disk_modules: list[ModuleSnapshot] = []
     open_files: dict[Path, OpenBuffer] = {}
     for buffer in buffers:
         _check_version(buffer.version)
@@ -239,6 +248,119 @@ def acquire_editor_snapshot(
             _text_digest(repr(astuple(config))),
         )
     validate_project_ownership(configs.values())
+    projects = tuple(
+        (
+            config,
+            select_project_sources(
+                config, paths, workspace=base, config_texts=config_texts
+            ),
+        )
+        for config in sorted(configs.values(), key=lambda item: str(item.path))
+    )
+    return _CapturedProjects(
+        base,
+        paths,
+        open_files,
+        observations,
+        projects,
+        tuple(sorted(config_facts.values())),
+    )
+
+
+def _check_observations(observations: Iterable[_Observation]) -> None:
+    for observation in observations:
+        if _identity(observation.path) != observation.canonical:
+            raise ValueError("Inputs changed during snapshot acquisition")
+        if observation.origin == "config-disk":
+            digest = _read(observation.path)[1] if observation.path.is_file() else None
+            if digest != observation.digest:
+                raise ValueError("Inputs changed during snapshot acquisition")
+        elif (
+            observation.origin == "disk"
+            and _read(observation.path)[1] != observation.digest
+        ):
+            raise ValueError("Inputs changed during snapshot acquisition")
+
+
+def _preparation(captured: _CapturedProjects) -> EditorPreparation:
+    return EditorPreparation(
+        tuple(
+            LocalSchemaPath(
+                config.path.as_uri(),
+                schema.name,
+                schema.origin.local_path,
+                _identity(schema.origin.local_path),
+            )
+            for config, _ in captured.projects
+            for schema in config.schemas
+            if schema.origin.local_path is not None
+        ),
+        captured.workspace,
+        tuple(sorted(set(captured.paths), key=str)),
+        tuple(
+            sorted(
+                captured.observations.values(),
+                key=lambda item: (str(item.path), item.origin),
+            )
+        ),
+        captured.config_facts,
+    )
+
+
+def prepare_editor_snapshot(
+    *,
+    workspace: Path,
+    candidates: tuple[Path, ...],
+    buffers: tuple[OpenBuffer, ...] = (),
+    editor_fallback: Mapping[str, object] | None = None,
+) -> EditorPreparation:
+    """List configured local schema paths before reading source/schema contents.
+
+    The trusted caller supplies finite source candidates and captured config
+    buffers. Paths are the shared parser's resolved paths, not original TOML
+    spellings. Missing files and unsupported suffixes remain in the manifest so
+    the caller can capture open buffers before full acquisition. This does not
+    prove complete enumeration, trust, freshness or schema validity.
+    """
+    captured = _capture_projects(workspace, candidates, buffers, editor_fallback)
+    _check_observations(captured.observations.values())
+    return _preparation(captured)
+
+
+def acquire_editor_snapshot(
+    *,
+    workspace: Path,
+    candidates: tuple[Path, ...],
+    buffers: tuple[OpenBuffer, ...] = (),
+    generation: int,
+    editor_fallback: Mapping[str, object] | None = None,
+    previous: EditorSnapshot | None = None,
+    preparation: EditorPreparation | None = None,
+) -> EditorSnapshot:
+    """Acquire exact analyzer facts without processes, imports, writes or fetching.
+
+    The trusted caller must authorize these finite local candidates and supply a
+    new monotonic generation for every acquisition. No directory enumeration or
+    complete-project discovery is implied. An optional previous snapshot retains
+    exact unchanged disk-source versions; it grants no publication permission.
+    Local schema paths explicitly selected by config may be outside the workspace;
+    Python source candidates may not.
+    Open source/schema/config buffers override disk, including new configs. One
+    closed config-text capture governs discovery and source ownership throughout.
+    A supplied preparation must match that capture before source/schema reads.
+    Before publishing, recheck newly captured buffers/candidates/fallback and the
+    caller's latest-job guard. Source/schema reads remain best effort, not atomic.
+    """
+    _check_version(generation)
+    captured = _capture_projects(workspace, candidates, buffers, editor_fallback)
+    base, paths = captured.workspace, captured.paths
+    if previous is not None:
+        _validate_previous(previous, base, generation)
+    if preparation is not None and preparation != _preparation(captured):
+        raise ValueError("Prepared editor configuration changed before acquisition")
+    open_files = captured.buffers
+    observations = captured.observations
+    disk_modules: list[ModuleSnapshot] = []
     modules: list[dict[str, object]] = []
     bindings: list[dict[str, object]] = []
     schemas: list[dict[str, object]] = []
@@ -256,11 +378,8 @@ def acquire_editor_snapshot(
         observations[(path, "text")] = _Observation(path, key, "disk", None, digest)
         return text, generation
 
-    for config in sorted(configs.values(), key=lambda item: str(item.path)):
+    for config, selected_files in captured.projects:
         project_id = config.path.as_uri()
-        selected_files = select_project_sources(
-            config, paths, workspace=base, config_texts=config_texts
-        )
         facts = project_bindings(config, project_id=project_id)
         bindings.append(
             {
@@ -324,18 +443,7 @@ def acquire_editor_snapshot(
             )
     # Helpers consumed one captured config map; remaining reads are best effort.
     # Mandatory full reacquisition and the latest-job guard still govern publish.
-    for observation in observations.values():
-        if _identity(observation.path) != observation.canonical:
-            raise ValueError("Inputs changed during snapshot acquisition")
-        if observation.origin == "config-disk":
-            digest = _read(observation.path)[1] if observation.path.is_file() else None
-            if digest != observation.digest:
-                raise ValueError("Inputs changed during snapshot acquisition")
-        elif (
-            observation.origin == "disk"
-            and _read(observation.path)[1] != observation.digest
-        ):
-            raise ValueError("Inputs changed during snapshot acquisition")
+    _check_observations(observations.values())
     request = {
         "request_id": str(generation),
         "modules": modules,
@@ -353,7 +461,7 @@ def acquire_editor_snapshot(
                 observations.values(), key=lambda item: (str(item.path), item.origin)
             )
         ),
-        tuple(sorted(config_facts.values())),
+        captured.config_facts,
         tuple(disk_modules),
     )
     return snapshot.reuse_disk_sources(previous) if previous is not None else snapshot
