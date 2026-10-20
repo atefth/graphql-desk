@@ -64,9 +64,13 @@ PEP613 aliases (`Alias: TypeAlias = ClassName`) also reuse those checks when the
 marker resolves to uncaptured `typing.TypeAlias` or `typing_extensions.TypeAlias`.
 Named or qualified targets and the bounded container forms `list[N]`,
 `tuple[N, ...]` and `typing.Sequence[N]` are supported, with one named or qualified
-type argument. Supported builtin availability includes `bool`, while direct or
-aliased `bool` class bases remain rejected as non-subclassable. Constructors must resolve to trusted external builtins or typing
-exports; shadowing and mutations invalidate that proof. External arguments stay
+type argument. Mapping aliases support `dict[K, V]`, trusted `typing.Mapping[K, V]`
+and `collections.abc.Mapping[K, V]` with exactly two existing named/qualified types.
+They retain valid class-base availability and drop element TypedDict provenance;
+either external operand keeps the alias unverified. Captured or mutated namespace
+prefixes cannot establish a trusted external alias constructor. Supported builtin availability includes `bool`, while direct or
+aliased `bool` class bases remain rejected as non-subclassable. Constructors must resolve to supported external `builtins`, `typing`,
+`typing_extensions` or `collections.abc` exports; shadowing and mutations invalidate that proof. External arguments stay
 unverified, and containers do not inherit TypedDict provenance from their element.
 Explicit nullable aliases support only `N | None`, `None | N` or trusted external
 `typing.Optional[N]`, where `N` is an existing named or qualified type target. They retain their own alias identity and
