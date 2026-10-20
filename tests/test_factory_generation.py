@@ -964,6 +964,96 @@ if TYPE_CHECKING:
             )
             self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
 
+    def test_mapping_aliases_type_original_scalar_calls_and_valid_class_bases(
+        self,
+    ) -> None:
+        context = self.context()
+        for constructor in ("dict", "typing.Mapping", "collections.abc.Mapping"):
+            with self.subTest(constructor=constructor):
+                imports = "from typing import TypeAlias\n"
+                expression = constructor
+                if constructor != "dict":
+                    namespace, expression = constructor.rsplit(".", 1)
+                    imports += f"from {namespace} import {expression}\n"
+                declaration = (
+                    imports
+                    + f"Text:TypeAlias={expression}[str,object]\n"
+                    + "class Direct(Text): pass\n"
+                )
+                source = """from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from generated.main import graphql
+from generated.sources.main import QueryResult
+from exports import Text
+query=graphql('{greeting}')
+value:Text={'ok':True,'nested':{'x':1}}
+assert graphql.scalar('String',value) is value
+class Reexported(Text): pass
+if TYPE_CHECKING:
+ result:QueryResult={'greeting':value}
+ assert_type(result['greeting'],Text)
+ bad=graphql.scalar('String',{1:'bad'}) # error
+ bad2=graphql.scalar('String',[]) # error
+"""
+                modules = (
+                    ModuleSnapshot("p", "main", "file:///main.py", 1, source),
+                    ModuleSnapshot(
+                        "p", "local_types", "file:///local_types.py", 1, declaration
+                    ),
+                    ModuleSnapshot(
+                        "p",
+                        "exports",
+                        "file:///exports.py",
+                        1,
+                        "from local_types import Text as Text",
+                    ),
+                )
+                resolved = resolve_project(
+                    modules,
+                    bindings=(
+                        ProjectBindings(
+                            "p",
+                            ("main",),
+                            factories=(
+                                FactoryBinding("generated.main", "graphql", "main"),
+                            ),
+                        ),
+                    ),
+                )
+                with patch(
+                    "importlib.import_module",
+                    side_effect=AssertionError("No project import"),
+                ):
+                    artifacts = generate_factory_artifacts(
+                        context,
+                        index_fragments(resolved, schemas={("p", "main"): context}),
+                        modules=modules,
+                        project_id="p",
+                        generated_package="generated",
+                        scalars=(
+                            ScalarMapping("String", "exports.Text", "exports.Text"),
+                        ),
+                    )
+                self.assertEqual(artifacts.diagnostics, ())
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.write(root, artifacts, modules)
+                    errors = {
+                        n
+                        for n, line in enumerate(source.splitlines(), 1)
+                        if "# error" in line
+                    }
+                    self.check(root, {"main.py": errors})
+                    runtime = subprocess.run(
+                        [sys.executable, "main.py"],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        runtime.returncode, 0, runtime.stdout + runtime.stderr
+                    )
+
     def test_unsubclassable_aliases_preserve_checker_evidence_and_runtime_rejection(
         self,
     ) -> None:

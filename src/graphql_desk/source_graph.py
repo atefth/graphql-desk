@@ -947,7 +947,7 @@ class _Graph:
             return self.expression(module, node, before, active)
         if (
             isinstance(node.value, ast.Name)
-            and node.value.id in {"list", "tuple"}
+            and node.value.id in {"list", "tuple", "dict"}
             and node.value.id not in module.bindings
             and node.value.id not in module.blocked
             and not module.star
@@ -955,6 +955,17 @@ class _Graph:
             constructor = self.export(module, "builtins", node.value.id, active)
         else:
             constructor = self.expression(module, node.value, before, active)
+        constructor_modules = (
+            (module.snapshot.project, ".".join(constructor.text.split(".")[:index]))
+            for index in range(1, len(constructor.text.split(".")))
+        )
+        if constructor.kind == "external" and any(
+            identity in self.mutated or identity in self.supplied
+            for identity in constructor_modules
+        ):
+            raise _Unresolved(
+                "Type alias constructor namespace is not trusted external"
+            )
         if constructor.kind == "external" and constructor.text in {
             "typing.Literal",
             "typing_extensions.Literal",
@@ -986,6 +997,9 @@ class _Graph:
         if constructor.kind != "external" or constructor.text not in {
             "builtins.list",
             "builtins.tuple",
+            "builtins.dict",
+            "typing.Mapping",
+            "collections.abc.Mapping",
             "typing.Sequence",
             "typing.Optional",
         }:
@@ -1002,22 +1016,38 @@ class _Graph:
             ):
                 raise _Unresolved("Tuple aliases require one named type and ellipsis")
             argument = argument.elts[0]
-        if not isinstance(argument, (ast.Name, ast.Attribute)):
-            raise _Unresolved(
-                "Subscribed type aliases require one supported named type"
-            )
-        element = self.expression(module, argument, before, active)
-        if element.kind not in {"type", "external"} or element.text in {
-            "typing.TypeAlias",
-            "typing_extensions.TypeAlias",
+        arguments = [argument]
+        if constructor.text in {
+            "builtins.dict",
+            "typing.Mapping",
+            "collections.abc.Mapping",
         }:
-            raise _Unresolved(
-                "Subscribed type alias argument is not an established type"
-            )
+            if not isinstance(argument, ast.Tuple) or len(argument.elts) != 2:
+                raise _Unresolved("Mapping aliases require two named types")
+            arguments = argument.elts
+        elements: list[_Value] = []
+        for argument in arguments:
+            if not isinstance(argument, (ast.Name, ast.Attribute)):
+                raise _Unresolved(
+                    "Subscribed type aliases require supported named types"
+                )
+            element = self.expression(module, argument, before, active)
+            if element.kind not in {"type", "external"} or element.text in {
+                "typing.TypeAlias",
+                "typing_extensions.TypeAlias",
+            }:
+                raise _Unresolved(
+                    "Subscribed type alias argument is not an established type"
+                )
+            elements.append(element)
         return _Value(
-            "external" if element.kind == "external" else "type",
+            "external"
+            if any(element.kind == "external" for element in elements)
+            else "type",
             f"{module.snapshot.module}.{name}",
-            dependencies=constructor.dependencies | element.dependencies,
+            dependencies=constructor.dependencies.union(
+                *(element.dependencies for element in elements)
+            ),
             class_base=constructor.text != "typing.Optional",
         )
 

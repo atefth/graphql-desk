@@ -562,6 +562,203 @@ class SourceGraphTests(unittest.TestCase):
                 "unresolved",
             )
 
+    def test_mapping_aliases_preserve_both_operands_and_constructor_trust(self) -> None:
+        snapshots = (
+            module(
+                "base",
+                "from typing_extensions import TypedDict\n"
+                "class Known(TypedDict):\n value:str",
+            ),
+            module(
+                "models",
+                "from typing import TypeAlias,Mapping\nimport base\n"
+                "import builtins as b\nimport typing as t\n"
+                "import collections.abc as abc\n"
+                "from collections.abc import Mapping as AbstractMapping\n"
+                "Imported:TypeAlias=AbstractMapping[str,base.Known]\n"
+                "Modern:TypeAlias=abc.Mapping[str,base.Known]\n"
+                "Qualified:TypeAlias=b.dict[str,base.Known]\n"
+                "QualifiedView:TypeAlias=t.Mapping[str,base.Known]\n"
+                "D:TypeAlias=dict[str,base.Known]\nM:TypeAlias=Mapping[str,base.Known]\n"
+                "class Child(D): pass\nclass View(M): pass\n"
+                "class Bad(D,total=False): pass",
+            ),
+            module("exports", "from models import D as Public"),
+            module("consumer", "from exports import Public\nclass Child(Public): pass"),
+        )
+        names = (
+            "models.D",
+            "models.M",
+            "models.Qualified",
+            "models.QualifiedView",
+            "models.Modern",
+            "models.Imported",
+            "models.Child",
+            "models.View",
+            "exports.Public",
+            "consumer.Child",
+        )
+        results = resolve_type_symbols(names, modules=snapshots, project_id="app")
+        self.assertEqual([r.status for r in results], ["resolved"] * len(names))
+        self.assertEqual(
+            results,
+            resolve_type_symbols(
+                tuple(reversed(names)),
+                modules=tuple(reversed(snapshots)),
+                project_id="app",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("models.Bad",), modules=snapshots, project_id="app")[
+                0
+            ].status,
+            "unresolved",
+        )
+        changed = (replace(snapshots[0], version=2), *snapshots[1:])
+        self.assertNotEqual(
+            results[0].dependencies,
+            resolve_type_symbols(names, modules=changed, project_id="app")[
+                0
+            ].dependencies,
+        )
+        for operand in ("Missing,str", "str,Missing"):
+            external = module(
+                "models",
+                "from typing import TypeAlias\nfrom unknown import Missing\n"
+                "Alias:TypeAlias=dict[" + operand + "]",
+            )
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("models.Alias",), modules=(external,), project_id="app"
+                )[0].status,
+                "external",
+            )
+        for mutation in (
+            "import builtins\nbuiltins.dict=object",
+            "import typing\ntyping.Mapping=object",
+            "import base\nbase.Known=42",
+            "import builtins\nbuiltins.str=42",
+        ):
+            for name in (
+                ("models.D", "models.M")
+                if "dict" not in mutation and "Mapping" not in mutation
+                else (("models.D",) if "dict" in mutation else ("models.M",))
+            ):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        (name,),
+                        modules=(*snapshots, module("mutator", mutation)),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+        for declaration in (
+            "Alias:TypeAlias=dict[str]",
+            "Alias:TypeAlias=dict[str,int,bool]",
+            "Alias:TypeAlias=Mapping[str]",
+            "Alias:TypeAlias=dict[str,list[int]]",
+            "Alias:TypeAlias=dict['str',int]",
+            "Alias:TypeAlias=dict[str,TypeAlias]",
+            "Alias:TypeAlias=dict[Alias,str]",
+            "value=42\nAlias:TypeAlias=dict[str,value]",
+            "dict=42\nAlias:TypeAlias=dict[str,int]",
+            "Mapping=42\nAlias:TypeAlias=Mapping[str,int]",
+        ):
+            with self.subTest(declaration=declaration):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Alias",),
+                        modules=(
+                            module(
+                                "models",
+                                "from typing import TypeAlias,Mapping\n" + declaration,
+                            ),
+                        ),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+        for namespace, constructor in (
+            ("builtins", "dict"),
+            ("typing", "Mapping"),
+            ("collections.abc", "Mapping"),
+        ):
+            fake = (
+                module(namespace, "class " + constructor + ": pass"),
+                module(
+                    "models",
+                    "from typing_extensions import TypeAlias\nfrom "
+                    + namespace
+                    + " import "
+                    + constructor
+                    + "\nAlias:TypeAlias="
+                    + constructor
+                    + "[str,int]",
+                ),
+            )
+            self.assertEqual(
+                resolve_type_symbols(("models.Alias",), modules=fake, project_id="app")[
+                    0
+                ].status,
+                "unresolved",
+            )
+        for mutation in (
+            "import collections.abc\ncollections.abc.Mapping=object",
+            "import collections\ncollections.abc=object",
+            "import collections.abc as abc\nabc.Mapping=object",
+        ):
+            self.assertTrue(
+                all(
+                    result.status == "unresolved"
+                    for result in resolve_type_symbols(
+                        ("models.Modern", "models.Imported"),
+                        modules=(*snapshots, module("mutator", mutation)),
+                        project_id="app",
+                    )
+                ),
+            )
+        for parent in ("", "abc=42", "from unknown import abc"):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("models.Alias",),
+                    modules=(
+                        replace(module("collections", parent), is_package=True),
+                        module(
+                            "models",
+                            "from typing import TypeAlias\n"
+                            "from collections.abc import Mapping\n"
+                            "Alias:TypeAlias=Mapping[str,int]",
+                        ),
+                    ),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        isolated = (*snapshots, replace(module("models", "D=42"), project="other"))
+        self.assertEqual(
+            resolve_type_symbols(("models.D",), modules=isolated, project_id="app")[
+                0
+            ].status,
+            "resolved",
+        )
+
+        cycle = (
+            module(
+                "a",
+                "from typing import TypeAlias\nfrom b import B\n"
+                "A:TypeAlias=dict[str,B]",
+            ),
+            module(
+                "b",
+                "from typing import TypeAlias,Mapping\nfrom a import A\n"
+                "B:TypeAlias=Mapping[A,str]",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("a.A",), modules=cycle, project_id="app")[0].status,
+            "unresolved",
+        )
+
     def test_literal_aliases_use_only_trusted_flat_constants(self) -> None:
         snapshots = (
             module(
