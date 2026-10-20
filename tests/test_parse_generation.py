@@ -4,17 +4,22 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from graphql import DocumentNode, GraphQLError
+from graphql import DocumentNode, GraphQLError, parse
 
 from graphql_desk.literal_ast import render_document_ast_types
 from graphql_desk.parse_generation import (
     render_captured_parse_companion,
     render_parse_companion,
 )
-from graphql_desk.source_graph import ModuleSnapshot
+from graphql_desk.source_graph import (
+    ModuleSnapshot,
+    ParseSources,
+    resolve_parse_sources,
+)
 from tests import test_factory_generation as factory_tests
 
 
@@ -131,6 +136,119 @@ class ParseGenerationTests(unittest.TestCase):
         self.assertTrue(
             all(item.range.end > item.range.start for item in output.diagnostics)
         )
+
+    def test_captured_syntax_origins_follow_each_literal_and_import(self) -> None:
+        cases = (
+            ("'query Q { missing( }'", "}"),
+            (r"'query Q { missing( \x7d'", r"\x7d"),
+            (r"r'query Q { missing( }'", "}"),
+            ("'''# \U0001f600\r\nquery Q { missing( }'''", "}"),
+            ("'query {'", ""),
+            ("'{\U0001f600}'", "\U0001f600"),
+        )
+        for expression, expected in cases:
+            with self.subTest(expression=expression):
+                source = "from graphql_desk import parse\nq=parse(" + expression + ")"
+                module = ModuleSnapshot("p", "main", "file:///main.py", 7, source)
+                output = render_captured_parse_companion(
+                    (module,), project_id="p", module="main"
+                )
+                (diagnostic,) = output.diagnostics
+                self.assertEqual(diagnostic.module.version, 7)
+                self.assertEqual(
+                    source[diagnostic.range.start : diagnostic.range.end], expected
+                )
+                if not expected:
+                    self.assertEqual(diagnostic.range.start, source.rindex("'"))
+        constants = ModuleSnapshot(
+            "p",
+            "constants",
+            "file:///constants.py",
+            4,
+            "PREFIX='query Q { missing( '\nTAIL='\\x7d'\n",
+        )
+        main = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            9,
+            "from graphql_desk import parse\n"
+            "from constants import PREFIX,TAIL\n"
+            "a=parse(PREFIX+TAIL)\nb=parse('query Q { missing( }')\n"
+            "good=parse('{ id }')\n",
+        )
+        with patch("graphql_desk.parse_generation.parse", wraps=parse) as parser:
+            output = render_captured_parse_companion(
+                (constants, main), project_id="p", module="main"
+            )
+        self.assertEqual(parser.call_count, 2)
+        self.assertEqual(
+            [d.module.module for d in output.diagnostics], ["constants", "main"]
+        )
+        for diagnostic, module in zip(output.diagnostics, (constants, main)):
+            self.assertEqual(diagnostic.module.uri, module.uri)
+            self.assertEqual(diagnostic.module.version, module.version)
+            self.assertEqual(
+                module.source[diagnostic.range.start : diagnostic.range.end],
+                r"\x7d" if module is constants else "}",
+            )
+        self.assertIn("_ParseLiteral['{ id }']", output.companion.stub)
+        self.assertEqual(
+            output,
+            render_captured_parse_companion(
+                (main, constants), project_id="p", module="main"
+            ),
+        )
+
+    def test_captured_syntax_without_trusted_map_falls_back_to_owner_call(self) -> None:
+        module = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            1,
+            "from graphql_desk import parse\nq=parse('{')",
+        )
+        (call,) = resolve_parse_sources((module,)).calls
+        for changed in (
+            replace(call, contributions=()),
+            replace(call, dependencies=(replace(call.module, version=2),)),
+            replace(
+                call, contributions=(replace(call.contributions[0], text="wrong"),)
+            ),
+        ):
+            with self.subTest(changed=changed):
+                with patch(
+                    "graphql_desk.parse_generation.resolve_parse_sources",
+                    return_value=ParseSources((changed,), ()),
+                ):
+                    output = render_captured_parse_companion(
+                        (module,), project_id="p", module="main"
+                    )
+                (diagnostic,) = output.diagnostics
+                self.assertEqual(
+                    (diagnostic.module, diagnostic.range), (call.module, call.range)
+                )
+
+    def test_captured_eof_preserves_multiple_contributing_boundaries(self) -> None:
+        prefix = ModuleSnapshot("p", "prefix", "file:///prefix.py", 2, "TEXT='query {'")
+        empty = ModuleSnapshot("p", "empty", "file:///empty.py", 3, "EMPTY=''")
+        main = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            1,
+            "from graphql_desk import parse\nfrom prefix import TEXT\n"
+            "from empty import EMPTY\nq=parse(TEXT+EMPTY)",
+        )
+        output = render_captured_parse_companion(
+            (prefix, empty, main), project_id="p", module="main"
+        )
+        self.assertEqual(
+            [d.module.module for d in output.diagnostics], ["prefix", "empty"]
+        )
+        for diagnostic, module in zip(output.diagnostics, (prefix, empty)):
+            self.assertEqual(diagnostic.range.start, module.source.rindex("'"))
+            self.assertEqual(diagnostic.range.start, diagnostic.range.end)
 
     def test_captured_opt_in_reexports_type_original_source_without_schema_facts(
         self,

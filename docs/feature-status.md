@@ -1,6 +1,6 @@
 # Feature status and remaining work
 
-Implementation baseline: **71 foundation slices** are merged, with 351 Python tests and 51 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
+Implementation baseline: **72 foundation slices** are merged, with 355 Python tests and 51 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
 
 Merged #134–#137 preserve original-source validation and rejected resolver/index
 ownership, and type introspection selections. #138 assembles captured multi-schema
@@ -101,3 +101,9 @@ preparation reconciles changed schema paths; missing paths remain repair targets
 and failed preparation retains previous observation. External dirty-schema and
 retired-callback regressions add bounded lifecycle evidence, leaving complete
 discovery/lifecycle and live generated-typing acceptance open.
+
+Captured parser syntax diagnostics now reuse exact versioned contribution maps,
+including imported constants, escaped literals and legitimate EOF origins. Each
+call keeps its own source locations despite deduplicated parsing; unverifiable
+provenance and resource failures retain honest call-level fallbacks. Automatic
+import attachment, editor publication and full exact-location acceptance remain open.

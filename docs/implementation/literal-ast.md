@@ -37,8 +37,16 @@ fragment indexes. Dynamic inputs, nondefault options and unsupported scopes reta
 ordinary ASTs with local fallback diagnostics. No project modules are imported.
 
 `render_captured_parse_companion(modules, *, project_id, module)` selects one unique
-captured owner and returns its identity, opt-in companion and local diagnostics.
+captured owner and returns its identity, opt-in companion and selected-call diagnostics.
 Independent valid literals survive invalid parser syntax. Sources deduplicate
 deterministically and remain schema-independent. Callers still own publication and
 explicit companion imports; neither function rewrites original imports or writes
 files. Full automatic attachment and exact-location acceptance remain open.
+
+Captured parser syntax errors use the existing versioned source map to locate the
+actual contributing Python literals, including imported constants, concatenation,
+escapes, Unicode and EOF boundaries. Diagnostic module identities can therefore
+differ from the selected call owner. Each call maps its own provenance even when
+parsing is deduplicated by decoded source. Unavailable or unverifiable maps retain
+an honest whole-call diagnostic; resource fallbacks also remain on the call.
+This does not attach companions to original imports or complete location acceptance.
