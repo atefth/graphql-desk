@@ -2,8 +2,10 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createLanguageFeatures, registerLanguageFeatures, positionAt } = require("../src/languageFeatures");
+const { createLanguageFeatures, registerLanguageFeatures, positionAt, toDecoded } = require("../src/languageFeatures");
 const { bundle, document, options } = require("./featureFixtures.cjs");
+const gql = require("graphql");
+const gls = require("graphql-language-service");
 
 test("actual Python source maps give exact schema/deprecation diagnostics and clear on repair", async () => {
   const value = bundle("# 😀\r\nfrom graphql_desk import gql\r\nq=gql('{ user { missing old } }')");
@@ -31,6 +33,60 @@ test("incomplete GraphQL inside valid Python still completes with a unique mappe
   assert.equal(snapshot.text.slice(name.range.start, name.range.end), "na");
   assert.equal(name.insertText, "name");
   assert.equal(items.some((item) => "command" in item), false);
+});
+
+test("blank GraphQL completion preserves exact zero-width escape and CRLF endpoints", async () => {
+  const cases = [
+    ["'|'", "query"], ["r'|'", "query"], ["' |'", "query"],
+    ["'\\n|'", "query"], ["'\\r\\n|'", "query"], ["'\\t|'", "query"],
+    ["'\\u0020|'", "query"], ["'''\n|'''", "query"],
+    ["'''\r\n|'''", "query"], ["'''\r\n|\r\n'''", "query"],
+    ["'''{user{\r\n|\r\n}}'''", "name"],
+    ["'''{user(\r\n|\r\n){id}}'''", "id"],
+    ["'''{user(filter:{\r\n|\r\n}){id}}'''", "color"],
+    ["'''{user(color:\r\n|\r\n){id}}'''", "RED"],
+  ];
+  for (const [expression, expected] of cases) {
+    const marked = "# 😀\r\nfrom graphql_desk import gql\r\nq=gql(" + expression + ")";
+    const offset = marked.indexOf("|");
+    const source = marked.replace("|", "");
+    const value = bundle(source);
+    const snapshot = document(value);
+    const call = value.response.calls[0];
+    const points = toDecoded(call, snapshot, offset);
+    assert.equal(points.length, 1, expression);
+    const decoded = points[0].start;
+    const native = gls.getAutocompleteSuggestions(gql.buildSchema(value.request.schemas[0].text),
+      call.source, gls.offsetToPosition(call.source, decoded))
+      .filter(item => /^[$@]?[_A-Za-z][_0-9A-Za-z]*$/.test(item.label));
+    const items = await createLanguageFeatures(options(value)).complete(snapshot, offset);
+    assert.deepEqual(items.map(item => item.label), native.map(item => item.label), expression);
+    const item = items.find(item => item.label === expected);
+    assert.ok(item, expression);
+    assert.deepEqual(item.range, { start: offset, end: offset }, expression);
+    assert.equal(item.insertText, expected, expression);
+    const edited = source.slice(0, offset) + item.insertText + source.slice(offset);
+    assert.equal(bundle(edited).response.calls[0].source,
+      call.source.slice(0, decoded) + expected + call.source.slice(decoded), expression);
+  }
+});
+
+test("zero-width completion retains origin multiplicity and rejects literal gaps or interiors", async () => {
+  for (const marked of [
+    "from graphql_desk import gql\nTEXT='|'\nq=gql(TEXT+TEXT)",
+    "from graphql_desk import gql\nTEXT='|'\nq=gql(TEXT)\nr=gql(TEXT)",
+    "from graphql_desk import gql\nq=gql('\\u0|020')",
+    "from graphql_desk import gql\nq=gql('\\|n')",
+    "from graphql_desk import gql\r\nq=gql('''\r|\n''')",
+    "from graphql_desk import gql\nq=gql('\\n|' '')",
+    "from graphql_desk import gql\nq=gql('\\\n|')",
+    "from graphql_desk import gql\nq=gql('\\n'|)",
+  ]) {
+    const offset = marked.indexOf("|");
+    const source = marked.replace("|", "");
+    const value = bundle(source);
+    assert.deepEqual(await createLanguageFeatures(options(value)).complete(document(value), offset), [], marked);
+  }
 });
 
 test("hover keeps signatures/descriptions and definitions point to actual SDL fields", async () => {

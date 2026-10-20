@@ -130,6 +130,7 @@ function editableRange(bundle, call, span, snapshot) {
   const matching = call.map.utf16.filter((atom) => atom.linear &&
     atom.decoded.start <= span.start && span.end <= atom.decoded.end &&
     key(atom.host.module) === key(origin.module));
+  if (span.start === span.end && matching.length === 0) return origin.range;
   if (matching.length !== 1 || call.source.slice(span.start, span.end) !== snapshot.text.slice(origin.range.start, origin.range.end)) return null;
   return origin.range;
 }
