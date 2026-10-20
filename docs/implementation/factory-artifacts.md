@@ -50,10 +50,14 @@ Precision diagnostics can accompany usable files; fatal indexed generation
 errors return no files. A future publisher must enforce ownership, freshness and
 batch recovery before writing any returned artifact.
 
-Nine focused tests check unchanged original Python source with both strict
+The generated callable protocol also includes the [scalar member](scalar-helpers.md)
+using the same schema declarations and configured input aliases once. The runtime
+factory remains the ordinary schema-name binding.
+
+Ten focused tests check unchanged original Python source with both strict
 checkers and actual generated runtime imports, generic client inference and
 negative variable/result cases, exact ASTs, explicit fallback limits, aliases,
 source packages, diagnostics and stale/collision failures. Multi-schema artifact
-assembly, dynamic discovery, scalar/persisted/reader helpers, writer integration,
+assembly, dynamic discovery, persisted/reader helpers, writer integration,
 incremental generation and the full editor/client matrix remain separate work.
 No broad typing, API or live-typing gate is passed.
