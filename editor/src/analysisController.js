@@ -32,9 +32,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   let pythonApiPromise;
   let pythonEnvironments;
   const configuredPython = folder => vscode.workspace.getConfiguration("graphqlDesk", folder.uri).get("pythonPath", "");
+  function stopPolling(state) {
+    clearTimeout(state.pollTimer); state.pollTimer = null;
+    state.pollPaused = true; state.pollAbort?.abort();
+  }
   function dropState(root) {
     const state = states.get(root);
     if (state) {
+      stopPolling(state); state.polls.clear();
       state.cached = null; state.worker.dispose();
       reconcileSchemaWatches(state, new Set()); states.delete(root);
     }
@@ -108,7 +113,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   const trusted = () => {
     const allowed = !disposed && vscode.workspace.isTrusted === true;
     if (!allowed) status(null);
-    if (!allowed) for (const state of states.values()) { state.cached = null; state.worker.invalidate(); }
+    if (!allowed) for (const state of states.values()) { stopPolling(state); state.cached = null; state.worker.invalidate(); }
     return allowed;
   };
   const localPath = document => {
@@ -144,7 +149,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (state && (state.python !== python || state.setting !== setting)) { dropState(root); state = null; }
     if (!state) {
       state = { root, folder, python, setting, worker: workerFactory({ python, workspace: root, isTrusted: trusted }),
-        running: false, pending: null, cached: null, targets: [], credentials: new Map(), revisions: [], watches: new Map() };
+        running: false, pending: null, cached: null, targets: [], credentials: new Map(), revisions: [], watches: new Map(),
+        polls: new Map(), pollTimer: null, pollAbort: null, polling: false, pollPaused: false };
       states.set(root, state);
     }
     return state;
@@ -152,7 +158,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   function invalidate() {
     if (disposed) return;
     epoch += 1;
-    for (const state of states.values()) { state.cached = null; if (!trusted()) state.worker.invalidate(); }
+    for (const state of states.values()) { stopPolling(state); state.cached = null; if (!trusted()) state.worker.invalidate(); }
     changed();
   }
   function snapshot(document) {
@@ -235,6 +241,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       const pending = state.pending;
       state.pending = null;
       if (pending) enqueue(state, pending.action, pending.kind).then(pending.resolve, pending.reject);
+      schedulePolling(state);
     });
   }
   function reconcileSchemaWatches(state, filenames) {
@@ -247,24 +254,67 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       state.watches.set(filename, [watcher, watcher.onDidChange(invalidate), watcher.onDidCreate(invalidate), watcher.onDidDelete(invalidate)]);
     }
   }
-  function check(ticket, token, state) {
-    if (!trusted() || epoch !== ticket || token?.isCancellationRequested || (state && states.get(state.root) !== state)) throw new Error("Superseded analysis");
+  function check(ticket, token, state, signal) {
+    if (!trusted() || epoch !== ticket || token?.isCancellationRequested || signal?.aborted || (state && states.get(state.root) !== state)) throw new Error("Superseded analysis");
   }
-  async function build(state, token, refreshTarget) {
+  function schedulePolling(state) {
+    clearTimeout(state.pollTimer); state.pollTimer = null;
+    if (disposed || states.get(state.root) !== state || state.pollPaused || state.polling || state.running || !state.polls.size) return;
+    const next = [...state.polls.values()].sort((a, b) => a.due - b.due)[0];
+    // Node converts overflowing delays into 1ms; long intervals need bounded chunks.
+    state.pollTimer = setTimeout(async () => {
+      state.pollTimer = null;
+      if (!trusted() || states.get(state.root) !== state || state.pollPaused) return;
+      if (Date.now() < next.due) { schedulePolling(state); return; }
+      state.polling = true;
+      const abort = new AbortController(); state.pollAbort = abort;
+      let attempted = false;
+      try {
+        if (await stateFor({ uri: state.folder.uri.toString() }) !== state) {
+          if (states.get(state.root) === state) dropState(state.root);
+          return;
+        }
+        if (abort.signal.aborted) return;
+        if (state.running) return;
+        attempted = true;
+        await enqueue(state, () => build(state, undefined, next.target, abort), "poll");
+      } catch { state.cached = null; if (!abort.signal.aborted && trusted()) status("Schema unavailable"); }
+      finally {
+        if (attempted && state.polls.get(key(next.target)) === next) next.due = Date.now() + next.interval * 1000;
+        state.pollAbort = null; state.polling = false;
+        schedulePolling(state);
+        if (attempted && !abort.signal.aborted && states.get(state.root) === state && trusted()) changed();
+      }
+    }, Math.min(2_147_483_647, Math.max(1, next.due - Date.now())));
+    state.pollTimer.unref?.();
+  }
+  function reconcilePolling(state) {
+    const targets = new Map(state.targets.filter(target => target.refresh_interval > 0).map(target => [key(target), target]));
+    for (const identity of state.polls.keys()) if (!targets.has(identity)) state.polls.delete(identity);
+    for (const [identity, target] of targets) {
+      const previous = state.polls.get(identity);
+      if (!previous || previous.interval !== target.refresh_interval) state.polls.set(identity,
+        { target, interval: target.refresh_interval, due: Date.now() + target.refresh_interval * 1000 });
+      else previous.target = target;
+    }
+    state.pollPaused = false;
+    schedulePolling(state);
+  }
+  async function build(state, token, refreshTarget, pollAbort) {
     const ticket = epoch;
-    check(ticket, token, state);
+    check(ticket, token, state, pollAbort?.signal);
     const captured = await capture(state);
-    check(ticket, token, state);
+    check(ticket, token, state, pollAbort?.signal);
     const wanted = revisions(state);
     const revisionSignature = JSON.stringify(wanted);
     if (!refreshTarget && state.cached?.capture.signature === captured.signature && state.cached.revisionSignature === revisionSignature) return state.cached;
     // shortcut: stale jobs finish without publishing to retain fetched schemas; refine if measured edit latency needs interruption.
-    const abort = refreshTarget ? new AbortController() : null;
+    const abort = pollAbort ?? (refreshTarget ? new AbortController() : null);
     const cancellation = abort && token?.onCancellationRequested?.(() => abort.abort());
     const requestWorker = message => state.worker.request(message, abort ? { signal: abort.signal } : undefined);
     try {
       const prepared = await requestWorker({ op: "prepare", ...captured.request, remote_revisions: wanted });
-      check(ticket, token, state);
+      check(ticket, token, state, abort?.signal);
       state.targets = prepared.remote_schemas;
       state.revisions = prepared.remote_revisions;
       const schema_buffers = prepared.required_buffers.map(id => {
@@ -276,10 +326,18 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       let refreshStatus;
       if (refreshTarget) {
         const target = state.targets.find(item => key(item) === key(refreshTarget));
+        if (pollAbort) {
+          reconcilePolling(state);
+          const scheduled = target && state.polls.get(key(target));
+          if (!scheduled || scheduled.interval !== refreshTarget.refresh_interval || Date.now() < scheduled.due) {
+            state.cached = null; return null;
+          }
+        }
         if (!target) throw new Error("Remote target changed");
         const credentials = credential(state, target);
         const refreshed = await requestWorker({ op: "refresh", ...captured.request, id: identity, schema_buffers,
           project: target.project, schema_name: target.schema_name, credential_revision: credentials.revision, environment: credentials.values });
+        check(ticket, token, state, abort?.signal);
         identity = refreshed.id;
         state.revisions = state.revisions.filter(item => key(item) !== key(target));
         state.revisions.push({ project: target.project, schema_name: target.schema_name, revision: credentials.revision });
@@ -288,17 +346,18 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       }
       const request = { ...captured.request, id: identity, schema_buffers, remote_revisions: state.revisions };
       const bundle = await requestWorker({ op: "analyze", ...request });
-      check(ticket, token, state);
+      check(ticket, token, state, abort?.signal);
       const latest = await capture(state);
-      check(ticket, token, state);
+      check(ticket, token, state, abort?.signal);
       if (latest.signature !== captured.signature) throw new Error("Capture changed");
       const latestRevisions = revisions(state);
       if (state.revisions.some(active => !latestRevisions.some(current => key(current) === key(active) && current.revision === active.revision))) throw new Error("Credentials changed during analysis");
-      if (refreshStatus) report(refreshStatus === "ready" ? "Schema refreshed." : "Schema refresh failed; this schema is unavailable for analysis.");
+      if (refreshStatus && !pollAbort) report(refreshStatus === "ready" ? "Schema refreshed." : "Schema refresh failed; this schema is unavailable for analysis.");
       // Bind newly discovered targets before computing the credential freshness key.
       const result = { bundle, request, capture: captured, ticket, preferences: prepared.project_preferences,
         revisionSignature: JSON.stringify(latestRevisions) };
       state.cached = result;
+      reconcilePolling(state);
       return result;
     } finally { cancellation?.dispose(); }
   }
@@ -342,8 +401,11 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const document = vscode.window.activeTextEditor?.document;
     const state = document && await stateFor(snapshot(document));
     if (!state) { report("Open a Python file and select a Python environment, or configure an absolute GraphQL Desk Python interpreter."); return; }
+    const ticket = epoch;
+    stopPolling(state);
     try {
       await enqueue(state, () => build(state));
+      stopPolling(state);
       const choices = state.targets.map(target => ({ label: target.schema_name, description: target.project, target }));
       const choice = choices.length === 1 ? choices[0] : await vscode.window.showQuickPick(choices, { placeHolder: "Select a remote GraphQL schema to refresh" });
       if (!choice) { if (!choices.length) report("No remote schema is configured for this project."); return; }
@@ -353,6 +415,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       else await run();
       changed();
     } catch { report("GraphQL Desk could not refresh this schema. Check configuration and the selected interpreter."); }
+    finally { if (epoch === ticket && states.get(state.root) === state && trusted()) reconcilePolling(state); }
   }
   function clientDirectives(bundle, call) {
     for (const state of states.values()) if (state.cached?.bundle === bundle) return state.cached.preferences.find(item => item.project === call.identity.module.project)?.client_directives ?? [];

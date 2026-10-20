@@ -12,6 +12,15 @@ const { createAnalysisWorker } = require("../src/analysisWorker");
 const { createLanguageFeatures } = require("../src/languageFeatures");
 const { createHighlighting } = require("../src/highlighting");
 const python = process.env.GRAPHQL_DESK_PYTHON ?? path.resolve(__dirname, "../../.venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
+const realTimeout = setTimeout;
+
+async function eventually(accept) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (accept()) return;
+    await new Promise(resolve => realTimeout(resolve, 10));
+  }
+  assert.fail("Polling did not settle");
+}
 
 function uri(value) {
   const parsed = new URL(value);
@@ -290,6 +299,264 @@ test("explicit remote refresh survives typing without HTTP, but changed credenti
 });
 
 
+
+test("opt-in polling reuses authenticated refresh, retains source-edit deadlines and stops on config disable", async t => {
+  const headers = [];
+  let fail = false;
+  const payload = JSON.stringify({ data: introspectionFromSchema(buildSchema("type Query { title: String }")) });
+  const server = http.createServer((request, response) => {
+    headers.push(request.headers["x-key"]); request.resume(); response.setHeader("Content-Type", "application/json");
+    if (fail) { response.statusCode = 503; response.end("{}"); } else response.end(payload);
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+  const fixture = await setup(t, `schema={url="http://127.0.0.1:${server.address().port}/graphql",headers={"X-Key"="\${env:TOKEN}"}}\nschema_refresh_interval=2\n`);
+  let environment = { TOKEN: "FIRST_PRIVATE" };
+  let changes = 0;
+  const reports = [];
+  const controller = createAnalysisController(fixture.vscode, { environment: () => environment, changed: () => { changes += 1; }, report: value => reports.push(value) });
+  t.after(() => controller.dispose());
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+  const snapshot = () => controller.snapshot(fixture.main);
+  assert.equal((await controller.analyze(snapshot())).request.schemas.length, 0);
+  t.mock.timers.tick(1000);
+  fixture.main.text += "# dirty source\n"; fixture.main.version += 1;
+  fixture.events.onDidChangeTextDocument.fire({ document: fixture.main });
+  await controller.analyze(snapshot());
+  assert.equal(headers.length, 0);
+  t.mock.timers.tick(1000);
+  await eventually(() => changes === 2);
+  assert.ok(headers.length > 0);
+  assert.ok(headers.every(value => value === "FIRST_PRIVATE"));
+  assert.equal((await controller.analyze(snapshot())).request.schemas.length, 1);
+  assert.deepEqual(reports, [], "Automatic refreshes do not display periodic notifications");
+  const first = headers.length;
+  environment = { TOKEN: "SECOND_PRIVATE" };
+  t.mock.timers.tick(2000);
+  await eventually(() => changes === 3);
+  assert.ok(headers.length > first);
+  assert.ok(headers.slice(first).every(value => value === "SECOND_PRIVATE"));
+  fail = true;
+  t.mock.timers.tick(2000);
+  await eventually(() => changes === 4);
+  assert.equal((await controller.analyze(snapshot())).request.schemas.length, 0, "A failed poll never reuses a last-good schema as current");
+  const fetched = headers.length;
+  const config = path.join(fixture.root, "pyproject.toml");
+  await fs.writeFile(config, (await fs.readFile(config, "utf8")).replace("schema_refresh_interval=2", "schema_refresh_interval=0"));
+  // No watcher event: the due poll must reprepare and honor the newly disabled setting.
+  t.mock.timers.tick(2000);
+  await eventually(() => changes === 5 && reports.length === 0);
+  t.mock.timers.tick(20000);
+  await new Promise(resolve => realTimeout(resolve, 30));
+  assert.equal(headers.length, fetched);
+});
+
+test("polling waits for interactive work without losing its deadline and cancels active HTTP on retirement", async t => {
+  let requests = 0;
+  let heldResponse;
+  const server = http.createServer((request, response) => { requests += 1; request.resume(); heldResponse = response; });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+  const fixture = await setup(t, `schema="http://127.0.0.1:${server.address().port}/graphql"\nschema_refresh_interval=1\n`);
+  let release;
+  let entered;
+  let hold = false;
+  const ready = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  let active = 0;
+  let maximum = 0;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, settings) {
+      active += 1; maximum = Math.max(maximum, active);
+      try {
+        if (hold && message.op === "prepare") { hold = false; entered(); await gate; }
+        return await worker.request(message, settings);
+      } finally { active -= 1; }
+    } };
+  } }); t.after(() => controller.dispose());
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+  await controller.analyze(controller.snapshot(fixture.main));
+  hold = true;
+  fixture.main.text += "# edit\n"; fixture.main.version += 1;
+  const interactive = controller.analyze(controller.snapshot(fixture.main));
+  await ready;
+  t.mock.timers.tick(1000);
+  assert.equal(requests, 0);
+  release(); await interactive;
+  t.mock.timers.tick(1);
+  await eventually(() => requests > 0);
+  assert.equal(maximum, 1);
+  controller.dispose();
+  await eventually(() => active === 0);
+  const count = requests;
+  heldResponse?.end("{}");
+  t.mock.timers.tick(10000);
+  assert.equal(requests, count);
+});
+
+test("huge finite polling intervals use safe timeout chunks and untrusted workspaces never fetch", async t => {
+  const fixture = await setup(t, 'schema="https://example.invalid/graphql"\nschema_refresh_interval=1e308\n');
+  const messages = [];
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, request(message, settings) { messages.push(message); return worker.request(message, settings); } };
+  } }); t.after(() => controller.dispose());
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+  await controller.analyze(controller.snapshot(fixture.main));
+  t.mock.timers.tick(2_147_483_647);
+  await new Promise(resolve => realTimeout(resolve, 20));
+  assert.equal(messages.some(message => message.op === "refresh"), false);
+  fixture.vscode.workspace.isTrusted = false;
+  t.mock.timers.tick(2_147_483_647);
+  assert.equal(messages.some(message => message.op === "refresh"), false);
+  controller.dispose();
+  t.mock.timers.tick(2_147_483_647);
+});
+
+test("polling revalidates increased intervals before HTTP and fairly refreshes each named schema", async t => {
+  const requests = [];
+  const payload = JSON.stringify({ data: introspectionFromSchema(buildSchema("type Query { title: String }")) });
+  const server = http.createServer((request, response) => {
+    requests.push(request.url); request.resume(); response.setHeader("Content-Type", "application/json"); response.end(payload);
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+  const fixture = await setup(t);
+  const config = path.join(fixture.root, "pyproject.toml");
+  const text = `[tool.graphql-desk]\nschema_refresh_interval=1\n` + ["alpha", "beta"].map(name =>
+    `[[tool.graphql-desk.schemas]]\nname="${name}"\nschema="http://127.0.0.1:${server.address().port}/${name}"\nschema_output="graphql_desk_generated/${name}.pyi"\n`).join("");
+  await fs.writeFile(config, text);
+  let changes = 0;
+  const refreshed = [];
+  const controller = createAnalysisController(fixture.vscode, { changed: () => { changes += 1; }, workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, request(message, settings) {
+      if (message.op === "refresh") refreshed.push(message.schema_name);
+      return worker.request(message, settings);
+    } };
+  } }); t.after(() => controller.dispose());
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+  const snapshot = controller.snapshot(fixture.main);
+  await controller.analyze(snapshot);
+  await fs.writeFile(config, text.replace("schema_refresh_interval=1", "schema_refresh_interval=10"));
+  t.mock.timers.tick(1000);
+  await controller.analyze(snapshot);
+  assert.deepEqual(refreshed, [], "The old due callback cannot fetch under a longer current interval");
+  assert.equal(changes, 1, "Observed configuration changes invalidate displayed analysis without another user request");
+  t.mock.timers.tick(9999);
+  assert.deepEqual(requests, []);
+  t.mock.timers.tick(1);
+  await eventually(() => changes === 2);
+  t.mock.timers.tick(1);
+  await eventually(() => changes === 3);
+  assert.deepEqual(refreshed, ["alpha", "beta"]);
+  assert.ok(requests.includes("/alpha") && requests.includes("/beta"));
+  fixture.vscode.window.showQuickPick = async () => {
+    t.mock.timers.tick(20000);
+    await new Promise(resolve => realTimeout(resolve, 20));
+    assert.deepEqual(refreshed, ["alpha", "beta"], "Foreground schema selection pauses automatic HTTP");
+    return undefined;
+  };
+  await controller.refresh();
+  assert.deepEqual(refreshed, ["alpha", "beta"], "Cancelling the foreground picker performs no refresh");
+  t.mock.timers.tick(1);
+  await eventually(() => changes === 4);
+  assert.deepEqual(refreshed, ["alpha", "beta", "alpha"], "Cancelling a foreground picker resumes the existing polling deadline");
+});
+
+test("automatic HTTP is aborted on trust loss, interpreter changes and workspace retirement", async t => {
+  for (const reason of ["trust", "interpreter", "workspace"]) {
+    let requests = 0;
+    let closed = false;
+    const server = http.createServer(request => {
+      requests += 1; request.resume(); request.socket.once("close", () => { closed = true; });
+    });
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+    const fixture = await setup(t, `schema="http://127.0.0.1:${server.address().port}/graphql"\nschema_refresh_interval=1\n`);
+    const controller = createAnalysisController(fixture.vscode);
+    t.after(() => controller.dispose());
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+    await controller.analyze(controller.snapshot(fixture.main));
+    t.mock.timers.tick(1000);
+    await eventually(() => requests > 0);
+    if (reason === "trust") { fixture.vscode.workspace.isTrusted = false; controller.isTrusted(); }
+    else if (reason === "interpreter") {
+      fixture.interpreter(path.join(fixture.root, "missing-python.exe"));
+      fixture.events.onDidChangeConfiguration.fire({ affectsConfiguration: () => true });
+    } else {
+      fixture.vscode.workspace.workspaceFolders = [];
+      fixture.events.onDidChangeWorkspaceFolders.fire({ added: [], removed: [] });
+    }
+    await eventually(() => closed);
+    const count = requests;
+    t.mock.timers.tick(10000);
+    assert.equal(requests, count, reason);
+    controller.dispose();
+    t.mock.timers.reset();
+  }
+});
+
+test("explicit refresh preempts automatic HTTP while retaining normal foreground notifications", async t => {
+  let requests = 0;
+  let automaticClosed = false;
+  const payload = JSON.stringify({ data: introspectionFromSchema(buildSchema("type Query { title: String }")) });
+  const server = http.createServer((request, response) => {
+    requests += 1; request.resume();
+    if (requests === 1) { request.socket.once("close", () => { automaticClosed = true; }); return; }
+    response.setHeader("Content-Type", "application/json"); response.end(payload);
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+  const fixture = await setup(t, `schema="http://127.0.0.1:${server.address().port}/graphql"\nschema_refresh_interval=1\n`);
+  const reports = [];
+  const controller = createAnalysisController(fixture.vscode, { report: value => reports.push(value) });
+  t.after(() => controller.dispose());
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+  const snapshot = controller.snapshot(fixture.main);
+  await controller.analyze(snapshot);
+  t.mock.timers.tick(1000);
+  await eventually(() => requests === 1);
+  await controller.refresh();
+  assert.equal(automaticClosed, true);
+  assert.ok(requests > 1);
+  assert.deepEqual(reports, ["Schema refreshed."]);
+  assert.equal((await controller.analyze(snapshot)).request.schemas.length, 1);
+});
+
+test("cancelling a resolved automatic prepare cannot install its watchers before foreground refresh", async t => {
+  const payload = JSON.stringify({ data: introspectionFromSchema(buildSchema("type Query { title: String }")) });
+  const server = http.createServer((request, response) => { request.resume(); response.setHeader("Content-Type", "application/json"); response.end(payload); });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+  const fixture = await setup(t, `schema="http://127.0.0.1:${server.address().port}/graphql"\nschema_refresh_interval=1\n`);
+  const cancelledPath = path.join(fixture.root, "cancelled-schema.graphql");
+  let foreground;
+  let intercepted = false;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, settings) {
+      const result = await worker.request(message, settings);
+      if (message.op === "prepare" && settings?.signal && !intercepted) {
+        intercepted = true;
+        foreground = controller.refresh();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(settings.signal.aborted, true);
+        return { ...result, local_schemas: [{ project: result.remote_schemas[0].project, schema_name: "default",
+          path: cancelledPath, canonical_path: cancelledPath }] };
+      }
+      return result;
+    } };
+  } }); t.after(() => controller.dispose());
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+  await controller.analyze(controller.snapshot(fixture.main));
+  t.mock.timers.tick(1000);
+  await eventually(() => foreground !== undefined);
+  await foreground;
+  assert.equal(fixture.watchers.some(watcher => watcher.pattern.pattern === "cancelled-schema.graphql"), false);
+  assert.equal((await controller.analyze(controller.snapshot(fixture.main))).request.schemas.length, 1);
+});
 
 test("edit storms coalesce into one latest capture and cancelling one provider preserves shared work", async t => {
   const fixture = await setup(t);

@@ -87,6 +87,7 @@ class EditorWorkerTests(unittest.TestCase):
                         "project": project,
                         "schema_name": "default",
                         "environment_names": ["TOKEN"],
+                        "refresh_interval": 0,
                     }
                 ],
             )
@@ -183,6 +184,35 @@ class EditorWorkerTests(unittest.TestCase):
                 [{"project": project, "client_directives": ["local"]}],
             )
             self.assertNotIn("PRIVATE_MARKER", json.dumps(prepared))
+
+    def test_prepare_exposes_validated_polling_interval_without_network_or_secrets(
+        self,
+    ) -> None:
+        with endpoint() as (url, server):
+            capture, _, project = self.remote_capture(url)
+            original = self.config.read_text(encoding="utf8")
+            for interval in (0.125, 1e308, 0):
+                self.config.write_text(
+                    original + f"\nschema_refresh_interval={interval}\n",
+                    encoding="utf8",
+                )
+                prepared = self.worker.handle(
+                    {"op": "prepare", **capture, "remote_revisions": []}
+                )
+                self.assertTrue(prepared["ok"], prepared)
+                self.assertEqual(
+                    prepared["remote_schemas"],
+                    [
+                        {
+                            "project": project,
+                            "schema_name": "default",
+                            "environment_names": ["TOKEN"],
+                            "refresh_interval": interval,
+                        }
+                    ],
+                )
+                self.assertNotIn("PRIVATE_MARKER", json.dumps(prepared))
+            self.assertEqual(server.records, [])
 
     def test_missed_disk_source_change_rebinds_remote_cache_without_http(self) -> None:
         with endpoint() as (url, server):

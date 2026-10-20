@@ -51,8 +51,9 @@ function validReply(reply, request) {
         Array.isArray(reply.remote_revisions) && reply.remote_revisions.every(item =>
           keys(item, ["project", "schema_name", "revision"]) && Object.values(item).every(string)))) &&
       Array.isArray(reply.remote_schemas) && reply.remote_schemas.every(item =>
-        keys(item, extended ? ["project", "schema_name", "environment_names"] : ["project", "schema_name"]) &&
-        string(item.project) && string(item.schema_name) && (!extended || names(item.environment_names))) &&
+        keys(item, extended ? ["project", "schema_name", "environment_names", "refresh_interval"] : ["project", "schema_name"]) &&
+        string(item.project) && string(item.schema_name) && (!extended || (names(item.environment_names) &&
+          typeof item.refresh_interval === "number" && Number.isFinite(item.refresh_interval) && item.refresh_interval >= 0))) &&
       names(reply.required_buffers) &&
       Array.isArray(reply.local_schemas) && reply.local_schemas.every(item =>
         keys(item, ["project", "schema_name", "path", "canonical_path"]) && Object.values(item).every(string));
