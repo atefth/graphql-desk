@@ -3,6 +3,7 @@
 import keyword
 import unicodedata
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import cast
 
 from graphql import (
@@ -43,6 +44,23 @@ from .validation import validate_document
 _CONDITIONAL = frozenset({"include", "skip", "defer"})
 # True marks a conditional occurrence chosen present in a correlated alternative.
 _Field = tuple[GraphQLCompositeType, FieldNode, bool]
+
+
+@dataclass(frozen=True)
+class FragmentReaderBranch:
+    input_name: str
+    output_name: str
+    typename: str | None
+    narrow_input_name: str | None
+    accepts_empty: bool
+
+
+@dataclass(frozen=True)
+class FragmentReaderTypes:
+    text: str
+    input_name: str
+    output_name: str
+    branches: tuple[FragmentReaderBranch, ...]
 
 
 def _directives(
@@ -93,11 +111,14 @@ class _SupportedSyntax(Visitor):
             )
 
 
-def _output_type(type_: TypeNode, leaf: str, *, nullable: bool = True) -> str:
+def _output_type(
+    type_: TypeNode, leaf: str, *, nullable: bool = True, readonly: bool = False
+) -> str:
     if isinstance(type_, NonNullTypeNode):
-        return _output_type(type_.type, leaf, nullable=False)
+        return _output_type(type_.type, leaf, nullable=False, readonly=readonly)
     if isinstance(type_, ListTypeNode):
-        result = f"list[{_output_type(type_.type, leaf)}]"
+        container = "__graphql_desk_Sequence" if readonly else "list"
+        result = f"{container}[{_output_type(type_.type, leaf, readonly=readonly)}]"
     elif isinstance(type_, NamedTypeNode):
         result = leaf
     else:
@@ -124,6 +145,7 @@ def _render_operation_types(
     disable_masking: bool = False,
     fragment_keys: dict[str, str] | None = None,
     selected_fragment: str | None = None,
+    reader_branches: list[FragmentReaderBranch] | None = None,
 ) -> str:
     """Render validated operation declarations, rejecting unsupported semantics.
 
@@ -225,6 +247,8 @@ def _render_operation_types(
     variant_index = 0
     needs_never = False
     needs_capabilities = False
+    needs_reader_sequence = False
+    needs_reader_readonly = False
     conditional_alternatives = 0
 
     def possible(parent: GraphQLCompositeType) -> tuple[GraphQLObjectType, ...]:
@@ -379,12 +403,13 @@ def _render_operation_types(
         closed: bool = False,
     ) -> None:
         nonlocal variant_index, needs_never, conditional_alternatives
-        nonlocal needs_capabilities
+        nonlocal needs_capabilities, needs_reader_sequence, needs_reader_readonly
         abstract = any(not isinstance(parent, GraphQLObjectType) for parent in parents)
         candidates = set(possible(parents[0]))
         for parent in parents[1:]:
             candidates.intersection_update(possible(parent))
         branches: list[str] = []
+        reader_inputs: list[str] = []
         choices: list[tuple[GraphQLObjectType, list[list[_Field]]]] = []
         correlated = False
         count = 0
@@ -430,6 +455,11 @@ def _render_operation_types(
                     key = node.alias.value if node.alias else node.name.value
                     groups.setdefault(key, []).append((scope, node, forced))
                 fields: list[tuple[str, str]] = []
+                input_fields: list[tuple[str, str]] = []
+                narrow_fields: list[tuple[str, str]] = []
+                typename: str | None = None
+                typename_required = False
+                required = bool(capabilities)
                 if capabilities:
                     needs_capabilities = True
                     identity = " | ".join(sorted(capabilities))
@@ -440,6 +470,8 @@ def _render_operation_types(
                             f"__graphql_desk_Callable[[{identity}], None]]",
                         )
                     )
+                input_fields.extend(fields)
+                narrow_fields.extend(fields)
                 # An authored alias owns its response key, even when named __typename.
                 if abstract and not owns_typename:
                     fields.append(
@@ -448,6 +480,17 @@ def _render_operation_types(
                             f"NotRequired[{f'Literal[{concrete.name!r}]'!r}]",
                         )
                     )
+                    literal = f"Literal[{concrete.name!r}]"
+                    input_fields.append(
+                        (
+                            "__typename",
+                            f"NotRequired[__graphql_desk_ReadOnly[{literal!r}]]",
+                        )
+                    )
+                    narrow_fields.append(
+                        ("__typename", f"__graphql_desk_ReadOnly[{literal!r}]")
+                    )
+                    typename = concrete.name
                 for key, group in sorted(groups.items()):
                     scope, node, _ = group[0]
                     optional = all(
@@ -460,12 +503,32 @@ def _render_operation_types(
                         _outer_nullable(schema, scope, item) for scope, item, _ in group
                     )
 
-                    def annotation(value: str) -> str:
-                        return f"NotRequired[{value!r}]" if optional else repr(value)
+                    required = required or not optional
+
+                    def annotation(value: str, *, readonly: bool = False) -> str:
+                        result = (
+                            f"__graphql_desk_ReadOnly[{value!r}]"
+                            if readonly
+                            else repr(value)
+                        )
+                        return f"NotRequired[{result}]" if optional else result
 
                     if node.name.value == "__typename":
                         # Pinned inference keeps typename literal even with @optional.
-                        fields.append((key, annotation(f"Literal[{concrete.name!r}]")))
+                        literal = f"Literal[{concrete.name!r}]"
+                        fields.append((key, annotation(literal)))
+                        input_fields.append((key, annotation(literal, readonly=True)))
+                        narrow_fields.append(
+                            (
+                                key,
+                                f"__graphql_desk_ReadOnly[{literal!r}]"
+                                if key == "__typename"
+                                else annotation(literal, readonly=True),
+                            )
+                        )
+                        if key == "__typename":
+                            typename = concrete.name
+                            typename_required = not optional
                         continue
                     assert not isinstance(scope, GraphQLUnionType)
                     field_type = parse_type(str(_field_type(schema, scope, node)))
@@ -508,8 +571,10 @@ def _render_operation_types(
                             closed=closed or correlated,
                         )
                         leaf = child_name
+                        input_leaf = child_name + "Input"
                     elif isinstance(named, (GraphQLScalarType, GraphQLEnumType)):
                         leaf = outputs.get(named.name, named.name)
+                        input_leaf = leaf
                     else:
                         raise ValueError(f"Unsupported output type: {named.name}")
                     outer = (
@@ -519,7 +584,40 @@ def _render_operation_types(
                     )
                     value = _output_type(outer, leaf, nullable=nullable)
                     fields.append((key, annotation(value)))
+                    if isinstance(outer, ListTypeNode):
+                        needs_reader_sequence = True
+                    input_value = _output_type(
+                        outer, input_leaf, nullable=nullable, readonly=True
+                    )
+                    input_field = (key, annotation(input_value, readonly=True))
+                    input_fields.append(input_field)
+                    narrow_fields.append(input_field)
                 declare(branch, fields, closed=closed or correlated)
+                if reader_branches is not None:
+                    needs_reader_readonly = needs_reader_readonly or bool(input_fields)
+                    input_name = branch + "Input"
+                    reader_inputs.append(input_name)
+                    declare(
+                        input_name,
+                        input_fields,
+                        closed=(closed or correlated) and not input_fields,
+                    )
+                    narrow_name = None
+                    if typename is not None:
+                        narrow_name = input_name
+                        if not typename_required:
+                            narrow_name = input_name + "Narrow"
+                            declare(narrow_name, narrow_fields)
+                    if class_name == f"{name}Result":
+                        reader_branches.append(
+                            FragmentReaderBranch(
+                                input_name,
+                                branch,
+                                typename,
+                                narrow_name,
+                                not required,
+                            )
+                        )
         if branches != [class_name]:
             if class_name in reserved:
                 raise ValueError(
@@ -530,6 +628,18 @@ def _render_operation_types(
                 needs_never = True
             declarations.append(
                 f"{class_name} = " + (" | ".join(branches) or "__graphql_desk_Never")
+            )
+        if reader_branches is not None and reader_inputs != [class_name + "Input"]:
+            input_alias = class_name + "Input"
+            if input_alias in reserved:
+                raise ValueError(
+                    f"Colliding generated declaration name: {input_alias!r}"
+                )
+            reserved.add(input_alias)
+            declarations.append(
+                input_alias
+                + " = "
+                + (" | ".join(reader_inputs) or "__graphql_desk_Never")
             )
 
     root: GraphQLCompositeType
@@ -564,6 +674,15 @@ def _render_operation_types(
                 [parent],
                 [(parent, node) for node in definition.selection_set.selections],
                 f"{name}Fragment_{fragment_name}",
+            )
+    if reader_branches is not None:
+        if needs_reader_sequence:
+            output += (
+                "\nfrom collections.abc import Sequence as __graphql_desk_Sequence\n"
+            )
+        if needs_reader_readonly:
+            output += (
+                "from typing_extensions import ReadOnly as __graphql_desk_ReadOnly\n"
             )
     if needs_capabilities:
         output += (
@@ -718,4 +837,47 @@ def render_indexed_fragment_types(
         disable_masking=disable_masking,
         fragment_keys=keys,
         selected_fragment=primary.name,
+    )
+
+
+def render_indexed_fragment_reader_types(
+    context: SchemaContext,
+    document: IndexedDocument,
+    *,
+    name: str,
+    scalars: tuple[ScalarMapping, ...] = (),
+    enums: tuple[tuple[str, str], ...] = (),
+    client_directives: tuple[str, ...] = (),
+    disable_masking: bool = False,
+    fragment_index: FragmentIndex | None = None,
+) -> FragmentReaderTypes:
+    """Render mutable fragment results and readonly reader input projections."""
+    keys = _indexed_fragment_keys(context, document, fragment_index, disable_masking)
+    primary = document.primary_fragment
+    if (
+        primary is None
+        or primary.kind != "fragment"
+        or primary.name is None
+        or primary not in document.definitions
+        or primary.document
+        != DocumentIdentity(document.call.module, document.call.range)
+        or document.selected_operation is not None
+        or document.call.operation is not None
+    ):
+        raise ValueError("Indexed document primary fragment identity differs")
+    branches: list[FragmentReaderBranch] = []
+    text = _render_operation_types(
+        context.schema,
+        "\n\n".join(fact.printed for fact in document.definitions),
+        name=name,
+        scalars=scalars,
+        enums=enums,
+        client_directives=client_directives,
+        disable_masking=disable_masking,
+        fragment_keys=keys,
+        selected_fragment=primary.name,
+        reader_branches=branches,
+    )
+    return FragmentReaderTypes(
+        text, name + "ResultInput", name + "Result", tuple(branches)
     )

@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Generic, TypeVar
 
 from typing_extensions import ReadOnly, TypedDict
@@ -16,6 +16,7 @@ _Identity = TypeVar("_Identity")
 _Identity_contra = TypeVar("_Identity_contra", contravariant=True)
 _Result = TypeVar("_Result")
 _Variables = TypeVar("_Variables")
+_ReadInput = TypeVar("_ReadInput", bound=Mapping[str, object])
 
 
 class FragmentIdentity(Generic[_Key]):
@@ -42,6 +43,13 @@ class FragmentDocument(
     Generated bindings establish the view. They do not construct this subclass,
     add attributes or promise isinstance/class identity at runtime.
     """
+
+
+class ReadableFragmentDocument(
+    FragmentDocument[_Identity, _Result, _Variables],
+    Generic[_Identity, _Result, _Variables, _ReadInput],
+):
+    """Annotation-only fragment view with a separate readonly input shape."""
 
 
 def fragment_identity_key(owner: IndexedDocument, definition: DefinitionFact) -> str:
