@@ -516,6 +516,67 @@ class OperationTypesTests(unittest.TestCase):
             render_indexed_fragment_types(context, empty, name="Payload"),
         )
 
+    def test_indexed_leaf_and_fragment_free_modules_have_no_unused_private_imports(
+        self,
+    ) -> None:
+        schema = build_schema("type Query { greeting: String! }")
+        context = SchemaContext("main", schema, "v1")
+        snapshot = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            1,
+            "from graphql_desk import gql\n"
+            'f=gql("fragment F on Query {greeting}")\n'
+            'q=gql("query Q {greeting}")',
+        )
+        index = index_fragments(
+            resolve_project((snapshot,)), schemas={("p", None): context}
+        )
+        self.assertEqual(index.diagnostics, ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for document in index.documents:
+                renderer = (
+                    render_indexed_fragment_types
+                    if document.primary_fragment
+                    else render_indexed_operation_types
+                )
+                output = renderer(context, document, name="Read", fragment_index=index)
+                self.assertNotIn("Callable as __graphql_desk_Callable", output)
+                self.assertNotIn("ReadOnly as __graphql_desk_ReadOnly", output)
+                if document.primary_fragment is None:
+                    self.assertNotIn("FragmentIdentity", output)
+                (root / f"{document.call.binding}.py").write_text(
+                    output, encoding="utf8"
+                )
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["."],
+                        "typeCheckingMode": "strict",
+                        "pythonVersion": "3.10",
+                    }
+                ),
+                encoding="utf8",
+            )
+            checked = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
     def test_indexed_named_fragments_use_actual_closure_scope_and_selected_operation(
         self,
     ) -> None:
