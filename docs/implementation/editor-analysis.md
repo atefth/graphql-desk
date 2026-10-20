@@ -10,4 +10,12 @@ Successful fragment indexing adds a call's `index` with schema/token identity, s
 
 Only a supplied binding's actual default schema installs the unbound schema context. Supplied SDL/introspection is validated in memory. Missing contexts remain explicit diagnostics; invalid schemas reject without echoing their contents in the exception. This boundary does not acquire current buffers or verify current disk/config/schema state. Its caller must compare every relevant version and schema token, and must not execute analysis in an untrusted workspace.
 
-Tests cover the real resolver/index/map pipeline, invalid-to-valid recovery, explicit factories and named routing, imported fragments, Unicode/CRLF/escapes/repeated origins, empty boundaries, SDL/introspection and malformed JSON facts without source IO. This is a read-only foundation for #39/#40. VS Code activation, snapshot acquisition, worker launch, provider registration, live editor acceptance and the unresolved production analysis adapter remain separate work; no broad editor or live-typing gate is passed.
+An optional keyword-only `resolver=IncrementalResolver()` reuses source facts
+across requests. The caller owns and serializes that instance, including cache
+clearing. Schema loading, fragment indexing and response/map assembly still run
+on every request; changed schema facts are never replaced by cached source facts.
+The default function and JSON wrapper retain cold behavior. A warm/cold equivalence
+test counts actual parses and checks changed schema tokens, invalid SDL and
+same-version source changes. This is no publication or performance guarantee.
+
+Tests cover the real resolver/index/map pipeline, invalid-to-valid recovery, explicit factories and named routing, imported fragments, Unicode/CRLF/escapes/repeated origins, empty boundaries, SDL/introspection and malformed JSON facts without source IO. This is a read-only foundation for #39/#40. Separate [snapshot acquisition](editor-snapshots.md) and [provider](editor-providers.md) foundations exist; production activation/worker integration, live editor acceptance and the unresolved analysis adapter remain open. No broad editor or live-typing gate is passed.
