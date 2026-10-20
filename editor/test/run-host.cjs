@@ -8,6 +8,8 @@ const { runTests, runVSCodeCommand } = require("@vscode/test-electron");
 async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
+  const suite = process.argv[3] || "features";
+  assert.ok(["features", "discovery"].includes(suite), "Choose a known isolated suite");
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
@@ -32,7 +34,7 @@ async function main() {
   await runTests({
     version,
     extensionDevelopmentPath: path.resolve(__dirname, ".."),
-    extensionTestsPath: path.join(__dirname, "features.host.cjs"),
+    extensionTestsPath: path.join(__dirname, `${suite}.host.cjs`),
     extensionTestsEnv: {
       GRAPHQL_DESK_TEST_WORKSPACE: workspace,
       GRAPHQL_DESK_RESULT_PATH: result,
@@ -42,8 +44,8 @@ async function main() {
     launchArgs: [workspace, ...isolation, "--disable-updates", "--disable-telemetry", "--skip-welcome", "--skip-release-notes", "--disable-workspace-trust"],
   });
   const observed = JSON.parse(await fs.readFile(result, "utf8"));
-  assert.equal(observed.outcome, "read-only-features-observed");
-  console.log(`Read-only feature evidence: ${result}`);
+  assert.equal(observed.outcome, `read-only-${suite}-observed`);
+  console.log(`Read-only ${suite} evidence: ${result}`);
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

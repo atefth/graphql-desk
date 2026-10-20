@@ -1,0 +1,72 @@
+{
+  "outcome": "read-only-discovery-observed",
+  "vscode": "1.142.0",
+  "nullExclusions": [
+    ".hidden/query.py",
+    "café.py",
+    "file_excluded/query.py",
+    "git_ignored/query.py",
+    "ignore_ignored/query.py",
+    "nested/deeper/query.py",
+    "root.py",
+    "search_excluded/query.py",
+    "untracked.py",
+    "watcher_excluded/query.py"
+  ],
+  "defaultExclusions": [
+    ".hidden/query.py",
+    "café.py",
+    "nested/deeper/query.py",
+    "root.py",
+    "search_excluded/query.py",
+    "untracked.py",
+    "watcher_excluded/query.py"
+  ],
+  "expectedDiskFixtures": [
+    "root.py",
+    "untracked.py",
+    "git_ignored/query.py",
+    "ignore_ignored/query.py",
+    "file_excluded/query.py",
+    "search_excluded/query.py",
+    "watcher_excluded/query.py",
+    ".hidden/query.py",
+    "nested/deeper/query.py",
+    "café.py"
+  ],
+  "watcherCreateEvents": [
+    "watch_control.py",
+    "watcher_excluded/later.py",
+    "watch_control.py"
+  ],
+  "watcherCompletenessClaim": false,
+  "unsaved": {
+    "callerKnownAssociation": true,
+    "finderReturned": false,
+    "explicitlyAdded": true,
+    "remainsDirty": true,
+    "diskAbsent": true
+  },
+  "core": {
+    "coreSelected": [
+      "café",
+      "file_excluded.query",
+      "git_ignored.query",
+      "ignore_ignored.query",
+      "nested.deeper.query",
+      "root",
+      "search_excluded.query",
+      "untracked",
+      "watch_control",
+      "watcher_excluded.later",
+      "watcher_excluded.query"
+    ],
+    "unsavedBufferContent": true,
+    "symlink": {
+      "supported": true,
+      "insideDeduplicated": true,
+      "escapeRejected": true
+    }
+  },
+  "sourceFilesUnchanged": true
+}
