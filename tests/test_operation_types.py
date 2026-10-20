@@ -53,6 +53,137 @@ _SOURCE = """
 
 
 class OperationTypesTests(unittest.TestCase):
+    def test_fixture_ignored_transitive_keys_do_not_expand_conditional_powerset(
+        self,
+    ) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema(
+                "type User { id: ID! title: String! } type Query { user: User! }"
+            ),
+            "ignored-keys",
+        )
+        children = tuple(
+            ModuleSnapshot(
+                "p",
+                f"child{number}",
+                f"file:///child{number}.py",
+                1,
+                "from graphql_desk import gql\n"
+                f"c{number}=gql('fragment Child{number} on User {{ "
+                f"... @include(if:true) {{ ignored_{number}:title }} }}')",
+            )
+            for number in range(20)
+        )
+        aggregate = ModuleSnapshot(
+            "p",
+            "aggregate",
+            "file:///aggregate.py",
+            1,
+            "from graphql_desk import gql\n"
+            + "".join(f"from child{n} import c{n}\n" for n in range(20))
+            + "aggregate=gql('fragment Aggregate on User { "
+            + " ".join(f"...Child{n}" for n in range(20))
+            + " }',["
+            + ",".join(f"c{n}" for n in range(20))
+            + "])",
+        )
+        query = ModuleSnapshot(
+            "p",
+            "query",
+            "file:///query.py",
+            1,
+            "from graphql_desk import gql\nfrom aggregate import aggregate\n"
+            'q=gql("{ user { id ...Aggregate } }",[aggregate])',
+        )
+        index = index_fragments(
+            resolve_project((*children, aggregate, query)),
+            schemas={("p", None): context},
+        )
+        self.assertEqual(index.diagnostics, ())
+        document = next(d for d in index.documents if d.call.binding == "q")
+        baseline = render_indexed_operation_types(
+            context, document, name="Read", fragment_index=index
+        )
+        projected = render_indexed_operation_types(
+            context, document, name="Read", fragment_index=index, fixture_input=True
+        )
+        self.assertNotIn("FixtureInput", baseline)
+        for number in range(20):
+            self.assertIn(
+                f"'ignored_{number}': NotRequired[__graphql_desk_ReadOnly[object]]",
+                projected,
+            )
+
+    def test_fixture_projection_reuses_reader_facts_and_keeps_direct_constraints(
+        self,
+    ) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema(
+                "type User { id: ID! title: String! } type Query { user: User! }"
+            ),
+            "fixture",
+        )
+        modules = (
+            ModuleSnapshot(
+                "p",
+                "fragment",
+                "file:///fragment.py",
+                1,
+                "from graphql_desk import gql\n"
+                'f=gql("fragment F on User { id title }")',
+            ),
+            ModuleSnapshot(
+                "p",
+                "query",
+                "file:///query.py",
+                1,
+                "from graphql_desk import gql\nfrom fragment import f\n"
+                'q=gql("{ user { id ...F } }",[f])',
+            ),
+        )
+        index = index_fragments(
+            resolve_project(modules), schemas={("p", None): context}
+        )
+        self.assertEqual(index.diagnostics, ())
+        fragment = next(d for d in index.documents if d.call.binding == "f")
+        document = next(d for d in index.documents if d.call.binding == "q")
+        original = render_indexed_operation_types(
+            context, document, name="Read", fragment_index=index
+        )
+        self.assertEqual(
+            original,
+            render_indexed_operation_types(
+                context,
+                document,
+                name="Read",
+                fragment_index=index,
+                fixture_input=False,
+            ),
+        )
+        projected = render_indexed_operation_types(
+            context, document, name="Read", fragment_index=index, fixture_input=True
+        )
+        self.assertNotIn("FixtureInput", original)
+        self.assertIn("ReadResult_userFixtureInput", projected)
+        self.assertIn("'id': __graphql_desk_ReadOnly['ID']", projected)
+        self.assertIn(
+            "'title': NotRequired[__graphql_desk_ReadOnly[object]]", projected
+        )
+        self.assertNotIn(
+            "'id': NotRequired[__graphql_desk_ReadOnly[object]]", projected
+        )
+        reader = render_indexed_fragment_reader_types(
+            context, fragment, name="Payload", fragment_index=index
+        )
+        combined = render_indexed_fragment_reader_types(
+            context, fragment, name="Payload", fragment_index=index, fixture_input=True
+        )
+        self.assertEqual(reader.branches, combined.branches)
+        self.assertEqual(reader.input_name, combined.input_name)
+        self.assertIn("PayloadResultFixtureInput", combined.text)
+
     def test_fragment_reader_projections_and_branch_facts(self) -> None:
         context = SchemaContext(
             "main",

@@ -58,3 +58,28 @@ passthrough is not yet exposed by these typed Python helpers. Required condition
 empty branches remain absent rather than inventing selected fields. These limits,
 mask/result helpers and the full parity matrix keep the broad gate open. Mutable
 output aliasing intentionally follows the pinned runtime identity behavior.
+
+`unsafe_read_result(document, fixture)` is exported from the package root and
+`graphql_desk.testing` as the same identity function. Generated documents carry a
+`FixtureDocument[Result, Variables, FixtureInput]` view. Each valid source binding
+exports `<Binding>FixtureInput` and `unsafe_read_<binding>_result`; the bound helper
+provides literal context, while the generic helper accepts typed fixture variables.
+All return the original data as the whole document result, without runtime checks.
+
+Fixture inputs recursively check directly selected fields using output scalar
+types, preserve object/list/null/absent-key structure and deliberately discard
+fragment-marker requirements. Known fragment-owned keys beside direct fields are
+optional unchecked values; shared keys keep their direct-field constraints.
+Marker-only objects accept `Mapping[str, object]`. Read-only inputs accept wider
+typed fixtures, while result views and runtime objects remain mutable.
+
+Pinned upstream behavior widens default enum and typename input literals to
+strings; output aliases retain the original enum/tag unions. The unsafe helper
+can therefore accept wrong masked values or labels and still return the whole
+result type. Generic root dictionary literals have checker context limits: use
+typed fixture aliases or generated bound helpers. Unknown extra mixed-node literal
+keys remain unsupported; wider typed fixtures can retain extra data. The
+JSON-object boundary is narrower than upstream's non-null `{}`
+primitive/array acceptance. Python omission represents upstream optional-key
+`undefined`, without introducing a JSON sentinel. Complete reader precision,
+arbitrary-fragment masking and registry-aware `read_result` remain open.

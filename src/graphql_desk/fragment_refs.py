@@ -52,6 +52,12 @@ class ReadableFragmentDocument(
     """Annotation-only fragment view with a separate readonly input shape."""
 
 
+class FixtureDocument(
+    TypedDocument[_Result, _Variables], Generic[_Result, _Variables, _ReadInput]
+):
+    """Annotation-only document view with its unchecked-fragment fixture input."""
+
+
 def fragment_identity_key(owner: IndexedDocument, definition: DefinitionFact) -> str:
     """Return an opaque key for a local fragment and its complete snapshot closure.
 

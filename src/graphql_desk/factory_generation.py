@@ -28,6 +28,7 @@ from .source_graph import (
     resolve_type_symbols,
 )
 from .source_maps import build_source_map
+from .testing import render_unsafe_result_helper
 
 
 @dataclass(frozen=True)
@@ -452,6 +453,7 @@ def _generate_factory_artifacts(
                         client_directives=client_directives,
                         disable_masking=disable_masking,
                         fragment_index=index,
+                        fixture_input=True,
                     )
                     helpers = render_fragment_helpers(
                         reader, name=name, identity_name=name + "Identity"
@@ -498,6 +500,15 @@ def _generate_factory_artifacts(
                         client_directives=client_directives,
                         disable_masking=disable_masking,
                         fragment_index=index,
+                        fixture_input=True,
+                    )
+                fixture_name = name + "ResultFixtureInput"
+                unsafe_helper = render_unsafe_result_helper(
+                    name=name, input_name=fixture_name, output_name=name + "Result"
+                )
+                if unsafe_helper.function_name in context.schema.type_map:
+                    raise ValueError(
+                        "Schema aliases collide with fixture helper declarations"
                     )
                 if primary is not None:
                     key = fragment_identity_key(document, primary)
@@ -511,28 +522,38 @@ def _generate_factory_artifacts(
                 runtime = carrier(document)
                 ast_text = render_document_ast_types(runtime.ast, name="Exact")
                 packages(path + ".py")
-                put(path + ".py", text + (helpers.runtime if helpers else ""))
+                put(
+                    path + ".py",
+                    text + (helpers.runtime if helpers else "") + unsafe_helper.runtime,
+                )
                 put(
                     path + "_ast.py",
                     '"""Literal AST views exist only in the matching stub."""\n',
                 )
                 put(path + "_ast.pyi", ast_text)
+                fixture_base = (
+                    f"__graphql_desk_FixtureDocument[{name}Result, "
+                    f"{name}Variables, {fixture_name}]"
+                )
                 base_type = (
                     f"__graphql_desk_FragmentDocument[{name}Identity, "
-                    f"{name}Result, {name}Variables, {name}ResultInput]"
+                    f"{name}Result, {name}Variables, {name}ResultInput], {fixture_base}"
                     if primary is not None
-                    else f"__graphql_desk_TypedDocument[{name}Result, {name}Variables]"
+                    else fixture_base
                 )
                 superclass_import = (
                     "from graphql_desk.fragment_refs import "
+                    "FixtureDocument as __graphql_desk_FixtureDocument\n"
+                ) + (
+                    "from graphql_desk.fragment_refs import "
                     "ReadableFragmentDocument as __graphql_desk_FragmentDocument\n"
                     if primary is not None
-                    else "from graphql_desk import "
-                    "TypedDocument as __graphql_desk_TypedDocument\n"
+                    else ""
                 )
                 stub = (
                     text
                     + (helpers.stub if helpers else "")
+                    + unsafe_helper.stub
                     + "\n"
                     + superclass_import
                     + (
@@ -551,6 +572,20 @@ def _generate_factory_artifacts(
                         f"{helpers.reader_name}: ...\n"
                     )
                 put(path + ".pyi", stub)
+                if call.binding is not None:
+                    exports.extend(
+                        (
+                            _SourceExport(
+                                identity, module, fixture_name, label + "FixtureInput"
+                            ),
+                            _SourceExport(
+                                identity,
+                                module,
+                                unsafe_helper.function_name,
+                                "unsafe_read_" + call.binding + "_result",
+                            ),
+                        )
+                    )
                 if helpers is not None and call.binding is not None:
                     exports.append(
                         _SourceExport(

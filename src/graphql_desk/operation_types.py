@@ -146,6 +146,7 @@ def _render_operation_types(
     fragment_keys: dict[str, str] | None = None,
     selected_fragment: str | None = None,
     reader_branches: list[FragmentReaderBranch] | None = None,
+    fixture_input: bool = False,
 ) -> str:
     """Render validated operation declarations, rejecting unsupported semantics.
 
@@ -192,7 +193,11 @@ def _render_operation_types(
             alias = f"__graphql_desk_fragment_identity_{index}"
             identities[fragment_name] = alias
             output += f"{alias} = __graphql_desk_FragmentIdentity[Literal[{key!r}]]\n"
-    fragment_choices: dict[tuple[str, str], list[list[_Field]]] = {}
+    fragment_choices: dict[tuple[str, str, bool], list[list[_Field]]] = {}
+    fragments_by_identity = {
+        identity: fragments[fragment_name]
+        for fragment_name, identity in identities.items()
+    }
     operations = [
         definition
         for definition in document.definitions
@@ -249,6 +254,7 @@ def _render_operation_types(
     needs_capabilities = False
     needs_reader_sequence = False
     needs_reader_readonly = False
+    needs_fixture_mapping = False
     conditional_alternatives = 0
 
     def possible(parent: GraphQLCompositeType) -> tuple[GraphQLObjectType, ...]:
@@ -282,6 +288,8 @@ def _render_operation_types(
     def collect(
         concrete: GraphQLObjectType,
         nodes: list[tuple[GraphQLCompositeType, SelectionNode]],
+        *,
+        mask_spreads: bool = True,
     ) -> list[list[_Field]]:
         alternatives: list[list[_Field]] = [[]]
         for scope, node in nodes:
@@ -308,7 +316,7 @@ def _render_operation_types(
                     (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType),
                 )
                 cache_key = (
-                    (node.name.value, concrete.name)
+                    (node.name.value, concrete.name, mask_spreads)
                     if isinstance(node, FragmentSpreadNode)
                     else None
                 )
@@ -316,6 +324,7 @@ def _render_operation_types(
                     additions: list[list[_Field]] = [[]]
                 elif (
                     isinstance(node, FragmentSpreadNode)
+                    and mask_spreads
                     and not disable_masking
                     and fragment_keys is not None
                     and "_unmask" not in _directives(definition)
@@ -334,10 +343,15 @@ def _render_operation_types(
                             (condition, child)
                             for child in definition.selection_set.selections
                         ],
+                        mask_spreads=mask_spreads,
                     )
                     if cache_key is not None:
                         fragment_choices[cache_key] = additions
-                if (_directives(node) | _directives(definition)) & _CONDITIONAL:
+                # Ignored fixture values need union keys, not presence alternatives.
+                if (
+                    mask_spreads
+                    and (_directives(node) | _directives(definition)) & _CONDITIONAL
+                ):
                     additions = bounded([[], *additions])
             alternatives = bounded(
                 [*previous, *addition]
@@ -404,12 +418,14 @@ def _render_operation_types(
     ) -> None:
         nonlocal variant_index, needs_never, conditional_alternatives
         nonlocal needs_capabilities, needs_reader_sequence, needs_reader_readonly
+        nonlocal needs_fixture_mapping
         abstract = any(not isinstance(parent, GraphQLObjectType) for parent in parents)
         candidates = set(possible(parents[0]))
         for parent in parents[1:]:
             candidates.intersection_update(possible(parent))
         branches: list[str] = []
         reader_inputs: list[str] = []
+        fixture_inputs: list[str] = []
         choices: list[tuple[GraphQLObjectType, list[list[_Field]]]] = []
         correlated = False
         count = 0
@@ -457,6 +473,7 @@ def _render_operation_types(
                 fields: list[tuple[str, str]] = []
                 input_fields: list[tuple[str, str]] = []
                 narrow_fields: list[tuple[str, str]] = []
+                fixture_fields: list[tuple[str, str]] = []
                 typename: str | None = None
                 typename_required = False
                 required = bool(capabilities)
@@ -491,6 +508,10 @@ def _render_operation_types(
                         ("__typename", f"__graphql_desk_ReadOnly[{literal!r}]")
                     )
                     typename = concrete.name
+                    if fixture_input:
+                        fixture_fields.append(
+                            ("__typename", "NotRequired[__graphql_desk_ReadOnly[str]]")
+                        )
                 for key, group in sorted(groups.items()):
                     scope, node, _ = group[0]
                     optional = all(
@@ -529,6 +550,10 @@ def _render_operation_types(
                         if key == "__typename":
                             typename = concrete.name
                             typename_required = not optional
+                        if fixture_input:
+                            fixture_fields.append(
+                                (key, annotation("str", readonly=True))
+                            )
                         continue
                     assert not isinstance(scope, GraphQLUnionType)
                     field_type = parse_type(str(_field_type(schema, scope, node)))
@@ -572,9 +597,16 @@ def _render_operation_types(
                         )
                         leaf = child_name
                         input_leaf = child_name + "Input"
+                        fixture_leaf = child_name + "FixtureInput"
                     elif isinstance(named, (GraphQLScalarType, GraphQLEnumType)):
                         leaf = outputs.get(named.name, named.name)
                         input_leaf = leaf
+                        fixture_leaf = (
+                            "str"
+                            if isinstance(named, GraphQLEnumType)
+                            and named.name not in dict(enums)
+                            else leaf
+                        )
                     else:
                         raise ValueError(f"Unsupported output type: {named.name}")
                     outer = (
@@ -592,6 +624,21 @@ def _render_operation_types(
                     input_field = (key, annotation(input_value, readonly=True))
                     input_fields.append(input_field)
                     narrow_fields.append(input_field)
+                    if fixture_input:
+                        fixture_fields.append(
+                            (
+                                key,
+                                annotation(
+                                    _output_type(
+                                        outer,
+                                        fixture_leaf,
+                                        nullable=nullable,
+                                        readonly=True,
+                                    ),
+                                    readonly=True,
+                                ),
+                            )
+                        )
                 declare(branch, fields, closed=closed or correlated)
                 if reader_branches is not None:
                     needs_reader_readonly = needs_reader_readonly or bool(input_fields)
@@ -618,6 +665,56 @@ def _render_operation_types(
                                 not required,
                             )
                         )
+                if fixture_input:
+                    fixture_name = branch + "FixtureInput"
+                    fixture_inputs.append(fixture_name)
+                    if fixture_fields:
+                        # Masked-owned values are intentionally unchecked; direct
+                        # selections keep their stronger constraints on shared keys.
+                        ignored: set[str] = set()
+                        for capability in capabilities:
+                            definition = fragments_by_identity[capability]
+                            condition = schema.get_type(
+                                definition.type_condition.name.value
+                            )
+                            assert isinstance(
+                                condition,
+                                (
+                                    GraphQLObjectType,
+                                    GraphQLInterfaceType,
+                                    GraphQLUnionType,
+                                ),
+                            )
+                            for alternative in collect(
+                                concrete,
+                                [
+                                    (condition, child)
+                                    for child in definition.selection_set.selections
+                                ],
+                                mask_spreads=False,
+                            ):
+                                ignored.update(
+                                    node.alias.value if node.alias else node.name.value
+                                    for _, node, _ in alternative
+                                )
+                        checked = {key for key, _ in fixture_fields}
+                        fixture_fields.extend(
+                            (key, "NotRequired[__graphql_desk_ReadOnly[object]]")
+                            for key in sorted(ignored - checked)
+                        )
+                        needs_reader_readonly = True
+                        declare(fixture_name, fixture_fields)
+                    else:
+                        if fixture_name in reserved:
+                            raise ValueError(
+                                "Colliding generated declaration name: "
+                                f"{fixture_name!r}"
+                            )
+                        reserved.add(fixture_name)
+                        needs_fixture_mapping = True
+                        declarations.append(
+                            f"{fixture_name} = __graphql_desk_Mapping[str, object]"
+                        )
         if branches != [class_name]:
             if class_name in reserved:
                 raise ValueError(
@@ -640,6 +737,18 @@ def _render_operation_types(
                 input_alias
                 + " = "
                 + (" | ".join(reader_inputs) or "__graphql_desk_Never")
+            )
+        if fixture_input and fixture_inputs != [class_name + "FixtureInput"]:
+            fixture_alias = class_name + "FixtureInput"
+            if fixture_alias in reserved:
+                raise ValueError(
+                    f"Colliding generated declaration name: {fixture_alias!r}"
+                )
+            reserved.add(fixture_alias)
+            declarations.append(
+                fixture_alias
+                + " = "
+                + (" | ".join(fixture_inputs) or "__graphql_desk_Never")
             )
 
     root: GraphQLCompositeType
@@ -675,7 +784,7 @@ def _render_operation_types(
                 [(parent, node) for node in definition.selection_set.selections],
                 f"{name}Fragment_{fragment_name}",
             )
-    if reader_branches is not None:
+    if reader_branches is not None or fixture_input:
         if needs_reader_sequence:
             output += (
                 "\nfrom collections.abc import Sequence as __graphql_desk_Sequence\n"
@@ -684,6 +793,8 @@ def _render_operation_types(
             output += (
                 "from typing_extensions import ReadOnly as __graphql_desk_ReadOnly\n"
             )
+    if needs_fixture_mapping:
+        output += "from collections.abc import Mapping as __graphql_desk_Mapping\n"
     if needs_capabilities:
         output += (
             "\nfrom collections.abc import Callable as __graphql_desk_Callable\n"
@@ -767,6 +878,7 @@ def render_indexed_operation_types(
     client_directives: tuple[str, ...] = (),
     disable_masking: bool = False,
     fragment_index: FragmentIndex | None = None,
+    fixture_input: bool = False,
 ) -> str:
     """Render trusted index facts with their selected operation and context.
 
@@ -794,6 +906,7 @@ def render_indexed_operation_types(
         client_directives=client_directives,
         disable_masking=disable_masking,
         fragment_keys=keys,
+        fixture_input=fixture_input,
     )
 
 
@@ -850,6 +963,7 @@ def render_indexed_fragment_reader_types(
     client_directives: tuple[str, ...] = (),
     disable_masking: bool = False,
     fragment_index: FragmentIndex | None = None,
+    fixture_input: bool = False,
 ) -> FragmentReaderTypes:
     """Render mutable fragment results and readonly reader input projections."""
     keys = _indexed_fragment_keys(context, document, fragment_index, disable_masking)
@@ -877,6 +991,7 @@ def render_indexed_fragment_reader_types(
         fragment_keys=keys,
         selected_fragment=primary.name,
         reader_branches=branches,
+        fixture_input=fixture_input,
     )
     return FragmentReaderTypes(
         text, name + "ResultInput", name + "Result", tuple(branches)
