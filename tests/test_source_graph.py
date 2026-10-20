@@ -1,10 +1,13 @@
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
+import graphql_desk.source_graph as source_graph
 from graphql_desk.source import extract_calls
 from graphql_desk.source_graph import (
     DocumentIdentity,
     FactoryBinding,
+    IncrementalResolver,
     ModuleSnapshot,
     ProjectBindings,
     resolve_project,
@@ -855,3 +858,214 @@ document=gql('{ otherUnknownField }', [operation])
         result = resolve_project((consumer, fragment))
         self.assertEqual(result.calls, ())
         self.assertTrue(result.diagnostics)
+
+
+class IncrementalResolverTests(unittest.TestCase):
+    def test_parse_and_project_reuse_with_exact_input_identity(self) -> None:
+        resolver = IncrementalResolver()
+        first = module("main", 'from graphql_desk import gql\ndoc = gql("{ id }")')
+        other = replace(first, project="other", uri="file:///other.py")
+        inputs = (first, other)
+        expected = resolve_project(inputs)
+        with (
+            patch.object(
+                source_graph, "_parse", wraps=getattr(source_graph, "_parse")
+            ) as parse,
+            patch.object(
+                source_graph, "_resolve", wraps=getattr(source_graph, "_resolve")
+            ) as resolve,
+        ):
+            self.assertEqual(resolver.resolve(inputs), expected)
+            self.assertEqual((parse.call_count, resolve.call_count), (2, 2))
+            self.assertEqual(resolver.resolve(inputs), expected)
+            self.assertEqual((parse.call_count, resolve.call_count), (2, 2))
+            changed = replace(first, source=first.source.replace("id", "name"))
+            result = resolver.resolve((changed, other))
+            self.assertEqual((parse.call_count, resolve.call_count), (3, 3))
+            self.assertEqual(result.calls[0].source, "{ name }")
+            # Older inputs are authoritative too; chronology belongs to the caller.
+            self.assertEqual(resolver.resolve(inputs), expected)
+            self.assertEqual((parse.call_count, resolve.call_count), (4, 4))
+            resolver.clear()
+            self.assertEqual(resolver.resolve(inputs), expected)
+            self.assertEqual((parse.call_count, resolve.call_count), (6, 6))
+
+    def test_unchanged_files_reparse_never_but_recompute_in_changed_project(
+        self,
+    ) -> None:
+        resolver = IncrementalResolver()
+        constants = module("constants", 'TEXT = "{ id }"')
+        consumer = module(
+            "consumer",
+            "from constants import TEXT\nfrom graphql_desk import gql\ndoc = gql(TEXT)",
+        )
+        resolver.resolve((constants, consumer))
+        with (
+            patch.object(
+                source_graph, "_parse", wraps=getattr(source_graph, "_parse")
+            ) as parse,
+            patch.object(
+                source_graph, "_resolve", wraps=getattr(source_graph, "_resolve")
+            ) as resolve,
+        ):
+            changed = replace(constants, source='TEXT = "{ name }"')
+            result = resolver.resolve((changed, consumer))
+            self.assertEqual(parse.call_count, 1)
+            self.assertEqual(resolve.call_args.args[0], (changed, consumer))
+            self.assertEqual(result, resolve_project((changed, consumer)))
+
+    def test_binding_changes_recompute_without_parsing(self) -> None:
+        resolver = IncrementalResolver()
+        consumer = module(
+            "main", 'from generated import graphql\ndoc = graphql("{ id }")'
+        )
+        first = ProjectBindings(
+            "app",
+            ("one", "two"),
+            factories=(FactoryBinding("generated", "graphql", "one"),),
+        )
+        second = replace(
+            first, factories=(FactoryBinding("generated", "graphql", "two"),)
+        )
+        resolver.resolve((consumer,), bindings=(first,))
+        with (
+            patch.object(
+                source_graph, "_parse", wraps=getattr(source_graph, "_parse")
+            ) as parse,
+            patch.object(
+                source_graph, "_resolve", wraps=getattr(source_graph, "_resolve")
+            ) as resolve,
+        ):
+            result = resolver.resolve((consumer,), bindings=(second,))
+            self.assertEqual((parse.call_count, resolve.call_count), (0, 1))
+            self.assertEqual(result.calls[0].schema_name, "two")
+        self.assertEqual(result, resolve_project((consumer,), bindings=(second,)))
+
+    def test_negative_lookups_mutation_failures_and_reexports_recover(self) -> None:
+        resolver = IncrementalResolver()
+        consumer = module(
+            "consumer", "from bridge import query, TEXT\ndoc = query(TEXT)"
+        )
+        bridge = module(
+            "bridge", 'from graphql_desk import gql as query\nTEXT = "{ id }"'
+        )
+        mutation = module(
+            "mutation", "import graphql_desk as desk\ndesk.gql = object()"
+        )
+        invalid = replace(bridge, source="def (")
+        replacement = replace(
+            bridge, source='from graphql_desk import gql as query\nTEXT = "{ name }"'
+        )
+        shadow = module("graphql_desk", "gql = object()")
+        for inputs in (
+            (consumer,),
+            (consumer, bridge),
+            (consumer, bridge, mutation),
+            (consumer, bridge),
+            (consumer, invalid),
+            (consumer, replacement),
+            (consumer, replacement, shadow),
+            (consumer, replacement),
+            (),
+            (consumer, bridge),
+        ):
+            with self.subTest(inputs=inputs):
+                self.assertEqual(resolver.resolve(inputs), resolve_project(inputs))
+
+    def test_ordering_versions_packages_and_failed_parse_reuse(self) -> None:
+        resolver = IncrementalResolver()
+        good = module("main", 'from graphql_desk import gql\na = gql("{ id }")')
+        dynamic = module("dynamic", "from graphql_desk import gql\na = gql(unknown)")
+        invalid = module("broken", "def (")
+        other = replace(good, project="other", uri="file:///other.py")
+        other_bad = replace(invalid, project="other", uri="file:///other-bad.py")
+        initial = (dynamic, other, invalid, good, other_bad)
+        for inputs in (
+            initial,
+            tuple(reversed(initial)),
+            (replace(good, version=2), other),
+            (replace(good, uri="file:///new.py", is_package=True), other),
+            initial,
+        ):
+            self.assertEqual(resolver.resolve(inputs), resolve_project(inputs))
+        with patch.object(
+            source_graph, "_parse", wraps=getattr(source_graph, "_parse")
+        ) as parse:
+            self.assertEqual(resolver.resolve(initial), resolve_project(initial))
+            # The cold comparison parses; the cached request itself does not.
+            self.assertEqual(parse.call_count, len(initial))
+
+    def test_invalid_request_does_not_replace_cache(self) -> None:
+        resolver = IncrementalResolver()
+        item = module("main", 'from graphql_desk import gql\na = gql("{ id }")')
+        expected = resolver.resolve((item,))
+        for inputs, bindings in (
+            ((item, item), ()),
+            ((replace(item, module="bad-name"),), ()),
+            ((item,), (ProjectBindings("unused", ()),)),
+            ((item,), (ProjectBindings("unused", ("one",)),) * 2),
+        ):
+            with self.subTest(inputs=inputs, bindings=bindings):
+                with self.assertRaises(ValueError) as cold:
+                    resolve_project(inputs, bindings=bindings)
+                with self.assertRaisesRegex(ValueError, str(cold.exception)):
+                    resolver.resolve(inputs, bindings=bindings)
+        with (
+            patch.object(
+                source_graph, "_parse", wraps=getattr(source_graph, "_parse")
+            ) as parse,
+            patch.object(
+                source_graph, "_resolve", wraps=getattr(source_graph, "_resolve")
+            ) as resolve,
+        ):
+            self.assertEqual(resolver.resolve((item,)), expected)
+            self.assertEqual((parse.call_count, resolve.call_count), (0, 0))
+
+    def test_failed_dependency_traversal_recovers_without_mutable_state_leaks(
+        self,
+    ) -> None:
+        resolver = IncrementalResolver()
+        fragment = module(
+            "fragment",
+            'from graphql_desk import gql\nf=gql("fragment F on User { id }")',
+        )
+        broken = replace(
+            fragment,
+            source=fragment.source + "\ndeep=gql(" + "+".join(['"x"'] * 550) + ")",
+        )
+        consumer = module(
+            "main",
+            "from graphql_desk import gql\nfrom fragment import f\n"
+            'doc=gql("{ user { ...F } }", [f])',
+        )
+        for inputs in (
+            (consumer, fragment),
+            (consumer, broken),
+            (consumer, broken),
+            (consumer, fragment),
+        ):
+            self.assertEqual(resolver.resolve(inputs), resolve_project(inputs))
+
+    def test_failed_update_is_atomic_and_removed_parses_are_not_retained(self) -> None:
+        resolver = IncrementalResolver()
+        original = module("main", 'from graphql_desk import gql\ndoc=gql("{ id }")')
+        changed = replace(original, source=original.source.replace("id", "name"))
+        expected = resolver.resolve((original,))
+        with patch.object(
+            source_graph, "_resolve", side_effect=RuntimeError("interrupted")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                resolver.resolve((changed,))
+        with (
+            patch.object(
+                source_graph, "_parse", wraps=getattr(source_graph, "_parse")
+            ) as parse,
+            patch.object(
+                source_graph, "_resolve", wraps=getattr(source_graph, "_resolve")
+            ) as resolve,
+        ):
+            self.assertEqual(resolver.resolve((original,)), expected)
+            self.assertEqual((parse.call_count, resolve.call_count), (0, 0))
+            resolver.resolve(())
+            self.assertEqual(resolver.resolve((original,)), expected)
+            self.assertEqual((parse.call_count, resolve.call_count), (1, 1))
