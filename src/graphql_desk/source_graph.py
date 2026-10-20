@@ -187,6 +187,7 @@ class _Module:
             str, list[tuple[tuple[int, int], ast.expr | tuple[str, str] | _Value]]
         ] = {}
         self.types: dict[str, ast.ClassDef] = {}
+        self.annotated_types: dict[str, ast.AnnAssign] = {}
         self.blocked: set[str] = set()
         self.star = False
         self.call_bindings: dict[int, str] = {}
@@ -233,6 +234,7 @@ class _Module:
                 ):
                     value: ast.expr | _Value = statement.value
                     if type_symbols and isinstance(statement, ast.AnnAssign):
+                        self.annotated_types[targets[0].id] = statement
                         value = _Value("unsupported", targets[0].id)
                     self.add(targets[0].id, statement, value)
                     if isinstance(statement.value, ast.Call):
@@ -722,7 +724,36 @@ class _Graph:
             try:
                 if isinstance(definition, _Value):
                     value = definition
-                    if self.type_symbols and value.kind == "type":
+                    if self.type_symbols and name in module.annotated_types:
+                        alias = module.annotated_types[name]
+                        marker = self.expression(
+                            module,
+                            alias.annotation,
+                            (alias.lineno, alias.col_offset),
+                            active,
+                        )
+                        if not (
+                            marker.kind == "external"
+                            and marker.text
+                            in {"typing.TypeAlias", "typing_extensions.TypeAlias"}
+                            and isinstance(alias.value, (ast.Name, ast.Attribute))
+                        ):
+                            raise _Unresolved(
+                                "Annotated type aliases require an external TypeAlias "
+                                "marker and a supported named target"
+                            )
+                        value = self.expression(
+                            module,
+                            alias.value,
+                            (alias.lineno, alias.col_offset),
+                            active,
+                        )
+                        if value.kind not in {"type", "external"}:
+                            raise _Unresolved(
+                                "Explicit type alias target is not a supported "
+                                "type declaration"
+                            )
+                    elif self.type_symbols and value.kind == "type":
                         declaration = module.types[name]
                         bases = [
                             self.expression(

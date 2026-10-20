@@ -59,8 +59,13 @@ local schema tokens still conservatively change on every acquisition.
 exports against captured Python snapshots without importing or evaluating project
 code. Immutable results distinguish supported captured class declarations,
 uncaptured external symbols, unsupported forms, missing exports and known non-types.
-Class aliases and package reexports reuse the existing source graph. Dependencies
-retain the entire captured project, including negative lookups.
+Class aliases and package reexports reuse the existing source graph. Simple explicit
+PEP613 aliases (`Alias: TypeAlias = ClassName`) also reuse those checks when the
+marker resolves to uncaptured `typing.TypeAlias` or `typing_extensions.TypeAlias`.
+Only named or qualified targets are supported; shadowed markers, ordinary variable
+annotations, string/parameterized/union targets, cycles and mutations remain
+unresolved. External targets stay unverified. Dependencies retain the entire
+captured project, including negative lookups.
 
 Decorators, unsupported class keywords/bases, richer annotated aliases and dynamic
 type factories remain unresolved. Recognized namespace escapes invalidate affected
