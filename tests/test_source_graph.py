@@ -658,6 +658,235 @@ class SourceGraphTests(unittest.TestCase):
                 "unresolved",
             )
 
+    def test_standard_class_decorators_preserve_identity_and_capabilities(self) -> None:
+        snapshots = (
+            module(
+                "decorators",
+                "from dataclasses import dataclass as dc\n"
+                "from typing import final as done\n"
+                "setter=dc.__setattr__",
+            ),
+            module(
+                "models",
+                "from typing import TypeAlias\n"
+                "from decorators import dc,done\n"
+                "import dataclasses as d\n"
+                "@dc\nclass Plain: value:int\n"
+                "@d.dataclass(frozen=True,slots=True)\n"
+                "class Frozen(object): value:int\n"
+                "@dc(frozen=False,slots=False)\nclass Mutable: value:int\n"
+                "@done\nclass Final: pass\nAlias:TypeAlias=Final\n"
+                "@done\n@dc(frozen=True,slots=True)\nclass Both: value:int\n"
+                "@dc(frozen=True,slots=True)\n@done\nclass Reverse: value:int\n"
+                "class Child(Plain): pass\nclass Bad(Final): pass",
+            ),
+            module("exports", "from models import Alias as Public,Plain as Data"),
+            module(
+                "consumer",
+                "from exports import Public,Data\nimport models\n"
+                "class Child(Data): pass\nclass Bad(Public): pass\n"
+                "class QualifiedBad(models.Final): pass",
+            ),
+        )
+        names = (
+            "models.Plain",
+            "models.Frozen",
+            "models.Mutable",
+            "models.Final",
+            "models.Both",
+            "models.Reverse",
+            "models.Child",
+            "exports.Public",
+            "consumer.Child",
+        )
+        results = resolve_type_symbols(names, modules=snapshots, project_id="app")
+        self.assertEqual([r.status for r in results], ["resolved"] * len(names))
+        self.assertEqual(
+            results,
+            resolve_type_symbols(
+                tuple(reversed(names)),
+                modules=tuple(reversed(snapshots)),
+                project_id="app",
+            ),
+        )
+        for name in ("models.Bad", "consumer.Bad", "consumer.QualifiedBad"):
+            self.assertEqual(
+                resolve_type_symbols((name,), modules=snapshots, project_id="app")[
+                    0
+                ].status,
+                "unresolved",
+            )
+        changed = (replace(snapshots[0], version=2), *snapshots[1:])
+        self.assertNotEqual(
+            results[0].dependencies,
+            resolve_type_symbols(names, modules=changed, project_id="app")[
+                0
+            ].dependencies,
+        )
+        for namespace, mutation in (("dataclasses", "dataclass"), ("typing", "final")):
+            name = "models.Plain" if namespace == "dataclasses" else "models.Final"
+            self.assertEqual(
+                resolve_type_symbols(
+                    (name,),
+                    modules=(
+                        *snapshots,
+                        module(
+                            "mutator", f"import {namespace}\n{namespace}.{mutation}=42"
+                        ),
+                    ),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        for mutation in (
+            "from dataclasses import dataclass as dc\ndc.__code__=unknown",
+            "from decorators import dc\nopaque(dc)",
+            "import typing\ntyping.final.__dict__.clear()",
+            "from dataclasses import dataclass as dc\n"
+            "dc.__setattr__('__code__',replacement.__code__)",
+            "from decorators import dc\nsetter=dc.__setattr__\n"
+            "setter('__code__',replacement.__code__)",
+            "import typing\ntyping.final.__delattr__('__code__')",
+            "from dataclasses import dataclass as dc\nopaque(dc.__setattr__)",
+            "from decorators import dc\nsetter=dc.__setattr__\nopaque(setter)",
+            "from decorators import setter\nopaque(setter)",
+            "from decorators import setter\nbox=[setter]\nopaque(box)",
+            "import typing\nopaque(typing.final.__delattr__)",
+            "from decorators import setter\nsetter('__code__',replacement.__code__)",
+        ):
+            name = "models.Final" if "typing" in mutation else "models.Plain"
+            self.assertEqual(
+                resolve_type_symbols(
+                    (name,),
+                    modules=(*snapshots, module("mutator", mutation)),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        isolated = (
+            *snapshots,
+            replace(module("dataclasses", "dataclass=42"), project="other"),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("models.Plain",), modules=isolated, project_id="app")[
+                0
+            ].status,
+            "resolved",
+        )
+
+    def test_standard_class_decorators_reject_untrusted_options_and_special_bases(
+        self,
+    ) -> None:
+        declarations = (
+            "@final()\nclass Bad: pass",
+            "@dataclass(42)\nclass Bad: pass",
+            "@dataclass(**{})\nclass Bad: pass",
+            "@dataclass(frozen=1)\nclass Bad: pass",
+            "flag=True\n@dataclass(frozen=flag)\nclass Bad: pass",
+            "@dataclass(init=False)\nclass Bad: pass",
+            "@dataclass(frozen=True,frozen=False)\nclass Bad: pass",
+            "@dataclass\n@dataclass\nclass Bad: pass",
+            "@final\n@final\nclass Bad: pass",
+            "def custom(cls): return cls\n@custom\nclass Bad: pass",
+            "from unknown import decorate\n@decorate\nclass Bad: pass",
+            "dataclass=42\n@dataclass\nclass Bad: pass",
+            "@dataclass\nclass Bad: pass\ndataclass=42",
+            "@final\nclass Bad: pass\nfinal=42",
+            "from typing_extensions import TypedDict\n"
+            "@final\n"
+            "class Bad(TypedDict): value:int",
+            "from typing_extensions import TypedDict\n"
+            "class Base(TypedDict): value:int\n"
+            "@dataclass\n"
+            "class Bad(Base): pass",
+            "from enum import Enum\n@final\nclass Bad(Enum): VALUE=1",
+            "from enum import Enum\n"
+            "class Base(Enum): pass\n"
+            "Alias=Base\n"
+            "@final\n"
+            "class Bad(Alias): pass",
+            "@dataclass\n"
+            "class Base: value:int\n"
+            "@dataclass(frozen=True)\n"
+            "class Bad(Base): pass",
+            "class Base: pass\n@dataclass\nclass Bad(Base): pass",
+        )
+        for declaration in declarations:
+            with self.subTest(declaration=declaration):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Bad",),
+                        modules=(
+                            module(
+                                "models",
+                                "from dataclasses import dataclass\n"
+                                "from typing import final\n" + declaration,
+                            ),
+                        ),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+        for namespace, decorator in (("dataclasses", "dataclass"), ("typing", "final")):
+            fake = (
+                module(namespace, f"def {decorator}(cls): return cls"),
+                module(
+                    "models",
+                    f"from {namespace} import {decorator}\n"
+                    f"@{decorator}\n"
+                    f"class Bad: pass",
+                ),
+            )
+            self.assertEqual(
+                resolve_type_symbols(("models.Bad",), modules=fake, project_id="app")[
+                    0
+                ].status,
+                "unresolved",
+            )
+        special = (
+            module(
+                "base",
+                "from enum import Enum\n"
+                "from typing import TypeAlias\n"
+                "from typing_extensions import TypedDict\n"
+                "class E(Enum): pass\n"
+                "Alias:TypeAlias=E\n"
+                "class D(TypedDict): value:int",
+            ),
+            module("exports", "from base import Alias as EnumBase,D as DictBase"),
+        )
+        self.assertEqual(
+            [
+                result.status
+                for result in resolve_type_symbols(
+                    ("exports.EnumBase", "exports.DictBase"),
+                    modules=special,
+                    project_id="app",
+                )
+            ],
+            ["resolved", "resolved"],
+        )
+        for base in ("EnumBase", "DictBase"):
+            for decorator in ("dataclass", "final"):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Bad",),
+                        modules=(
+                            *special,
+                            module(
+                                "models",
+                                "from dataclasses import dataclass\n"
+                                "from typing import final\n"
+                                + f"from exports import {base}\n"
+                                f"@{decorator}\n"
+                                f"class Bad({base}): pass",
+                            ),
+                        ),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+
     def test_standard_collection_spellings_share_trust_and_operand_rules(self) -> None:
         for spelling in (
             "set",
@@ -833,7 +1062,8 @@ class SourceGraphTests(unittest.TestCase):
                 "models",
                 "from typing import TypeAlias,Tuple as T\n"
                 "import typing as t\nimport keys,values\n"
-                "One:TypeAlias=tuple[keys.Key]\nPair:TypeAlias=T[keys.Key,values.Value]\n"
+                "One:TypeAlias=tuple[keys.Key]\n"
+                "Pair:TypeAlias=T[keys.Key,values.Value]\n"
                 "Three:TypeAlias=t.Tuple[str,keys.Key,values.Value]\n"
                 "Variable:TypeAlias=T[keys.Key,...]\nclass Child(Pair): pass\n"
                 "class Bad(Pair,total=False): pass",
@@ -1002,7 +1232,8 @@ class SourceGraphTests(unittest.TestCase):
                 "Modern:TypeAlias=abc.Mapping[str,base.Known]\n"
                 "Qualified:TypeAlias=b.dict[str,base.Known]\n"
                 "QualifiedView:TypeAlias=t.Mapping[str,base.Known]\n"
-                "D:TypeAlias=dict[str,base.Known]\nM:TypeAlias=Mapping[str,base.Known]\n"
+                "D:TypeAlias=dict[str,base.Known]\n"
+                "M:TypeAlias=Mapping[str,base.Known]\n"
                 "class Child(D): pass\nclass View(M): pass\n"
                 "class Bad(D,total=False): pass",
             ),
@@ -1188,7 +1419,8 @@ class SourceGraphTests(unittest.TestCase):
                 "models",
                 "from typing import TypeAlias,Literal as L\nimport typing as t\n"
                 "Text:TypeAlias=t.Literal['hello','world']\n"
-                "Values:TypeAlias=L[1,-2,True,False,None,b'hello']\nAlias:TypeAlias=Text\n"
+                "Values:TypeAlias=L[1,-2,True,False,None,b'hello']\n"
+                "Alias:TypeAlias=Text\n"
                 "from typing_extensions import Literal as LE\n"
                 "Extra:TypeAlias=LE['hello']",
             ),

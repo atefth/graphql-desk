@@ -977,6 +977,132 @@ if TYPE_CHECKING:
             )
             self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
 
+    def test_standard_decorated_mappings_check_factory_values_and_final_bases(
+        self,
+    ) -> None:
+        context = self.context()
+        for label, declaration, value in (
+            (
+                "plain",
+                "from dataclasses import dataclass\n@dataclass\nclass Text: value:int",
+                "Text(value=1)",
+            ),
+            (
+                "frozen",
+                "import dataclasses\n"
+                "@dataclasses.dataclass(frozen=True,slots=True)\n"
+                "class Text(object): value:int",
+                "Text(value=1)",
+            ),
+            (
+                "mutable",
+                "from dataclasses import dataclass\n"
+                "@dataclass(frozen=False,slots=False)\n"
+                "class Text: value:int",
+                "Text(value=1)",
+            ),
+            ("final", "from typing import final\n@final\nclass Text: pass", "Text()"),
+            (
+                "final_outer",
+                "from dataclasses import dataclass\n"
+                "from typing import final\n"
+                "@final\n"
+                "@dataclass(frozen=True,slots=True)\n"
+                "class Text: value:int",
+                "Text(value=1)",
+            ),
+            (
+                "final_inner",
+                "from dataclasses import dataclass\n"
+                "from typing import final\n"
+                "@dataclass(frozen=True,slots=True)\n"
+                "@final\n"
+                "class Text: value:int",
+                "Text(value=1)",
+            ),
+        ):
+            with self.subTest(label=label):
+                source = f"""from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from generated.main import graphql
+from generated.sources.main import QueryResult
+from exports import Text
+query=graphql('{{greeting}}')
+value={value}
+assert graphql.scalar('String',value) is value
+if TYPE_CHECKING:
+ result:QueryResult={{'greeting':value}}
+ assert_type(result['greeting'],Text)
+ bad=graphql.scalar('String',42) # error
+"""
+                if label.startswith("final"):
+                    source += " from local_types import Text as Direct\n"
+                    source += " class BadDirect(Direct): pass # error\n"
+                    source += " class BadReexport(Text): pass # error\n"
+                    source += "runtime_child=type('RuntimeChild',(Text,),{})\n"
+                    source += "assert issubclass(runtime_child,Text)\n"
+                else:
+                    declaration += "\nclass Direct(Text): pass"
+                    source += "class Reexported(Text): pass\n"
+                modules = (
+                    ModuleSnapshot("p", "main", "file:///main.py", 1, source),
+                    ModuleSnapshot(
+                        "p", "local_types", "file:///local_types.py", 1, declaration
+                    ),
+                    ModuleSnapshot(
+                        "p",
+                        "exports",
+                        "file:///exports.py",
+                        1,
+                        "from local_types import Text as Text",
+                    ),
+                )
+                resolved = resolve_project(
+                    modules,
+                    bindings=(
+                        ProjectBindings(
+                            "p",
+                            ("main",),
+                            factories=(
+                                FactoryBinding("generated.main", "graphql", "main"),
+                            ),
+                        ),
+                    ),
+                )
+                with patch(
+                    "importlib.import_module",
+                    side_effect=AssertionError("No project import"),
+                ):
+                    artifacts = generate_factory_artifacts(
+                        context,
+                        index_fragments(resolved, schemas={("p", "main"): context}),
+                        modules=modules,
+                        project_id="p",
+                        generated_package="generated",
+                        scalars=(
+                            ScalarMapping("String", "exports.Text", "exports.Text"),
+                        ),
+                    )
+                self.assertEqual(artifacts.diagnostics, ())
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.write(root, artifacts, modules)
+                    errors = {
+                        n
+                        for n, line in enumerate(source.splitlines(), 1)
+                        if "# error" in line
+                    }
+                    self.check(root, {"main.py": errors})
+                    runtime = subprocess.run(
+                        [sys.executable, "main.py"],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        runtime.returncode, 0, runtime.stdout + runtime.stderr
+                    )
+
     def test_standard_collection_aliases_check_original_values_and_class_bases(
         self,
     ) -> None:

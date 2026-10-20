@@ -102,8 +102,22 @@ constructors,
 cycles and mutations remain unresolved. Dependencies retain the entire captured
 project, including negative lookups.
 
-Decorators, unsupported class keywords/bases, richer annotated aliases and dynamic
-type factories remain unresolved. Recognized namespace escapes invalidate affected
+Captured ordinary classes may use trusted external `dataclasses.dataclass` and
+`typing.final`, including aliases/reexports and one of each in either order.
+Dataclass calls accept only literal boolean `frozen`/`slots` options, with no
+positional or unpacked arguments. Dataclass-decorated declarations require no
+bases or trusted `object`; inherited decoration remains unsupported because
+frozen and non-frozen combinations can fail at runtime. Ordinary undecorated
+subclasses of supported dataclasses retain existing base checks. Final classes
+remain valid mapping values but cannot establish class bases through aliases or
+reexports: both strict checkers reject the tested subclass although runtime permits
+it. Decorated TypedDict and enum classes remain unsupported, including inherited
+and reexported special bases. Supplied or mutated decorator namespaces, writes to
+decorator functions and recognized capability escapes cannot establish trust.
+No decorators execute during analysis.
+
+Other decorators, unsupported class keywords/bases, richer annotated aliases and
+dynamic type factories remain unresolved. Recognized namespace escapes invalidate affected
 facts; `sys.modules` reflection and captured `__builtins__` access or replacement
 conservatively prevent project type resolution. This type-only guard preserves
 ordinary document/parser facts and isolates other projects.
