@@ -10,6 +10,7 @@ const { buildSchema, introspectionFromSchema } = require("graphql");
 const { createAnalysisController } = require("../src/analysisController");
 const { createAnalysisWorker } = require("../src/analysisWorker");
 const { createLanguageFeatures } = require("../src/languageFeatures");
+const { createHighlighting } = require("../src/highlighting");
 const python = process.env.GRAPHQL_DESK_PYTHON ?? path.resolve(__dirname, "../../.venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
 
 function uri(value) {
@@ -92,6 +93,58 @@ test("real worker captures unsaved source/config/schema, shares concurrent provi
   assert.equal(await fs.readFile(path.join(root, "schema.graphql"), "utf8"), "type Query { title: String }");
   assert.equal(unsaved.isDirty, true);
   await assert.rejects(fs.stat(path.join(root, "new.py")), { code: "ENOENT" });
+});
+
+test("real configured factory capture highlights incomplete Python lexically and repairs without semantic promotion", async t => {
+  const fixture = await setup(t);
+  const { main } = fixture;
+  main.text = "# 😀\r\nfrom graphql_desk_generated.default import graphql as query\r\nq=query('''query Read { title";
+  main.version += 1; main.isDirty = true;
+  const controller = createAnalysisController(fixture.vscode); t.after(() => controller.dispose());
+  const service = createHighlighting(controller);
+  const snapshot = controller.snapshot(main);
+  const captured = await controller.analyze(snapshot); assert.ok(captured);
+  assert.equal(captured.response.calls.length, 0);
+  assert.ok(captured.response.diagnostics.some(item => item.code === "invalid-python"));
+  assert.ok(captured.request.bindings[0].factories.some(item => item.module === "graphql_desk_generated.default" && item.export === "graphql"));
+  const lexical = await service.highlight(snapshot);
+  assert.ok(lexical.some(item => main.text.slice(item.start, item.end) === "query"));
+  assert.ok(lexical.every(item => item.mode === "lexical"));
+  const features = createLanguageFeatures(controller);
+  assert.deepEqual(await features.complete(snapshot, main.text.length), []);
+  assert.equal(await features.hover(snapshot, main.text.length), null);
+  assert.deepEqual(await features.definition(snapshot, main.text.length), []);
+  assert.ok((await features.diagnostics(snapshot)).every(item => item.code === "graphql-desk.invalid-python"));
+  const foreign = structuredClone(captured);
+  foreign.request.bindings[0].project = "foreign";
+  assert.deepEqual(await createHighlighting({ ...controller, analyze: async () => foreign, isCurrent: async () => true }).highlight(snapshot), []);
+  const foreignDiagnostic = structuredClone(captured);
+  foreignDiagnostic.response.diagnostics[0].module.project = "foreign";
+  assert.deepEqual(await createHighlighting({ ...controller, analyze: async () => foreignDiagnostic, isCurrent: async () => true }).highlight(snapshot), []);
+  const ambiguous = structuredClone(captured);
+  ambiguous.request.modules.push({ ...ambiguous.request.modules[0], project: "foreign" });
+  assert.deepEqual(await createHighlighting({ ...controller, analyze: async () => ambiguous, isCurrent: async () => true }).highlight(snapshot), []);
+  assert.deepEqual(await createHighlighting({ ...controller, analyze: async () => captured }).highlight({ ...snapshot, version: snapshot.version + 1 }), []);
+  fixture.vscode.workspace.isTrusted = false;
+  assert.deepEqual(await service.highlight(snapshot), []);
+  fixture.vscode.workspace.isTrusted = true;
+  const config = fixture.document("pyproject.toml", '[tool.graphql-desk]\nschema="schema.graphql"\ngenerated_package="changed"\nschema_output="changed/default.pyi"\n');
+  config.isDirty = true;
+  assert.equal(await controller.isCurrent(captured, snapshot), false);
+  assert.deepEqual(await createHighlighting({ ...controller, analyze: async () => captured }).highlight(snapshot), []);
+  assert.deepEqual(await service.highlight(snapshot), [], "New config does not retain the old generated factory");
+  main.text = "from changed.default import graphql as query\nq=query('''query Read { title";
+  main.version += 1;
+  const changed = await service.highlight(controller.snapshot(main));
+  assert.ok(changed.length);
+  assert.ok(changed.every(item => item.mode === "lexical"));
+  main.text += " }''')"; main.version += 1;
+  const repaired = await service.highlight(controller.snapshot(main));
+  assert.ok(repaired.length);
+  assert.ok(repaired.every(item => item.mode === "resolved"));
+  assert.equal(await fs.readFile(path.join(fixture.root, "main.py"), "utf8"), 'raise RuntimeError("NO_IMPORT")\nfrom graphql_desk import gql\nq=gql("{title}")\n');
+  assert.equal(main.isDirty, true);
+  await assert.rejects(fs.stat(path.join(fixture.root, "changed")), { code: "ENOENT" });
 });
 
 test("workspace folder watchers follow additions and removals and refresh closed source/config changes", async t => {
