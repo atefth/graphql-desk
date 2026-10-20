@@ -479,7 +479,18 @@ class _Graph:
                     )
                 )
         for module in self.modules.values():
+            if type_symbols and (
+                "__builtins__" in module.bindings or "__builtins__" in module.blocked
+            ):
+                self.reflected_type_projects.add(module.snapshot.project)
             for node in ast.walk(module.tree):
+                if type_symbols and (
+                    (isinstance(node, ast.Name) and node.id == "__builtins__")
+                    or (isinstance(node, ast.Attribute) and node.attr == "__builtins__")
+                ):
+                    # shortcut: implicit builtins may be a dict/module or escape;
+                    # refine per-name availability only when that precision is needed.
+                    self.reflected_type_projects.add(module.snapshot.project)
                 if type_symbols and isinstance(node, (ast.Attribute, ast.Name)):
                     try:
                         registry = self.expression(
@@ -727,6 +738,8 @@ class _Graph:
             and name not in module.bindings
             and f"builtins.{name}" in _TYPE_BASES
         ):
+            if not probe and (module.snapshot.project, "builtins") in self.mutated:
+                raise _Unresolved("Builtin type depends on a mutated namespace")
             return _Value("type", f"builtins.{name}")
         definitions = module.bindings.get(name, [])
         if not definitions or (
@@ -756,14 +769,17 @@ class _Graph:
                             marker.kind == "external"
                             and marker.text
                             in {"typing.TypeAlias", "typing_extensions.TypeAlias"}
-                            and isinstance(alias.value, (ast.Name, ast.Attribute))
+                            and isinstance(
+                                alias.value, (ast.Name, ast.Attribute, ast.Subscript)
+                            )
                         ):
                             raise _Unresolved(
                                 "Annotated type aliases require an external TypeAlias "
-                                "marker and a supported named target"
+                                "marker and a supported target"
                             )
-                        value = self.expression(
+                        value = self.alias_target(
                             module,
+                            name,
                             alias.value,
                             (alias.lineno, alias.col_offset),
                             active,
@@ -881,6 +897,58 @@ class _Graph:
         if fallback is not None:
             return fallback
         raise _Unresolved(f"Binding {name!r} cannot be resolved")
+
+    def alias_target(
+        self,
+        module: _Module,
+        name: str,
+        node: ast.expr,
+        before: tuple[int, int],
+        active: set[tuple[str, str, str]],
+    ) -> _Value:
+        if not isinstance(node, ast.Subscript):
+            return self.expression(module, node, before, active)
+        if (
+            isinstance(node.value, ast.Name)
+            and node.value.id in {"list", "tuple"}
+            and node.value.id not in module.bindings
+            and node.value.id not in module.blocked
+            and not module.star
+        ):
+            constructor = self.export(module, "builtins", node.value.id, active)
+        else:
+            constructor = self.expression(module, node.value, before, active)
+        if constructor.kind != "external" or constructor.text not in {
+            "builtins.list",
+            "builtins.tuple",
+            "typing.Sequence",
+        }:
+            raise _Unresolved(
+                "Type alias subscriptions require a trusted supported constructor"
+            )
+        argument = node.slice
+        if constructor.text == "builtins.tuple":
+            if not (
+                isinstance(argument, ast.Tuple)
+                and len(argument.elts) == 2
+                and isinstance(argument.elts[1], ast.Constant)
+                and argument.elts[1].value is Ellipsis
+            ):
+                raise _Unresolved("Tuple aliases require one named type and ellipsis")
+            argument = argument.elts[0]
+        if not isinstance(argument, (ast.Name, ast.Attribute)):
+            raise _Unresolved("Container aliases require one supported named type")
+        element = self.expression(module, argument, before, active)
+        if element.kind not in {"type", "external"} or element.text in {
+            "typing.TypeAlias",
+            "typing_extensions.TypeAlias",
+        }:
+            raise _Unresolved("Container alias argument is not an established type")
+        return _Value(
+            "external" if element.kind == "external" else "type",
+            f"{module.snapshot.module}.{name}",
+            dependencies=constructor.dependencies | element.dependencies,
+        )
 
     def export(
         self,
@@ -1742,7 +1810,7 @@ def resolve_type_symbols(
             try:
                 if project_id in graph.reflected_type_projects:
                     raise _Unresolved(
-                        "Module registry reflection prevents static type resolution"
+                        "Namespace reflection prevents static type resolution"
                     )
                 value = graph.export(owner, imported, name, set())
                 target = value.text if value.kind in {"type", "external"} else None

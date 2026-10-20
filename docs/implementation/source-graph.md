@@ -62,14 +62,21 @@ uncaptured external symbols, unsupported forms, missing exports and known non-ty
 Class aliases and package reexports reuse the existing source graph. Simple explicit
 PEP613 aliases (`Alias: TypeAlias = ClassName`) also reuse those checks when the
 marker resolves to uncaptured `typing.TypeAlias` or `typing_extensions.TypeAlias`.
-Only named or qualified targets are supported; shadowed markers, ordinary marker
-value assignments, ordinary variable annotations, string/parameterized/union targets, cycles and mutations remain
-unresolved. External targets stay unverified. Dependencies retain the entire
-captured project, including negative lookups.
+Named or qualified targets and the bounded container forms `list[N]`,
+`tuple[N, ...]` and `typing.Sequence[N]` are supported, with one named or qualified
+type argument. Constructors must resolve to trusted external builtins or typing
+exports; shadowing and mutations invalidate that proof. External arguments stay
+unverified, and containers do not inherit TypedDict provenance from their element.
+Shadowed markers, ordinary marker value assignments, ordinary variable annotations,
+strings, nested subscriptions, fixed tuples, unions, custom generic constructors,
+cycles and mutations remain unresolved. Dependencies retain the entire captured
+project, including negative lookups.
 
 Decorators, unsupported class keywords/bases, richer annotated aliases and dynamic
 type factories remain unresolved. Recognized namespace escapes invalidate affected
-facts; `sys.modules` reflection conservatively prevents project type resolution.
+facts; `sys.modules` reflection and captured `__builtins__` access or replacement
+conservatively prevent project type resolution. This type-only guard preserves
+ordinary document/parser facts and isolates other projects.
 External symbols remain explicitly unverified. This establishes bounded symbol
 availability, not full Python type compatibility or guaranteed runtime imports.
 Factory mapping preflight consumes these facts before emitting artifacts; checker,

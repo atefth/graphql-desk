@@ -270,7 +270,7 @@ class SourceGraphTests(unittest.TestCase):
             "TypeAlias='typing.TypeAlias'\nAlias:TypeAlias=Plain",
             "from typing import TypeAlias\nTypeAlias=Plain\nAlias:TypeAlias=Plain",
             "from typing import TypeAlias\nAlias:TypeAlias='Plain'",
-            "from typing import TypeAlias\nAlias:TypeAlias=list[Plain]",
+            "from typing import TypeAlias\nAlias:TypeAlias=list[list[Plain]]",
             "from typing import TypeAlias\nAlias:TypeAlias=Plain|None",
             "from typing import TypeAlias\nAlias:TypeAlias=make()",
             "from typing import TypeAlias\nvalue=42\nAlias:TypeAlias=value",
@@ -411,6 +411,248 @@ class SourceGraphTests(unittest.TestCase):
                 ("models.Grandchild",), modules=mutated, project_id="app"
             )[0].status,
             "unresolved",
+        )
+
+    def test_explicit_container_aliases_keep_trusted_constructor_and_element_facts(
+        self,
+    ) -> None:
+        snapshots = (
+            module(
+                "base",
+                "from typing_extensions import TypedDict\n"
+                "class Known(TypedDict):\n value: str",
+            ),
+            module(
+                "models",
+                "from typing import TypeAlias,Sequence as Seq\n"
+                "from builtins import tuple as Tup\nfrom base import Known\n"
+                "Items:TypeAlias=list[Known]\nNames:TypeAlias=Tup[str,...]\n"
+                "View:TypeAlias=Seq[Known]\nclass Bad(Items,total=False): pass",
+            ),
+            module("exports", "from models import Items as Public"),
+        )
+        symbols = ("models.Items", "models.Names", "models.View", "exports.Public")
+        results = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
+        self.assertEqual([r.status for r in results], ["resolved"] * 4)
+        self.assertEqual(
+            results,
+            resolve_type_symbols(
+                tuple(reversed(symbols)),
+                modules=tuple(reversed(snapshots)),
+                project_id="app",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("models.Bad",), modules=snapshots, project_id="app")[
+                0
+            ].status,
+            "unresolved",
+        )
+        changed = (*snapshots[:1], replace(snapshots[1], version=2), snapshots[2])
+        self.assertNotEqual(
+            results[0].dependencies,
+            resolve_type_symbols(symbols, modules=changed, project_id="app")[
+                0
+            ].dependencies,
+        )
+        external = (
+            module(
+                "models",
+                "from typing import TypeAlias\nfrom unknown import Value\n"
+                "Alias:TypeAlias=list[Value]",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("models.Alias",), modules=external, project_id="app")[
+                0
+            ].status,
+            "external",
+        )
+        for mutation in (
+            "import builtins\nbuiltins.list=object",
+            "import base\nbase.Known=42",
+            "import typing\ntyping.Sequence=object",
+        ):
+            self.assertTrue(
+                all(
+                    r.status == "unresolved"
+                    for r in resolve_type_symbols(
+                        ("models.Items" if "builtins" in mutation else "models.View",),
+                        modules=(*snapshots, module("mutator", mutation)),
+                        project_id="app",
+                    )
+                )
+            )
+        builtin_argument = module(
+            "models",
+            "from typing import TypeAlias,Sequence\nAlias:TypeAlias=Sequence[str]",
+        )
+        for mutation in (
+            "import builtins\nbuiltins.str=42",
+            "import builtins\nbuiltins.__dict__.clear()",
+        ):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("models.Alias",),
+                    modules=(builtin_argument, module("mutator", mutation)),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        cycle = (
+            module(
+                "a",
+                "from typing import TypeAlias\nfrom b import B\nA:TypeAlias=list[B]",
+            ),
+            module(
+                "b",
+                "from typing import TypeAlias\nfrom a import A\n"
+                "B:TypeAlias=tuple[A,...]",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("a.A",), modules=cycle, project_id="app")[0].status,
+            "unresolved",
+        )
+        cases = (
+            "value=42\nAlias:TypeAlias=list[value]",
+            "Alias:TypeAlias=list[Missing]",
+            "Alias:TypeAlias=list[Alias]",
+            "class Box: pass\nAlias:TypeAlias=Box[str]",
+            "from unknown import Box\nAlias:TypeAlias=Box[str]",
+            "list=42\nAlias:TypeAlias=list[str]",
+            "Alias:TypeAlias=list[str]\nlist=other",
+            "Alias:TypeAlias=list[list[str]]",
+            "Alias:TypeAlias=tuple[str,int]",
+            "Alias:TypeAlias=list[str,int]",
+            "Alias:TypeAlias=list['str']",
+            "Alias:TypeAlias=list[TypeAlias]",
+            "from typing import Sequence\nAlias:TypeAlias=Sequence[str,int]",
+            "Alias:list[str]=list[str]",
+            "Alias=list[str]",
+        )
+        for declaration in cases:
+            with self.subTest(declaration=declaration):
+                captured = (
+                    module("models", "from typing import TypeAlias\n" + declaration),
+                )
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Alias",), modules=captured, project_id="app"
+                    )[0].status,
+                    "unresolved",
+                )
+        for constructor, syntax in (
+            ("builtins", "list[str]"),
+            ("typing", "Sequence[str]"),
+        ):
+            fake = (
+                module(constructor, "class " + syntax.split("[")[0] + ": pass"),
+                module(
+                    "models",
+                    f"from {constructor} import {syntax.split('[')[0]}\n"
+                    "from typing_extensions import TypeAlias\n"
+                    f"Alias:TypeAlias={syntax}",
+                ),
+            )
+            self.assertEqual(
+                resolve_type_symbols(("models.Alias",), modules=fake, project_id="app")[
+                    0
+                ].status,
+                "unresolved",
+            )
+
+    def test_known_builtin_mutation_invalidates_all_type_reference_spellings(
+        self,
+    ) -> None:
+        declaration = (
+            "from typing import TypeAlias,Sequence\n"
+            "import builtins as b\nfrom builtins import str as Text\n"
+            "Bare:TypeAlias=str\nQualified:TypeAlias=b.str\n"
+            "Imported:TypeAlias=Text\nItems:TypeAlias=Sequence[str]\n"
+            "class Plain(str): pass\nclass QualifiedBase(b.str): pass\n"
+            "class ImportedBase(Text): pass\n"
+            "from graphql_desk import gql,parse\nq=gql('{id}')\na=parse('{id}')"
+        )
+        main = module("models", declaration)
+        symbols = tuple(
+            "models." + name
+            for name in (
+                "Bare",
+                "Qualified",
+                "Imported",
+                "Items",
+                "Plain",
+                "QualifiedBase",
+                "ImportedBase",
+            )
+        )
+        for mutation in (
+            "import builtins\nbuiltins.str=42",
+            "import builtins as b\nsetattr(b,'str',42)",
+            "import builtins\nnamespace=builtins.__dict__\nmutate(namespace)",
+        ):
+            with self.subTest(mutation=mutation):
+                snapshots = (main, module("other", mutation))
+                self.assertEqual(
+                    [
+                        r.status
+                        for r in resolve_type_symbols(
+                            symbols, modules=snapshots, project_id="app"
+                        )
+                    ],
+                    ["unresolved"] * len(symbols),
+                )
+                self.assertEqual(resolve_project(snapshots), resolve_project((main,)))
+                self.assertEqual(
+                    resolve_parse_sources(snapshots), resolve_parse_sources((main,))
+                )
+                separate = (main, module("other", mutation, project="another"))
+                self.assertEqual(
+                    resolve_type_symbols(symbols, modules=separate, project_id="app"),
+                    resolve_type_symbols(symbols, modules=(main,), project_id="app"),
+                )
+
+    def test_implicit_builtins_reflection_only_degrades_type_availability(self) -> None:
+        main = module(
+            "models",
+            "from typing import TypeAlias\nAlias:TypeAlias=list[str]\n"
+            "from graphql_desk import gql,parse\nq=gql('{id}')\na=parse('{id}')",
+        )
+        for mutation in (
+            "__builtins__['list']=42",
+            "namespace=__builtins__\nmutate(namespace)",
+            "namespace=__builtins__\nnamespace['list']=42",
+            "__builtins__={}",
+            "def __builtins__(): pass",
+            "import unknown as __builtins__",
+            "import models\nnamespace=models.__builtins__\nmutate(namespace)",
+            "def replace_namespace():\n global __builtins__\n"
+            " import unknown as __builtins__",
+            "import builtins\nbuiltins.list=42",
+        ):
+            with self.subTest(mutation=mutation):
+                snapshots = (main, module("other", mutation))
+                before = resolve_project(snapshots)
+                parser_before = resolve_parse_sources(snapshots)
+                self.assertEqual(before, resolve_project((main,)))
+                self.assertEqual(parser_before, resolve_parse_sources((main,)))
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Alias",), modules=snapshots, project_id="app"
+                    )[0].status,
+                    "unresolved",
+                )
+                self.assertEqual(resolve_project(snapshots), before)
+                self.assertEqual(resolve_parse_sources(snapshots), parser_before)
+                self.assertEqual(len(before.calls), 1)
+                self.assertEqual(len(parser_before.calls), 1)
+        separate = (main, module("other", "__builtins__['list']=42", project="another"))
+        self.assertEqual(
+            resolve_type_symbols(("models.Alias",), modules=separate, project_id="app")[
+                0
+            ].status,
+            "resolved",
         )
 
     def test_captured_type_symbols_distinguish_known_failures_and_unknown_forms(
