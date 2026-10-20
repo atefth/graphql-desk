@@ -19,6 +19,7 @@ from .operation_types import (
     render_indexed_fragment_reader_types,
     render_indexed_operation_types,
 )
+from .project import project_bindings
 from .runtime import init_graphql
 from .scalar_types import render_scalar_method
 from .schema_types import mapped_type_declarations, render_schema_types
@@ -26,10 +27,11 @@ from .source import Span
 from .source_graph import (
     DocumentIdentity,
     GraphDiagnostic,
+    ModuleDependency,
     ModuleSnapshot,
     resolve_type_symbols,
 )
-from .source_maps import build_source_map
+from .source_maps import Position, build_source_map, position_to_offset
 from .testing import render_unsafe_result_helper
 
 
@@ -253,6 +255,182 @@ def _precision_diagnostics(
     ]
 
 
+def _recoverable_index(
+    index: FragmentIndex,
+    modules: tuple[ModuleSnapshot, ...],
+    project_id: str,
+    schema_names: set[str],
+    default_schema: str | None,
+) -> bool:
+    """Admit only current, explicitly rejected owners; unknown failures stay fatal."""
+    if not index.diagnostics or not index.documents:
+        return False
+    snapshots = {
+        ModuleDependency(item.project, item.module, item.uri, item.version): item
+        for item in modules
+    }
+    if len({(item.project, item.module) for item in modules}) != len(modules) or len(
+        {(item.project, item.uri) for item in modules}
+    ) != len(modules):
+        return False
+    accepted = {
+        DocumentIdentity(item.call.module, item.call.range) for item in index.documents
+    }
+    owners = [
+        (item.module, item.range, item.binding) for item in index.rejected_calls
+    ] + [
+        (item.call.module, item.call.range, item.call.binding)
+        for item in index.unavailable
+    ]
+    bindings = [
+        (module.project, module.module, _pascal(binding))
+        for module, _, binding in owners
+        if binding is not None
+    ] + [
+        (item.call.module.project, item.call.module.module, _pascal(item.call.binding))
+        for item in index.documents
+        if item.call.binding is not None
+    ]
+    if len(set(bindings)) != len(bindings):
+        return False
+    rejected = {DocumentIdentity(module, range_) for module, range_, _ in owners}
+    if len(rejected) != len(owners) or accepted & rejected:
+        return False
+    if any(
+        reference.target in rejected
+        for document in index.documents
+        for reference in document.call.fragments
+    ):
+        return False
+    calls: dict[ModuleDependency, dict[Span, str | None]] = {}
+    try:
+        for module, range_, binding in owners:
+            snapshot = snapshots.get(module)
+            if snapshot is None or module.project != project_id:
+                return False
+            if module not in calls:
+                tree = ast.parse(snapshot.source)
+                nodes = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+                positions = {
+                    id(node): Span(
+                        position_to_offset(
+                            snapshot.source,
+                            Position(node.lineno - 1, node.col_offset),
+                            encoding="utf-8",
+                        ),
+                        position_to_offset(
+                            snapshot.source,
+                            Position(node.end_lineno - 1, node.end_col_offset),
+                            encoding="utf-8",
+                        ),
+                    )
+                    for node in nodes
+                    if node.end_lineno is not None and node.end_col_offset is not None
+                }
+                calls[module] = {range_: None for range_ in positions.values()}
+                for statement in tree.body:
+                    if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                        continue
+                    targets = (
+                        statement.targets
+                        if isinstance(statement, ast.Assign)
+                        else [statement.target]
+                    )
+                    if (
+                        len(targets) == 1
+                        and isinstance(targets[0], ast.Name)
+                        and isinstance(statement.value, ast.Call)
+                    ):
+                        calls[module][positions[id(statement.value)]] = targets[0].id
+            if range_ not in calls[module] or calls[module][range_] != binding:
+                return False
+        originals = set(index.diagnostics)
+        if any(
+            diagnostic.module not in snapshots
+            or diagnostic.module.project != project_id
+            or not 0
+            <= diagnostic.range.start
+            <= diagnostic.range.end
+            <= len(snapshots[diagnostic.module].source)
+            for diagnostic in originals
+        ):
+            return False
+        anchored: set[GraphDiagnostic] = set()
+        for rejected_call in index.rejected_calls:
+            if (
+                not rejected_call.source_failure
+                or not rejected_call.diagnostics
+                or any(
+                    diagnostic.code != "source-not-static"
+                    or diagnostic.module != rejected_call.module
+                    or diagnostic.range != rejected_call.range
+                    for diagnostic in rejected_call.diagnostics
+                )
+            ):
+                return False
+            anchored.update(rejected_call.diagnostics)
+        for rejected_document in index.unavailable:
+            schema_name = rejected_document.call.schema_name or default_schema
+            if schema_name not in schema_names:
+                return False
+            if not rejected_document.diagnostics or any(
+                diagnostic.code not in {"invalid-fragments", "unavailable-fragment"}
+                for diagnostic in rejected_document.diagnostics
+            ):
+                return False
+            build_source_map(rejected_document.call, modules)
+            direct = {
+                diagnostic
+                for diagnostic in rejected_document.diagnostics
+                if (
+                    diagnostic.code == "invalid-fragments"
+                    and diagnostic.module == rejected_document.call.module
+                    and diagnostic.range == rejected_document.call.range
+                )
+                or (
+                    diagnostic.code == "unavailable-fragment"
+                    and any(
+                        reference.target in rejected
+                        and diagnostic.module == reference.reference_module
+                        and diagnostic.range == reference.range
+                        for reference in rejected_document.call.fragments
+                    )
+                )
+            }
+            if not direct or not set(rejected_document.diagnostics) <= originals:
+                return False
+            anchored.update(direct)
+        if originals != anchored:
+            return False
+        failed_signatures = {
+            (
+                item.call.source,
+                item.call.operation,
+                item.call.schema_name or default_schema,
+                tuple(reference.target for reference in item.call.fragments),
+            )
+            for item in index.unavailable
+        }
+        return not any(
+            (
+                item.call.source,
+                operation,
+                item.call.schema_name or default_schema,
+                tuple(reference.target for reference in item.call.fragments),
+            )
+            in failed_signatures
+            for item in index.documents
+            for operation in (
+                {None, item.selected_operation.name}
+                if item.selected_operation is not None
+                and sum(fact.kind != "fragment" for fact in item.definitions) == 1
+                else {item.call.operation}
+            )
+        )
+    except (KeyError, SyntaxError, ValueError, RecursionError):
+        return False
+
+
 def _generate_factory_artifacts(
     context: SchemaContext,
     index: FragmentIndex,
@@ -270,8 +448,8 @@ def _generate_factory_artifacts(
     The caller supplies current, trusted resolver/index snapshots. The general str
     fallback exposes AST metadata only, without trusted result/variable types.
     Checkers also use this opaque view for incorrect known constructor calls.
-    Index errors prevent publication; precision diagnostics accompany usable
-    artifacts and identify syntax that cannot reliably select precise overloads.
+    Attributed source/index owner errors retain independent declarations and all
+    diagnostics. Precision warnings identify syntax that may select the fallback.
     """
     if not project_id:
         raise ValueError("Project identity must not be empty")
@@ -281,10 +459,12 @@ def _generate_factory_artifacts(
         raise ValueError("Schema binding collides with a generated package namespace")
     if not _identifier(context.schema_name):
         raise ValueError("Schema binding must be a normalized Python name")
-    if index.diagnostics:
+    if index.diagnostics and not _recoverable_index(
+        index, modules, project_id, {context.schema_name}, context.schema_name
+    ):
         return _SchemaArtifacts(FactoryArtifacts((), index.diagnostics), ())
-    if index.unavailable:
-        raise ValueError("Rejected indexed documents cannot generate factory artifacts")
+    if (index.unavailable or index.rejected_calls) and not index.diagnostics:
+        raise ValueError("Rejected indexed documents require owned diagnostics")
     snapshots = {(item.project, item.module): item for item in modules}
     if len(snapshots) != len(modules):
         raise ValueError("Source module identities must be unique")
@@ -295,7 +475,7 @@ def _generate_factory_artifacts(
     if len(owners) != len(documents):
         raise ValueError("Indexed document identities must be unique")
     files: dict[str, str] = {}
-    diagnostics: list[GraphDiagnostic] = []
+    diagnostics: list[GraphDiagnostic] = list(index.diagnostics)
     base = generated_package.replace(".", "/")
     declarations: dict[DocumentIdentity, tuple[str, str, str]] = {}
     carriers: dict[DocumentIdentity, TypedDocument[Any, Any]] = {}
@@ -975,7 +1155,7 @@ def generate_project_factory_artifacts(
     """Assemble all configured schemas atomically from trusted captured facts.
 
     No configuration reload, schema loading, project imports or writes occur.
-    The caller owns freshness. Index errors remain fatal for this artifact set.
+    The caller owns freshness. Unattributed or structural index errors stay fatal.
     """
     settings = {item.name: item for item in config.schemas}
     schemas = {item.schema_name: item for item in contexts}
@@ -994,10 +1174,16 @@ def generate_project_factory_artifacts(
         item.schema_output != package / f"{item.name}.pyi" for item in config.schemas
     ) or len({item.schema_output for item in config.schemas}) != len(config.schemas):
         raise ValueError("Configured schema output differs from generated package")
-    if index.diagnostics:
+    if index.diagnostics and not _recoverable_index(
+        index,
+        modules,
+        project_id,
+        set(settings),
+        project_bindings(config, project_id=project_id).default_schema,
+    ):
         return FactoryArtifacts((), index.diagnostics)
-    if index.unavailable:
-        raise ValueError("Rejected indexed documents cannot generate project artifacts")
+    if (index.unavailable or index.rejected_calls) and not index.diagnostics:
+        raise ValueError("Rejected indexed documents require owned diagnostics")
     identities = {
         DocumentIdentity(document.call.module, document.call.range)
         for document in index.documents
@@ -1032,4 +1218,7 @@ def generate_project_factory_artifacts(
         )
         for name in sorted(settings)
     )
-    return _assemble(parts, modules, project_id, config.generated_package)
+    artifacts = _assemble(parts, modules, project_id, config.generated_package)
+    return FactoryArtifacts(
+        artifacts.files, (*index.diagnostics, *artifacts.diagnostics)
+    )

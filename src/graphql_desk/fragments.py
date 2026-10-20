@@ -29,6 +29,7 @@ from .source_graph import (
     GraphDiagnostic,
     ModuleDependency,
     ProjectSources,
+    RejectedCall,
     ResolvedCall,
 )
 
@@ -85,6 +86,7 @@ class FragmentIndex:
     documents: tuple[IndexedDocument, ...]
     diagnostics: tuple[GraphDiagnostic, ...]
     unavailable: tuple[RejectedDocument, ...] = ()
+    rejected_calls: tuple[RejectedCall, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -433,4 +435,5 @@ def index_fragments(
             for identity, call in calls.items()
             if identity in failed
         ),
+        sources.unavailable,
     )

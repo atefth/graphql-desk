@@ -71,10 +71,20 @@ checkers also accept incorrect known constructor arguments through this opaque
 fallback; the constructor call itself is not statically rejected. Source
 diagnostics remain required. Dynamic AST execution and untyped fragment
 composition still use the original runtime carriers without wrappers or copies.
-A source/index error prevents the artifact set from being returned. A discovered dynamic
-source still produces the resolver's `source-not-static` diagnostic and no files;
-the fallback test for external callers does not establish dynamic discovery.
-These gaps keep #36 open.
+Owner-bound `source-not-static` and indexed
+`invalid-fragments`/`unavailable-fragment` failures can retain independently valid
+factory artifacts when at least one valid indexed owner remains. Recovery
+requires current, disjoint owner records, explicit source-expression failure
+provenance and bounded diagnostic spans; all original diagnostics remain.
+Rejected owners receive no invented precise overloads or companion aliases;
+imports of absent aliases still fail honestly. The ordinary opaque fallback
+remains available, while an existing precise overload may still match a
+checker-known Literal even when the resolver could not resolve the source.
+Known indistinguishable constructor signatures and normalized companion-binding
+collisions remain fatal. Resource, unknown-binding, unclassified dependency,
+unattributed, structural, stale-snapshot and schema/context failures remain fatal.
+This bounded recovery does not complete inference or invalid-buffer acceptance;
+#36 remains open.
 
 Source maps verify decoded contributions against supplied snapshots before
 emission. Schema/context/dependency mismatches, unsafe names, normalized alias or
@@ -82,9 +92,9 @@ file collisions, and ambiguous fragment signatures reject atomically. Identical
 operation signatures can deduplicate, but identical fragment call signatures with
 distinct owner identities cannot be distinguished by a literal overload and
 produce a diagnostic. Invalid top-level generation arguments raise `ValueError`.
-Precision diagnostics can accompany usable files; fatal indexed generation
-errors return no files. A future publisher must enforce ownership, freshness and
-batch recovery before writing any returned artifact.
+Precision and validated owner-bound recovery diagnostics can accompany usable
+files; fatal indexed generation errors return no files. A future publisher must
+enforce ownership, freshness and batch recovery before writing any returned artifact.
 
 The generated callable protocol also includes the [scalar member](scalar-helpers.md)
 using the same schema declarations and configured input aliases once. The runtime
