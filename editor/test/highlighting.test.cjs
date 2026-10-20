@@ -72,6 +72,43 @@ test("lexical candidates exclude lookalikes, strings/comments as imports, interp
   ]) assert.equal(lexicalCandidates(text).length, 1, text);
 });
 
+test("configured factory candidates accept exact direct/qualified aliases and preserve lexical exclusions", () => {
+  const factories = [{ module: "generated.default", export: "graphql" }, { module: "custom.templates", export: "document" }, { module: "custom2.templates", export: "document2" }];
+  for (const [imported, callee] of [
+    ["from generated.default import graphql", "graphql"],
+    ["from generated.default import graphql as query", "query"],
+    ["from generated.default import graphql as query2", "query2"],
+    ["import generated.default as documents", "documents.graphql"],
+    ["import generated.default", "generated.default.graphql"],
+    ["from custom.templates import document as query", "query"],
+    ["import custom.templates as templates", "templates.document"],
+    ["from custom2.templates import document2", "document2"],
+    ["import custom2.templates as templates2", "templates2.document2"],
+  ]) {
+    const text = `# 😀\r\n${imported}\r\nq=${callee}(source=r'query Read { title`;
+    const candidates = lexicalCandidates(text, factories);
+    assert.equal(candidates.length, 1, text);
+    assert.equal(text.slice(candidates[0].start, candidates[0].end), "query Read { title");
+    assert.equal(candidates[0].mode, "lexical");
+    assert.deepEqual(lexicalCandidates(text), [], "Configured identities are never assumed by the untrusted default");
+  }
+  for (const text of [
+    "from generated.other import graphql\nq=graphql('query { title",
+    "from generated.default import other\nq=other('query { title",
+    "from generated.default import graphql\ngraphql=unknown\nq=graphql('query { title",
+    "import generated.default as documents\ndocuments=unknown\nq=documents.graphql('query { title",
+    "import generated.default as documents\ndocuments.graphql=unknown\nq=documents.graphql('query { title",
+    "import generated.default\ngenerated.default=unknown\nq=generated.default.graphql('query { title",
+    "from generated.default import graphql\nfrom other import graphql\nq=graphql('query { title",
+    "import generated.default as documents\nimport other as documents\nq=documents.graphql('query { title",
+    "from generated.default import graphql\nq=graphql(f'query { title",
+    "from generated.default import graphql\nq=graphql(b'query { title",
+    "from generated.default import graphql\nq=graphql('query\\n{ title",
+    "# from generated.default import graphql\nq=graphql('query { title",
+    "'from generated.default import graphql'\nq=graphql('query { title",
+  ]) assert.deepEqual(lexicalCandidates(text, factories), [], text);
+});
+
 test("valid Python semantic shadowing does not fall back to lexical precision", async () => {
   const value = bundle("from graphql_desk import gql\ndef gql(source):return source\nq=gql('query { field }')");
   assert.deepEqual(await createHighlighting(options(value)).highlight(document(value)), []);

@@ -33,7 +33,7 @@ function tokens(text) {
 }
 
 /** Lexical candidates never become semantic source, diagnostics or typed facts. */
-function lexicalCandidates(text) {
+function lexicalCandidates(text, factories = []) {
   const strings = [];
   const mask = text.split("");
   for (let i = 0; i < text.length;) {
@@ -61,18 +61,27 @@ function lexicalCandidates(text) {
     }
   }
   const code = mask.join("");
+  const constructors = [
+    { module: "graphql_desk", export: "graphql" },
+    { module: "graphql_desk", export: "gql" }, ...factories,
+  ];
   const callees = new Set();
+  const imports = new Map();
+  const importedName = name => imports.set(name, (imports.get(name) ?? 0) + 1);
   for (const line of code.split(/\r\n|\r|\n/)) {
-    const from = /^\s*from\s+graphql_desk\s+import\s+([_A-Za-z, \t]+)\s*$/.exec(line);
-    if (from) for (const entry of from[1].split(",")) {
-      const match = /^\s*(graphql|gql)(?:\s+as\s+([_A-Za-z][_0-9A-Za-z]*))?\s*$/.exec(entry);
-      if (match) callees.add(match[2] ?? match[1]);
+    const from = /^\s*from\s+([_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*)\s+import\s+([_0-9A-Za-z, \t]+)\s*$/.exec(line);
+    if (from) for (const entry of from[2].split(",")) {
+      const match = /^\s*([_A-Za-z][_0-9A-Za-z]*)(?:\s+as\s+([_A-Za-z][_0-9A-Za-z]*))?\s*$/.exec(entry);
+      if (!match) continue;
+      importedName(match[2] ?? match[1]);
+      if (constructors.some(item => item.module === from[1] && item.export === match[1])) callees.add(match[2] ?? match[1]);
     }
-    const imported = /^\s*import\s+graphql_desk(?:\s+as\s+([_A-Za-z][_0-9A-Za-z]*))?\s*$/.exec(line);
+    const imported = /^\s*import\s+([_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*)(?:\s+as\s+([_A-Za-z][_0-9A-Za-z]*))?\s*$/.exec(line);
     if (imported) {
-      const name = imported[1] ?? "graphql_desk";
-      callees.add(`${name}.graphql`);
-      callees.add(`${name}.gql`);
+      importedName(imported[2] ?? imported[1].split(".")[0]);
+      for (const item of constructors) {
+        if (item.module === imported[1]) callees.add(`${imported[2] ?? imported[1]}.${item.export}`);
+      }
     }
   }
   return strings.flatMap((literal) => {
@@ -80,17 +89,20 @@ function lexicalCandidates(text) {
     const body = text.slice(literal.bodyStart, literal.bodyEnd);
     // Escaped ordinary literals require the semantic decoder, never guessed offsets.
     if (!literal.prefix.includes("r") && body.includes("\\")) return [];
-    const match = /([_A-Za-z][_0-9A-Za-z]*(?:\.(?:graphql|gql))?)\s*\(\s*(?:source\s*=\s*)?$/.exec(code.slice(0, literal.start));
+    const match = /([_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*)\s*\(\s*(?:source\s*=\s*)?$/.exec(code.slice(0, literal.start));
     if (!match || !callees.has(match[1])) return [];
     const name = match[1].split(".")[0];
+    if (imports.get(name) !== 1) return [];
     if (new RegExp(`(?:\\b(?:def|class)\\s+${name}\\b|\\b${name}\\s*=(?!=))`).test(code)) return [];
+    const parts = match[1].split(".");
+    if (parts.some((_, index) => new RegExp(`\\b${parts.slice(0, index + 1).join("\\.")}\\s*=(?!=)`).test(code))) return [];
     return [{ text: body, start: literal.bodyStart, end: literal.bodyEnd, mode: "lexical" }];
   });
 }
 
 function createHighlighting({ analyze, isCurrent, isTrusted, mapSnapshot = value => value }) {
   if (![analyze, isCurrent, isTrusted].every((item) => typeof item === "function")) throw new Error("Analysis, trust and freshness callbacks are required");
-  const lexical = (snapshot) => lexicalCandidates(snapshot.text).flatMap((candidate) =>
+  const lexical = (snapshot, factories = []) => lexicalCandidates(snapshot.text, factories).flatMap((candidate) =>
     tokens(candidate.text).map((token) => ({ ...token, start: token.start + candidate.start,
       end: token.end + candidate.start, mode: "lexical" })));
   return {
@@ -107,8 +119,14 @@ function createHighlighting({ analyze, isCurrent, isTrusted, mapSnapshot = value
         const result = bundle.response.calls.flatMap((call) => tokens(call.source).flatMap((token) =>
           toHost(bundle, call, token).filter((origin) => origin.module.uri === snapshot.uri && origin.module.version === snapshot.version)
             .map((origin) => ({ ...origin.range, scope: token.scope, mode: "resolved" }))));
-        if (bundle.response.diagnostics.some((item) => item.module.uri === snapshot.uri &&
-          item.module.version === snapshot.version && item.code === "invalid-python")) result.push(...lexical(snapshot));
+        const owners = bundle.request.modules.filter(item => item.uri === snapshot.uri &&
+          item.version === snapshot.version && item.source === snapshot.text);
+        if (bundle.response.diagnostics.some((item) => item.code === "invalid-python" &&
+          owners.some(owner => owner.project === item.module.project && owner.module === item.module.module &&
+            owner.uri === item.module.uri && owner.version === item.module.version))) {
+          const bindings = owners.length === 1 ? bundle.request.bindings.filter(item => item.project === owners[0].project) : [];
+          result.push(...lexical(snapshot, bindings.length === 1 ? bindings[0].factories : []));
+        }
         if (!await isCurrent(bundle, snapshot, token) || token?.isCancellationRequested || !isTrusted()) return [];
         return [...new Map(result.map((item) => [JSON.stringify(item), item])).values()];
       } catch { return []; }
