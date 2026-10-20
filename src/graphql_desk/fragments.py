@@ -73,9 +73,18 @@ class IndexedDocument:
 
 
 @dataclass(frozen=True)
+class RejectedDocument:
+    """Failed indexed owner and its local/dependency causes, not display ownership."""
+
+    call: ResolvedCall
+    diagnostics: tuple[GraphDiagnostic, ...]
+
+
+@dataclass(frozen=True)
 class FragmentIndex:
     documents: tuple[IndexedDocument, ...]
     diagnostics: tuple[GraphDiagnostic, ...]
+    unavailable: tuple[RejectedDocument, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -196,17 +205,18 @@ def index_fragments(
     """
     calls: dict[DocumentIdentity, ResolvedCall] = {}
     failed: set[DocumentIdentity] = set()
+    causes: dict[DocumentIdentity, tuple[GraphDiagnostic, ...]] = {}
     diagnostics = list(sources.diagnostics)
     versions: dict[tuple[str, str], set[ModuleDependency]] = {}
     for call in sources.calls:
         identity = _identity(call)
         if identity in calls and calls[identity] != call:
             failed.add(identity)
-            diagnostics.append(
-                _error(
-                    call, "conflicting-document", "Conflicting document snapshots"
-                ).diagnostic
-            )
+            diagnostic = _error(
+                call, "conflicting-document", "Conflicting document snapshots"
+            ).diagnostic
+            diagnostics.append(diagnostic)
+            causes[identity] = (*causes.get(identity, ()), diagnostic)
         calls[identity] = call
         for dependency in (call.module, *call.dependencies):
             versions.setdefault((dependency.project, dependency.module), set()).add(
@@ -303,6 +313,13 @@ def index_fragments(
                 for reference in call.fragments:
                     target = completed.get(reference.target)
                     if target is None:
+                        causes[identity] = tuple(
+                            dict.fromkeys(
+                                diagnostic
+                                for dependency in call.fragments
+                                for diagnostic in causes.get(dependency.target, ())
+                            )
+                        )
                         raise _Invalid(
                             GraphDiagnostic(
                                 reference.reference_module,
@@ -393,21 +410,27 @@ def index_fragments(
             except _Invalid as error:
                 failed.add(identity)
                 diagnostics.append(error.diagnostic)
+                causes[identity] = (error.diagnostic, *causes.get(identity, ()))
             except RecursionError:
                 failed.add(identity)
-                diagnostics.append(
-                    _error(
-                        call,
-                        "source-too-complex",
-                        "Fragment syntax exceeds the analysis recursion limit",
-                    ).diagnostic
-                )
+                diagnostic = _error(
+                    call,
+                    "source-too-complex",
+                    "Fragment syntax exceeds the analysis recursion limit",
+                ).diagnostic
+                diagnostics.append(diagnostic)
+                causes[identity] = (diagnostic,)
             except (GraphQLError, TypeError, ValueError) as error:
                 failed.add(identity)
-                diagnostics.append(
-                    _error(call, "invalid-fragments", str(error)).diagnostic
-                )
+                diagnostic = _error(call, "invalid-fragments", str(error)).diagnostic
+                diagnostics.append(diagnostic)
+                causes[identity] = (diagnostic,)
     return FragmentIndex(
         tuple(completed[identity][0] for identity in calls if identity in completed),
         tuple(diagnostics),
+        tuple(
+            RejectedDocument(call, causes[identity])
+            for identity, call in calls.items()
+            if identity in failed
+        ),
     )
