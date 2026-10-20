@@ -457,6 +457,13 @@ if TYPE_CHECKING:
         self.assertTrue(
             any(d.code == "graphql-validation" for d in artifacts.diagnostics)
         )
+        companion = next(
+            item.text
+            for item in artifacts.files
+            if item.relative_path == "generated/sources/main.pyi"
+        )
+        self.assertNotIn("unsafe_read_bad_result", companion)
+        self.assertNotIn("BadFixtureInput", companion)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.write(root, artifacts, modules)
@@ -604,6 +611,7 @@ BadResult() # error
         for alias in (
             "GraphqlDeskReader",
             "GraphqlDeskReadFragment",
+            "GraphqlDeskUnsafeReadResult",
         ):
             with self.subTest(alias=alias):
                 context = SchemaContext(
@@ -814,12 +822,16 @@ BadResult() # error
             (
                 "from typing import TYPE_CHECKING, TypeVar\n"
                 "from typing_extensions import assert_type\n"
-                "from graphql_desk import TypedDocument, read_fragment\n"
+                "from graphql_desk import "
+                "TypedDocument, read_fragment, unsafe_read_result\n"
+                "from graphql_desk.testing import "
+                "unsafe_read_result as testing_unsafe_read_result\n"
                 "from generated.main import graphql\n"
                 "from generated.sources.main import "
-                "BookQueryResult, BookQueryVariables\n"
+                "BookQueryResult, BookQueryVariables, BookQueryFixtureInput, "
+                "unsafe_read_book_query_result\n"
                 "from generated.sources.leaf import "
-                "read_book_fields, BookFieldsResult\n"
+                "read_book_fields, BookFieldsResult, unsafe_read_book_fields_result\n"
                 "from leaf import book_fields\n"
                 'book_query=graphql("query Book($id:ID!){book(id:$id){id ...Fields}}",'
                 "(book_fields,))\n"
@@ -834,6 +846,14 @@ BadResult() # error
                 "    variables: BookQueryVariables = {'id':'1'}\n"
                 "    assert_type(execute(book_query, variables), BookQueryResult)\n"
                 "    assert_type(read_book_fields({'title':'x'}), BookFieldsResult)\n"
+                "    assert_type(unsafe_read_book_fields_result({'title':'x'}), "
+                "BookFieldsResult)\n"
+                "    input_fixture: BookQueryFixtureInput="
+                "{'book':{'id':'1','title':99}}\n"
+                "    assert_type(unsafe_read_result(book_query,input_fixture), "
+                "BookQueryResult)\n"
+                "    assert_type(unsafe_read_book_query_result("
+                "{'book':{'id':'1','title':99}}), BookQueryResult)\n"
                 "    assert_type(read_fragment(book_fields, "
                 "execute(book_query, variables)['book']), BookFieldsResult)\n"
                 "    assert_type(book_query.ast.definitions[0].name.value, "
@@ -846,6 +866,11 @@ BadResult() # error
                 "data: BookFieldsResult = {'title':'x'}\n"
                 "assert read_book_fields(data) is data\n"
                 "assert read_fragment(book_fields, data) is data\n"
+                "fixture: BookQueryFixtureInput={'book':{'id':'1','title':99}}\n"
+                "if not TYPE_CHECKING:\n"
+                " assert unsafe_read_result(book_query,fixture) is fixture\n"
+                " assert unsafe_read_book_query_result(fixture) is fixture\n"
+                "assert testing_unsafe_read_result is unsafe_read_result\n"
             )
             .replace("__import__('typing').Literal", "Literal")
             .replace("TYPE_CHECKING, TypeVar", "TYPE_CHECKING, Literal, TypeVar")
@@ -872,6 +897,11 @@ BadResult() # error
                 "from typing_extensions import assert_type\n"
                 "from graphql import DocumentNode\n"
                 "from graphql_desk import TypedDocument\n"
+                "from generated.sources.main import unsafe_read_book_query_result\n"
+                "from generated.sources.leaf import unsafe_read_book_fields_result\n"
+                "unsafe_read_book_query_result({'book':{'id':1}}) # error\n"
+                "unsafe_read_book_query_result({'book':{'title':'x'}}) # error\n"
+                "unsafe_read_book_fields_result({'title':99}) # error\n"
                 "variables: BookQueryVariables = {'id': 1}  # error\n"
                 "valid: BookQueryVariables = {'id':'1'}\n"
                 "result = execute(book_query, valid)\n"

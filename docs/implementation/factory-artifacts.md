@@ -93,6 +93,13 @@ original object without reading metadata, copying data or inserting markers.
 Rejected fragment owners do not export readers. Schema/helper alias collisions
 reject atomically. See [reader limits](fragment-refs.md).
 
+Valid operation and fragment companions also export `<Binding>FixtureInput` and
+`unsafe_read_<binding>_result`. Generated document stubs retain their ordinary
+typed carrier view and add fixture-input metadata; runtime factories remain
+unchanged. Root/testing `unsafe_read_result` uses typed fixture inputs, and native
+bound helpers supply literal context. Rejected owners export neither fixture
+inputs nor unsafe helpers. See [unsafe fixture limits](fragment-refs.md).
+
 Configured scalar input/output and enum symbols also receive captured-local
 preflight. Supported classes, aliases and reexports retain ordinary generated
 imports; captured missing/non-type/unsupported exports reject atomically without

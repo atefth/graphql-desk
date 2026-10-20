@@ -7,8 +7,17 @@ from graphql import DocumentNode, parse
 
 from .fragment_helpers import read_fragment
 from .runtime import gql, graphql, init_graphql
+from .testing import unsafe_read_result
 
-__all__ = ["TypedDocument", "gql", "graphql", "init_graphql", "parse", "read_fragment"]
+__all__ = [
+    "TypedDocument",
+    "gql",
+    "graphql",
+    "init_graphql",
+    "parse",
+    "read_fragment",
+    "unsafe_read_result",
+]
 
 _Result = TypeVar("_Result")
 _Variables = TypeVar("_Variables")
