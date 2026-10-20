@@ -16,4 +16,17 @@ Variable defaults and variable-directive arguments use const-required checker ba
 
 Location presence is precise (`Location` or `None`), but numeric offsets, tokens and source metadata keep ordinary mutable types. Narrowing mutable `Location.start` to a numeric literal is rejected by Pyright and becomes false after legal mutation through a normal `Location` consumer. This limitation remains explicit rather than publishing unsound precision.
 
-This is the declaration foundation for #25. Generated parse overloads, runtime companions, dynamic-string fallback attachment and complete exact-location acceptance remain open. API-01 and the live-typing gate have not passed. Tests cover emitted stub imports, exact positive/negative bindings in mypy/Pyright, parse options, complex defaults, unsafe names and excessive nesting.
+`graphql_desk.parse_generation.render_parse_companion(sources)` accepts explicitly
+supplied literal strings and returns runtime/stub text without writing files.
+The runtime companion reexports the identical root `parse` function. Stub overloads
+refine supplied executable literals in default parser mode using the existing AST
+renderer. Dynamic strings, `Source` objects, SDL and nondefault options retain the
+ordinary `DocumentNode` return. Sources deduplicate deterministically; invalid
+syntax raises the original parser error, and unknown schema fields still parse.
+
+This is a retained-source opt-in companion foundation for #25. Automatic parse-call
+discovery, attachment to original imports, regeneration/editor publication and
+complete exact-location acceptance remain open. API-01 and the live-typing gate
+have not passed. Tests cover actual generated imports and exact positive/negative
+bindings in both strict checkers, runtime identity, fallback/options, schema-independent
+parsing, syntax errors, complex defaults, unsafe names and excessive nesting.
