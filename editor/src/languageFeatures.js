@@ -199,11 +199,12 @@ function definitionNodes(schema, ast, fragments, offset) {
 }
 
 /** All analysis and freshness authority is injected; this module never starts Python. */
-function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirectives = () => [] }) {
+function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirectives = () => [], mapSnapshot = value => value }) {
   if (![analyze, isCurrent, isTrusted].every((item) => typeof item === "function")) throw new Error("Analysis, trust and freshness callbacks are required");
   async function load(snapshot, token) {
     if (!isTrusted() || cancelled(token)) return null;
     const bundle = await analyze(snapshot, token);
+    if (bundle) snapshot = mapSnapshot(snapshot, bundle);
     if (!bundle || cancelled(token) || !isTrusted() || bundle.request.request_id !== bundle.response.request_id ||
       !bundle.request.modules.some((item) => item.uri === snapshot.uri && item.version === snapshot.version && item.source === snapshot.text) ||
       !await isCurrent(bundle, snapshot, token) || cancelled(token) || !isTrusted()) return null;
@@ -217,18 +218,19 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
     try {
       const bundle = await load(snapshot, token);
       if (!bundle) return fallback;
+      snapshot = mapSnapshot(snapshot, bundle);
       const candidates = bundle.response.calls.flatMap((call) => toDecoded(call, snapshot, offset).map((point) => ({ call, offset: point.start })));
       if (candidates.length !== 1) return fallback;
       const { call, offset: decoded } = candidates[0];
       const schema = schemaFor(bundle, call);
       if (!schema) return fallback;
-      const value = action(bundle, call, schema, decoded);
+      const value = action(bundle, call, schema, decoded, snapshot);
       return await finish(bundle, snapshot, token, value, fallback);
     } catch { return fallback; }
   }
   return {
     async complete(snapshot, offset, token) {
-      return at(snapshot, offset, token, (bundle, call, schema, decoded) => {
+      return at(snapshot, offset, token, (bundle, call, schema, decoded, snapshot) => {
         const span = wordRange(call.source, decoded);
         const range = editableRange(bundle, call, span, snapshot);
         if (!range) return [];
@@ -242,7 +244,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
       }, []);
     },
     async hover(snapshot, offset, token) {
-      return at(snapshot, offset, token, (bundle, call, schema, decoded) => {
+      return at(snapshot, offset, token, (bundle, call, schema, decoded, snapshot) => {
         const contents = hoverInformation(schema, call.source, decoded);
         if (!contents || (Array.isArray(contents) && !contents.length)) return null;
         const origins = toHost(bundle, call, wordRange(call.source, decoded))
@@ -251,7 +253,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
       }, null);
     },
     async definition(snapshot, offset, token) {
-      return at(snapshot, offset, token, (bundle, call, schema, decoded) => {
+      return at(snapshot, offset, token, (bundle, call, schema, decoded, snapshot) => {
         let ast;
         try { ast = gql.parse(new gql.Source(call.source, documentKey(call.identity))); }
         catch { return []; }
@@ -269,6 +271,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
       try {
         const bundle = await load(snapshot, token);
         if (!bundle) return [];
+        snapshot = mapSnapshot(snapshot, bundle);
         const result = bundle.response.diagnostics
           .filter((item) => item.module.uri === snapshot.uri && item.module.version === snapshot.version && item.code !== "invalid-fragments")
           .map((item) => ({ range: item.range.utf16, message: item.message,
@@ -327,7 +330,7 @@ function registerLanguageFeatures(vscode, options) {
     isCurrent: async (...args) => !disposed && await options.isCurrent(...args) && !disposed,
   });
   const selector = [{ language: "python", scheme: "file" }, { language: "python", scheme: "untitled" }];
-  const snapshot = (document) => ({ uri: document.uri.toString(), version: document.version, text: document.getText() });
+  const snapshot = options.snapshot ?? ((document) => ({ uri: document.uri.toString(), version: document.version, text: document.getText() }));
   const range = (document, span) => new vscode.Range(document.positionAt(span.start), document.positionAt(span.end));
   const collection = vscode.languages.createDiagnosticCollection("graphql-desk");
   const markdown = (value) => {
@@ -360,7 +363,7 @@ function registerLanguageFeatures(vscode, options) {
     vscode.languages.registerDefinitionProvider(selector, {
       async provideDefinition(document, position, token) {
         const items = await service.definition(snapshot(document), document.offsetAt(position), token);
-        return items.map((item) => new vscode.Location(vscode.Uri.parse(item.module.uri),
+        return items.map((item) => new vscode.Location(options.resolveUri ? options.resolveUri(item.module.uri) : vscode.Uri.parse(item.module.uri),
           new vscode.Range(item.positionRange.start, item.positionRange.end)));
       },
     }),
