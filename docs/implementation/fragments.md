@@ -6,10 +6,13 @@ transitive dependency diagnostics, independently of where those diagnostics are
 displayed. A reference error's range therefore never substitutes for the failed
 owner identity. Unrelated valid documents remain in `documents`.
 
-Resolver failures that never produced a resolved call have no invented rejected
-owner. These facts support future invalid-document recovery; the artifact
-generator still rejects an error-bearing index. They do not establish generated
-error types, schema-unavailable publication or editor recovery.
+`FragmentIndex.rejected_calls` also retains the resolver's frozen `RejectedCall`
+records unchanged. Its default is empty for existing callers. These records carry
+known source ownership, causes and the resolver's default-false `source_failure`
+classification without inventing a resolved source, schema or selector. The factory generator uses this provenance for bounded independent-owner
+recovery, while preserving every original diagnostic. Unattributed, structural,
+schema, snapshot and resource failures remain fatal. These facts do not establish
+schema-unavailable publication or editor recovery.
 
 `graphql_desk.fragments.index_fragments(sources, *, schemas)` consumes actual `ProjectSources` records from the static module resolver. Schema contexts are explicitly keyed by `(project, schema_name)` and contain the resolved schema name, `GraphQLSchema` and caller-owned generation token. An unbound `None` name also requires an explicit routing context; the index never guesses a default. Callers keep schemas stable during the synchronous call.
 

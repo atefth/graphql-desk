@@ -2143,6 +2143,55 @@ class SourceGraphTests(unittest.TestCase):
         )
         self.assertEqual(len(resolve_project(snapshots).calls), 1)
 
+    def test_source_failure_provenance_excludes_other_error_origins(self) -> None:
+        snapshot = module(
+            "main",
+            "from graphql_desk import gql,init_graphql\n"
+            "def runtime_source()->str: return '{hello}'\n"
+            "source_error=gql(runtime_source())\n"
+            "wrong_type=gql(gql)\n"
+            "missing=gql(unknown)\n"
+            "argument_error=gql('{hello}',unknown=1)\n"
+            "fragment_error=gql('{hello}',fragments=unknown)\n"
+            "selector_error=gql('{hello}',operation=unknown)\n"
+            "dependent=gql('query Q{...F}',(source_error,))\n"
+            "scoped=lambda:gql(runtime_source())\n"
+            "good=gql('{hello}')\n",
+        )
+        result = resolve_project(
+            (snapshot,), bindings=(ProjectBindings("app", ("one",), "one"),)
+        )
+        rejected = {item.binding: item for item in result.unavailable}
+        self.assertEqual(
+            {name for name, item in rejected.items() if item.source_failure},
+            {"source_error", "wrong_type"},
+        )
+        self.assertFalse(rejected["dependent"].source_failure)
+        self.assertFalse(rejected[None].source_failure)
+        self.assertTrue(
+            all(item.code == "source-not-static" for item in result.diagnostics)
+        )
+        self.assertEqual([item.binding for item in result.calls], ["good"])
+        for item in rejected.values():
+            with self.assertRaises(FrozenInstanceError):
+                setattr(item, "source_failure", True)
+        self.assertFalse(
+            source_graph.RejectedCall(
+                rejected["missing"].module,
+                rejected["missing"].range,
+                "missing",
+                rejected["missing"].diagnostics,
+            ).source_failure
+        )
+        with patch(
+            "graphql_desk.source_graph._Graph.extract", side_effect=RecursionError
+        ):
+            excessive = resolve_project(
+                (snapshot,), bindings=(ProjectBindings("app", ("one",), "one"),)
+            )
+        self.assertTrue(excessive.unavailable)
+        self.assertTrue(all(not item.source_failure for item in excessive.unavailable))
+
     def test_rejected_call_ownership_without_invented_semantics(self) -> None:
         item = module(
             "main",

@@ -126,6 +126,28 @@ class FragmentTests(unittest.TestCase):
         self.assertEqual(result.unavailable, ())
         self.assertEqual([item.call.binding for item in result.documents], ["good"])
 
+    def test_source_rejected_calls_preserve_ownership_through_indexing(self) -> None:
+        snapshot = module("q", 'bad=graphql(dynamic)\ngood=graphql("{ hello }")')
+        sources = resolve_project(
+            (snapshot,), bindings=(ProjectBindings("p", ("default",), "default"),)
+        )
+        result = index_fragments(sources, schemas=self.schemas)
+        self.assertIs(result.rejected_calls, sources.unavailable)
+        self.assertEqual(len(result.rejected_calls), 1)
+        rejected = result.rejected_calls[0]
+        self.assertEqual(rejected.binding, "bad")
+        self.assertEqual(rejected.module, sources.diagnostics[0].module)
+        self.assertEqual(rejected.diagnostics, sources.diagnostics)
+        self.assertEqual(
+            snapshot.source[rejected.range.start : rejected.range.end],
+            "graphql(dynamic)",
+        )
+        with self.assertRaises(FrozenInstanceError):
+            setattr(result, "rejected_calls", ())
+        self.assertEqual(FragmentIndex((), ()).rejected_calls, ())
+        self.assertEqual(result.unavailable, ())
+        self.assertEqual([item.call.binding for item in result.documents], ["good"])
+
     def test_imported_diamond_matches_runtime_order_dedup_and_primary(self) -> None:
         sources = self.resolve(
             module("leaf", 'leaf=graphql("fragment Leaf on User { id }")'),

@@ -126,6 +126,7 @@ class RejectedCall:
     range: Span
     binding: str | None
     diagnostics: tuple[GraphDiagnostic, ...]
+    source_failure: bool = field(default=False, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,16 @@ class _Value:
 
 class _Unresolved(Exception):
     pass
+
+
+class _DynamicExpression(_Unresolved):
+    pass
+
+
+class _SourceFailure(_Unresolved):
+    def __init__(self, owner: DocumentIdentity, message: str) -> None:
+        super().__init__(message)
+        self.owner = owner
 
 
 class _MissingType(_Unresolved):
@@ -1445,7 +1456,7 @@ class _Graph:
                     left.contributions + right.contributions,
                     left.dependencies | right.dependencies,
                 )
-        raise _Unresolved(
+        raise _DynamicExpression(
             "Use stable module constants, string literals or literal-only +"
         )
 
@@ -1489,11 +1500,15 @@ class _Graph:
         source_node = node.args[0] if node.args else keywords.get("source")
         if source_node is None:
             raise _Unresolved("A static source string is required")
-        source = self.expression(
-            module, source_node, (node.lineno, node.col_offset), set()
-        )
+        owner = DocumentIdentity(module.identity, module.span(node))
+        try:
+            source = self.expression(
+                module, source_node, (node.lineno, node.col_offset), set()
+            )
+        except _DynamicExpression as error:
+            raise _SourceFailure(owner, str(error)) from None
         if source.kind != "string":
-            raise _Unresolved("Source must resolve to a static string")
+            raise _SourceFailure(owner, "Source must resolve to a static string")
         fragments = node.args[1] if len(node.args) == 2 else keywords.get("fragments")
         references: list[FragmentReference] = []
         reference_dependencies: frozenset[ModuleDependency] = frozenset()
@@ -1800,6 +1815,7 @@ def _resolve(
                     return
                 candidate = False
                 document_candidate = False
+                source_failure = False
 
                 def reject(diagnostic: GraphDiagnostic) -> None:
                     graph.diagnostics.append(diagnostic)
@@ -1810,6 +1826,7 @@ def _resolve(
                                 module.span(node),
                                 module.call_bindings.get(id(node)),
                                 (diagnostic,),
+                                source_failure=source_failure,
                             )
                         )
 
@@ -1838,6 +1855,11 @@ def _resolve(
                             )
                         )
                 except _Unresolved as error:
+                    source_failure = isinstance(
+                        error, _SourceFailure
+                    ) and error.owner == DocumentIdentity(
+                        module.identity, module.span(node)
+                    )
                     if not candidate:
                         try:
                             origin = graph.expression(
