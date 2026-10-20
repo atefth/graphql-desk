@@ -72,6 +72,7 @@ class EditorPreparation:
     _observations: tuple[_Observation, ...] = field(repr=False)
     _configs: tuple[tuple[str, str, str], ...] = field(repr=False)
     remote_origins: tuple[RemoteSchemaOrigin, ...] = field(default=(), repr=False)
+    project_preferences: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 @dataclass
@@ -314,7 +315,6 @@ def _preparation(captured: _CapturedProjects) -> EditorPreparation:
             key=lambda item: (str(item.path), item.origin),
         )
     )
-    config_token = _text_digest(repr((captured.config_facts, observations)))
     return EditorPreparation(
         tuple(
             LocalSchemaPath(
@@ -336,11 +336,26 @@ def _preparation(captured: _CapturedProjects) -> EditorPreparation:
                 config.path.as_uri(),
                 schema.name,
                 schema.origin,
-                config_token,
+                _text_digest(
+                    repr(
+                        (
+                            astuple(config),
+                            tuple(
+                                item
+                                for item in observations
+                                if item.canonical == _identity(config.path)
+                            ),
+                        )
+                    )
+                ),
             )
             for config, _ in captured.projects
             for schema in config.schemas
             if schema.origin.url is not None
+        ),
+        tuple(
+            (config.path.as_uri(), tuple(dict.fromkeys(config.client_directives)))
+            for config, _ in captured.projects
         ),
     )
 

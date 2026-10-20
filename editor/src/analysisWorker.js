@@ -41,10 +41,19 @@ function parseFrame(buffer) {
 function validReply(reply, request) {
   if (!object(reply) || reply.ok !== true) return false;
   if (request.op === "prepare") {
-    return keys(reply, ["ok", "id", "local_schemas", "remote_schemas", "required_buffers"]) && string(reply.id) &&
+    const extended = Object.hasOwn(request, "remote_revisions");
+    const expected = ["ok", "id", "local_schemas", "remote_schemas", "required_buffers"];
+    if (extended) expected.push("project_preferences", "remote_revisions");
+    const names = value => Array.isArray(value) && value.every(string) && new Set(value).size === value.length;
+    return keys(reply, expected) && string(reply.id) &&
+      (!extended || (Array.isArray(reply.project_preferences) && reply.project_preferences.every(item =>
+        keys(item, ["project", "client_directives"]) && string(item.project) && names(item.client_directives)) &&
+        Array.isArray(reply.remote_revisions) && reply.remote_revisions.every(item =>
+          keys(item, ["project", "schema_name", "revision"]) && Object.values(item).every(string)))) &&
       Array.isArray(reply.remote_schemas) && reply.remote_schemas.every(item =>
-        keys(item, ["project", "schema_name"]) && Object.values(item).every(string)) &&
-      Array.isArray(reply.required_buffers) && reply.required_buffers.every(string) &&
+        keys(item, extended ? ["project", "schema_name", "environment_names"] : ["project", "schema_name"]) &&
+        string(item.project) && string(item.schema_name) && (!extended || names(item.environment_names))) &&
+      names(reply.required_buffers) &&
       Array.isArray(reply.local_schemas) && reply.local_schemas.every(item =>
         keys(item, ["project", "schema_name", "path", "canonical_path"]) && Object.values(item).every(string));
   }
