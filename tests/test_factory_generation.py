@@ -664,6 +664,17 @@ BadResult() # error
                 "class Text(Alias,total=False):\n optional: int",
                 True,
             ),
+            ("from typing import TypeAlias\nText:TypeAlias=list[str]", True),
+            (
+                "from typing import TypeAlias\nclass Known(str): pass\n"
+                "Text:TypeAlias=tuple[Known,...]",
+                True,
+            ),
+            (
+                "from typing import TypeAlias,Sequence\nclass Known(str): pass\n"
+                "Text:TypeAlias=Sequence[Known]",
+                True,
+            ),
             ("class _Text(str): pass\nText:_Text=_Text", False),
             (
                 "from typing import TypeAlias\n"
@@ -677,6 +688,28 @@ BadResult() # error
             ("@unknown\nclass Text: pass", False),
         ):
             with self.subTest(declaration=declaration):
+                authored = source
+                if "Text:TypeAlias=list" in declaration:
+                    authored = source.replace(
+                        "value=Text('hello')", "value:Text=['hello']"
+                    )
+                elif "tuple[Known" in declaration or "Sequence[Known" in declaration:
+                    authored = source.replace(
+                        "from local_types import Text",
+                        "from local_types import Text,Known",
+                    ).replace(
+                        "value=Text('hello')",
+                        "value:Text=(Known('hello'),)"
+                        if "tuple[Known" in declaration
+                        else "value:Text=[Known('hello')]",
+                    )
+                if (
+                    "Text:TypeAlias=list" in declaration
+                    or "Sequence[Known" in declaration
+                ):
+                    authored += " bad=graphql.scalar('String',[1])\n"
+                elif "tuple[Known" in declaration:
+                    authored += " bad=graphql.scalar('String',(1,))\n"
                 modules = (
                     ModuleSnapshot(
                         "p",
@@ -685,7 +718,7 @@ BadResult() # error
                         1,
                         source.replace("Text('hello')", "Text(required='hello')")
                         if "TypedDict" in declaration
-                        else source,
+                        else authored,
                     ),
                     ModuleSnapshot(
                         "p", "local_types", "file:///local_types.py", 1, declaration
@@ -724,7 +757,12 @@ BadResult() # error
                     with tempfile.TemporaryDirectory() as directory:
                         root = Path(directory)
                         self.write(root, artifacts, modules)
-                        self.check(root)
+                        errors = {
+                            n
+                            for n, line in enumerate(authored.splitlines(), 1)
+                            if "bad=graphql.scalar" in line
+                        }
+                        self.check(root, {"main.py": errors} if errors else None)
                         runtime = subprocess.run(
                             [sys.executable, "main.py"],
                             cwd=root,
