@@ -1246,35 +1246,82 @@ class _Graph:
 
 
 class _CallScopes(ast.NodeVisitor):
-    scoped = False
-    shadowed: set[str] = set()
+    def __init__(self, module: _Module) -> None:
+        self.module = module
+        self.scoped = False
+        self.function_body = False
+        self.shadowed: set[str] = set()
 
-    def visit_FunctionDef(self, node: ast.AST) -> None:
-        previous = self.scoped
-        previous_shadowed = self.shadowed
-        self.scoped = True
-        local = {
-            item.id
+    def check_scope(self, node: ast.Call) -> None:
+        if self.scoped and not self.function_body:
+            raise _Unresolved("Nested scopes require a later project resolver slice")
+        if self.function_body and any(
+            isinstance(item, ast.Name)
+            and isinstance(item.ctx, ast.Load)
+            and item.id in self.shadowed
             for item in ast.walk(node)
-            if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del))
+        ):
+            raise _Unresolved(
+                "Function inputs must use stable module globals or literals"
+            )
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        if (
+            self.scoped
+            or node not in self.module.tree.body
+            or getattr(node, "type_params", False)
+        ):
+            self.visit_unsupported_scope(node)
+            return
+        previous = self.scoped, self.function_body, self.shadowed
+        self.scoped = True
+        # Defaults, decorators and annotations are not function-body expressions.
+        for expression in [*node.decorator_list, node.args, node.returns]:
+            if expression is not None:
+                self.visit(expression)
+        local = {
+            name for statement in node.body for name in self.module.writes(statement)
         }
-        local.update(item.arg for item in ast.walk(node) if isinstance(item, ast.arg))
-        self.shadowed = previous_shadowed | local
-        self.generic_visit(node)
-        self.shadowed = previous_shadowed
-        self.scoped = previous
+        local.update(
+            item.arg for item in ast.walk(node.args) if isinstance(item, ast.arg)
+        )
+        self.shadowed = local
+        self.function_body = not any(
+            isinstance(item, (ast.Global, ast.Nonlocal)) for item in ast.walk(node)
+        )
+        for statement in node.body:
+            self.visit(statement)
+        self.scoped, self.function_body, self.shadowed = previous
 
     visit_AsyncFunctionDef = visit_FunctionDef
-    visit_ClassDef = visit_FunctionDef
-    visit_Lambda = visit_FunctionDef
-    visit_ListComp = visit_FunctionDef
-    visit_SetComp = visit_FunctionDef
-    visit_DictComp = visit_FunctionDef
-    visit_GeneratorExp = visit_FunctionDef
+
+    def visit_unsupported_scope(self, node: ast.AST) -> None:
+        previous = self.scoped, self.function_body, self.shadowed
+        self.scoped = True
+        self.function_body = False
+        self.shadowed = (
+            self.shadowed
+            | {
+                item.id
+                for item in ast.walk(node)
+                if isinstance(item, ast.Name)
+                and isinstance(item.ctx, (ast.Store, ast.Del))
+            }
+            | {item.arg for item in ast.walk(node) if isinstance(item, ast.arg)}
+        )
+        self.generic_visit(node)
+        self.scoped, self.function_body, self.shadowed = previous
+
+    visit_ClassDef = visit_unsupported_scope
+    visit_Lambda = visit_unsupported_scope
+    visit_ListComp = visit_unsupported_scope
+    visit_SetComp = visit_unsupported_scope
+    visit_DictComp = visit_unsupported_scope
+    visit_GeneratorExp = visit_unsupported_scope
 
 
 def resolve_parse_sources(modules: tuple[ModuleSnapshot, ...]) -> ParseSources:
-    """Resolve default-mode module-level parser strings, without schema facts.
+    """Resolve default-mode static parser strings, without schema facts.
 
     Other recognized calls retain the ordinary parser fallback with a local
     diagnostic. Normal document resolution and its diagnostics are unchanged.
@@ -1299,10 +1346,7 @@ def resolve_parse_sources(modules: tuple[ModuleSnapshot, ...]) -> ParseSources:
                     )
                     recognized = callee.kind == "parser"
                     if recognized:
-                        if self.scoped:
-                            raise _Unresolved(
-                                "Nested parser scopes retain the ordinary AST fallback"
-                            )
+                        self.check_scope(node)
                         names = (
                             "source",
                             "no_location",
@@ -1390,7 +1434,7 @@ def resolve_parse_sources(modules: tuple[ModuleSnapshot, ...]) -> ParseSources:
 
         start = len(calls)
         try:
-            Calls().visit(module.tree)
+            Calls(module).visit(module.tree)
         except RecursionError:
             del calls[start:]
             graph.failed_modules.add(module.identity)
@@ -1457,10 +1501,7 @@ def _resolve(
                     if callable_.kind in {"callable", "initializer"}:
                         candidate = True
                         document_candidate = callable_.kind == "callable"
-                        if self.scoped:
-                            raise _Unresolved(
-                                "Nested scopes require a later project resolver slice"
-                            )
+                        self.check_scope(node)
                         if callable_.kind == "initializer":
                             graph.expression(
                                 module, node, (node.lineno, node.col_offset), set()
@@ -1505,7 +1546,7 @@ def _resolve(
         start = len(calls)
         rejected_start = len(unavailable)
         try:
-            Calls().visit(module.tree)
+            Calls(module).visit(module.tree)
         except RecursionError:
             del calls[start:]
             del unavailable[rejected_start:]

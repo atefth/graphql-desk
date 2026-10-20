@@ -271,6 +271,17 @@ def dynamic(text:str)->DocumentNode:
  assert_type(reader(text),DocumentNode)
  return reader(text)
 assert dynamic(TEXT).kind == "document"
+def scoped() -> None:
+ item=reader(TEXT)
+ assert_type(item.definitions[0].name.value,Literal["Q"])
+ assert item.kind=="document"
+async def async_scoped() -> None:
+ item=reader("query Async { missing }")
+ assert_type(item.definitions[0].name.value,Literal["Async"])
+ assert item.kind=="document"
+scoped()
+import asyncio
+asyncio.run(async_scoped())
 if TYPE_CHECKING:
  wrong:Literal["Other"]=value.definitions[0].name.value
  value.nonexistent
