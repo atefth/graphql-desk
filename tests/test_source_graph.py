@@ -320,6 +320,98 @@ class SourceGraphTests(unittest.TestCase):
         self.assertEqual(result.status, "unresolved")
         self.assertEqual(resolve_project(ordinary).calls[0].source, "text")
 
+    def test_inherited_typed_dict_provenance_survives_aliases_and_reexports(
+        self,
+    ) -> None:
+        snapshots = (
+            module(
+                "base",
+                "from typing_extensions import TypedDict\n"
+                "class Base(TypedDict):\n required: str",
+            ),
+            module("exports", "from base import Base as Public"),
+            module(
+                "models",
+                "from typing import TypeAlias\n"
+                "import base\n"
+                "from exports import Public\nAlias:TypeAlias=base.Base\n"
+                "class Child(Alias,total=False):\n optional: int\n"
+                "class Grandchild(Child,total=True):\n final: bool\n"
+                "class Qualified(base.Base,total=False): pass\n"
+                "class Reexported(Public,total=False): pass",
+            ),
+        )
+        result = resolve_type_symbols(
+            ("models.Grandchild",), modules=snapshots, project_id="app"
+        )
+        self.assertEqual(result[0].status, "resolved")
+        self.assertEqual(
+            [
+                item.status
+                for item in resolve_type_symbols(
+                    ("models.Qualified", "models.Reexported"),
+                    modules=snapshots,
+                    project_id="app",
+                )
+            ],
+            ["resolved", "resolved"],
+        )
+        self.assertEqual(
+            result,
+            resolve_type_symbols(
+                ("models.Grandchild",),
+                modules=tuple(reversed(snapshots)),
+                project_id="app",
+            ),
+        )
+        changed = (*snapshots[:2], replace(snapshots[2], version=2))
+        self.assertNotEqual(
+            result[0].dependencies,
+            resolve_type_symbols(
+                ("models.Grandchild",), modules=changed, project_id="app"
+            )[0].dependencies,
+        )
+        for suffix in (
+            "class Plain: pass\nclass Bad(Plain,total=False): pass",
+            "class Plain: pass\nclass Bad(Public,Plain,total=False): pass",
+            "class Bad(Public,metaclass=unknown): pass",
+            "class Bad(Public,closed=True): pass",
+            "class Bad(Public,total=unknown): pass",
+            "Public=object\nclass Bad(Public,total=False): pass",
+        ):
+            with self.subTest(suffix=suffix):
+                bad = (
+                    *snapshots[:2],
+                    module("models", "from exports import Public\n" + suffix),
+                )
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Bad",), modules=bad, project_id="app"
+                    )[0].status,
+                    "unresolved",
+                )
+        shadowed = (
+            module("typing_extensions", "class TypedDict: pass"),
+            module(
+                "models",
+                "from typing_extensions import TypedDict\n"
+                "class Base(TypedDict): pass\nclass Child(Base,total=False): pass",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("models.Child",), modules=shadowed, project_id="app")[
+                0
+            ].status,
+            "unresolved",
+        )
+        mutated = (*snapshots, module("mutator", "import base\nbase.Base=object"))
+        self.assertEqual(
+            resolve_type_symbols(
+                ("models.Grandchild",), modules=mutated, project_id="app"
+            )[0].status,
+            "unresolved",
+        )
+
     def test_captured_type_symbols_distinguish_known_failures_and_unknown_forms(
         self,
     ) -> None:

@@ -74,3 +74,12 @@ External symbols remain explicitly unverified. This establishes bounded symbol
 availability, not full Python type compatibility or guaranteed runtime imports.
 Factory mapping preflight consumes these facts before emitting artifacts; checker,
 editor/doctor and complete external/stub search-path integration remain open.
+
+Captured TypedDict subclasses retain trusted base provenance through name and
+qualified aliases, explicit supported TypeAlias targets and reexports. This permits
+inherited `total=True`/`total=False` declarations while rejecting mixed ordinary
+class bases, shadowed markers, mutations and unsupported metaclass semantics.
+Inherited-only `closed` remains unresolved; the existing direct-marker policy is
+unchanged. Actual-source mapping fixtures pass both strict checkers and runtime
+checks without importing project modules during generation. Full Python type
+compatibility and external-symbol verification remain open.

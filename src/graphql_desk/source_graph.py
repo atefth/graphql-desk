@@ -8,7 +8,7 @@ import ast
 import keyword
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from .source import Span
@@ -158,6 +158,7 @@ class _Value:
     dependencies: frozenset[ModuleDependency] = frozenset()
     schema_name: str | None = None
     document: DocumentIdentity | None = None
+    typed_dict: bool = False
 
 
 class _Unresolved(Exception):
@@ -794,12 +795,19 @@ class _Graph:
                             raise _Unresolved(
                                 "Class bases are not statically established types"
                             )
-                        typed_dict = any(
-                            base.kind == "external"
+                        typed_dict_bases = [
+                            base.typed_dict
+                            or base.kind == "external"
                             and base.text
                             in {"typing.TypedDict", "typing_extensions.TypedDict"}
                             for base in bases
-                        )
+                        ]
+                        typed_dict = any(typed_dict_bases)
+                        if typed_dict and not all(typed_dict_bases):
+                            raise _Unresolved(
+                                "TypedDict bases cannot mix with ordinary class bases"
+                            )
+                        value = replace(value, typed_dict=typed_dict)
                         keywords = {"total"}
                         if any(
                             base.kind == "external"
@@ -852,6 +860,7 @@ class _Graph:
                 value.dependencies | {module.identity},
                 schema_name=value.schema_name,
                 document=value.document,
+                typed_dict=value.typed_dict,
             )
             if factory is not None:
                 value = self.declared_factory(
@@ -1091,6 +1100,7 @@ class _Graph:
                     value.dependencies | parent.dependencies,
                     schema_name=value.schema_name,
                     document=value.document,
+                    typed_dict=value.typed_dict,
                 )
         if isinstance(node, ast.Call):
             callee = self.expression(module, node.func, before, active, probe=probe)
