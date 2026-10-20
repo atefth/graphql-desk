@@ -63,7 +63,7 @@ Class aliases and package reexports reuse the existing source graph. Simple expl
 PEP613 aliases (`Alias: TypeAlias = ClassName`) also reuse those checks when the
 marker resolves to uncaptured `typing.TypeAlias` or `typing_extensions.TypeAlias`.
 Only named or qualified targets are supported; shadowed markers, ordinary marker
-value assignments, variable annotations, string/parameterized/union targets, cycles and mutations remain
+value assignments, ordinary variable annotations, string/parameterized/union targets, cycles and mutations remain
 unresolved. External targets stay unverified. Dependencies retain the entire
 captured project, including negative lookups.
 
