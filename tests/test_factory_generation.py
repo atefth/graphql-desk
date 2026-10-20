@@ -665,6 +665,20 @@ BadResult() # error
                 True,
             ),
             ("from typing import TypeAlias\nText:TypeAlias=list[str]", True),
+            ("from typing import TypeAlias\nText:TypeAlias=bool", True),
+            ("from bool_types import Flag as Text\n__all__=['Text']", True),
+            (
+                "from typing import TypeAlias\nFlag:TypeAlias=bool\n"
+                "Text:TypeAlias=Flag",
+                True,
+            ),
+            ("from typing import TypeAlias\nText:TypeAlias=list[bool]", True),
+            ("class Text(bool): pass", False),
+            (
+                "from typing import TypeAlias\nFlag:TypeAlias=bool\n"
+                "class Text(Flag): pass",
+                False,
+            ),
             (
                 "from typing import TypeAlias\nclass Known(str): pass\n"
                 "Text:TypeAlias=tuple[Known,...]",
@@ -689,7 +703,18 @@ BadResult() # error
         ):
             with self.subTest(declaration=declaration):
                 authored = source
-                if "Text:TypeAlias=list" in declaration:
+                if (
+                    "Text:TypeAlias=bool" in declaration
+                    or "Text:TypeAlias=Flag" in declaration
+                    or "from bool_types" in declaration
+                ):
+                    authored = source.replace("value=Text('hello')", "value:Text=True")
+                    authored += " bad=graphql.scalar('String',1)\n"
+                elif "Text:TypeAlias=list[bool]" in declaration:
+                    authored = source.replace(
+                        "value=Text('hello')", "value:Text=[True]"
+                    )
+                elif "Text:TypeAlias=list" in declaration:
                     authored = source.replace(
                         "value=Text('hello')", "value:Text=['hello']"
                     )
@@ -710,7 +735,7 @@ BadResult() # error
                     authored += " bad=graphql.scalar('String',[1])\n"
                 elif "tuple[Known" in declaration:
                     authored += " bad=graphql.scalar('String',(1,))\n"
-                modules = (
+                modules: tuple[ModuleSnapshot, ...] = (
                     ModuleSnapshot(
                         "p",
                         "main",
@@ -724,6 +749,16 @@ BadResult() # error
                         "p", "local_types", "file:///local_types.py", 1, declaration
                     ),
                 )
+                if "from bool_types" in declaration:
+                    modules += (
+                        ModuleSnapshot(
+                            "p",
+                            "bool_types",
+                            "file:///bool_types.py",
+                            1,
+                            "from typing import TypeAlias\nFlag:TypeAlias=bool",
+                        ),
+                    )
                 resolved = resolve_project(
                     modules,
                     bindings=(
@@ -778,6 +813,31 @@ BadResult() # error
                         "Configured mapping", artifacts.diagnostics[0].message
                     )
                     self.assertNotIn("PRIVATE_VALUE", artifacts.diagnostics[0].message)
+
+    def test_boolean_subclasses_reject_in_both_checkers_and_at_runtime(self) -> None:
+        for source in (
+            "class Bad(bool): pass\n",
+            "from typing import TypeAlias\nFlag:TypeAlias=bool\n"
+            "class Bad(Flag): pass\n",
+        ):
+            with (
+                self.subTest(source=source),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                (root / "bad.py").write_text(source, encoding="utf8")
+                errors = {
+                    n
+                    for n, line in enumerate(source.splitlines(), 1)
+                    if line.startswith("class Bad")
+                }
+                self.check(root, {"bad.py": errors})
+                runtime = subprocess.run(
+                    [sys.executable, "bad.py"], cwd=root, capture_output=True, text=True
+                )
+                self.assertNotEqual(runtime.returncode, 0)
+                self.assertIn("TypeError", runtime.stderr)
+                self.assertIn("bool", runtime.stderr)
 
     def test_direct_function_and_async_calls_infer_in_original_source(self) -> None:
         source = """import asyncio

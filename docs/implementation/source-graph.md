@@ -64,7 +64,8 @@ PEP613 aliases (`Alias: TypeAlias = ClassName`) also reuse those checks when the
 marker resolves to uncaptured `typing.TypeAlias` or `typing_extensions.TypeAlias`.
 Named or qualified targets and the bounded container forms `list[N]`,
 `tuple[N, ...]` and `typing.Sequence[N]` are supported, with one named or qualified
-type argument. Constructors must resolve to trusted external builtins or typing
+type argument. Supported builtin availability includes `bool`, while direct or
+aliased `bool` class bases remain rejected as non-subclassable. Constructors must resolve to trusted external builtins or typing
 exports; shadowing and mutations invalidate that proof. External arguments stay
 unverified, and containers do not inherit TypedDict provenance from their element.
 Shadowed markers, ordinary marker value assignments, ordinary variable annotations,
