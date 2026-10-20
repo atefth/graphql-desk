@@ -20,3 +20,19 @@ Three tests cover unknown-only suppression, schema-authored directives, retained
 variable validation, unused fragments and original AST/source identity. This
 extracts the existing renderer policy; it does not establish shared editor/CLI
 diagnostics, complete source mapping or any broad acceptance gate.
+
+`document_validation.validate_indexed_document` validates a composed indexed
+document against its supplied schema context and returns `GraphDiagnostic`
+records. It selects definitions from each owner's original parsed AST, retaining
+original source locations, and maps errors through verified Python literal
+contributions. Imported fragments, adjacent strings and escapes retain their
+actual host origins; printed definitions are used only to check index facts.
+Locationless errors fall back to the owning call range.
+
+The adapter checks registry ownership, schema/context identities and supplied
+source-map snapshots. It trusts the caller's index and whole-snapshot freshness;
+it does not discover sources, acquire current files or authorize publication.
+Three focused tests cover imported split/escaped error locations, field/argument/
+variable validation, directive policy and stale owner/source/context rejection.
+Editor and CLI integration, severity policy and full diagnostic acceptance remain
+open.

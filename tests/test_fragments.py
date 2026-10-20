@@ -61,6 +61,71 @@ class FragmentTests(unittest.TestCase):
         )
         return [fact.name for fact in document.definitions]
 
+    def test_rejected_owners_preserve_transitive_causes_and_independent_success(
+        self,
+    ) -> None:
+        sources = self.resolve(
+            module("leaf", 'leaf=graphql("fragment Leaf on User {")', version=3),
+            module(
+                "left",
+                "from leaf import leaf\n"
+                'left=graphql("fragment Left on User { ...Leaf }",[leaf])',
+            ),
+            module(
+                "right",
+                "from leaf import leaf\n"
+                'right=graphql("fragment Right on User { ...Leaf }",[leaf])',
+            ),
+            module(
+                "query",
+                "from left import left\nfrom right import right\n"
+                'q=graphql("query Q { user { ...Left ...Right } }",[left,right])\n'
+                'good=graphql("{ hello }")',
+            ),
+        )
+        result = index_fragments(sources, schemas=self.schemas)
+        self.assertEqual([item.call.binding for item in result.documents], ["good"])
+        failed = {item.call.binding: item for item in result.unavailable}
+        self.assertEqual(set(failed), {"leaf", "left", "right", "q"})
+        originals = {call.binding: call for call in sources.calls}
+        for name, item in failed.items():
+            self.assertIs(item.call, originals[name])
+            self.assertIn(failed["leaf"].diagnostics[0], item.diagnostics)
+            self.assertTrue(item.diagnostics)
+        leaf = failed["leaf"]
+        self.assertEqual(leaf.call.module.version, 3)
+        self.assertEqual(leaf.call.module.uri, "file:///p/leaf.py")
+        # Dependency diagnostics display at references, not the owning call.
+        left = failed["left"]
+        self.assertEqual(left.diagnostics[0].range, left.call.fragments[0].range)
+        self.assertNotEqual(left.diagnostics[0].range, left.call.range)
+        with self.assertRaises(FrozenInstanceError):
+            setattr(left, "call", originals["q"])
+        with self.assertRaises(FrozenInstanceError):
+            setattr(result, "unavailable", ())
+        self.assertEqual(FragmentIndex((), ()).unavailable, ())
+
+    def test_rejected_context_and_resolver_failure_boundaries(self) -> None:
+        sources = self.resolve(module("q", 'q=graphql("{ hello }")'))
+        contexts: tuple[dict[tuple[str, str | None], SchemaContext], ...] = (
+            {},
+            {("p", "default"): replace(self.context, schema_name="bad")},
+        )
+        for schemas in contexts:
+            with self.subTest(schemas=schemas):
+                result = index_fragments(sources, schemas=schemas)
+                self.assertEqual(result.documents, ())
+                self.assertIs(result.unavailable[0].call, sources.calls[0])
+                self.assertEqual(result.unavailable[0].diagnostics, result.diagnostics)
+        unresolved = resolve_project(
+            (module("q", 'bad=graphql(dynamic)\ngood=graphql("{ hello }")'),),
+            bindings=(ProjectBindings("p", ("default",), "default"),),
+        )
+        result = index_fragments(unresolved, schemas=self.schemas)
+        self.assertTrue(result.diagnostics)
+        self.assertEqual(result.unavailable, ())
+        self.assertEqual([item.call.binding for item in result.documents], ["good"])
+
     def test_imported_diamond_matches_runtime_order_dedup_and_primary(self) -> None:
         sources = self.resolve(
             module("leaf", 'leaf=graphql("fragment Leaf on User { id }")'),
