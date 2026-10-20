@@ -37,8 +37,16 @@ for its indexed fragment definitions, with each fragment's own selected fields
 visible and nested spreads still masked. Definition-level `@_unmask` expands that
 fragment without adding its own capability; nested fragments keep their policy.
 Global `disable_masking=True` expands all spreads without reference metadata.
-Schema aliases are emitted once. This API still selects an operation: standalone
-fragment factory generation and reader helpers remain separate work.
+Schema aliases are emitted once. This entry point still selects an operation.
+
+`render_indexed_fragment_types` accepts the same keyword options and uses the
+indexed `primary_fragment` instead. It renders `<name>Result` from the fragment's
+actual type condition, without inventing an operation or schema field.
+`<name>Variables` is empty because fragments declare no operation variables.
+Nested spreads use the same masking policy and owner registry. Abstract
+alternatives and list/null wrappers follow the shared renderer, and incompatible
+primary/schema/context facts reject. Factory attachment and reader helpers remain
+separate work.
 
 Configured scalar mappings distinguish variable/input and result/output aliases; enum remappings apply in both directions. Mapping facts and limitations follow the [schema renderer](schema-types.md). Raw masked spreads without ownership, unmapped custom scalars and introspection object selections currently raise errors. Unsupported semantics never become `Any`. The schema renderer supplies closed oneOf input alternatives and preserves variable omission/default behavior. This function produces declarations only: it does not attach them to factories, execute requests, coerce responses, write files or refresh Pylance.
 
