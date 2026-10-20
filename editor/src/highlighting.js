@@ -88,7 +88,7 @@ function lexicalCandidates(text) {
   });
 }
 
-function createHighlighting({ analyze, isCurrent, isTrusted }) {
+function createHighlighting({ analyze, isCurrent, isTrusted, mapSnapshot = value => value }) {
   if (![analyze, isCurrent, isTrusted].every((item) => typeof item === "function")) throw new Error("Analysis, trust and freshness callbacks are required");
   const lexical = (snapshot) => lexicalCandidates(snapshot.text).flatMap((candidate) =>
     tokens(candidate.text).map((token) => ({ ...token, start: token.start + candidate.start,
@@ -99,6 +99,7 @@ function createHighlighting({ analyze, isCurrent, isTrusted }) {
       if (!isTrusted()) return lexical(snapshot);
       try {
         const bundle = await analyze(snapshot, token);
+        if (bundle) snapshot = mapSnapshot(snapshot, bundle);
         if (!bundle || token?.isCancellationRequested || !isTrusted() ||
             bundle.request.request_id !== bundle.response.request_id ||
             !bundle.request.modules.some((item) => item.uri === snapshot.uri && item.version === snapshot.version && item.source === snapshot.text) ||
@@ -131,7 +132,7 @@ function registerHighlighting(vscode, options) {
       const version = document.version;
       const generation = (generations.get(uri) ?? 0) + 1;
       generations.set(uri, generation);
-      const snapshot = { uri, version, text: document.getText() };
+      const snapshot = options.snapshot ? options.snapshot(document) : { uri, version, text: document.getText() };
       const items = await service.highlight(snapshot, token);
       if (disposed || document.isClosed || generations.get(uri) !== generation || document.version !== version || token?.isCancellationRequested) return;
       for (const [scope, decoration] of decorations) editor.setDecorations(decoration,

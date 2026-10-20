@@ -9,7 +9,7 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "discovery"].includes(suite), "Choose a known isolated suite");
+  assert.ok(["features", "discovery", "activation"].includes(suite), "Choose a known isolated suite");
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
@@ -24,6 +24,7 @@ async function main() {
     "telemetry.telemetryLevel": "off",
     "files.autoSave": "off",
     "python.defaultInterpreterPath": python,
+    "graphqlDesk.pythonPath": suite === "activation" ? python : "",
     "python.experiments.enabled": false,
     "python.analysis.aiHoverSummaries": false,
   }));
