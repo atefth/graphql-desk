@@ -26,5 +26,35 @@ runtime operations. They are intended for generated result and reader signatures
 
 Tests run positive and negative fixtures through both pinned checkers, including
 wrong identities, raw closed dictionaries, combined capabilities, exact fragment
-tuples, and changed transitive dependencies. Generic fragment reader helpers and
-factory attachment are separate work; issue #35 remains open.
+tuples, and changed transitive dependencies. Issue #35 remains open for the complete
+helper acceptance matrix.
+
+Reader research remains incomplete. A pinned TypeScript comparison corrected an
+initially stronger expectation: a different fragment reference with directly
+selected compatible fields can legitimately satisfy the raw-result arm. A pure
+unmatched reference is passed through upstream; it must not expose fragment-only
+fields. Empty and conditional payloads need return-type and field-access checks,
+not a blanket requirement that every such call reject.
+
+The pinned helper also permits mutable alias deletion through an optional-field
+view, leaving an original required-field annotation invalid. That is an upstream
+aliasing limitation, consistent with the identity contract, not justification to
+require closed raw shapes or readonly result views. Upstream array results
+are readonly; Python reader containers use `Sequence`.
+
+`read_fragment(document, data)` now supplies an identity reader for generated
+fragment views. Each valid fragment binding also exports `read_<binding>` from
+its generated source companion. `ReadableFragmentDocument[I, R, V, Input]` keeps
+the existing three-parameter `FragmentDocument` base and adds a distinct read-only
+input projection. Recursive read-only fields accept compatible mutable results
+without changing the mutable result view. Generated bound helpers provide literal
+context and typename narrowing; the root reader uses checker-only callable facts.
+Neither function reads the phantom property at runtime.
+
+This is bounded reader support. Nullable arrays retain the full result union and,
+when needed, the absent alternative. Generic raw literals and contextual fallback
+inputs can retain a wider result/absence union. Upstream unmatched-reference
+passthrough is not yet exposed by these typed Python helpers. Required conditional
+empty branches remain absent rather than inventing selected fields. These limits,
+mask/result helpers and the full parity matrix keep the broad gate open. Mutable
+output aliasing intentionally follows the pinned runtime identity behavior.

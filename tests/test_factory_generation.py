@@ -590,6 +590,35 @@ BadResult() # error
                 self.assertEqual(artifacts.files, ())
                 self.assertEqual(artifacts.diagnostics[0].code, "factory-generation")
 
+    def test_fragment_reader_schema_alias_collisions_reject_atomically(self) -> None:
+        from graphql import build_schema
+
+        module = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            1,
+            "from generated.main import graphql\n"
+            "fields=graphql('fragment Fields on Book { title }')",
+        )
+        for alias in (
+            "GraphqlDeskReader",
+            "GraphqlDeskReadFragment",
+        ):
+            with self.subTest(alias=alias):
+                context = SchemaContext(
+                    "main",
+                    build_schema(
+                        f"enum {alias} {{ VALUE }}\n"
+                        "type Book { title: String } type Query { book: Book }"
+                    ),
+                    "generation-1",
+                )
+                with patch.object(self, "context", return_value=context):
+                    artifacts = self.generate((module,))
+                self.assertEqual(artifacts.files, ())
+                self.assertIn("collide", artifacts.diagnostics[0].message)
+
     def generate(self, modules: tuple[ModuleSnapshot, ...]) -> FactoryArtifacts:
         context = self.context()
         sources = resolve_project(
@@ -706,10 +735,12 @@ BadResult() # error
             (
                 "from typing import TYPE_CHECKING, TypeVar\n"
                 "from typing_extensions import assert_type\n"
-                "from graphql_desk import TypedDocument\n"
+                "from graphql_desk import TypedDocument, read_fragment\n"
                 "from generated.main import graphql\n"
                 "from generated.sources.main import "
                 "BookQueryResult, BookQueryVariables\n"
+                "from generated.sources.leaf import "
+                "read_book_fields, BookFieldsResult\n"
                 "from leaf import book_fields\n"
                 'book_query=graphql("query Book($id:ID!){book(id:$id){id ...Fields}}",'
                 "(book_fields,))\n"
@@ -723,6 +754,9 @@ BadResult() # error
                 "if TYPE_CHECKING:\n"
                 "    variables: BookQueryVariables = {'id':'1'}\n"
                 "    assert_type(execute(book_query, variables), BookQueryResult)\n"
+                "    assert_type(read_book_fields({'title':'x'}), BookFieldsResult)\n"
+                "    assert_type(read_fragment(book_fields, "
+                "execute(book_query, variables)['book']), BookFieldsResult)\n"
                 "    assert_type(book_query.ast.definitions[0].name.value, "
                 "__import__('typing').Literal['Book'])\n"
                 "assert type(book_query) is TypedDocument\n"
@@ -730,6 +764,9 @@ BadResult() # error
                 "assert other.operation_name == 'B'\n"
                 "assert book_query.schema_name == 'main'\n"
                 "assert len(book_query.ast.definitions) == 2\n"
+                "data: BookFieldsResult = {'title':'x'}\n"
+                "assert read_book_fields(data) is data\n"
+                "assert read_fragment(book_fields, data) is data\n"
             )
             .replace("__import__('typing').Literal", "Literal")
             .replace("TYPE_CHECKING, TypeVar", "TYPE_CHECKING, Literal, TypeVar")

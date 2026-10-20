@@ -5,9 +5,10 @@ from typing import Generic, TypeVar
 
 from graphql import DocumentNode, parse
 
+from .fragment_helpers import read_fragment
 from .runtime import gql, graphql, init_graphql
 
-__all__ = ["TypedDocument", "gql", "graphql", "init_graphql", "parse"]
+__all__ = ["TypedDocument", "gql", "graphql", "init_graphql", "parse", "read_fragment"]
 
 _Result = TypeVar("_Result")
 _Variables = TypeVar("_Variables")

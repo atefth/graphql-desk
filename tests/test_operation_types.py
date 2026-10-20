@@ -20,6 +20,7 @@ from graphql_desk.fragments import (
     index_fragments,
 )
 from graphql_desk.operation_types import (
+    render_indexed_fragment_reader_types,
     render_indexed_fragment_types,
     render_indexed_operation_types,
     render_operation_types,
@@ -52,6 +53,235 @@ _SOURCE = """
 
 
 class OperationTypesTests(unittest.TestCase):
+    def test_fragment_reader_projections_and_branch_facts(self) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema(
+                "scalar Token type User { id:ID! title:String! token:Token! "
+                "friend:User friends:[User!]! } "
+                "type Org { count:Int! } union Node=User|Org "
+                "type Query {user:User! node:Node!}"
+            ),
+            "v1",
+        )
+        source = """from graphql_desk import gql
+inner=gql('fragment Inner on User {id}')
+outer=gql('fragment Outer on User {token title @include(if:$show) '
+ 'friend {title @include(if:$show) ...Inner} friends {...Inner}}',(inner,))
+raw=gql('query Raw {user {token title friend {title ...Inner} '
+ 'friends {...Inner}}}',(inner,))
+explicit=gql('fragment Explicit on Node {__typename '
+ '... on User {title} ... on Org {count}}')
+implicit=gql('fragment Implicit on Node {... on User {title} ... on Org {count}}')
+optional=gql('fragment Optional on User {title @include(if:$show)}')
+aliased=gql('fragment Aliased on User {__typename:title}')
+conditional=gql('fragment Conditional on User {... on User @include(if:$show) {id}}')
+"""
+        index = index_fragments(
+            resolve_project(
+                (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+            ),
+            schemas={("p", None): context},
+        )
+        self.assertEqual(index.diagnostics, ())
+        documents = {document.call.binding: document for document in index.documents}
+        readers = {
+            key: render_indexed_fragment_reader_types(
+                context,
+                documents[key],
+                name=key.capitalize(),
+                scalars=(ScalarMapping("Token", "builtins.str", "builtins.bytes"),),
+                fragment_index=index,
+            )
+            for key in (
+                "outer",
+                "explicit",
+                "implicit",
+                "optional",
+                "aliased",
+                "conditional",
+            )
+        }
+        self.assertEqual(readers["outer"].input_name, "OuterResultInput")
+        self.assertEqual(readers["outer"].output_name, "OuterResult")
+        self.assertFalse(readers["outer"].branches[0].accepts_empty)
+        self.assertTrue(readers["optional"].branches[0].accepts_empty)
+        self.assertIsNone(readers["aliased"].branches[0].typename)
+        for branch in readers["explicit"].branches:
+            self.assertIn(branch.typename, ("User", "Org"))
+            self.assertEqual(branch.input_name, branch.narrow_input_name)
+        for branch in readers["implicit"].branches:
+            self.assertEqual(branch.narrow_input_name, branch.input_name + "Narrow")
+        self.assertEqual(
+            {branch.accepts_empty for branch in readers["conditional"].branches},
+            {True, False},
+        )
+        with self.assertRaises(ValueError):
+            render_indexed_fragment_reader_types(
+                replace(context, token="stale"),
+                documents["outer"],
+                name="Outer",
+                fragment_index=index,
+            )
+        with self.assertRaises(ValueError):
+            render_indexed_fragment_reader_types(
+                context,
+                replace(documents["outer"], primary_fragment=None),
+                name="Outer",
+                fragment_index=index,
+            )
+        fixture = """from typing_extensions import assert_type
+from outer import OuterResultInput,OuterResult,OuterResult_friends
+from raw import RawResult
+from optional import OptionalResultInput
+def accept(value:OuterResultInput)->None: pass
+def check(raw:RawResult,view:OuterResultInput,result:OuterResult)->None:
+ accept(raw['user'])
+ assert_type(result['friends'],list[OuterResult_friends])
+ assert_type(view['token'],bytes)
+ view['title']='changed' # BAD
+ del view['title'] # BAD
+ view['friends'].append(view['friends'][0]) # BAD
+ view['friend']={'title':'missing ref'} # BAD
+accept({'friends':[{}],'friend':None}) # BAD
+accept({'friends':[],'friend':{'title':'missing ref'}}) # BAD
+optional:OptionalResultInput={}
+"""
+        expected = {
+            number
+            for number, line in enumerate(fixture.splitlines(), 1)
+            if "# BAD" in line
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for key, reader in readers.items():
+                (root / (key + ".py")).write_text(reader.text, encoding="utf8")
+            (root / "raw.py").write_text(
+                render_indexed_operation_types(
+                    context,
+                    documents["raw"],
+                    name="Raw",
+                    scalars=(ScalarMapping("Token", "builtins.str", "builtins.bytes"),),
+                    fragment_index=index,
+                ),
+                encoding="utf8",
+            )
+            (root / "fixture.py").write_text(fixture, encoding="utf8")
+            runtime = subprocess.run(
+                [
+                    sys.executable,
+                    "-X",
+                    "utf8",
+                    "-c",
+                    "import outer,explicit,implicit,optional,aliased",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stderr)
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-X",
+                    "utf8",
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+            self.assertEqual(
+                {
+                    int(line)
+                    for line in re.findall(r"fixture\.py:(\d+): error:", mypy.stdout)
+                },
+                expected,
+                mypy.stdout,
+            )
+            self.assertNotIn("outer.py:", mypy.stdout)
+            (root / "pyrightconfig.json").write_text(
+                json.dumps({"typeCheckingMode": "strict", "pythonVersion": "3.10"}),
+                encoding="utf8",
+            )
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-X",
+                    "utf8",
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            self.assertEqual(pyright.returncode, 1, pyright.stdout + pyright.stderr)
+            diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
+            self.assertTrue(
+                all(Path(item["file"]).name == "fixture.py" for item in diagnostics),
+                diagnostics,
+            )
+            self.assertEqual(
+                {item["range"]["start"]["line"] + 1 for item in diagnostics},
+                expected,
+                diagnostics,
+            )
+
+    def test_reader_projection_for_interface_without_implementers(self) -> None:
+        context = SchemaContext(
+            "main", build_schema("interface Node {id:ID!} type Query {node:Node}"), "v1"
+        )
+        module = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            1,
+            'from graphql_desk import gql\nf=gql("fragment F on Node {id}")',
+        )
+        index = index_fragments(
+            resolve_project((module,)), schemas={("p", None): context}
+        )
+        rendered = render_indexed_fragment_reader_types(
+            context, index.documents[0], name="Empty", fragment_index=index
+        )
+        self.assertEqual(rendered.branches, ())
+        self.assertIn("EmptyResult = __graphql_desk_Never", rendered.text)
+        self.assertIn("EmptyResultInput = __graphql_desk_Never", rendered.text)
+        self.assertNotIn("ReadOnly as __graphql_desk_ReadOnly", rendered.text)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "generated.py").write_text(rendered.text, encoding="utf8")
+            (root / "pyrightconfig.json").write_text(
+                json.dumps({"typeCheckingMode": "strict", "pythonVersion": "3.10"}),
+                encoding="utf8",
+            )
+            for arguments in (
+                ["mypy", "--strict", "--no-incremental", str(root)],
+                ["pyright", "--project", str(root), "--pythonpath", sys.executable],
+            ):
+                checked = subprocess.run(
+                    [sys.executable, "-X", "utf8", "-m", *arguments],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf8",
+                )
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+
     def test_indexed_masked_payloads_capabilities_and_owner_guards(self) -> None:
         schema = build_schema(
             "type User { id: ID! name: String! friends: [User] } "

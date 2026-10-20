@@ -85,10 +85,18 @@ The generated callable protocol also includes the [scalar member](scalar-helpers
 using the same schema declarations and configured input aliases once. The runtime
 factory remains the ordinary schema-name binding.
 
-Fifteen focused tests check unchanged original Python source with both strict
+Valid primary fragments also emit a bound `read_<binding>` function in their
+source companion. The generated document view carries a separate recursive,
+read-only input projection and a checker-only reader property. Result types stay
+mutable. The public `read_fragment(document, data)` and bound helpers return the
+original object without reading metadata, copying data or inserting markers.
+Rejected fragment owners do not export readers. Schema/helper alias collisions
+reject atomically. See [reader limits](fragment-refs.md).
+
+Sixteen focused tests check unchanged original Python source with both strict
 checkers and actual generated runtime imports, generic client inference and
 negative variable/result cases, exact ASTs, explicit fallback limits, aliases,
 source packages, diagnostics and stale/collision failures. Dynamic discovery,
-persisted/reader helpers, writer integration,
+persisted helpers, complete reader precision, writer integration,
 incremental generation and the full editor/client matrix remain separate work.
 No broad typing, API or live-typing gate is passed.

@@ -10,16 +10,17 @@ from typing import Any
 from . import TypedDocument
 from .config import ProjectConfig, ScalarMapping
 from .document_validation import validate_indexed_document
+from .fragment_helpers import render_fragment_helpers
 from .fragment_refs import fragment_identity_key
 from .fragments import FragmentIndex, IndexedDocument, SchemaContext
 from .literal_ast import render_document_ast_types
 from .operation_types import (
-    render_indexed_fragment_types,
+    render_indexed_fragment_reader_types,
     render_indexed_operation_types,
 )
 from .runtime import init_graphql
 from .scalar_types import render_scalar_method
-from .schema_types import render_schema_types
+from .schema_types import mapped_type_declarations, render_schema_types
 from .source_graph import DocumentIdentity, GraphDiagnostic, ModuleSnapshot
 from .source_maps import build_source_map
 
@@ -416,21 +417,64 @@ def _generate_factory_artifacts(
                         ),
                     )
             else:
-                render = (
-                    render_indexed_fragment_types
-                    if primary is not None
-                    else render_indexed_operation_types
-                )
-                text = render(
-                    context,
-                    document,
-                    name=name,
-                    scalars=scalars,
-                    enums=enums,
-                    client_directives=client_directives,
-                    disable_masking=disable_masking,
-                    fragment_index=index,
-                )
+                helpers = None
+                if primary is not None:
+                    reader = render_indexed_fragment_reader_types(
+                        context,
+                        document,
+                        name=name,
+                        scalars=scalars,
+                        enums=enums,
+                        client_directives=client_directives,
+                        disable_masking=disable_masking,
+                        fragment_index=index,
+                    )
+                    helpers = render_fragment_helpers(
+                        reader, name=name, identity_name=name + "Identity"
+                    )
+                    inputs, outputs, _ = mapped_type_declarations(
+                        context.schema, scalars, enums
+                    )
+                    reserved = (
+                        set(context.schema.type_map)
+                        | set(inputs.values())
+                        | set(outputs.values())
+                    )
+                    generated = {
+                        name + "Identity",
+                        name + "FragmentRef",
+                        name + "Document",
+                        helpers.reader_name,
+                        helpers.function_name,
+                        *(
+                            f"{name}ReaderRef{number}"
+                            for number in range(
+                                len(
+                                    {
+                                        branch.typename
+                                        for branch in reader.branches
+                                        if branch.typename is not None
+                                    }
+                                )
+                            )
+                        ),
+                    }
+                    if reserved & generated:
+                        raise ValueError(
+                            "Schema aliases collide with fragment helper declarations"
+                        )
+                    text = reader.text
+                else:
+                    text = render_indexed_operation_types(
+                        context,
+                        document,
+                        name=name,
+                        scalars=scalars,
+                        enums=enums,
+                        client_directives=client_directives,
+                        disable_masking=disable_masking,
+                        fragment_index=index,
+                    )
                 if primary is not None:
                     key = fragment_identity_key(document, primary)
                     text += (
@@ -443,7 +487,7 @@ def _generate_factory_artifacts(
                 runtime = carrier(document)
                 ast_text = render_document_ast_types(runtime.ast, name="Exact")
                 packages(path + ".py")
-                put(path + ".py", text)
+                put(path + ".py", text + (helpers.runtime if helpers else ""))
                 put(
                     path + "_ast.py",
                     '"""Literal AST views exist only in the matching stub."""\n',
@@ -451,19 +495,20 @@ def _generate_factory_artifacts(
                 put(path + "_ast.pyi", ast_text)
                 base_type = (
                     f"__graphql_desk_FragmentDocument[{name}Identity, "
-                    f"{name}Result, {name}Variables]"
+                    f"{name}Result, {name}Variables, {name}ResultInput]"
                     if primary is not None
                     else f"__graphql_desk_TypedDocument[{name}Result, {name}Variables]"
                 )
                 superclass_import = (
                     "from graphql_desk.fragment_refs import "
-                    "FragmentDocument as __graphql_desk_FragmentDocument\n"
+                    "ReadableFragmentDocument as __graphql_desk_FragmentDocument\n"
                     if primary is not None
                     else "from graphql_desk import "
                     "TypedDocument as __graphql_desk_TypedDocument\n"
                 )
                 stub = (
                     text
+                    + (helpers.stub if helpers else "")
                     + "\n"
                     + superclass_import
                     + (
@@ -475,7 +520,22 @@ def _generate_factory_artifacts(
                         f"    schema_name: Literal[{context.schema_name!r}]\n"
                     )
                 )
+                if helpers is not None:
+                    stub += (
+                        "    @property\n"
+                        "    def _graphql_desk_reader(self) -> "
+                        f"{helpers.reader_name}: ...\n"
+                    )
                 put(path + ".pyi", stub)
+                if helpers is not None and call.binding is not None:
+                    exports.append(
+                        _SourceExport(
+                            identity,
+                            module,
+                            helpers.function_name,
+                            "read_" + call.binding,
+                        )
+                    )
             declarations[identity] = (module, name, label)
             if call.binding is not None:
                 names = public_names.setdefault(call.module.module, set())
