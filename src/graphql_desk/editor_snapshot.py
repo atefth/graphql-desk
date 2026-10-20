@@ -46,6 +46,7 @@ class RemoteSchemaOrigin:
     schema_name: str
     origin: SchemaOrigin = field(repr=False)
     config_token: str = field(repr=False)
+    refresh_interval: float = 0
 
 
 @dataclass(frozen=True)
@@ -348,6 +349,7 @@ def _preparation(captured: _CapturedProjects) -> EditorPreparation:
                         )
                     )
                 ),
+                config.schema_refresh_interval,
             )
             for config, _ in captured.projects
             for schema in config.schemas

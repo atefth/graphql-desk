@@ -46,7 +46,8 @@ Only one wire job and one latest pending job are retained during edit storms.
 Provider cancellation suppresses that caller; explicit refresh cancellation,
 interpreter changes, trust loss and disposal terminate the relevant worker.
 
-Remote schemas load only through the explicit refresh command. Unavailable schemas
+Remote schemas load through explicit refresh by default; a positive configured
+interval enables trusted background polling. Unavailable schemas
 show a status item linked to that command. Credential fingerprints stay private;
 only random opaque revisions cross the protocol. Changed configuration/credentials
 remove trusted schema precision, while unrelated source edits can retain explicitly
@@ -87,3 +88,16 @@ for repair; failed preparation keeps the previous observation set. Real-worker
 coverage checks external dirty-schema authority, configuration path replacement,
 missing-file repair and inert retired callbacks. This is bounded resource-lifecycle
 coverage, with complete lifecycle acceptance still open.
+
+Remote schemas remain explicit-refresh-only by default. A positive validated
+`schema_refresh_interval` enables authenticated background polling after trusted
+preparation. One state-owned timer preserves per-target deadlines across source-only
+captures, waits for interactive work, and reuses the existing bounded worker queue.
+Long intervals use safe platform timer chunks. Fresh preparation rechecks the target
+and interval before HTTP; credentials resolve from the current environment, and all
+capture/credential/trust/cancellation guards still apply before publication. Explicit
+refresh takes priority, including while its schema picker is open. Successful polls
+refresh providers without repeated command notifications; failed schemas retain the
+existing unavailable-state behavior. Invalidations abort polling; interpreter changes,
+workspace removal and disposal retire state-owned timers. This bounded polling and
+lifecycle coverage does not pass complete schema/editor or live-typing acceptance.

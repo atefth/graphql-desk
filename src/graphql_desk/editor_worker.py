@@ -329,6 +329,7 @@ class EditorWorker:
                                 )
                             )
                         ),
+                        "refresh_interval": entry.refresh_interval,
                     }
                     for entry in preparation.remote_origins
                 ]
