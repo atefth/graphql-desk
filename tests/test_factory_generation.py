@@ -656,6 +656,14 @@ BadResult() # error
                 "Text:t.TypeAlias=_Text",
                 True,
             ),
+            (
+                "from typing_extensions import TypedDict\n"
+                "from typing import TypeAlias\n"
+                "class Base(TypedDict):\n required: str\n"
+                "Alias:TypeAlias=Base\n"
+                "class Text(Alias,total=False):\n optional: int",
+                True,
+            ),
             ("class _Text(str): pass\nText:_Text=_Text", False),
             (
                 "from typing import TypeAlias\n"
@@ -670,7 +678,15 @@ BadResult() # error
         ):
             with self.subTest(declaration=declaration):
                 modules = (
-                    ModuleSnapshot("p", "main", "file:///main.py", 1, source),
+                    ModuleSnapshot(
+                        "p",
+                        "main",
+                        "file:///main.py",
+                        1,
+                        source.replace("Text('hello')", "Text(required='hello')")
+                        if "TypedDict" in declaration
+                        else source,
+                    ),
                     ModuleSnapshot(
                         "p", "local_types", "file:///local_types.py", 1, declaration
                     ),

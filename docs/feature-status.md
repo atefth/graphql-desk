@@ -1,6 +1,6 @@
 # Feature status and remaining work
 
-Implementation baseline: **69 foundation slices** are merged, with 350 Python tests and 50 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
+Implementation baseline: **70 foundation slices** are merged, with 351 Python tests and 50 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
 
 Merged #134–#137 preserve original-source validation and rejected resolver/index
 ownership, and type introspection selections. #138 assembles captured multi-schema
@@ -89,3 +89,9 @@ removals. A real-worker regression verifies added-folder closed source/configura
 edits refresh diagnostics, retained folders avoid duplicate watchers, and removed
 listeners stop invalidating analysis. This does not complete discovery/lifecycle or
 supported-platform acceptance.
+
+Captured mapping preflight now preserves inherited TypedDict provenance through
+aliases and reexports, allowing proven inherited total keywords. Mixed ordinary
+bases and unsupported inherited-only closed semantics remain unresolved. Existing
+actual-source factory fixtures cover both strict checkers and runtime behavior;
+full Python type compatibility and external-symbol verification remain open.
