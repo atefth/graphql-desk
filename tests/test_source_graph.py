@@ -1,5 +1,5 @@
 import unittest
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
 
 import graphql_desk.source_graph as source_graph
@@ -10,6 +10,7 @@ from graphql_desk.source_graph import (
     IncrementalResolver,
     ModuleSnapshot,
     ProjectBindings,
+    ProjectSources,
     resolve_project,
 )
 
@@ -23,6 +24,54 @@ def module(
 
 
 class SourceGraphTests(unittest.TestCase):
+    def test_rejected_call_ownership_without_invented_semantics(self) -> None:
+        item = module(
+            "main",
+            "from graphql_desk import gql, init_graphql\n"
+            "bad_source=gql(dynamic)\n"
+            "bad_selector=gql('{ id }',operation=selector)\n"
+            "bad_fragments=gql('{ id }',[unknown])\n"
+            "bad_init=init_graphql(dynamic)\n"
+            "good=gql('{ ok }')\n",
+        )
+        result = resolve_project((item,))
+        self.assertEqual([call.binding for call in result.calls], ["good"])
+        self.assertEqual(
+            [call.binding for call in result.unavailable],
+            ["bad_source", "bad_selector", "bad_fragments"],
+        )
+        for rejected in result.unavailable:
+            self.assertEqual(rejected.module.uri, item.uri)
+            self.assertEqual(rejected.module.version, item.version)
+            self.assertEqual(len(rejected.diagnostics), 1)
+            self.assertEqual(rejected.diagnostics[0].range, rejected.range)
+            self.assertTrue(
+                item.source[rejected.range.start : rejected.range.end].startswith(
+                    "gql("
+                )
+            )
+            self.assertFalse(hasattr(rejected, "source"))
+            self.assertFalse(hasattr(rejected, "schema_name"))
+            with self.assertRaises(FrozenInstanceError):
+                setattr(rejected, "binding", "changed")
+        self.assertEqual(ProjectSources((), ()).unavailable, ())
+        resolver = IncrementalResolver()
+        cold = resolver.resolve((item,))
+        warm = resolver.resolve((item,))
+        self.assertEqual(cold, result)
+        self.assertEqual(warm, result)
+        self.assertIs(cold.unavailable[0], warm.unavailable[0])
+        probe = resolve_project(
+            (
+                module(
+                    "probe",
+                    "from graphql_desk import gql\ngql=other\nrejected=gql('{ id }')",
+                ),
+            )
+        )
+        self.assertEqual(probe.calls, ())
+        self.assertEqual([call.binding for call in probe.unavailable], ["rejected"])
+
     def test_constants_reexports_relative_imports_and_contributions(self) -> None:
         constants = module("pkg.constants", 'HEAD = "query Q "\nTAIL = "{ id }"\n')
         bridge = module(
@@ -814,6 +863,16 @@ document=gql('{ otherUnknownField }', [operation])
         result = resolve_project((consumer, fragment, independent))
         self.assertEqual([call.binding for call in result.calls], ["ok"])
         self.assertIn("source-too-complex", {item.code for item in result.diagnostics})
+        self.assertEqual([call.binding for call in result.unavailable], ["doc"])
+        rejected = result.unavailable[0]
+        self.assertEqual(rejected.module.uri, consumer.uri)
+        self.assertTrue(rejected.diagnostics)
+        self.assertTrue(
+            all(cause.module.uri == fragment.uri for cause in rejected.diagnostics)
+        )
+        resolver = IncrementalResolver()
+        self.assertEqual(resolver.resolve((consumer, fragment, independent)), result)
+        self.assertEqual(resolver.resolve((consumer, fragment, independent)), result)
 
     def test_imported_document_mutation_and_diagnostic_probes_create_no_references(
         self,
