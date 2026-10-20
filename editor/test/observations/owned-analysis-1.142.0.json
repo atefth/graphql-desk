@@ -11,7 +11,7 @@
     "ms-python.vscode-pylance": "2026.4.1",
     "savedBaseline": "```python\n(variable) selected: str\n```\n<!--moduleHash:-567770122-->",
     "baselineDefinitions": [
-      "file:///c%3A/Users/ateft/AppData/Local/Temp/graphql-desk-features-62oJEN/workspace/generated.py"
+      "file:///c%3A/Users/ateft/AppData/Local/Temp/graphql-desk-features-5NsRWY/workspace/generated.py"
     ],
     "diskOnlyUpdate": true,
     "nullableHover": "```python\n(variable) selected: str | None\n```\n<!--moduleHash:-567770122-->",
