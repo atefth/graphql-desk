@@ -34,7 +34,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   const configuredPython = folder => vscode.workspace.getConfiguration("graphqlDesk", folder.uri).get("pythonPath", "");
   function dropState(root) {
     const state = states.get(root);
-    if (state) { state.cached = null; state.worker.dispose(); states.delete(root); }
+    if (state) {
+      state.cached = null; state.worker.dispose();
+      reconcileSchemaWatches(state, new Set()); states.delete(root);
+    }
   }
   const selectedKey = selected => selected && typeof selected.id === "string" && selected.id && typeof selected.path === "string" && selected.path ? JSON.stringify([selected.id, selected.path]) : null;
   async function environments(ticket) {
@@ -135,10 +138,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!trusted() || epoch !== ticket || configuredPython(folder) !== setting) return null;
     let state = states.get(root);
     if (typeof python !== "string" || !path.isAbsolute(python)) {
-      if (state) { state.worker.dispose(); states.delete(root); }
+      dropState(root);
       return null;
     }
-    if (state && (state.python !== python || state.setting !== setting)) { state.worker.dispose(); states.delete(root); state = null; }
+    if (state && (state.python !== python || state.setting !== setting)) { dropState(root); state = null; }
     if (!state) {
       state = { root, folder, python, setting, worker: workerFactory({ python, workspace: root, isTrusted: trusted }),
         running: false, pending: null, cached: null, targets: [], credentials: new Map(), revisions: [], watches: new Map() };
@@ -234,11 +237,15 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (pending) enqueue(state, pending.action, pending.kind).then(pending.resolve, pending.reject);
     });
   }
-  function watch(state, filename) {
-    if (state.watches.has(filename)) return;
-    const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(path.dirname(filename), path.basename(filename)));
-    state.watches.set(filename, watcher);
-    subscriptions.push(watcher, watcher.onDidChange(invalidate), watcher.onDidCreate(invalidate), watcher.onDidDelete(invalidate));
+  function reconcileSchemaWatches(state, filenames) {
+    for (const [filename, handles] of state.watches) if (!filenames.has(filename)) {
+      handles.forEach(handle => handle.dispose());
+      state.watches.delete(filename);
+    }
+    for (const filename of filenames) if (!state.watches.has(filename)) {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(path.dirname(filename), path.basename(filename)));
+      state.watches.set(filename, [watcher, watcher.onDidChange(invalidate), watcher.onDidCreate(invalidate), watcher.onDidDelete(invalidate)]);
+    }
   }
   function check(ticket, token, state) {
     if (!trusted() || epoch !== ticket || token?.isCancellationRequested || (state && states.get(state.root) !== state)) throw new Error("Superseded analysis");
@@ -264,7 +271,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         if (!captured.texts.has(id)) throw new Error("Missing schema buffer");
         return captured.texts.get(id);
       });
-      for (const schema of prepared.local_schemas) watch(state, schema.path);
+      reconcileSchemaWatches(state, new Set(prepared.local_schemas.map(schema => schema.path)));
       let identity = prepared.id;
       let refreshStatus;
       if (refreshTarget) {
@@ -373,8 +380,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         }
       }
       if (event === "onDidChangeWorkspaceFolders") {
-        for (const state of states.values()) state.worker.dispose();
-        states.clear(); interpreters.clear();
+        for (const root of states.keys()) dropState(root);
+        interpreters.clear();
         reconcileFolderWatches();
       }
       invalidate();
@@ -382,7 +389,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   }
   reconcileFolderWatches();
   return { analyze, isCurrent, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
-    dispose() { disposed = true; epoch += 1; for (const state of states.values()) state.worker.dispose(); states.clear(); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); subscriptions.forEach(item => item.dispose()); } };
+    dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
 module.exports = { createAnalysisController };
 
