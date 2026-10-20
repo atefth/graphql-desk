@@ -658,6 +658,167 @@ class SourceGraphTests(unittest.TestCase):
                 "unresolved",
             )
 
+    def test_standard_collection_spellings_share_trust_and_operand_rules(self) -> None:
+        for spelling in (
+            "set",
+            "frozenset",
+            "typing.List",
+            "typing.Set",
+            "typing.FrozenSet",
+            "typing.AbstractSet",
+            "collections.abc.Sequence",
+            "collections.abc.Set",
+            "typing.Dict",
+        ):
+            with self.subTest(spelling=spelling):
+                namespace, _, constructor = spelling.rpartition(".")
+                namespace = namespace or "builtins"
+                imports = f"from {namespace} import {constructor}\n"
+                arguments = "str,Known" if spelling == "typing.Dict" else "Known"
+                declaration = (
+                    "from typing_extensions import TypeAlias\nfrom base import Known\n"
+                    + (imports if "." in spelling else "")
+                    + f"Alias:TypeAlias={constructor}[{arguments}]\n"
+                    + "class Child(Alias): pass\nclass Bad(Alias,total=False): pass"
+                )
+                snapshots = (
+                    module(
+                        "base",
+                        "from typing_extensions import TypedDict\n"
+                        "class Known(TypedDict):\n value:int",
+                    ),
+                    module("models", declaration),
+                    module("exports", "from models import Alias as Public"),
+                    module(
+                        "consumer",
+                        "from exports import Public\nclass Child(Public): pass",
+                    ),
+                )
+                names = (
+                    "models.Alias",
+                    "models.Child",
+                    "exports.Public",
+                    "consumer.Child",
+                )
+                results = resolve_type_symbols(
+                    names, modules=snapshots, project_id="app"
+                )
+                self.assertEqual([r.status for r in results], ["resolved"] * len(names))
+                self.assertEqual(
+                    results,
+                    resolve_type_symbols(
+                        tuple(reversed(names)),
+                        modules=tuple(reversed(snapshots)),
+                        project_id="app",
+                    ),
+                )
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Bad",), modules=snapshots, project_id="app"
+                    )[0].status,
+                    "unresolved",
+                )
+                self.assertNotEqual(
+                    results[0].dependencies,
+                    resolve_type_symbols(
+                        names,
+                        modules=(replace(snapshots[0], version=2), *snapshots[1:]),
+                        project_id="app",
+                    )[0].dependencies,
+                )
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Alias",),
+                        modules=(
+                            module(
+                                "models",
+                                declaration.replace(
+                                    "from base import Known",
+                                    "from unknown import Known",
+                                ),
+                            ),
+                        ),
+                        project_id="app",
+                    )[0].status,
+                    "external",
+                )
+                for mutation in (
+                    f"import {namespace} as ns\nns.{constructor}=42",
+                    "import base\nbase.Known=42",
+                ):
+                    self.assertEqual(
+                        resolve_type_symbols(
+                            ("models.Alias",),
+                            modules=(*snapshots, module("mutator", mutation)),
+                            project_id="app",
+                        )[0].status,
+                        "unresolved",
+                    )
+                for arguments_bad in (
+                    "()",
+                    "Known,list[int]",
+                    "Known,42",
+                    "Known,...",
+                    "Alias",
+                ):
+                    changed = declaration.replace(
+                        f"[{arguments}]", f"[{arguments_bad}]"
+                    )
+                    self.assertEqual(
+                        resolve_type_symbols(
+                            ("models.Alias",),
+                            modules=(snapshots[0], module("models", changed)),
+                            project_id="app",
+                        )[0].status,
+                        "unresolved",
+                    )
+                shadowed = declaration.replace(
+                    "Alias:TypeAlias=", f"{constructor}=42\nAlias:TypeAlias="
+                )
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Alias",),
+                        modules=(snapshots[0], module("models", shadowed)),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+                fake = (*snapshots, module(namespace, f"class {constructor}: pass"))
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Alias",), modules=fake, project_id="app"
+                    )[0].status,
+                    "unresolved",
+                )
+                isolated = (
+                    *snapshots,
+                    replace(module("base", "Known=42"), project="other"),
+                )
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Alias",), modules=isolated, project_id="app"
+                    )[0].status,
+                    "resolved",
+                )
+        for constructor in ("Sequence", "Set"):
+            for parent in ("", "abc=42", "from unknown import abc"):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("models.Alias",),
+                        modules=(
+                            replace(module("collections", parent), is_package=True),
+                            module(
+                                "models",
+                                "from typing import TypeAlias\n"
+                                + f"from collections.abc import {constructor}\n"
+                                f"Alias:TypeAlias={constructor}[str]",
+                            ),
+                        ),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+
     def test_fixed_tuple_aliases_keep_each_named_operand_and_base_capability(
         self,
     ) -> None:
@@ -2058,6 +2219,54 @@ alias('{ id }')
                 )
                 with self.subTest(source=source):
                     self.assertEqual(resolve((module("main", source),)).calls, ())
+
+    def test_nested_directives_do_not_disable_unrelated_outer_calls(self) -> None:
+        for declaration in ("def outer():", "async def outer():"):
+            for nested in (
+                " def helper():\n  TEXT='local'\n  return TEXT\n",
+                " def helper():\n  global OTHER\n  return OTHER\n",
+                " async def helper():\n  nonlocal seed\n  return seed\n",
+                " class Helper:\n  global OTHER\n  value=OTHER\n",
+            ):
+                source = (
+                    "from graphql_desk import gql,parse\n"
+                    "TEXT='{ id }'\nOTHER=1\n"
+                    + declaration
+                    + "\n seed=1\n"
+                    + nested
+                    + " return gql(TEXT),parse(TEXT)\n"
+                )
+                with self.subTest(source=source):
+                    snapshots = (module("main", source),)
+                    documents = resolve_project(snapshots)
+                    parsers = resolve_parse_sources(snapshots)
+                    self.assertEqual(documents.diagnostics, ())
+                    self.assertEqual(parsers.diagnostics, ())
+                    self.assertEqual(len(documents.calls), 1)
+                    self.assertEqual(len(parsers.calls), 1)
+                    self.assertEqual(
+                        documents, IncrementalResolver().resolve(snapshots)
+                    )
+        for body in (
+            " global OTHER\n return CALL(TEXT)",
+            " seed=1\n def helper():\n  global TEXT\n  TEXT='changed'\n"
+            " return CALL(TEXT)",
+            " def helper():\n  return CALL(TEXT)\n return helper",
+            " seed=1\n def helper():\n  nonlocal seed\n  return CALL(TEXT)\n"
+            " return helper",
+        ):
+            for callable_, resolve in (
+                ("gql", resolve_project),
+                ("parse", resolve_parse_sources),
+            ):
+                source = (
+                    f"from graphql_desk import {callable_}\nTEXT='{{ id }}'\n"
+                    "OTHER=1\ndef outer():\n" + body.replace("CALL", callable_)
+                )
+                with self.subTest(source=source):
+                    result = resolve((module("main", source),))
+                    self.assertEqual(result.calls, ())
+                    self.assertTrue(result.diagnostics)
 
     def test_function_globals_fragments_and_async_calls_keep_existing_identities(
         self,

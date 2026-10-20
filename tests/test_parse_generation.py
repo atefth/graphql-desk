@@ -272,10 +272,26 @@ def dynamic(text:str)->DocumentNode:
  return reader(text)
 assert dynamic(TEXT).kind == "document"
 def scoped() -> None:
+ seed=1
+ def helper() -> int:
+  nonlocal seed
+  return seed
+ class Helper:
+  global unrelated
+  value=1
+ assert helper()==Helper.value
  item=reader(TEXT)
  assert_type(item.definitions[0].name.value,Literal["Q"])
  assert item.kind=="document"
 async def async_scoped() -> None:
+ def helper() -> str:
+  TEXT="local"
+  return TEXT
+ async def other() -> int:
+  global unrelated
+  return 1
+ assert helper()=="local"
+ assert await other()==1
  item=reader("query Async { missing }")
  assert_type(item.definitions[0].name.value,Literal["Async"])
  assert item.kind=="document"

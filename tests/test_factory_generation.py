@@ -977,6 +977,105 @@ if TYPE_CHECKING:
             )
             self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
 
+    def test_standard_collection_aliases_check_original_values_and_class_bases(
+        self,
+    ) -> None:
+        context = self.context()
+        for spelling, value, wrong in (
+            ("set", "{1,2}", "{'bad'}"),
+            ("frozenset", "frozenset({1,2})", "frozenset({'bad'})"),
+            ("typing.List", "[1,2]", "['bad']"),
+            ("typing.Set", "{1,2}", "{'bad'}"),
+            ("typing.FrozenSet", "frozenset({1,2})", "frozenset({'bad'})"),
+            ("typing.AbstractSet", "{1,2}", "{'bad'}"),
+            ("collections.abc.Sequence", "[1,2]", "['bad']"),
+            ("collections.abc.Set", "{1,2}", "{'bad'}"),
+            ("typing.Dict", "{'ok':1}", "{1:'bad'}"),
+        ):
+            with self.subTest(spelling=spelling):
+                imports = "from typing import TypeAlias\n"
+                namespace, _, constructor = spelling.rpartition(".")
+                if namespace:
+                    imports += f"from {namespace} import {constructor}\n"
+                arguments = "str,int" if spelling == "typing.Dict" else "int"
+                declaration = (
+                    imports + f"Text:TypeAlias={constructor}[{arguments}]\n"
+                    "class Direct(Text): pass\n"
+                )
+                source = f"""from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from generated.main import graphql
+from generated.sources.main import QueryResult
+from exports import Text
+query=graphql('{{greeting}}')
+value:Text={value}
+assert graphql.scalar('String',value) is value
+class Reexported(Text): pass
+if TYPE_CHECKING:
+ result:QueryResult={{'greeting':value}}
+ assert_type(result['greeting'],Text)
+ bad=graphql.scalar('String',{wrong}) # error
+ bad2=graphql.scalar('String',42) # error
+"""
+                modules = (
+                    ModuleSnapshot("p", "main", "file:///main.py", 1, source),
+                    ModuleSnapshot(
+                        "p", "local_types", "file:///local_types.py", 1, declaration
+                    ),
+                    ModuleSnapshot(
+                        "p",
+                        "exports",
+                        "file:///exports.py",
+                        1,
+                        "from local_types import Text as Text",
+                    ),
+                )
+                resolved = resolve_project(
+                    modules,
+                    bindings=(
+                        ProjectBindings(
+                            "p",
+                            ("main",),
+                            factories=(
+                                FactoryBinding("generated.main", "graphql", "main"),
+                            ),
+                        ),
+                    ),
+                )
+                with patch(
+                    "importlib.import_module",
+                    side_effect=AssertionError("No project import"),
+                ):
+                    artifacts = generate_factory_artifacts(
+                        context,
+                        index_fragments(resolved, schemas={("p", "main"): context}),
+                        modules=modules,
+                        project_id="p",
+                        generated_package="generated",
+                        scalars=(
+                            ScalarMapping("String", "exports.Text", "exports.Text"),
+                        ),
+                    )
+                self.assertEqual(artifacts.diagnostics, ())
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.write(root, artifacts, modules)
+                    errors = {
+                        n
+                        for n, line in enumerate(source.splitlines(), 1)
+                        if "# error" in line
+                    }
+                    self.check(root, {"main.py": errors})
+                    runtime = subprocess.run(
+                        [sys.executable, "main.py"],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        runtime.returncode, 0, runtime.stdout + runtime.stderr
+                    )
+
     def test_fixed_tuple_aliases_check_original_factory_values_and_class_bases(
         self,
     ) -> None:
@@ -1256,11 +1355,27 @@ from typing_extensions import assert_type
 from generated.main import graphql
 fields=graphql("fragment F on Query { greeting }")
 def build() -> None:
+ seed=1
+ def helper() -> int:
+  nonlocal seed
+  return seed
+ class Helper:
+  global unrelated
+  value=1
+ assert helper()==Helper.value
  doc=graphql("query Q { ...F }",(fields,),operation="Q")
  assert_type(doc.ast.definitions[0].name.value,Literal["Q"])
  assert doc.operation_name=="Q"
  assert len(doc.ast.definitions)==2
 async def async_build() -> None:
+ def helper() -> str:
+  TEXT="local"
+  return TEXT
+ async def other() -> int:
+  global unrelated
+  return 1
+ assert helper()=="local"
+ assert await other()==1
  doc=graphql("query Async { greeting }")
  assert_type(doc.ast.definitions[0].name.value,Literal["Async"])
  assert doc.operation_name=="Async"
