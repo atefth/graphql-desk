@@ -1,0 +1,15 @@
+{
+  "outcome": "read-only-features-observed",
+  "vscode": "1.141.0",
+  "diagnostics": true,
+  "completion": true,
+  "hover": true,
+  "schemaDefinition": true,
+  "fragmentDefinition": true,
+  "nativeCoexistence": true,
+  "highlighting": true,
+  "nativePythonHover": true,
+  "untrustedNoAnalysis": true,
+  "diskUnchanged": true,
+  "cleanBuffers": true
+}
