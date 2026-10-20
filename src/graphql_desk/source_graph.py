@@ -33,6 +33,10 @@ _TYPE_BASES = frozenset(
     }
 )
 
+_BUILTIN_TYPES = frozenset(
+    {"builtins.bool"} | {name for name in _TYPE_BASES if name.startswith("builtins.")}
+)
+
 
 @dataclass(frozen=True)
 class ModuleSnapshot:
@@ -736,7 +740,7 @@ class _Graph:
         if (
             self.type_symbols
             and name not in module.bindings
-            and f"builtins.{name}" in _TYPE_BASES
+            and f"builtins.{name}" in _BUILTIN_TYPES
         ):
             if not probe and (module.snapshot.project, "builtins") in self.mutated:
                 raise _Unresolved("Builtin type depends on a mutated namespace")
@@ -803,6 +807,10 @@ class _Graph:
                         if any(
                             not (
                                 base.kind == "type"
+                                and (
+                                    base.text not in _BUILTIN_TYPES
+                                    or base.text in _TYPE_BASES
+                                )
                                 or base.kind == "external"
                                 and base.text in _TYPE_BASES
                             )

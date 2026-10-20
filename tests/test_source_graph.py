@@ -562,6 +562,75 @@ class SourceGraphTests(unittest.TestCase):
                 "unresolved",
             )
 
+    def test_boolean_alias_availability_does_not_prove_subclassability(self) -> None:
+        snapshots = (
+            module(
+                "models",
+                "from typing import TypeAlias,Sequence\n"
+                "Flag:TypeAlias=bool\nAlias:TypeAlias=Flag\n"
+                "Items:TypeAlias=list[Flag]\n"
+                "Flags:TypeAlias=tuple[bool,...]\nView:TypeAlias=Sequence[Alias]",
+            ),
+            module("exports", "from models import Alias as Public"),
+        )
+        symbols = (
+            "models.Flag",
+            "models.Alias",
+            "models.Items",
+            "models.Flags",
+            "models.View",
+            "exports.Public",
+        )
+        results = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
+        self.assertEqual([r.status for r in results], ["resolved"] * len(symbols))
+        self.assertEqual(
+            results,
+            resolve_type_symbols(
+                symbols, modules=tuple(reversed(snapshots)), project_id="app"
+            ),
+        )
+        for declaration in (
+            "class Bad(bool): pass",
+            "from typing import TypeAlias\nFlag:TypeAlias=bool\nclass Bad(Flag): pass",
+            "from exports import Public\nclass Bad(Public): pass",
+            "from builtins import bool as Flag\nclass Bad(Flag): pass",
+        ):
+            with self.subTest(declaration=declaration):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("bad.Bad",),
+                        modules=(*snapshots, module("bad", declaration)),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+        for source in (
+            "from typing import TypeAlias\nbool=42\nFlag:TypeAlias=bool",
+            "from typing import TypeAlias\nFlag:TypeAlias=bool\nbool=other",
+        ):
+            self.assertEqual(
+                resolve_type_symbols(
+                    ("models.Flag",),
+                    modules=(module("models", source),),
+                    project_id="app",
+                )[0].status,
+                "unresolved",
+            )
+        for mutation in (
+            "import builtins\nbuiltins.bool=42",
+            "__builtins__['bool']=42",
+        ):
+            self.assertTrue(
+                all(
+                    r.status == "unresolved"
+                    for r in resolve_type_symbols(
+                        symbols,
+                        modules=(*snapshots, module("mutator", mutation)),
+                        project_id="app",
+                    )
+                )
+            )
+
     def test_known_builtin_mutation_invalidates_all_type_reference_spellings(
         self,
     ) -> None:
