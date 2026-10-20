@@ -27,6 +27,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   let epoch = 0;
   const states = new Map();
   const subscriptions = [];
+  const folderWatches = new Map();
   const interpreters = new Map();
   let pythonApiPromise;
   let pythonEnvironments;
@@ -350,6 +351,18 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     for (const state of states.values()) if (state.cached?.bundle === bundle) return state.cached.preferences.find(item => item.project === call.identity.module.project)?.client_directives ?? [];
     return [];
   }
+  function reconcileFolderWatches() {
+    const folders = new Map((vscode.workspace.workspaceFolders ?? [])
+      .filter(folder => folder.uri.scheme === "file").map(folder => [folder.uri.toString(), folder]));
+    for (const [uri, handles] of folderWatches) if (!folders.has(uri)) {
+      handles.forEach(handle => handle.dispose());
+      folderWatches.delete(uri);
+    }
+    for (const [uri, folder] of folders) if (!folderWatches.has(uri)) {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, "**/*"));
+      folderWatches.set(uri, [watcher, watcher.onDidChange(invalidate), watcher.onDidCreate(invalidate), watcher.onDidDelete(invalidate)]);
+    }
+  }
   for (const event of ["onDidOpenTextDocument", "onDidChangeTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument", "onDidChangeConfiguration", "onDidChangeWorkspaceFolders", "onDidGrantWorkspaceTrust"]) {
     if (vscode.workspace[event]) subscriptions.push(vscode.workspace[event](change => {
       if (event === "onDidChangeConfiguration" && change?.affectsConfiguration && !change.affectsConfiguration("graphqlDesk")) return;
@@ -362,16 +375,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (event === "onDidChangeWorkspaceFolders") {
         for (const state of states.values()) state.worker.dispose();
         states.clear(); interpreters.clear();
+        reconcileFolderWatches();
       }
       invalidate();
     }));
   }
-  for (const folder of vscode.workspace.workspaceFolders ?? []) if (folder.uri.scheme === "file") {
-    const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, "**/*"));
-    subscriptions.push(watcher, watcher.onDidChange(invalidate), watcher.onDidCreate(invalidate), watcher.onDidDelete(invalidate));
-  }
+  reconcileFolderWatches();
   return { analyze, isCurrent, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
-    dispose() { disposed = true; epoch += 1; for (const state of states.values()) state.worker.dispose(); states.clear(); interpreters.clear(); subscriptions.forEach(item => item.dispose()); } };
+    dispose() { disposed = true; epoch += 1; for (const state of states.values()) state.worker.dispose(); states.clear(); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
 module.exports = { createAnalysisController };
 

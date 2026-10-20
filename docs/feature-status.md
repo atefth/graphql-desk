@@ -1,6 +1,6 @@
 # Feature status and remaining work
 
-Implementation baseline: **68 foundation slices** are merged, with 350 Python tests and 49 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
+Implementation baseline: **69 foundation slices** are merged, with 350 Python tests and 50 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
 
 Merged #134–#137 preserve original-source validation and rejected resolver/index
 ownership, and type introspection selections. #138 assembles captured multi-schema
@@ -83,3 +83,9 @@ Missing or incompatible mappings produce a redacted unavailable report. Imported
 symbol compatibility, generated ownership and active editor/bridge health remain
 unverified, so doctor still exits degraded. This does not start or complete the
 dependency-gated full doctor/CLI acceptance stories.
+
+Workspace-folder watcher registration now follows local folder additions and
+removals. A real-worker regression verifies added-folder closed source/configuration
+edits refresh diagnostics, retained folders avoid duplicate watchers, and removed
+listeners stop invalidating analysis. This does not complete discovery/lifecycle or
+supported-platform acceptance.
