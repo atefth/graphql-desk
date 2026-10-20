@@ -18,8 +18,9 @@ if response.data is not None:
     print(response.data["greeting"])
 ```
 
-Here `ReadVariables` and the result declaration come from the operation renderer;
-`document` must already carry those types. Factory inference is separate work.
+Here `ReadVariables` and the result declaration can come from a generated source
+companion. A retained-source generated factory supplies the correlated document
+types; both strict checkers verify inference through the existing client bindings.
 Mypy cannot reliably infer the variables type from a bare dictionary literal at
 this generic boundary. Constructing the generated `TypedDict` explicitly works
 with both pinned checkers and checks its required keys and value types.
@@ -45,5 +46,8 @@ uv run --python 3.10 python -m unittest tests.test_client_bindings
 Coverage includes real local execution, operation selection, fragment composition,
 omitted versus null variables, partial errors, mutation, asynchronous execution,
 subscription cleanup, and cancellation. It does not exercise network transports
-or promise inference for arbitrary client APIs. Issue #41 remains open for the
-generated-factory integration and its full acceptance matrix.
+or promise inference for arbitrary client APIs. A generated-factory integration
+fixture checks inferred result/variables through every binding signature, rejects
+invalid variables, and executes a selected operation through the real gql binding
+with unchanged AST, variables and native envelope identity. This bounded proof
+does not establish automatic import attachment or a broad compatibility gate.
