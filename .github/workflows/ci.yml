@@ -78,10 +78,37 @@ jobs:
       - run: uv export --locked --no-dev --no-emit-project --output-file runtime-requirements.txt
       - run: uv run python scripts/check_distributions.py
 
+  editor:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.2"
+          python-version: "3.10"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+      - run: uv sync --locked
+      - run: npm ci --ignore-scripts
+        working-directory: editor
+      - run: npm test
+        working-directory: editor
+      - run: node --check test/run-host.cjs
+        working-directory: editor
+      - run: node --check test/features.host.cjs
+        working-directory: editor
+      - run: npm audit
+        working-directory: editor
+
   required:
     name: CI
     if: always()
-    needs: [quality, dependencies, smoke]
+    needs: [quality, dependencies, smoke, editor]
     runs-on: ubuntu-24.04
     steps:
       - name: Require all checks
@@ -89,4 +116,5 @@ jobs:
           QUALITY: ${{ needs.quality.result }}
           DEPENDENCIES: ${{ needs.dependencies.result }}
           SMOKE: ${{ needs.smoke.result }}
-        run: test "$QUALITY" = success && test "$DEPENDENCIES" = success && test "$SMOKE" = success
+          EDITOR: ${{ needs.editor.result }}
+        run: test "$QUALITY" = success && test "$DEPENDENCIES" = success && test "$SMOKE" = success && test "$EDITOR" = success
