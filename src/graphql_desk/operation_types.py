@@ -11,6 +11,7 @@ from graphql import (
     GraphQLCompositeType,
     GraphQLEnumType,
     GraphQLInterfaceType,
+    GraphQLNonNull,
     GraphQLObjectType,
     GraphQLScalarType,
     GraphQLSchema,
@@ -56,6 +57,18 @@ def _null_override(node: FieldNode) -> bool | None:
     if names & {"optional", "_optional"}:
         return True
     return None
+
+
+def _outer_nullable(scope: GraphQLCompositeType, node: FieldNode) -> bool:
+    if node.name.value == "__typename":
+        return False
+    if node.name.value.startswith("__"):
+        raise ValueError("Introspection object selections are not supported yet")
+    override = _null_override(node)
+    if override is not None:
+        return override
+    assert not isinstance(scope, GraphQLUnionType)
+    return not isinstance(scope.fields[node.name.value].type, GraphQLNonNull)
 
 
 class _SupportedSyntax(Visitor):
@@ -301,7 +314,20 @@ def _render_operation_types(
         repeated = {
             key
             for key, group in groups.items()
-            if len(group) > 1 and group[0][1].selection_set is not None
+            if len(group) > 1
+            and (
+                group[0][1].selection_set is not None
+                or (
+                    group[0][1].name.value != "__typename"
+                    and len({_outer_nullable(scope, node) for scope, node, _ in group})
+                    > 1
+                    and not any(
+                        not _outer_nullable(scope, node)
+                        and (forced or not (_directives(node) & _CONDITIONAL))
+                        for scope, node, forced in group
+                    )
+                )
+            )
         }
         if not any(
             (node.alias.value if node.alias else node.name.value) in repeated
@@ -406,11 +432,11 @@ def _render_operation_types(
                         _directives(item) & _CONDITIONAL and not forced
                         for _, item, forced in group
                     )
-                    overrides = {_null_override(item) for _, item, _ in group}
-                    if len(overrides) > 1:
-                        raise ValueError(
-                            "Repeated fields have different nullability directives"
-                        )
+                    # Intersect active occurrences only; differing conditional
+                    # wrappers were split by expand_repeated before this merge.
+                    nullable = all(
+                        _outer_nullable(scope, item) for scope, item, _ in group
+                    )
 
                     def annotation(value: str) -> str:
                         return f"NotRequired[{value!r}]" if optional else repr(value)
@@ -419,10 +445,6 @@ def _render_operation_types(
                         # Pinned inference keeps typename literal even with @optional.
                         fields.append((key, annotation(f"Literal[{concrete.name!r}]")))
                         continue
-                    if node.name.value.startswith("__"):
-                        raise ValueError(
-                            "Introspection object selections are not supported yet"
-                        )
                     assert not isinstance(scope, GraphQLUnionType)
                     field_type = parse_type(str(scope.fields[node.name.value].type))
                     named = schema.get_type(_named_type(field_type))
@@ -468,16 +490,12 @@ def _render_operation_types(
                         leaf = outputs.get(named.name, named.name)
                     else:
                         raise ValueError(f"Unsupported output type: {named.name}")
-                    override = _null_override(node)
-                    if override is None:
-                        value = _output_type(field_type, leaf)
-                    else:
-                        outer = (
-                            field_type.type
-                            if isinstance(field_type, NonNullTypeNode)
-                            else field_type
-                        )
-                        value = _output_type(outer, leaf, nullable=override)
+                    outer = (
+                        field_type.type
+                        if isinstance(field_type, NonNullTypeNode)
+                        else field_type
+                    )
+                    value = _output_type(outer, leaf, nullable=nullable)
                     fields.append((key, annotation(value)))
                 declare(branch, fields, closed=closed or correlated)
         if branches != [class_name]:
