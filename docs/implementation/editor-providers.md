@@ -79,3 +79,11 @@ its listeners. Real-worker regression coverage verifies that closed source and
 configuration edits in an added folder trigger refreshed analysis, and removed
 watcher callbacks stop invalidating it. This bounded coverage does not establish
 complete watcher discovery, supported-platform or lifecycle acceptance.
+
+Local-schema watchers belong to their worker state. Interpreter replacement,
+workspace removal and disposal release those watchers and listeners. Successful
+preparation reconciles the required schema paths, including missing paths needed
+for repair; failed preparation keeps the previous observation set. Real-worker
+coverage checks external dirty-schema authority, configuration path replacement,
+missing-file repair and inert retired callbacks. This is bounded resource-lifecycle
+coverage, with complete lifecycle acceptance still open.

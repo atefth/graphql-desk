@@ -1,6 +1,6 @@
 # Feature status and remaining work
 
-Implementation baseline: **70 foundation slices** are merged, with 351 Python tests and 50 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
+Implementation baseline: **71 foundation slices** are merged, with 351 Python tests and 51 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
 
 Merged #134–#137 preserve original-source validation and rejected resolver/index
 ownership, and type introspection selections. #138 assembles captured multi-schema
@@ -95,3 +95,9 @@ aliases and reexports, allowing proven inherited total keywords. Mixed ordinary
 bases and unsupported inherited-only closed semantics remain unresolved. Existing
 actual-source factory fixtures cover both strict checkers and runtime behavior;
 full Python type compatibility and external-symbol verification remain open.
+
+Local schema watchers now belong to each worker state and retire with it. Successful
+preparation reconciles changed schema paths; missing paths remain repair targets,
+and failed preparation retains previous observation. External dirty-schema and
+retired-callback regressions add bounded lifecycle evidence, leaving complete
+discovery/lifecycle and live generated-typing acceptance open.
