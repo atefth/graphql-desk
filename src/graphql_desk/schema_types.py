@@ -64,15 +64,11 @@ def mapped_type_declarations(
         if mapping.name in seen:
             raise ValueError(f"Duplicate scalar mapping: {mapping.name!r}")
         seen.add(mapping.name)
-        if not isinstance(schema.get_type(mapping.name), GraphQLScalarType):
+        scalar = schema.get_type(mapping.name) or specified_scalar_types.get(
+            mapping.name
+        )
+        if not isinstance(scalar, GraphQLScalarType):
             raise ValueError(f"Unknown or non-scalar mapping: {mapping.name!r}")
-        if mapping.name in _BUILTINS:
-            expected = f"builtins.{_BUILTINS[mapping.name]}"
-            if mapping.input != expected or mapping.output != expected:
-                raise ValueError(
-                    "Built-in scalar mappings must retain their fixed types"
-                )
-            continue
         for suffix, symbol, names in (
             ("Input", mapping.input, inputs),
             ("Output", mapping.output, outputs),
