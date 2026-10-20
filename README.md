@@ -1,12 +1,12 @@
 # GraphQL Desk
 
-Planned Python developer tooling targeting **full user-visible parity with gql.tada 1.11.4 and its GraphQLSP VS Code integration**. Python-native equivalents are welcome; no upstream capability may be silently dropped. The foundation package carries explicitly annotated GraphQL documents; no editor or broad typing gate has passed.
+Planned Python developer tooling targeting **full user-visible parity with gql.tada 1.11.4 and its GraphQLSP VS Code integration**. Python-native equivalents are welcome; no upstream capability may be silently dropped. The foundation package carries GraphQL documents and produces pure retained-source typing artifacts; no editor or broad typing gate has passed.
 
 See [feature status](docs/feature-status.md) and [complete issue tracking](docs/feature-tracking.md) for built versus remaining work. Start with the [canonical parity plan](docs/parity-plan.md): requirements, acceptance gates, decisions and delivery order. Review [evidence, reuse and support](docs/audits/evidence-and-reuse.md), then the pinned [gql.tada inventory](docs/audits/gql-tada-source-audit.md) and [GraphQLSP inventory](docs/audits/graphqlsp-source-audit.md).
 
 Generated schema typing and live per-operation result/variable typing in VS Code/Pyright/Pylance are core. Static GraphQL embedded in Python calls is required; standalone `.graphql` support is optional extra scope. The persistent turbo-like cache is optional.
 
-One unsaved nullability edit changed Pylance hover/diagnostics after an open generated `.pyi` was updated in memory. Broad semantics/lifecycle remain unproven; disk-only replacement did not refresh within the tested window. Fragment helper identity is supported by narrow research; the production helpers remain unimplemented. No optional saved-model/client backend is selected.
+One unsaved nullability edit changed Pylance hover/diagnostics after an open generated `.pyi` was updated in memory. Broad semantics/lifecycle remain unproven; disk-only replacement did not refresh within the tested window. Identity fragment references, masked/unmasked renderers and exact executable AST declarations now have focused static foundations. Required read/mask/result helper functions remain unimplemented. Primary virtual-document research was negative; seeded local owned-disk research was positive within its fixture. The product policy remains pending, and no production disk analysis adapter is authorized. No optional saved-model/client backend is selected.
 
 After the live-typing acceptance gate, persisted operations and independent editor conveniences begin immediately, in parallel where independent. Fragment and remaining editor parity, schema/CLI/project workflows, then performance/package/release gates follow. An incremental milestone is not full parity.
 
@@ -33,16 +33,16 @@ CI checks all five Python minors on Ubuntu 24.04 x64, with Windows Server 2025 x
 
 Runtime dependencies are pinned `graphql-core==3.3.0` (MIT) and `typing_extensions==4.16.0` (PSF-2.0), needed for generated declarations on Python 3.10. CI audits the locked runtime/development dependency set and rejects runtime dependencies outside the reviewed license inventory. Python 3.10 additionally uses `tomli==2.5.0` (MIT) for TOML configuration; later Python versions use the standard library. Optional generators are absent. Builds use the locked Hatchling backend; smoke checks rebuild the source archive, then install both wheels into fresh environments outside the source tree.
 
-The pure [schema declaration renderer](docs/implementation/schema-types.md) currently covers built-in scalars, enums and input objects, independently of operation generation. The [operation renderer](docs/implementation/operation-types.md) adds a validated object-selection subset with result/variable declarations; factory inference and live integration remain open.
+The pure [schema declaration renderer](docs/implementation/schema-types.md) currently covers built-in scalars, enums and input objects, independently of operation generation. The [operation renderer](docs/implementation/operation-types.md) adds validated result/variable declarations. Pure [factory artifacts](docs/implementation/factory-artifacts.md) connect supported literal calls to those declarations, nominal fragment references, exact AST views and source companion aliases; publication and live integration remain open. Known incorrect literal calls can still select the `Any` fallback, so source diagnostics and complete inference remain open.
 
 The [runtime factories](docs/implementation/runtime-factories.md) provide untyped `graphql`/`gql` construction and schema-name binding; precise generated inference remains open.
 The [local schema loaders](docs/implementation/schema-loading.md) validate explicit SDL or introspection JSON inputs; configuration, remote fetching and refresh remain separate work.
 
-The [configuration parser](docs/implementation/configuration.md) validates immutable single/named-schema facts from an explicit TOML file; project discovery, routing and credential resolution remain open under #27.
+The [configuration model](docs/implementation/configuration.md) supplies single/named-schema facts, nearest-project ownership/routing and captured configuration text. Finite [editor snapshots](docs/implementation/editor-snapshots.md) acquire explicit candidates and current buffers without executing project Python; production enumeration, authenticated loading and actual CLI dispatch remain open under #27.
 
 ## Typed-document boundary
 
-`TypedDocument[Result, Variables]` holds a `graphql-core` `DocumentNode` in `.ast` and an optional `.operation_name`. The carrier preserves the supplied AST and performs no schema validation or response coercion. The generic parameters are annotations supplied by the caller today; generation and live inference remain future work.
+`TypedDocument[Result, Variables]` holds a `graphql-core` `DocumentNode` in `.ast` and an optional `.operation_name`. The carrier preserves the supplied AST and performs no schema validation or response coercion. Direct construction uses annotations supplied by the caller. Pure generated artifacts infer supported literal factory calls, but complete inference, generated publication and live integration remain open.
 
 ```python
 from typing import TypedDict
@@ -73,4 +73,11 @@ This is groundwork for the live bridge. It performs no editor/file mutation and 
 
 The pure [Python call extractor](docs/implementation/source-extraction.md) recognizes a conservative subset of direct GraphQL Desk imports and inline literals in one source snapshot. It returns decoded text, host ranges and explicit diagnostics without executing Python; it does not yet resolve complete projects or generate types.
 
-The [static module graph](docs/implementation/source-graph.md) resolves a first subset of constants/imports/reexports from explicit versioned snapshots. Exact caller-supplied factory/schema metadata is supported; imported fragment bindings, source matching and exact decoded maps remain open.
+The [static module graph](docs/implementation/source-graph.md) resolves a first subset of constants/imports/reexports from explicit versioned snapshots. Exact caller-supplied factory/schema metadata is supported; ordered imported fragment references and exact decoded maps are also implemented. The explicit `IncrementalResolver` reuses parsing and unchanged project results; snapshot acquisition can retain unchanged disk-source versions across generations. These are cache correctness foundations, not measured responsiveness. The read-only worker can reuse this resolver explicitly. Production discovery, complete incremental freshness and safe edit consumers remain open.
+
+
+## Read-only editor foundation
+
+Merged through #129, 45 foundation slices have 270 Python and 28 Node tests; no broad parity gate has passed. The [read-only provider foundation](docs/implementation/editor-providers.md) supplies embedded diagnostics, completion, hover, definitions and highlighting from actual source maps/index facts. Isolated VS Code1.141.0/1.142.0 hosts passed with pinned Python/Pylance extensions. Schema-path preflight, explicit analyzer reuse and a bounded [read-only Python worker and Node connection](docs/implementation/editor-worker.md) are implemented. Production activation, a discovery controller, automatic analysis and complete incremental freshness remain open; no VSIX, generated-file writes or disk analysis adapter are installed.
+
+Merged #122 adds two-host discovery fixtures, #123 pure factory artifacts, #124 incremental source caching and #125 stable acquisition identities. #126 adds schema-path preflight, #127 explicit analyzer reuse, #128 the read-only Python worker and #129 its Node connection. Discovery remains finite fixture evidence, not watcher completeness or production enumeration acceptance. The connection does not activate an extension, enumerate candidates or automatically publish analysis. See [feature status](docs/feature-status.md) for the remaining gates.
