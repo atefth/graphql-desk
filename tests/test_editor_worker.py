@@ -6,18 +6,232 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 from uuid import UUID
 
-from graphql import build_schema, introspection_from_schema
+from graphql import GraphQLSchema, build_schema, introspection_from_schema
 
+from graphql_desk.config import SchemaOrigin
 from graphql_desk.editor_worker import MAX_LINE_BYTES, EditorWorker, serve
+from tests.test_schema_url import endpoint
 
 
 class EditorWorkerTests(unittest.TestCase):
+    def remote_capture(self, url: str) -> tuple[dict[str, object], str, str]:
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema={url="' + url + '/PRIVATE_MARKER",'
+            'headers={"X-Key"="${env:TOKEN}"}}\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n',
+            encoding="utf8",
+        )
+        self.source.write_text(
+            'from graphql_desk import gql\nq=gql("{title}")\n', encoding="utf8"
+        )
+        capture = self.capture()
+        return capture, self.prepare(capture), self.config.as_uri()
+
+    def refresh(
+        self,
+        capture: dict[str, object],
+        identity: str,
+        project: str,
+        revision: str = "credentials-1",
+        token: str = "PRIVATE_MARKER",
+        schema_name: str = "default",
+    ) -> dict[str, object]:
+        result = self.worker.handle(
+            {
+                "op": "refresh",
+                **capture,
+                "id": identity,
+                "schema_buffers": [],
+                "project": project,
+                "schema_name": schema_name,
+                "credential_revision": revision,
+                "environment": {"TOKEN": token},
+            }
+        )
+        self.assertNotIn("PRIVATE_MARKER", json.dumps(result))
+        return result
+
+    def test_explicit_http_refresh_analysis_and_visible_stale_last_good(self) -> None:
+        with endpoint() as (url, server):
+            capture, identity, project = self.remote_capture(url)
+            self.assertEqual(server.records, [])
+            initial = self.analyze(capture, identity)
+            self.assertEqual(cast(dict[str, object], initial["request"])["schemas"], [])
+            loaded = self.refresh(capture, identity, project)
+            self.assertEqual(loaded["status"], "ready")
+            self.assertNotEqual(loaded["id"], identity)
+            self.assertEqual(len(server.records), 2)
+            revisions = [
+                {
+                    "project": project,
+                    "schema_name": "default",
+                    "revision": "credentials-1",
+                }
+            ]
+            request = {
+                "op": "analyze",
+                **capture,
+                "id": loaded["id"],
+                "schema_buffers": [],
+                "remote_revisions": revisions,
+            }
+            analyzed = self.worker.handle(request)
+            self.assertTrue(analyzed["ok"], analyzed)
+            facts = cast(dict[str, object], analyzed["request"])
+            schemas = cast(list[dict[str, object]], facts["schemas"])
+            self.assertEqual(len(schemas), 1)
+            self.assertTrue(str(schemas[0]["uri"]).startswith("untitled:"))
+            response = cast(dict[str, object], analyzed["response"])
+            self.assertEqual(len(cast(list[object], response["schemas"])), 1)
+            self.assertNotIn("PRIVATE_MARKER", json.dumps(analyzed))
+            self.assertEqual(
+                self.worker.handle({**request, "op": "current"}),
+                {"ok": True, "current": True},
+            )
+            self.assertEqual(len(server.records), 2)
+            server.mode = "auth"
+            stale = self.refresh(capture, cast(str, loaded["id"]), project)
+            self.assertEqual(stale["status"], "stale")
+            self.assertTrue(stale["last_good"])
+            self.assertEqual(stale["error"], "schema-refresh-failed")
+            analyzed = self.worker.handle({**request, "id": stale["id"]})
+            self.assertTrue(analyzed["ok"], analyzed)
+            self.assertEqual(
+                cast(dict[str, object], analyzed["request"])["schemas"], []
+            )
+            self.assertEqual(
+                analyzed["remote_schemas"],
+                [{"project": project, "schema_name": "default", "status": "stale"}],
+            )
+            # Different explicit credentials never inherit the previous last-good.
+            failed = self.refresh(
+                capture,
+                cast(str, stale["id"]),
+                project,
+                revision="credentials-2",
+                token="changed",
+            )
+            self.assertEqual(failed["status"], "unavailable")
+            self.assertFalse(failed["last_good"])
+            self.assertFalse(self.worker.handle({**request, "id": failed["id"]})["ok"])
+
+    def test_refresh_rejects_changed_config_and_old_jobs(self) -> None:
+        from graphql_desk.schema_url import load_from_url
+
+        with endpoint() as (url, _server):
+            capture, identity, project = self.remote_capture(url)
+            loaded = self.refresh(capture, identity, project)
+            self.assertFalse(self.analyze(capture, identity)["ok"])
+            capture, identity, project = self.remote_capture(url)
+
+            def change_config(
+                origin: SchemaOrigin, *, environment: Mapping[str, str]
+            ) -> GraphQLSchema:
+                result = load_from_url(origin, environment=environment)
+                self.config.write_text(
+                    self.config.read_text(encoding="utf8") + "# changed during fetch\n",
+                    encoding="utf8",
+                )
+                return result
+
+            with patch(
+                "graphql_desk.editor_worker.load_from_url", side_effect=change_config
+            ):
+                result = self.refresh(capture, identity, project)
+            self.assertEqual(result, {"ok": False, "error": "editor-request-failed"})
+            self.assertNotEqual(loaded["id"], identity)
+
+    def test_last_good_never_crosses_environment_or_config_capture(self) -> None:
+        with endpoint() as (url, server):
+            capture, identity, project = self.remote_capture(url)
+            loaded = self.refresh(capture, identity, project)
+            server.mode = "auth"
+            changed = self.refresh(
+                capture,
+                cast(str, loaded["id"]),
+                project,
+                token="changed-with-same-revision",
+            )
+            self.assertEqual(changed["status"], "unavailable")
+            self.assertFalse(changed["last_good"])
+            self.config.write_text(
+                self.config.read_text(encoding="utf8") + "# new closed capture\n",
+                encoding="utf8",
+            )
+            identity = self.prepare(capture)
+            failed = self.refresh(capture, identity, project)
+            self.assertEqual(failed["status"], "unavailable")
+            self.assertFalse(failed["last_good"])
+
+    def test_remote_target_must_be_prepared_before_network(self) -> None:
+        capture = self.capture()
+        identity = self.prepare(capture)
+        with patch("graphql_desk.editor_worker.load_from_url") as loader:
+            result = self.refresh(capture, identity, self.config.as_uri())
+            self.assertFalse(result["ok"])
+            loader.assert_not_called()
+
+    def test_failed_named_schema_never_substitutes_another_ready_schema(self) -> None:
+        with endpoint() as (url, server):
+            self.config.write_text(
+                "[tool.graphql-desk]\n"
+                + "".join(
+                    '[[tool.graphql-desk.schemas]]\nname="' + name + '"\n'
+                    'schema="'
+                    + url
+                    + '"\nschema_output="graphql_desk_generated/'
+                    + name
+                    + '.pyi"\n'
+                    for name in ("alpha", "beta")
+                ),
+                encoding="utf8",
+            )
+            self.source.write_text(
+                "from graphql_desk_generated.alpha import graphql as a\n"
+                "from graphql_desk_generated.beta import graphql as b\n"
+                'first=a("{title}")\nsecond=b("{title}")\n',
+                encoding="utf8",
+            )
+            capture, project = self.capture(), self.config.as_uri()
+            loaded = self.refresh(
+                capture, self.prepare(capture), project, schema_name="alpha"
+            )
+            server.mode = "auth"
+            failed = self.refresh(
+                capture, cast(str, loaded["id"]), project, schema_name="beta"
+            )
+            self.assertEqual(failed["status"], "unavailable")
+            result = self.worker.handle(
+                {
+                    "op": "analyze",
+                    **capture,
+                    "id": failed["id"],
+                    "schema_buffers": [],
+                    "remote_revisions": [
+                        {
+                            "project": project,
+                            "schema_name": name,
+                            "revision": "credentials-1",
+                        }
+                        for name in ("alpha", "beta")
+                    ],
+                }
+            )
+            self.assertTrue(result["ok"], result)
+            schemas = cast(
+                list[dict[str, object]],
+                cast(dict[str, object], result["request"])["schemas"],
+            )
+            self.assertEqual([schema["schema_name"] for schema in schemas], ["alpha"])
+            self.assertEqual(result["unavailable_schemas"], ((project, "beta"),))
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

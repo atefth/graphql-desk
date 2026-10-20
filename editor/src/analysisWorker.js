@@ -41,13 +41,22 @@ function parseFrame(buffer) {
 function validReply(reply, request) {
   if (!object(reply) || reply.ok !== true) return false;
   if (request.op === "prepare") {
-    return keys(reply, ["ok", "id", "local_schemas", "required_buffers"]) && string(reply.id) &&
+    return keys(reply, ["ok", "id", "local_schemas", "remote_schemas", "required_buffers"]) && string(reply.id) &&
+      Array.isArray(reply.remote_schemas) && reply.remote_schemas.every(item =>
+        keys(item, ["project", "schema_name"]) && Object.values(item).every(string)) &&
       Array.isArray(reply.required_buffers) && reply.required_buffers.every(string) &&
       Array.isArray(reply.local_schemas) && reply.local_schemas.every(item =>
         keys(item, ["project", "schema_name", "path", "canonical_path"]) && Object.values(item).every(string));
   }
+  if (request.op === "refresh") return keys(reply, ["ok", "id", "project", "schema_name", "status", "last_good", "error"]) &&
+    string(reply.id) && reply.id !== request.id && reply.project === request.project && reply.schema_name === request.schema_name &&
+    ["ready", "stale", "unavailable"].includes(reply.status) && reply.last_good === (reply.status === "stale") &&
+    reply.error === (reply.status === "ready" ? null : "schema-refresh-failed");
   if (request.op === "current") return keys(reply, ["ok", "current"]) && typeof reply.current === "boolean";
-  return keys(reply, ["ok", "id", "request", "response", "unavailable_schemas"]) && reply.id === request.id &&
+  return keys(reply, ["ok", "id", "request", "response", "unavailable_schemas", "remote_schemas"]) && reply.id === request.id &&
+    Array.isArray(reply.remote_schemas) && reply.remote_schemas.every(item =>
+      keys(item, ["project", "schema_name", "status"]) && string(item.project) && string(item.schema_name) &&
+      ["ready", "stale", "unavailable"].includes(item.status)) &&
     keys(reply.request, ["request_id", "modules", "bindings", "schemas"]) &&
     keys(reply.response, ["request_id", "modules", "schemas", "calls", "diagnostics"]) &&
     string(reply.request.request_id) && reply.request.request_id === reply.response.request_id &&
@@ -139,7 +148,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
       if (disposed || !trusted() || signal?.aborted) { stop(); throw failure(); }
       let encoded;
       try {
-        if (!object(message) || !["prepare", "analyze", "current"].includes(message.op) ||
+        if (!object(message) || !["prepare", "analyze", "current", "refresh"].includes(message.op) ||
             message.workspace !== workspace) throw failure();
         encoded = Buffer.from(JSON.stringify(message) + "\n", "utf8");
         if (encoded.length > MAX_FRAME_BYTES) throw failure();
