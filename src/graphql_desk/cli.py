@@ -10,6 +10,7 @@ from typing import NoReturn
 
 from .project import effective_project, select_schema, validate_project_ownership
 from .schema_loading import load_local_schema
+from .schema_types import render_schema_types
 from .schema_url import load_from_url
 
 
@@ -90,9 +91,9 @@ def _doctor(
     for schema in schemas:
         try:
             if schema.origin.local_path is not None:
-                load_local_schema(schema.origin.local_path)
+                loaded = load_local_schema(schema.origin.local_path)
             else:
-                load_from_url(schema.origin, environment=environment)
+                loaded = load_from_url(schema.origin, environment=environment)
         except (OSError, ValueError, RuntimeError):
             print(
                 f"schema {schema.name}: unavailable; check schema contents, "
@@ -101,6 +102,32 @@ def _doctor(
             )
         else:
             print(f"schema {schema.name}: ready", file=sys.stderr)
+            for name, direction, symbol in (
+                *((item.name, "scalar input", item.input) for item in schema.scalars),
+                *((item.name, "scalar output", item.output) for item in schema.scalars),
+                *((name, "enum", symbol) for name, symbol in schema.enums),
+            ):
+                if symbol == "typing.Any":
+                    # Configuration has already restricted names to GraphQL identifiers.
+                    print(
+                        f"schema {schema.name}: explicit Any {direction} "
+                        f"mapping {name}",
+                        file=sys.stderr,
+                    )
+            try:
+                render_schema_types(loaded, scalars=schema.scalars, enums=schema.enums)
+            except (ValueError, TypeError, RecursionError):
+                print(
+                    f"schema {schema.name}: mapping declarations unavailable; "
+                    "check scalar and enum mappings and schema declarations",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"schema {schema.name}: mapping declarations ready; "
+                    "symbol compatibility remains unverified",
+                    file=sys.stderr,
+                )
     print(
         "interpreter: Python " + ".".join(map(str, sys.version_info[:3])),
         file=sys.stderr,

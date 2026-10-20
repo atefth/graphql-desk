@@ -157,6 +157,87 @@ class CLITests(unittest.TestCase):
         self.assertIn("configuration: ready (explicit)", err)
         self.assertIn("schema default: ready", err)
 
+    def test_mapping_declarations_use_schema_policy_without_imports_or_writes(
+        self,
+    ) -> None:
+        self.schema.write_text(
+            "scalar Date\nenum Color { RED BLUE }\n"
+            "input Filter { date: Date color: Color }\n"
+            "type Query { date(filter: Filter): Date }",
+            encoding="utf8",
+        )
+        for mappings, ready in (
+            ("", False),
+            (
+                'scalars={Date="local_types.Date"}\nenums={Color="local_types.Color"}',
+                True,
+            ),
+            ('scalars={Date="local_types.Date", Missing="PRIVATE_MARKER.Type"}', False),
+            ('scalars={Date="local_types.Date", Color="local_types.Color"}', False),
+            (
+                'scalars={Date="local_types.Date"}\nenums={Date="local_types.Date"}',
+                False,
+            ),
+        ):
+            with self.subTest(mappings=mappings):
+                self.config.write_text(
+                    '[tool.graphql-desk]\nschema="schema.graphql"\n'
+                    'schema_output="graphql_desk_generated/default.pyi"\n'
+                    + mappings
+                    + "\n",
+                    encoding="utf8",
+                )
+                before = {
+                    p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()
+                }
+                with patch(
+                    "importlib.import_module", side_effect=AssertionError("No imports")
+                ):
+                    code, out, err = self.invoke(["doctor"])
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("schema default: ready", err)
+                self.assertIn(
+                    "mapping declarations ready"
+                    if ready
+                    else "mapping declarations unavailable",
+                    err,
+                )
+                self.assertNotIn("PRIVATE_MARKER", err)
+                if ready:
+                    self.assertIn("symbol compatibility remains unverified", err)
+                    self.assertIn("mapping symbols: unverified", err)
+                self.assertEqual(
+                    before,
+                    {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()},
+                )
+
+    def test_explicit_any_report_preserves_mapping_directions_and_schema_selection(
+        self,
+    ) -> None:
+        self.schema.write_text(
+            "scalar Date\nenum Color { RED }\ntype Query { date: Date color: Color }",
+            encoding="utf8",
+        )
+        self.config.write_text(
+            '[tool.graphql-desk]\n[[tool.graphql-desk.schemas]]\nname="first"\n'
+            'schema="schema.graphql"\nschema_output="graphql_desk_generated/first.pyi"\n'
+            'scalars={Date={input="typing.Any",output="local_types.Date"}}\n'
+            'enums={Color="typing.Any"}\n'
+            '[[tool.graphql-desk.schemas]]\nname="second"\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/second.pyi"\n'
+            'scalars={Date={input="local_types.Date",output="typing.Any"}}\n',
+            encoding="utf8",
+        )
+        _code, _out, err = self.invoke(["doctor", "--schema", "first"])
+        self.assertIn("schema first: explicit Any scalar input mapping Date", err)
+        self.assertIn("schema first: explicit Any enum mapping Color", err)
+        self.assertNotIn("scalar output mapping", err)
+        self.assertNotIn("schema second:", err)
+        _code, _out, err = self.invoke(["doctor", "--schema", "second"])
+        self.assertIn("schema second: explicit Any scalar output mapping Date", err)
+        self.assertNotIn("scalar input mapping", err)
+        self.assertNotIn("schema first:", err)
+
     def test_actual_http_access_has_one_pass_headers_and_redacted_failures(
         self,
     ) -> None:
@@ -164,7 +245,8 @@ class CLITests(unittest.TestCase):
             self.config.write_text(
                 '[tool.graphql-desk]\nschema={url="' + url + '/PRIVATE_MARKER",'
                 'headers={"X-Key"="${env:TOKEN}"}}\n'
-                'schema_output="graphql_desk_generated/default.pyi"\n',
+                'schema_output="graphql_desk_generated/default.pyi"\n'
+                'scalars={URL="typing.Any"}\n',
                 encoding="utf8",
             )
             with patch.dict(
@@ -175,6 +257,8 @@ class CLITests(unittest.TestCase):
                     code, out, err = self.invoke(["doctor"])
                     self.assertEqual((code, out), (1, ""))
                     self.assertIn("schema default: ready", err)
+                    self.assertIn("mapping declarations ready", err)
+                    self.assertIn("explicit Any scalar input mapping URL", err)
                     self.assertNotIn("PRIVATE_MARKER", err)
             self.assertEqual(len(server.records), 4)
             self.assertEqual(
@@ -185,6 +269,7 @@ class CLITests(unittest.TestCase):
             with patch.dict(os.environ, without_token, clear=True):
                 _code, _out, err = self.invoke(["doctor"])
                 self.assertIn("schema default: unavailable", err)
+                self.assertNotIn("mapping declarations", err)
                 self.assertNotIn("PRIVATE_MARKER", err)
             self.assertEqual(len(server.records), 4)
             server.mode = "auth"
