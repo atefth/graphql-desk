@@ -23,7 +23,15 @@ from graphql import (
 from typing_extensions import NotRequired
 
 from graphql_desk import TypedDocument, graphql
+from graphql_desk.factory_generation import generate_factory_artifacts
+from graphql_desk.fragments import SchemaContext, index_fragments
 from graphql_desk.operation_types import render_operation_types
+from graphql_desk.source_graph import (
+    FactoryBinding,
+    ModuleSnapshot,
+    ProjectBindings,
+    resolve_project,
+)
 from scripts.client_bindings import (
     execute_core,
     execute_core_sync,
@@ -31,6 +39,7 @@ from scripts.client_bindings import (
     execute_gql_sync,
     subscribe_gql,
 )
+from tests import test_factory_generation as factory_tests
 
 
 class Variables(TypedDict):
@@ -95,6 +104,99 @@ class SyncSchemaTransport(Transport):
 
 
 class ClientBindingsTests(unittest.TestCase):
+    def test_generated_factory_infers_real_client_bindings_and_executes_original_ast(
+        self,
+    ) -> None:
+        source = """from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from collections.abc import AsyncGenerator
+from gql.client import SyncClientSession, AsyncClientSession
+from graphql import GraphQLSchema
+from generated.main import graphql
+from generated.sources.authored import (
+ DocResult as ReadResult, DocVariables as ReadVariables,
+)
+from client_bindings import (
+ TypedResponse, execute_core_sync, execute_core, execute_gql_sync,
+ execute_gql, subscribe_gql,
+)
+doc=graphql(
+ "query Other { __typename } query Read($name:String!){hello(name:$name)}",
+ operation="Read",
+)
+variables=ReadVariables(name="Grace")
+def sync(schema:GraphQLSchema,session:SyncClientSession)->TypedResponse[ReadResult]:
+ assert_type(execute_core_sync(schema,doc,variables),TypedResponse[ReadResult])
+ response=execute_gql_sync(session,doc,variables)
+ assert_type(response.data,ReadResult|None)
+ return response
+async def asynchronous(schema:GraphQLSchema,session:AsyncClientSession)->None:
+ assert_type(await execute_core(schema,doc,variables),TypedResponse[ReadResult])
+ assert_type(await execute_gql(session,doc,variables),TypedResponse[ReadResult])
+ assert_type(subscribe_gql(session,doc,variables),AsyncGenerator[TypedResponse[ReadResult],None])
+if TYPE_CHECKING:
+ def wrong(schema:GraphQLSchema,session:SyncClientSession)->None:
+  execute_core_sync(schema,doc,ReadVariables(name=1)) # error
+  execute_gql_sync(session,doc,{}) # error
+"""
+        module = ModuleSnapshot("p", "authored", "file:///authored.py", 1, source)
+        context = SchemaContext("main", schema(), "client-fixture")
+        resolved = resolve_project(
+            (module,),
+            bindings=(
+                ProjectBindings(
+                    "p",
+                    ("main",),
+                    factories=(FactoryBinding("generated.main", "graphql", "main"),),
+                ),
+            ),
+        )
+        artifacts = generate_factory_artifacts(
+            context,
+            index_fragments(resolved, schemas={("p", "main"): context}),
+            modules=(module,),
+            project_id="p",
+            generated_package="generated",
+        )
+        self.assertEqual(artifacts.diagnostics, ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = factory_tests.FactoryGenerationTests()
+            helper.write(root, artifacts, (module,))
+            repository = Path(__file__).resolve().parents[1]
+            (root / "client_bindings.py").write_text(
+                (repository / "scripts/client_bindings.py").read_text(encoding="utf8"),
+                encoding="utf8",
+            )
+            errors = {
+                n for n, line in enumerate(source.splitlines(), 1) if "# error" in line
+            }
+            helper.check(root, {"authored.py": errors})
+            runtime = f"""import sys
+sys.path.insert(0,{str(repository)!r})
+sys.path.insert(0,{str(root)!r})
+from tests.test_client_bindings import schema,SyncSchemaTransport
+from gql import Client
+from authored import doc,variables,sync
+transport=SyncSchemaTransport(schema())
+with Client(schema=transport.schema,transport=transport) as session:
+ response=sync(transport.schema,session)
+ assert response is transport.responses[-1]
+ assert response.data=={{"hello":"Grace"}}
+ assert response.extensions=={{"unchanged":True}}
+ request=transport.requests[-1]
+ assert request.document is doc.ast
+ assert request.operation_name==doc.operation_name=="Read"
+ assert request.variable_values is variables
+"""
+            result = subprocess.run(
+                [sys.executable, "-c", runtime],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_core_omitted_null_operation_and_partial_error_envelope(self) -> None:
         schema_ = schema()
         self.assertEqual(
