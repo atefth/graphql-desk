@@ -12,10 +12,34 @@ Conditional inline fragments and repeated conditional composite selections produ
 
 Equivalent alternatives coalesce incrementally. More than 64 alternatives at one conditional selection or 256 conditional alternatives across one render raises an explicit error without returning partial output. Ordinary conditional fields retain `NotRequired` behavior. Repeated simultaneously active fields with differing nullability overrides still reject. Masking and configuration/consumer integration keep #33 open.
 
-Named spreads require explicit `disable_masking=True`; default masked spreads reject until typed fragment references are implemented. Unmasked expansion preserves each fragment's authored type condition and conditional spread/definition gates, using a local fragment/concrete-type memo for diamonds. Validation omits only `NoUnusedFragmentsRule`, matching the pinned GraphQLSP language-service policy so an explicit registry may contain unused definitions. Unknown/cyclic/impossible spreads, invalid fields and non-executable definitions still reject.
+Raw named spreads require explicit `disable_masking=True`; masked rendering needs
+the indexed ownership facts described below. Unmasked expansion preserves each
+fragment's authored type condition and conditional spread/definition gates, using
+a local fragment/concrete-type memo for diamonds. Validation omits only
+`NoUnusedFragmentsRule`, matching the pinned GraphQLSP language-service policy so
+an explicit registry may contain unused definitions. Unknown/cyclic/impossible
+spreads, invalid fields and non-executable definitions still reject.
 
-`render_indexed_operation_types(context, document, *, name, scalars=(), enums=(), client_directives=(), disable_masking=False)` consumes the [fragment index](fragments.md), checks supplied schema/token and selected-operation identity, and delegates the joined semantic definitions to the same renderer. It derives the indexed operation selector; callers cannot override that binding. Index facts are trusted inputs. This adapter does not acquire current snapshots or prove freshness: the lifecycle caller must recheck source/config/schema versions.
+`render_indexed_operation_types(context, document, *, name, scalars=(), enums=(), client_directives=(), disable_masking=False, fragment_index=None)` consumes the [fragment index](fragments.md), checks supplied schema/token and selected-operation identity, and delegates the joined semantic definitions to the same renderer. It derives the indexed operation selector; callers cannot override that binding. Index facts are trusted inputs. This adapter does not acquire current snapshots or prove freshness: the lifecycle caller must recheck source/config/schema versions.
 
-Configured scalar mappings distinguish variable/input and result/output aliases; enum remappings apply in both directions. Mapping facts and limitations follow the [schema renderer](schema-types.md). Masked spreads, unmapped custom scalars and introspection object selections currently raise errors. Unsupported semantics never become `Any`. The schema renderer supplies closed oneOf input alternatives and preserves variable omission/default behavior. This function produces declarations only: it does not attach them to factories, execute requests, coerce responses, write files or refresh Pylance.
+For masked spreads, supply the full `fragment_index`. Each definition resolves to
+its owning document with matching project/schema/context and valid local
+membership. Missing or duplicate owners reject. Shared [fragment identities](fragment-refs.md)
+use that owner's transitive dependencies, so different consumers agree on the
+same fragment capability. Direct fields remain visible; a masked spread supplies
+its required read-only callable phantom capability instead of exposing its fields.
+Co-present capabilities combine, while conditional and abstract branches retain
+their actual presence alternatives and list/null wrappers. No response keys are
+inserted or inspected at runtime.
 
-Tests execute generated modules, compare real GraphQL response aliases, and check both valid and invalid bindings with strict mypy/Pyright, including the actual resolver/index/renderer pipeline. The abstract selection rules were checked against pinned gql.tada selection source. These are foundations for #22 and #32, not completion of TYPE-01 or the live-typing gate. Masked named fragments and generated/live consumers keep the advanced stories open. Remaining semantics and integration are tracked separately in the [full inventory](../feature-tracking.md).
+The same module includes `<name>Fragment_<fragment name>` payload declarations
+for its indexed fragment definitions, with each fragment's own selected fields
+visible and nested spreads still masked. Definition-level `@_unmask` expands that
+fragment without adding its own capability; nested fragments keep their policy.
+Global `disable_masking=True` expands all spreads without reference metadata.
+Schema aliases are emitted once. This API still selects an operation: standalone
+fragment factory generation and reader helpers remain separate work.
+
+Configured scalar mappings distinguish variable/input and result/output aliases; enum remappings apply in both directions. Mapping facts and limitations follow the [schema renderer](schema-types.md). Raw masked spreads without ownership, unmapped custom scalars and introspection object selections currently raise errors. Unsupported semantics never become `Any`. The schema renderer supplies closed oneOf input alternatives and preserves variable omission/default behavior. This function produces declarations only: it does not attach them to factories, execute requests, coerce responses, write files or refresh Pylance.
+
+Tests execute generated modules, compare real GraphQL response aliases, and check both valid and invalid bindings with strict mypy/Pyright, including the actual resolver/index/renderer pipeline. The abstract selection rules were checked against pinned gql.tada selection source. These are foundations for #22, #32 and #35, not completion of TYPE-01 or the live-typing gate. Reader helpers and generated/live consumers keep the advanced stories open. Remaining semantics and integration are tracked separately in the [full inventory](../feature-tracking.md).
