@@ -24,7 +24,7 @@ async function main() {
     "telemetry.telemetryLevel": "off",
     "files.autoSave": "off",
     "python.defaultInterpreterPath": python,
-    "graphqlDesk.pythonPath": suite === "activation" ? python : "",
+    "graphqlDesk.pythonPath": "",
     "python.experiments.enabled": false,
     "python.analysis.aiHoverSummaries": false,
   }));

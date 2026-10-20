@@ -30,8 +30,11 @@ and Windows; these manual host observations do not establish other host platform
 ## Read-only extension activation
 
 The extension activates for Python documents and the **GraphQL Desk: Refresh
-Schema** command. Set `graphqlDesk.pythonPath` to an absolute interpreter with
-GraphQL Desk installed. `graphqlDesk.project` supplies the existing validated
+Schema** command. Install GraphQL Desk in the Python extension's selected
+environment. A blank `graphqlDesk.pythonPath` uses that environment's resolved
+executable for the owning workspace; a nonempty setting is an authoritative
+absolute interpreter override. Invalid nonempty overrides fail closed rather than
+silently selecting another interpreter. `graphqlDesk.project` supplies the existing validated
 fallback configuration when no active pyproject table exists. Semantic analysis
 requires workspace trust; untrusted workspaces retain lexical highlighting only.
 
@@ -58,6 +61,14 @@ configuration, fragment and schema buffers, native Pylance coexistence and expli
 remote refresh with no HTTP during typing. Source files remain unchanged on disk.
 The earlier feature fixture still directly registers providers.
 
-Interpreter selection remains explicit. Full supported-platform/performance
+The controller activates and reads the official Python environment API only in a
+trusted workspace. It resolves an executable rather than treating an environment
+ID/directory as Python, and never guesses from PATH or default-interpreter settings.
+Selected-environment changes immediately dispose affected workers/caches; explicit
+overrides remain independent. Late resolution rechecks trust, selection, settings
+and disposal. Both pinned activation hosts exercise a blank GraphQL override and
+assert the officially selected executable before the semantic feature checks.
+
+Full supported-platform/performance
 matrices, complete discovery/lifecycle acceptance, VSIX release and live generated
 typing remain open under #39/#40 and the broad gates.

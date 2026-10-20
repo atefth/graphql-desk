@@ -27,7 +27,7 @@
           "type": "string",
           "default": "",
           "scope": "resource",
-          "description": "Absolute Python interpreter with graphql-desk installed."
+          "description": "Optional absolute interpreter with GraphQL Desk installed; blank uses the interpreter selected in the Python extension."
         },
         "graphqlDesk.project": {
           "type": ["object", "null"],

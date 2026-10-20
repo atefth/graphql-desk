@@ -27,6 +27,80 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   let epoch = 0;
   const states = new Map();
   const subscriptions = [];
+  const interpreters = new Map();
+  let pythonApiPromise;
+  let pythonEnvironments;
+  const configuredPython = folder => vscode.workspace.getConfiguration("graphqlDesk", folder.uri).get("pythonPath", "");
+  function dropState(root) {
+    const state = states.get(root);
+    if (state) { state.cached = null; state.worker.dispose(); states.delete(root); }
+  }
+  const selectedKey = selected => selected && typeof selected.id === "string" && selected.id && typeof selected.path === "string" && selected.path ? JSON.stringify([selected.id, selected.path]) : null;
+  async function environments(ticket) {
+    check(ticket);
+    if (!pythonApiPromise) {
+      const extension = vscode.extensions?.getExtension("ms-python.python");
+      if (!extension) return null;
+      pythonApiPromise = Promise.resolve().then(() => { check(ticket); return extension.activate(); }).catch(() => null);
+    }
+    const api = await pythonApiPromise;
+    check(ticket);
+    const current = api?.environments;
+    if (!current || typeof current.getActiveEnvironmentPath !== "function" || typeof current.resolveEnvironment !== "function" || typeof current.onDidChangeActiveEnvironmentPath !== "function") { pythonApiPromise = null; return null; }
+    if (!pythonEnvironments) {
+      pythonEnvironments = current;
+      subscriptions.push(current.onDidChangeActiveEnvironmentPath(event => {
+        if (!trusted()) return;
+        const resource = event.resource?.uri ?? event.resource;
+        if (resource && (resource.scheme !== "file" || !path.isAbsolute(resource.fsPath))) return;
+        const filename = resource && canonical(resource.fsPath);
+        let affected = false;
+        const folders = new Map((vscode.workspace.workspaceFolders ?? [])
+          .filter(folder => folder.uri.scheme === "file")
+          .map(folder => [canonical(folder.uri.fsPath), folder]));
+        for (const [root, state] of states) folders.set(root, state.folder);
+        for (const [root, entry] of interpreters) folders.set(root, entry.folder);
+        for (const [root, folder] of folders) {
+          if (configuredPython(folder) !== "" || (filename && !inside(root, filename) && !inside(filename, root))) continue;
+          interpreters.delete(root); dropState(root); affected = true;
+        }
+        if (affected) changed();
+      }));
+    }
+    return current;
+  }
+  async function selectedPython(folder, root, ticket) {
+    const api = await environments(ticket);
+    check(ticket);
+    if (!api || configuredPython(folder) !== "") return null;
+    const selected = api.getActiveEnvironmentPath(folder.uri);
+    const key = selectedKey(selected);
+    if (!key) { interpreters.delete(root); dropState(root); return null; }
+    let entry = interpreters.get(root);
+    if (entry?.key !== key) {
+      dropState(root);
+      entry = { key, folder, promise: Promise.resolve().then(() => {
+        check(ticket);
+        if (configuredPython(folder) !== "" || interpreters.get(root) !== entry) return undefined;
+        return api.resolveEnvironment({ id: selected.id, path: selected.path });
+      }) };
+      interpreters.set(root, entry);
+    }
+    let resolved;
+    try { resolved = await entry.promise; }
+    catch (error) {
+      if (interpreters.get(root) === entry) { interpreters.delete(root); dropState(root); }
+      throw error;
+    }
+    check(ticket);
+    if (configuredPython(folder) !== "" || interpreters.get(root) !== entry || selectedKey(api.getActiveEnvironmentPath(folder.uri)) !== key) {
+      if (interpreters.get(root) === entry) { interpreters.delete(root); dropState(root); }
+      return null;
+    }
+    const executable = resolved?.executable?.uri;
+    if (!executable || executable.scheme !== "file" || !path.isAbsolute(executable.fsPath)) { interpreters.delete(root); dropState(root); return null; }
+    return executable.fsPath;
+  }
   const trusted = () => {
     const allowed = !disposed && vscode.workspace.isTrusted === true;
     if (!allowed) status(null);
@@ -38,7 +112,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!["file", "untitled"].includes(uri.scheme) || !path.isAbsolute(uri.fsPath)) return null;
     return canonical(uri.fsPath);
   };
-  function stateFor(snapshot) {
+  async function stateFor(snapshot) {
+    const ticket = epoch;
+    if (!trusted()) return null;
     const uri = vscode.Uri.parse(snapshot.uri);
     if (uri.scheme !== "file" || !path.isAbsolute(uri.fsPath)) return null;
     const filename = canonical(uri.fsPath);
@@ -50,15 +126,20 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const folder = deepest.length === 1 ? deepest[0] : null;
     if (!folder || folder.uri.scheme !== "file") return null;
     const root = canonical(folder.uri.fsPath);
-    const python = vscode.workspace.getConfiguration("graphqlDesk", folder.uri).get("pythonPath", "");
+    const setting = configuredPython(folder);
+    let python = setting;
+    if (setting === "") {
+      try { python = await selectedPython(folder, root, ticket); } catch { return null; }
+    }
+    if (!trusted() || epoch !== ticket || configuredPython(folder) !== setting) return null;
     let state = states.get(root);
-    if (!path.isAbsolute(python)) {
+    if (typeof python !== "string" || !path.isAbsolute(python)) {
       if (state) { state.worker.dispose(); states.delete(root); }
       return null;
     }
-    if (state && state.python !== python) { state.worker.dispose(); states.delete(root); state = null; }
+    if (state && (state.python !== python || state.setting !== setting)) { state.worker.dispose(); states.delete(root); state = null; }
     if (!state) {
-      state = { root, folder, python, worker: workerFactory({ python, workspace: root, isTrusted: trusted }),
+      state = { root, folder, python, setting, worker: workerFactory({ python, workspace: root, isTrusted: trusted }),
         running: false, pending: null, cached: null, targets: [], credentials: new Map(), revisions: [], watches: new Map() };
       states.set(root, state);
     }
@@ -158,14 +239,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     state.watches.set(filename, watcher);
     subscriptions.push(watcher, watcher.onDidChange(invalidate), watcher.onDidCreate(invalidate), watcher.onDidDelete(invalidate));
   }
-  function check(ticket, token) {
-    if (!trusted() || epoch !== ticket || token?.isCancellationRequested) throw new Error("Superseded analysis");
+  function check(ticket, token, state) {
+    if (!trusted() || epoch !== ticket || token?.isCancellationRequested || (state && states.get(state.root) !== state)) throw new Error("Superseded analysis");
   }
   async function build(state, token, refreshTarget) {
     const ticket = epoch;
-    check(ticket, token);
+    check(ticket, token, state);
     const captured = await capture(state);
-    check(ticket, token);
+    check(ticket, token, state);
     const wanted = revisions(state);
     const revisionSignature = JSON.stringify(wanted);
     if (!refreshTarget && state.cached?.capture.signature === captured.signature && state.cached.revisionSignature === revisionSignature) return state.cached;
@@ -175,7 +256,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const requestWorker = message => state.worker.request(message, abort ? { signal: abort.signal } : undefined);
     try {
       const prepared = await requestWorker({ op: "prepare", ...captured.request, remote_revisions: wanted });
-      check(ticket, token);
+      check(ticket, token, state);
       state.targets = prepared.remote_schemas;
       state.revisions = prepared.remote_revisions;
       const schema_buffers = prepared.required_buffers.map(id => {
@@ -199,9 +280,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       }
       const request = { ...captured.request, id: identity, schema_buffers, remote_revisions: state.revisions };
       const bundle = await requestWorker({ op: "analyze", ...request });
-      check(ticket, token);
+      check(ticket, token, state);
       const latest = await capture(state);
-      check(ticket, token);
+      check(ticket, token, state);
       if (latest.signature !== captured.signature) throw new Error("Capture changed");
       const latestRevisions = revisions(state);
       if (state.revisions.some(active => !latestRevisions.some(current => key(current) === key(active) && current.revision === active.revision))) throw new Error("Credentials changed during analysis");
@@ -215,11 +296,11 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   }
   async function analyze(value, token) {
     if (!trusted() || token?.isCancellationRequested) return null;
-    const state = stateFor(value);
-    if (!state) return null;
+    const state = await stateFor(value);
+    if (!state || token?.isCancellationRequested) return null;
     try {
       const result = await enqueue(state, () => build(state));
-      if (token?.isCancellationRequested || !trusted()) return null;
+      if (token?.isCancellationRequested || !trusted() || states.get(state.root) !== state) return null;
       if (result) status(result.bundle.unavailable_schemas.length ? "Schema unavailable" : null);
       return result?.bundle ?? null;
     }
@@ -227,20 +308,20 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   }
   async function isCurrent(bundle, value, token) {
     if (!trusted() || token?.isCancellationRequested) return false;
-    const state = stateFor(value);
-    if (!state) return false;
+    const state = await stateFor(value);
+    if (!state || token?.isCancellationRequested) return false;
     try {
       const current = await enqueue(state, async () => {
         const cached = state.cached;
         if (!cached || cached.bundle !== bundle) return false;
-        check(cached.ticket);
+        check(cached.ticket, undefined, state);
         const latest = await capture(state);
-        check(cached.ticket);
+        check(cached.ticket, undefined, state);
         if (latest.signature !== cached.capture.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) { state.cached = null; return false; }
         const reply = await state.worker.request({ op: "current", ...cached.request });
-        check(cached.ticket);
+        check(cached.ticket, undefined, state);
         const final = await capture(state);
-        check(cached.ticket);
+        check(cached.ticket, undefined, state);
         const current = reply.current && final.signature === latest.signature && JSON.stringify(revisions(state)) === cached.revisionSignature;
         if (!current) state.cached = null;
         return current;
@@ -251,8 +332,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   async function refresh() {
     if (!trusted()) { report("Trust this workspace before refreshing a schema."); return; }
     const document = vscode.window.activeTextEditor?.document;
-    const state = document && stateFor(snapshot(document));
-    if (!state) { report("Open a Python file and configure an absolute GraphQL Desk Python interpreter."); return; }
+    const state = document && await stateFor(snapshot(document));
+    if (!state) { report("Open a Python file and select a Python environment, or configure an absolute GraphQL Desk Python interpreter."); return; }
     try {
       await enqueue(state, () => build(state));
       const choices = state.targets.map(target => ({ label: target.schema_name, description: target.project, target }));
@@ -275,12 +356,12 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (event === "onDidChangeConfiguration") {
         for (const [root, state] of states) {
           const python = vscode.workspace.getConfiguration("graphqlDesk", state.folder.uri).get("pythonPath", "");
-          if (python !== state.python) { state.worker.dispose(); states.delete(root); }
+          if (python !== state.setting) { interpreters.delete(root); dropState(root); }
         }
       }
       if (event === "onDidChangeWorkspaceFolders") {
         for (const state of states.values()) state.worker.dispose();
-        states.clear();
+        states.clear(); interpreters.clear();
       }
       invalidate();
     }));
@@ -290,7 +371,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     subscriptions.push(watcher, watcher.onDidChange(invalidate), watcher.onDidCreate(invalidate), watcher.onDidDelete(invalidate));
   }
   return { analyze, isCurrent, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
-    dispose() { disposed = true; epoch += 1; for (const state of states.values()) state.worker.dispose(); states.clear(); subscriptions.forEach(item => item.dispose()); } };
+    dispose() { disposed = true; epoch += 1; for (const state of states.values()) state.worker.dispose(); states.clear(); interpreters.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
 module.exports = { createAnalysisController };
 
