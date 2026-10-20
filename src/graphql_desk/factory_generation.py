@@ -17,6 +17,7 @@ from .operation_types import (
     render_indexed_operation_types,
 )
 from .runtime import init_graphql
+from .scalar_types import render_scalar_method
 from .schema_types import render_schema_types
 from .source_graph import DocumentIdentity, GraphDiagnostic, ModuleSnapshot
 from .source_maps import build_source_map
@@ -399,8 +400,8 @@ def generate_factory_artifacts(
                     selector = f"__graphql_desk_Literal[{operation_name!r}, None]"
                 selector += " = None"
             overloads.append(
-                "@__graphql_desk_overload\n"
-                "def graphql(source: "
+                "    @__graphql_desk_overload\n"
+                "    def __call__(self, source: "
                 f"__graphql_desk_Literal[{document.call.source!r}], "
                 f"fragments: {fragments}{default}, *, "
                 f"operation: {selector}) -> {return_alias}: ...\n"
@@ -440,18 +441,17 @@ def generate_factory_artifacts(
             ),
         )
         fallback = (
-            "def graphql(source: str, "
+            "    def __call__(self, source: str, "
             "fragments: __graphql_desk_Iterable["
             "__graphql_desk_UnresolvedDocument] = (), "
             "*, operation: str | None = None) -> "
             "__graphql_desk_UnresolvedDocument: ...\n"
         )
-        typing_import = "from typing import Protocol as __graphql_desk_Protocol"
-        if overloads:
-            typing_import += (
-                ", Literal as __graphql_desk_Literal, "
-                "overload as __graphql_desk_overload"
-            )
+        typing_import = (
+            "from typing import Protocol as __graphql_desk_Protocol, "
+            "Literal as __graphql_desk_Literal, "
+            "overload as __graphql_desk_overload"
+        )
         stub = (
             schema_text
             + (
@@ -468,9 +468,17 @@ def generate_factory_artifacts(
             "    @property\n"
             "    def operation_name(self) -> str | None: ...\n"
             "    @property\n"
-            "    def schema_name(self) -> str | None: ...\n\n" + "\n".join(overloads)
+            "    def schema_name(self) -> str | None: ...\n\n"
+            "class __graphql_desk_Factory(__graphql_desk_Protocol):\n"
+            + "\n".join(overloads)
         )
-        stub += ("@__graphql_desk_overload\n" if overloads else "") + fallback + "\n"
+        stub += (
+            ("    @__graphql_desk_overload\n" if overloads else "")
+            + fallback
+            + "\n"
+            + render_scalar_method(context.schema, scalars=scalars, enums=enums)
+            + "\ngraphql: __graphql_desk_Factory\n"
+        )
         put(path + ".pyi", stub)
     except (ValueError, RecursionError, KeyError) as error:
         if documents:
