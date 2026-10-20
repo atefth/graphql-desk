@@ -9,7 +9,11 @@ from unittest.mock import patch
 
 from graphql import GraphQLError
 
-from graphql_desk.parse_generation import render_parse_companion
+from graphql_desk.parse_generation import (
+    render_captured_parse_companion,
+    render_parse_companion,
+)
+from graphql_desk.source_graph import ModuleSnapshot
 from tests import test_factory_generation as factory_tests
 
 
@@ -26,6 +30,163 @@ class ParseGenerationTests(unittest.TestCase):
         with self.assertRaises(GraphQLError) as caught:
             render_parse_companion(("query {",))
         self.assertTrue(caught.exception.locations)
+
+    def test_captured_owner_selection_isolates_syntax_and_dynamic_fallbacks(
+        self,
+    ) -> None:
+        modules = (
+            ModuleSnapshot(
+                "p",
+                "main",
+                "file:///main.py",
+                1,
+                "from graphql_desk import parse\n"
+                "good=parse('query Q { missing }')\n"
+                "bad=parse('query {')\n"
+                "again=parse('query {')\n"
+                "dynamic=parse(unknown)",
+            ),
+            ModuleSnapshot(
+                "p",
+                "other",
+                "file:///other.py",
+                1,
+                "from graphql_desk import parse\nbad=parse('query {')",
+            ),
+        )
+        with patch("builtins.open", side_effect=AssertionError("No writes")):
+            output = render_captured_parse_companion(
+                modules, project_id="p", module="main"
+            )
+        self.assertIn("'query Q { missing }'", output.companion.stub)
+        self.assertNotIn("_ParseLiteral['query {']", output.companion.stub)
+        self.assertEqual(
+            {item.code for item in output.diagnostics},
+            {"parse-syntax", "parse-fallback"},
+        )
+        self.assertTrue(
+            all(item.module.module == "main" for item in output.diagnostics)
+        )
+        syntax_ranges = [
+            item.range for item in output.diagnostics if item.code == "parse-syntax"
+        ]
+        self.assertEqual(len(syntax_ranges), 2)
+        self.assertNotEqual(*syntax_ranges)
+        self.assertTrue(
+            any("GraphQL request" in item.message for item in output.diagnostics)
+        )
+        self.assertEqual(
+            output,
+            render_captured_parse_companion(
+                tuple(reversed(modules)), project_id="p", module="main"
+            ),
+        )
+        with self.assertRaises(ValueError):
+            render_captured_parse_companion(modules, project_id="p", module="missing")
+
+    def test_captured_nesting_failures_preserve_independent_declarations(self) -> None:
+        parser_limit = "{" + "a{" * 350 + "id" + "}" * 351
+        declaration_limit = "{" + "a{" * 150 + "id" + "}" * 151
+        module = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            1,
+            "from graphql_desk import parse\n"
+            "good=parse('{ id }')\n"
+            f"too_deep=parse({parser_limit!r})\n"
+            f"too_nested=parse({declaration_limit!r})\n"
+            "also_good=parse('{ other }')\n",
+        )
+        output = render_captured_parse_companion(
+            (module,), project_id="p", module="main"
+        )
+        self.assertEqual(
+            output.companion.stub.count("def parse(source: _ParseLiteral["), 2
+        )
+        self.assertIn("_ParseLiteral['{ id }']", output.companion.stub)
+        self.assertIn("_ParseLiteral['{ other }']", output.companion.stub)
+        self.assertEqual(
+            [item.code for item in output.diagnostics], ["parse-fallback"] * 2
+        )
+        self.assertTrue(
+            all(item.range.end > item.range.start for item in output.diagnostics)
+        )
+
+    def test_captured_opt_in_reexports_type_original_source_without_schema_facts(
+        self,
+    ) -> None:
+        source = "query Q { missing }"
+        fixture = """from typing import TYPE_CHECKING, Literal
+from typing_extensions import assert_type
+from graphql import DocumentNode, Source
+from graphql_desk import parse as root_parse
+from shim import reader
+from constants import TEXT
+value=reader(TEXT)
+assert_type(value.definitions[0].name.value,Literal["Q"])
+assert_type(value.definitions[0].selection_set.selections[0].name.value,Literal["missing"])
+assert reader is root_parse
+assert_type(reader(Source(TEXT)),DocumentNode)
+assert_type(reader(TEXT,no_location=True),DocumentNode)
+assert_type(reader("scalar Date"),DocumentNode)
+def dynamic(text:str)->DocumentNode:
+ assert_type(reader(text),DocumentNode)
+ return reader(text)
+assert dynamic(TEXT).kind == "document"
+if TYPE_CHECKING:
+ wrong:Literal["Other"]=value.definitions[0].name.value
+ value.nonexistent
+"""
+        modules = (
+            ModuleSnapshot(
+                "p",
+                "parser_companion",
+                "file:///parser_companion.py",
+                1,
+                render_parse_companion(()).runtime,
+            ),
+            ModuleSnapshot(
+                "p",
+                "shim",
+                "file:///shim.py",
+                1,
+                "from parser_companion import parse as reader\n__all__=['reader']",
+            ),
+            ModuleSnapshot(
+                "p",
+                "constants",
+                "file:///constants.py",
+                1,
+                f"from typing import Literal\nTEXT:Literal[{source!r}]={source!r}\n",
+            ),
+            ModuleSnapshot("p", "main", "file:///main.py", 1, fixture),
+        )
+        output = render_captured_parse_companion(modules, project_id="p", module="main")
+        self.assertTrue(output.diagnostics)
+        self.assertEqual({item.code for item in output.diagnostics}, {"parse-fallback"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for module in modules:
+                (root / f"{module.module}.py").write_text(
+                    module.source, encoding="utf8"
+                )
+            (root / "parser_companion.py").write_text(
+                output.companion.runtime, encoding="utf8"
+            )
+            (root / "parser_companion.pyi").write_text(
+                output.companion.stub, encoding="utf8"
+            )
+            errors = {
+                index
+                for index, line in enumerate(fixture.splitlines(), 1)
+                if "wrong:" in line or "value.nonexistent" in line
+            }
+            factory_tests.FactoryGenerationTests().check(root, {"main.py": errors})
+            result = subprocess.run(
+                [sys.executable, "main.py"], cwd=root, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_original_source_exact_literals_fallbacks_and_runtime_identity(
         self,

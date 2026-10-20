@@ -11,6 +11,7 @@ from graphql_desk.source_graph import (
     ModuleSnapshot,
     ProjectBindings,
     ProjectSources,
+    resolve_parse_sources,
     resolve_project,
     resolve_type_symbols,
 )
@@ -25,6 +26,102 @@ def module(
 
 
 class SourceGraphTests(unittest.TestCase):
+    def test_parser_sources_reuse_imports_constants_scopes_and_provenance(self) -> None:
+        snapshots = (
+            module("constants", 'TEXT="query Q { id }"'),
+            module("companion", "from graphql_desk import parse as parse"),
+            module("shim", "from companion import parse as reader"),
+            module(
+                "main",
+                "from shim import reader as read\n"
+                "from constants import TEXT\n"
+                "value=read(TEXT)\n"
+                "other=read(source=TEXT,no_location=False,max_tokens=None,experimental_fragment_arguments=False)",
+            ),
+        )
+        baseline = resolve_project(snapshots)
+        with (
+            patch("builtins.open", side_effect=AssertionError("No files")),
+            patch("importlib.import_module", side_effect=AssertionError("No imports")),
+        ):
+            facts = resolve_parse_sources(snapshots)
+        self.assertEqual(facts.diagnostics, ())
+        self.assertEqual([call.binding for call in facts.calls], ["value", "other"])
+        self.assertEqual([call.source for call in facts.calls], ["query Q { id }"] * 2)
+        self.assertEqual(
+            {item.module for item in facts.calls[0].dependencies},
+            {"main", "shim", "companion", "constants"},
+        )
+        self.assertEqual(facts.calls[0].contributions[0].module.module, "constants")
+        self.assertEqual(facts, resolve_parse_sources(tuple(reversed(snapshots))))
+        changed = (*snapshots[:1], replace(snapshots[1], version=2), *snapshots[2:])
+        self.assertNotEqual(
+            facts.calls[0].dependencies,
+            resolve_parse_sources(changed).calls[0].dependencies,
+        )
+        self.assertEqual(resolve_project(snapshots), baseline)
+        self.assertEqual(IncrementalResolver().resolve(snapshots), baseline)
+
+    def test_parser_fallback_modes_do_not_poison_document_resolution(self) -> None:
+        snapshots = (
+            module(
+                "main",
+                "from graphql_desk import parse,gql\n"
+                "from graphql import Source\n"
+                "text=unknown()\n"
+                "a=parse(text)\n"
+                "b=parse(Source('query Q { id }'))\n"
+                "c=parse('query Q { id }',True)\n"
+                "d=parse('query Q { id }',max_tokens=20)\n"
+                "e=parse('fragment F($v:Int) on T { f(v:$v) }',"
+                "experimental_fragment_arguments=True)\n"
+                "f=parse(*unknown)\n"
+                "g=parse('query Q { id }',other=True)\n"
+                "def nested():\n"
+                " return parse('query Q { id }')\n"
+                "def shadow(parse):\n"
+                " return parse('query Q { id }')\n"
+                "valid=gql('{id}')",
+            ),
+        )
+        documents = resolve_project(snapshots)
+        self.assertEqual(len(documents.calls), 1)
+        self.assertEqual(documents.diagnostics, ())
+        facts = resolve_parse_sources(snapshots)
+        self.assertEqual(facts.calls, ())
+        self.assertEqual(len(facts.diagnostics), 8)
+        self.assertEqual({item.code for item in facts.diagnostics}, {"parse-fallback"})
+        self.assertEqual(resolve_project(snapshots), documents)
+
+    def test_parser_identity_rejects_mutation_shadowing_and_untrusted_lookalikes(
+        self,
+    ) -> None:
+        for source in (
+            "from graphql_desk import parse\nparse=other\nx=parse('{id}')",
+            "import graphql_desk as api\napi.parse=other\nx=api.parse('{id}')",
+            "from graphql_desk import parse\nmutate(parse)\nx=parse('{id}')",
+            "import graphql_desk as api\nmutate(api.__dict__)\nx=api.parse('{id}')",
+            "from graphql_desk import parse\nfrom other import *\nx=parse('{id}')",
+            "from constants import TEXT\nfrom graphql_desk import parse\nx=parse(TEXT)",
+        ):
+            with self.subTest(source=source):
+                facts = resolve_parse_sources((module("main", source),))
+                self.assertEqual(facts.calls, ())
+                self.assertTrue(facts.diagnostics)
+        lookalikes = (
+            module("graphql_desk", "def parse(source): pass"),
+            module("main", "from graphql_desk import parse\nx=parse('{id}')"),
+        )
+        self.assertEqual(resolve_parse_sources(lookalikes).calls, ())
+        self.assertEqual(
+            resolve_parse_sources(
+                (module("main", "from unrelated import parse\nx=parse('{id}')"),)
+            ).calls,
+            (),
+        )
+        with self.assertRaises(ValueError):
+            resolve_parse_sources((module("main", ""), module("main", "")))
+
     def test_captured_type_symbols_follow_classes_aliases_and_reexports(self) -> None:
         snapshots = (
             module("pkg", "from .exports import Public", package=True),

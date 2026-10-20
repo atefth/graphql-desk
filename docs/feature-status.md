@@ -1,6 +1,6 @@
 # Feature status and remaining work
 
-Implementation baseline: **67 foundation slices** are merged, with 344 Python tests and 49 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
+Implementation baseline: **68 foundation slices** are merged, with 350 Python tests and 49 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
 
 Merged #134–#137 preserve original-source validation and rejected resolver/index
 ownership, and type introspection selections. #138 assembles captured multi-schema
@@ -55,8 +55,8 @@ These foundations do not complete the dependency-gated later-stage stories.
 
 Merged #150 adds simple captured PEP613 mapping aliases. #151 generates opt-in
 parser companions with exact default-mode executable literals and ordinary fallback
-for dynamic strings, Source objects, SDL and nondefault modes. Automatic parse-call
-attachment and complete location acceptance remain open. The controller now resolves
+for dynamic strings, Source objects, SDL and nondefault modes. Captured parser discovery and owner-specific opt-in companions now reuse static
+source facts; automatic import attachment and complete location acceptance remain open. The controller now resolves
 the Python extension's selected executable when its override is blank; selection
 changes invalidate affected workers while explicit overrides remain independent.
 Both pinned hosts verify the selected executable with a blank GraphQL override.

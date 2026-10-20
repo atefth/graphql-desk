@@ -126,6 +126,22 @@ class ProjectSources:
 
 
 @dataclass(frozen=True)
+class ResolvedParseCall:
+    module: ModuleDependency
+    range: Span
+    source: str
+    contributions: tuple[StringContribution, ...]
+    dependencies: tuple[ModuleDependency, ...]
+    binding: str | None
+
+
+@dataclass(frozen=True)
+class ParseSources:
+    calls: tuple[ResolvedParseCall, ...]
+    diagnostics: tuple[GraphDiagnostic, ...]
+
+
+@dataclass(frozen=True)
 class TypeSymbolResolution:
     symbol: str
     status: Literal["resolved", "external", "unresolved", "missing", "not-type"]
@@ -426,7 +442,9 @@ class _Graph:
         parses: dict[tuple[str, str], _Parsed] | None = None,
         *,
         type_symbols: bool = False,
+        parsers: bool = False,
     ) -> None:
+        self.parsers = parsers
         self.type_symbols = type_symbols
         self.reflected_type_projects: set[str] = set()
         self.documents: dict[DocumentIdentity, ResolvedCall] = {}
@@ -504,7 +522,7 @@ class _Graph:
                             (node.lineno, node.col_offset),
                             set(),
                         )
-                        trusted = callee.kind in {"callable", "initializer"}
+                        trusted = callee.kind in {"callable", "initializer", "parser"}
                     except (_Unresolved, RecursionError):
                         trusted = False
                     if not trusted:
@@ -536,7 +554,7 @@ class _Graph:
                             self.mutated.add((module.snapshot.project, value.text))
                             if value.text == "builtins":
                                 module.star = True
-                        elif value.kind in {"callable", "initializer"}:
+                        elif value.kind in {"callable", "initializer", "parser"}:
                             self.mutated.add(
                                 (module.snapshot.project, value.text.rsplit(".", 1)[0])
                             )
@@ -575,6 +593,7 @@ class _Graph:
                     "callable",
                     "initializer",
                     "document-candidate",
+                    "parser",
                 }:
                     origins.append(value)
                     continue
@@ -845,7 +864,7 @@ class _Graph:
                 )
             if (
                 not probe
-                or value.kind in {"callable", "initializer"}
+                or value.kind in {"callable", "initializer", "parser"}
                 or value.text == "graphql_desk"
             ):
                 return value
@@ -886,6 +905,13 @@ class _Graph:
             )
             return _Value("module", imported, dependencies=dependencies)
         factory = self.factories.get((caller.snapshot.project, imported, symbol))
+        if (
+            self.parsers
+            and target is None
+            and imported == "graphql_desk"
+            and symbol == "parse"
+        ):
+            return _Value("parser", "graphql_desk.parse")
         if target is None and imported == "graphql_desk" and symbol == "init_graphql":
             return _Value("initializer", "graphql_desk.init_graphql")
         builtin = (
@@ -1209,6 +1235,171 @@ class _Graph:
         )
 
 
+class _CallScopes(ast.NodeVisitor):
+    scoped = False
+    shadowed: set[str] = set()
+
+    def visit_FunctionDef(self, node: ast.AST) -> None:
+        previous = self.scoped
+        previous_shadowed = self.shadowed
+        self.scoped = True
+        local = {
+            item.id
+            for item in ast.walk(node)
+            if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del))
+        }
+        local.update(item.arg for item in ast.walk(node) if isinstance(item, ast.arg))
+        self.shadowed = previous_shadowed | local
+        self.generic_visit(node)
+        self.shadowed = previous_shadowed
+        self.scoped = previous
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+    visit_ClassDef = visit_FunctionDef
+    visit_Lambda = visit_FunctionDef
+    visit_ListComp = visit_FunctionDef
+    visit_SetComp = visit_FunctionDef
+    visit_DictComp = visit_FunctionDef
+    visit_GeneratorExp = visit_FunctionDef
+
+
+def resolve_parse_sources(modules: tuple[ModuleSnapshot, ...]) -> ParseSources:
+    """Resolve default-mode module-level parser strings, without schema facts.
+
+    Other recognized calls retain the ordinary parser fallback with a local
+    diagnostic. Normal document resolution and its diagnostics are unchanged.
+    """
+    ordered = tuple(sorted(modules, key=lambda item: (item.project, item.module)))
+    graph = _Graph(ordered, (), parsers=True)
+    calls: list[ResolvedParseCall] = []
+    for module in graph.modules.values():
+
+        class Calls(_CallScopes):
+            def visit_Call(self, node: ast.Call) -> None:
+                root = node.func
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if isinstance(root, ast.Name) and root.id in self.shadowed:
+                    self.generic_visit(node)
+                    return
+                recognized = False
+                try:
+                    callee = graph.expression(
+                        module, node.func, (node.lineno, node.col_offset), set()
+                    )
+                    recognized = callee.kind == "parser"
+                    if recognized:
+                        if self.scoped:
+                            raise _Unresolved(
+                                "Nested parser scopes retain the ordinary AST fallback"
+                            )
+                        names = (
+                            "source",
+                            "no_location",
+                            "max_tokens",
+                            "experimental_fragment_arguments",
+                        )
+                        if len(node.args) > len(names) or any(
+                            isinstance(item, ast.Starred) for item in node.args
+                        ):
+                            raise _Unresolved(
+                                "Parser arguments are not statically supported"
+                            )
+                        arguments = dict(zip(names, node.args))
+                        for keyword in node.keywords:
+                            if keyword.arg not in names or keyword.arg in arguments:
+                                raise _Unresolved(
+                                    "Parser arguments must be named once "
+                                    "without unpacking"
+                                )
+                            arguments[keyword.arg] = keyword.value
+                        if "source" not in arguments:
+                            raise _Unresolved("A parser source is required")
+                        for name, default in zip(names[1:], (False, None, False)):
+                            option = arguments.get(name)
+                            if option is not None and not (
+                                isinstance(option, ast.Constant)
+                                and option.value is default
+                            ):
+                                raise _Unresolved(
+                                    "Nondefault parser options retain the "
+                                    "ordinary AST fallback"
+                                )
+                        source = graph.expression(
+                            module,
+                            arguments["source"],
+                            (node.lineno, node.col_offset),
+                            set(),
+                        )
+                        if source.kind != "string":
+                            raise _Unresolved("Parser source is not a static string")
+                        calls.append(
+                            ResolvedParseCall(
+                                module.identity,
+                                module.span(node),
+                                source.text,
+                                source.contributions,
+                                tuple(
+                                    sorted(
+                                        source.dependencies
+                                        | callee.dependencies
+                                        | {module.identity},
+                                        key=lambda item: (item.project, item.module),
+                                    )
+                                ),
+                                module.call_bindings.get(id(node)),
+                            )
+                        )
+                except (_Unresolved, RecursionError) as error:
+                    if not recognized:
+                        try:
+                            recognized = (
+                                graph.expression(
+                                    module,
+                                    node.func,
+                                    (node.lineno, node.col_offset),
+                                    set(),
+                                    probe=True,
+                                ).kind
+                                == "parser"
+                            )
+                        except (_Unresolved, RecursionError):
+                            pass
+                    if recognized:
+                        graph.diagnostics.append(
+                            GraphDiagnostic(
+                                module.identity,
+                                "parse-fallback",
+                                str(error)
+                                if isinstance(error, _Unresolved)
+                                else "Parser source exceeds static nesting limits",
+                                module.span(node),
+                            )
+                        )
+                self.generic_visit(node)
+
+        start = len(calls)
+        try:
+            Calls().visit(module.tree)
+        except RecursionError:
+            del calls[start:]
+            graph.failed_modules.add(module.identity)
+            graph.diagnostics.append(
+                GraphDiagnostic(
+                    module.identity,
+                    "parse-fallback",
+                    "Python syntax exceeds parser traversal limits",
+                    Span(0, len(module.snapshot.source)),
+                )
+            )
+    current = tuple(
+        call
+        for call in calls
+        if not graph.failed_modules.intersection(call.dependencies)
+    )
+    return ParseSources(current, tuple(graph.diagnostics))
+
+
 def resolve_project(
     modules: tuple[ModuleSnapshot, ...], *, bindings: tuple[ProjectBindings, ...] = ()
 ) -> ProjectSources:
@@ -1226,10 +1417,7 @@ def _resolve(
     unavailable: list[RejectedCall] = []
     for module in graph.modules.values():
 
-        class Calls(ast.NodeVisitor):
-            scoped = False
-            shadowed: set[str] = set()
-
+        class Calls(_CallScopes):
             def visit_Call(self, node: ast.Call) -> None:
                 root = node.func
                 while isinstance(root, ast.Attribute):
@@ -1303,32 +1491,6 @@ def _resolve(
                             )
                         )
                 self.generic_visit(node)
-
-            def visit_FunctionDef(self, node: ast.AST) -> None:
-                previous = self.scoped
-                previous_shadowed = self.shadowed
-                self.scoped = True
-                local = {
-                    item.id
-                    for item in ast.walk(node)
-                    if isinstance(item, ast.Name)
-                    and isinstance(item.ctx, (ast.Store, ast.Del))
-                }
-                local.update(
-                    item.arg for item in ast.walk(node) if isinstance(item, ast.arg)
-                )
-                self.shadowed = previous_shadowed | local
-                self.generic_visit(node)
-                self.shadowed = previous_shadowed
-                self.scoped = previous
-
-            visit_AsyncFunctionDef = visit_FunctionDef
-            visit_ClassDef = visit_FunctionDef
-            visit_Lambda = visit_FunctionDef
-            visit_ListComp = visit_FunctionDef
-            visit_SetComp = visit_FunctionDef
-            visit_DictComp = visit_FunctionDef
-            visit_GeneratorExp = visit_FunctionDef
 
         start = len(calls)
         rejected_start = len(unavailable)
