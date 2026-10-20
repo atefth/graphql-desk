@@ -1712,7 +1712,6 @@ class OperationTypesTests(unittest.TestCase):
         schema = build_schema(_SCHEMA)
         for source in (
             "{ missing }",
-            "{ __schema { queryType { name } } }",
             "query Same { greeting } query Same { greeting }",
             '{ a:greeting a:user(id: "1") { id } }',
             "{ greeting @skip(if: 1) }",
@@ -2055,3 +2054,213 @@ bad_title: Composite = {'user': {'id': '1', 'title': False}}  # BAD
                 )
                 self.assertNotIn("__graphql_desk_variant_", output)
                 self.assertEqual(output.count(": 'String'"), 12)
+
+    def test_introspection_objects_execute_and_pass_both_checkers(self) -> None:
+        from graphql import (
+            execute_sync,  # pyright: ignore[reportUnknownVariableType]
+            parse,
+            validate,
+        )
+
+        schema = build_schema(
+            "directive @kind(value: __TypeKind) on FIELD "
+            "type User { id: ID! } type Query { user: User }"
+        )
+        source = """query Inspect($type:String!, $show:Boolean!, $kind:__TypeKind) {
+          catalog:__schema @kind(value:$kind) {
+            tag:__typename root:queryType { name kind } mutation:mutationType { name }
+            dirs:directives { name locations }
+          }
+          target:__type(name:$type) {
+            tag:__typename name kind
+            fields(includeDeprecated:true) {
+              name args { name } type { kind name ofType { kind name } }
+            }
+          }
+          maybe:__type(name:"Missing") @include(if:$show) { kind }
+        }"""
+        ast = parse(source)
+        self.assertEqual(validate(schema, ast), [])
+        output = render_operation_types(schema, source, name="Inspect")
+        self.assertIn("'catalog': 'InspectResult_catalog'", output)
+        self.assertIn("'target': 'InspectResult_target | None'", output)
+        self.assertIn("'maybe': NotRequired['InspectResult_maybe | None']", output)
+        self.assertIn("'locations': 'list[__DirectiveLocation]'", output)
+        self.assertIn("'kind': '__TypeKind'", output)
+        self.assertEqual(output.count("__TypeKind = Literal["), 1)
+        for type_name, show in (("User", True), ("String", False), ("Missing", True)):
+            executed = execute_sync(
+                schema,
+                ast,
+                variable_values={"type": type_name, "show": show, "kind": "OBJECT"},
+            )
+            self.assertIsNone(executed.errors)
+            data = executed.data
+            assert data is not None
+            self.assertEqual(data["catalog"]["tag"], "__Schema")
+            self.assertEqual(
+                data["catalog"]["root"], {"name": "Query", "kind": "OBJECT"}
+            )
+            self.assertIsNone(data["catalog"]["mutation"])
+            self.assertEqual("maybe" in data, show)
+            if show:
+                self.assertIsNone(data["maybe"])
+            target = data["target"]
+            if type_name == "Missing":
+                self.assertIsNone(target)
+            else:
+                self.assertEqual(target["tag"], "__Type")
+                self.assertEqual(target["name"], type_name)
+                if type_name == "String":
+                    self.assertEqual(target["kind"], "SCALAR")
+                    self.assertIsNone(target["fields"])
+                else:
+                    self.assertEqual(target["kind"], "OBJECT")
+                    self.assertEqual(target["fields"][0]["name"], "id")
+                    self.assertEqual(target["fields"][0]["type"]["kind"], "NON_NULL")
+        fixture = """from typing import Literal
+from typing_extensions import assert_type
+from generated import (InspectResult as Result,InspectVariables as Variables,
+ InspectResult_target as Target,InspectResult_target_fields as Field,
+ InspectResult_catalog as Catalog,InspectResult_catalog_dirs as Directive,
+ InspectResult_catalog_root as Root,InspectResult_catalog_mutation as Mutation,
+ InspectResult_target_fields_type as FieldType)
+Kind=Literal['ENUM','INPUT_OBJECT','INTERFACE','LIST','NON_NULL',
+ 'OBJECT','SCALAR','UNION']
+variables:Variables={'type':'User','show':True,'kind':'OBJECT'}
+query:Root={'name':'Query','kind':'OBJECT'}
+catalog:Catalog={'tag':'__Schema','root':query,'mutation':None,'dirs':[]}
+directive:Directive={'name':'kind','locations':['FIELD']}
+wrapped:FieldType={'kind':'NON_NULL','name':None,'ofType':None}
+field:Field={'name':'id','args':[],'type':wrapped}
+target:Target={'tag':'__Type','name':'User','kind':'OBJECT','fields':[field]}
+present:Result={'catalog':catalog,'target':target,'maybe':None}
+missing:Result={'catalog':catalog,'target':None}
+scalar:Target={'tag':'__Type','name':'String','kind':'SCALAR','fields':None}
+assert_type(target['kind'],Kind)
+assert_type(field['type']['name'],str|None)
+assert_type(target['tag'],Literal['__Type'])
+def inspect(value:Result)->None:
+ assert_type(value['catalog']['tag'],Literal['__Schema'])
+ assert_type(value['catalog']['root']['name'],str|None)
+ assert_type(value['catalog']['mutation'],Mutation|None)
+ if value['target'] is not None and value['target']['fields'] is not None:
+  assert_type(value['target']['fields'][0]['args'][0]['name'],str)
+bad_root:Result={'catalog':None,'target':None} # BAD
+bad_catalog:Catalog={'tag':'__Schema','root':None,'mutation':None,'dirs':[]} # BAD
+bad_kind:Target={'tag':'__Type','name':None,'kind':'WRONG','fields':None} # BAD
+bad_tag:Target={'tag':'User','name':None,'kind':'OBJECT','fields':None} # BAD
+bad_fields:Target={'tag':'__Type','name':None,'kind':'OBJECT','fields':[None]} # BAD
+bad_type:Field={'name':'id','args':[],'type':None} # BAD
+bad_location:Directive={'name':'kind','locations':['WRONG']} # BAD
+bad_members:Directive={'name':'kind','locations':[None]} # BAD
+bad_variable:Variables={'type':'User','show':True,'kind':'WRONG'} # BAD
+"""
+        expected = {
+            number
+            for number, line in enumerate(fixture.splitlines(), 1)
+            if "# BAD" in line
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "generated.py").write_text(output, encoding="utf8")
+            (root / "fixture.py").write_text(fixture, encoding="utf8")
+            imported = subprocess.run(
+                [sys.executable, "-c", "import generated"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            checked = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    "--python-version",
+                    "3.10",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
+            self.assertEqual(
+                {
+                    int(line)
+                    for line in re.findall(r"fixture.py:(\d+): error:", checked.stdout)
+                },
+                expected,
+                checked.stdout,
+            )
+            self.assertNotIn("generated.py:", checked.stdout)
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["fixture.py", "generated.py"],
+                        "pythonVersion": "3.10",
+                        "typeCheckingMode": "strict",
+                    }
+                ),
+                encoding="utf8",
+            )
+            checked = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
+            diagnostics = json.loads(checked.stdout)["generalDiagnostics"]
+            self.assertTrue(
+                all(Path(item["file"]).name == "fixture.py" for item in diagnostics),
+                diagnostics,
+            )
+            self.assertEqual(
+                {item["range"]["start"]["line"] + 1 for item in diagnostics},
+                expected,
+                diagnostics,
+            )
+
+    def test_introspection_mapping_and_validation_are_preserved(self) -> None:
+        schema = build_schema(
+            "type User { id: ID! } type Query { user: User } "
+            "type Mutation { change: User }"
+        )
+        output = render_operation_types(
+            schema,
+            '{ __type(name:"User") { kind } __schema { directives { locations } } }',
+            name="Read",
+            enums=(
+                ("__TypeKind", "builtins.str"),
+                ("__DirectiveLocation", "builtins.int"),
+            ),
+        )
+        self.assertNotIn("__TypeKind = Literal[", output)
+        self.assertNotIn("__DirectiveLocation = Literal[", output)
+        self.assertIn("'kind': '__TypeKind'", output)
+        self.assertIn("'locations': 'list[__DirectiveLocation]'", output)
+        for invalid in (
+            "{ __type { name } }",
+            "{ __type(name:1) { name } }",
+            '{ __schema(name:"User") { queryType { name } } }',
+            "{ user { __schema { queryType { name } } } }",
+            '{ user { __type(name:"User") { name } } }',
+            "mutation { __schema { queryType { name } } }",
+            "{ __schema { missing } }",
+            '{ __type(name:"User") { fields(includeDeprecated:"yes") { name } } }',
+        ):
+            with self.subTest(source=invalid), self.assertRaises(ValueError):
+                render_operation_types(schema, invalid, name="Read")

@@ -3,6 +3,7 @@
 import keyword
 import unicodedata
 from collections.abc import Iterable
+from typing import cast
 
 from graphql import (
     FieldNode,
@@ -59,16 +60,24 @@ def _null_override(node: FieldNode) -> bool | None:
     return None
 
 
-def _outer_nullable(scope: GraphQLCompositeType, node: FieldNode) -> bool:
+def _field_type(
+    schema: GraphQLSchema, scope: GraphQLCompositeType, node: FieldNode
+) -> object:
+    field = schema.get_field(scope, node.name.value)
+    assert field is not None  # The document was validated against this schema.
+    # Pinned GraphQLOutputType includes bare wrapper generics; only str/isinstance used.
+    return cast(object, field.type)  # pyright: ignore[reportUnknownMemberType]
+
+
+def _outer_nullable(
+    schema: GraphQLSchema, scope: GraphQLCompositeType, node: FieldNode
+) -> bool:
     if node.name.value == "__typename":
         return False
-    if node.name.value.startswith("__"):
-        raise ValueError("Introspection object selections are not supported yet")
     override = _null_override(node)
     if override is not None:
         return override
-    assert not isinstance(scope, GraphQLUnionType)
-    return not isinstance(scope.fields[node.name.value].type, GraphQLNonNull)
+    return not isinstance(_field_type(schema, scope, node), GraphQLNonNull)
 
 
 class _SupportedSyntax(Visitor):
@@ -130,6 +139,14 @@ def _render_operation_types(
         raise ValueError(f"Unsafe Python operation name: {name!r}")
     output = render_schema_types(schema, scalars=scalars, enums=enums)
     inputs, outputs, _ = mapped_type_declarations(schema, scalars, enums)
+    for type_name, type_ in sorted(schema.type_map.items()):
+        if (
+            isinstance(type_, GraphQLEnumType)
+            and type_name.startswith("__")
+            and type_name not in inputs
+        ):
+            values = ", ".join(repr(value) for value in sorted(type_.values))
+            output += f"{type_name} = Literal[{values}]\n"
     document = parse(source)
     visit(
         document,
@@ -319,10 +336,15 @@ def _render_operation_types(
                 group[0][1].selection_set is not None
                 or (
                     group[0][1].name.value != "__typename"
-                    and len({_outer_nullable(scope, node) for scope, node, _ in group})
+                    and len(
+                        {
+                            _outer_nullable(schema, scope, node)
+                            for scope, node, _ in group
+                        }
+                    )
                     > 1
                     and not any(
-                        not _outer_nullable(scope, node)
+                        not _outer_nullable(schema, scope, node)
                         and (forced or not (_directives(node) & _CONDITIONAL))
                         for scope, node, forced in group
                     )
@@ -435,7 +457,7 @@ def _render_operation_types(
                     # Intersect active occurrences only; differing conditional
                     # wrappers were split by expand_repeated before this merge.
                     nullable = all(
-                        _outer_nullable(scope, item) for scope, item, _ in group
+                        _outer_nullable(schema, scope, item) for scope, item, _ in group
                     )
 
                     def annotation(value: str) -> str:
@@ -446,7 +468,7 @@ def _render_operation_types(
                         fields.append((key, annotation(f"Literal[{concrete.name!r}]")))
                         continue
                     assert not isinstance(scope, GraphQLUnionType)
-                    field_type = parse_type(str(scope.fields[node.name.value].type))
+                    field_type = parse_type(str(_field_type(schema, scope, node)))
                     named = schema.get_type(_named_type(field_type))
                     assert named is not None
                     if isinstance(
@@ -461,7 +483,7 @@ def _render_operation_types(
                             child_type = schema.get_type(
                                 _named_type(
                                     parse_type(
-                                        str(item_scope.fields[item.name.value].type)
+                                        str(_field_type(schema, item_scope, item))
                                     )
                                 )
                             )
