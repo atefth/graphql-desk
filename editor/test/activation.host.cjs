@@ -42,6 +42,12 @@ async function run() {
   for (const [id, version] of [["ms-python.python", "2026.10.0"], ["ms-python.vscode-pylance", "2026.4.1"]]) {
     const native = vscode.extensions.getExtension(id); assert.ok(native); assert.equal(native.packageJSON.version, version); await native.activate();
   }
+  assert.equal(vscode.workspace.getConfiguration("graphqlDesk", documents.get("main.py").uri).get("pythonPath"), "", "Host proof must use the Python extension selection without an explicit override");
+  const pythonApi = vscode.extensions.getExtension("ms-python.python").exports;
+  const selectedEnvironment = pythonApi.environments.getActiveEnvironmentPath(vscode.workspace.workspaceFolders[0].uri);
+  const resolvedEnvironment = await pythonApi.environments.resolveEnvironment(selectedEnvironment);
+  assert.equal(resolvedEnvironment.executable.uri.scheme, "file");
+  assert.equal((await fs.realpath(resolvedEnvironment.executable.uri.fsPath)).toLowerCase(), (await fs.realpath(process.env.GRAPHQL_DESK_PYTHON)).toLowerCase());
   const diagnostics = document => vscode.languages.getDiagnostics(document.uri).filter(item => item.source === "GraphQL Desk");
   const main = documents.get("main.py");
   await vscode.window.showTextDocument(main);
@@ -112,6 +118,6 @@ async function run() {
   for (const [name, text] of Object.entries(fixtures)) assert.equal(await fs.readFile(path.join(workspace, name), "utf8"), text);
   await assert.rejects(fs.stat(unsavedPath), { code: "ENOENT" });
   await assert.rejects(fs.stat(path.join(workspace, "graphql_desk_generated")), { code: "ENOENT" });
-  await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-activation-observed", vscode: vscode.version, actualActivation: true, actualWorker: true, diagnostics: true, completion: true, hover: true, definitions: true, configuredDirectives: true, dirtyConfiguration: true, dirtyFragment: true, sourceRepair: true, dirtySchema: true, associatedUntitled: true, explicitRemoteRefresh: true, remoteTypingRetention: true, noAutomaticHttp: true, nativePylanceCoexistence: true, diskUnchanged: true, dirtyBuffersPreserved: true }, null, 2));
+  await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-activation-observed", vscode: vscode.version, actualActivation: true, actualWorker: true, officialSelectedEnvironment: true, blankInterpreterOverride: true, diagnostics: true, completion: true, hover: true, definitions: true, configuredDirectives: true, dirtyConfiguration: true, dirtyFragment: true, sourceRepair: true, dirtySchema: true, associatedUntitled: true, explicitRemoteRefresh: true, remoteTypingRetention: true, noAutomaticHttp: true, nativePylanceCoexistence: true, diskUnchanged: true, dirtyBuffersPreserved: true }, null, 2));
 }
 module.exports = { run };

@@ -3,6 +3,8 @@
   "vscode": "1.142.0",
   "actualActivation": true,
   "actualWorker": true,
+  "officialSelectedEnvironment": true,
+  "blankInterpreterOverride": true,
   "diagnostics": true,
   "completion": true,
   "hover": true,
