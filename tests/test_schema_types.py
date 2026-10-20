@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,9 @@ from graphql import (
 )
 
 from graphql_desk.config import ScalarMapping
-from graphql_desk.schema_types import render_schema_types
+from graphql_desk.operation_types import render_operation_types
+from graphql_desk.scalar_types import render_scalar_method
+from graphql_desk.schema_types import mapped_type_declarations, render_schema_types
 
 _SCHEMA = """
     enum Color { RED BLUE }
@@ -184,7 +187,7 @@ class SchemaTypesTests(unittest.TestCase):
             ((ScalarMapping("Color", "builtins.str", "builtins.str"),), ()),
             ((ScalarMapping("Date", "os.system('bad')", "builtins.str"),), ()),
             ((ScalarMapping("Date", "str", "builtins.str"),), ()),
-            ((ScalarMapping("String", "builtins.int", "builtins.int"),), ()),
+            ((ScalarMapping("String", "builtins.int()", "builtins.int"),), ()),
             ((ScalarMapping("Date", "builtins.str", "builtins.str"),) * 2, ()),
             ((), (("Date", "builtins.str"),)),
             ((), (("Missing", "builtins.str"),)),
@@ -202,6 +205,164 @@ class SchemaTypesTests(unittest.TestCase):
             render_schema_types(
                 colliding,
                 scalars=(ScalarMapping("Date", "builtins.str", "datetime.datetime"),),
+            )
+        unused_builtin_collision = build_schema(
+            "input IDInput { x: Int } type Query { f(value: IDInput): String }"
+        )
+        self.assertNotIn("ID", unused_builtin_collision.type_map)
+        with self.assertRaisesRegex(ValueError, "Colliding"):
+            render_schema_types(
+                unused_builtin_collision,
+                scalars=(ScalarMapping("ID", "builtins.str", "builtins.int"),),
+            )
+
+    def test_builtin_overrides_use_directional_aliases_even_when_unused(self) -> None:
+        schema = build_schema(
+            "input Filter { value: String! identifiers: [ID!]! rate: Float } "
+            "type Query { title: String identifier: ID ratio: Float "
+            "search(value: Filter): String }"
+        )
+        mappings = (
+            ScalarMapping("String", "builtins.bytes", "builtins.int"),
+            ScalarMapping("ID", "models.IDInput", "models.IDOutput"),
+            ScalarMapping("Float", "models.FloatInput", "models.FloatOutput"),
+        )
+        output = render_schema_types(schema, scalars=mappings)
+        self.assertIn("String = str", output)
+        self.assertIn("'value': 'StringInput'", output)
+        self.assertIn("'identifiers': 'list[IDInput]'", output)
+        self.assertIn("'rate': NotRequired['FloatInput | None']", output)
+        self.assertEqual(
+            output, render_schema_types(schema, scalars=tuple(reversed(mappings)))
+        )
+        minimal = build_schema("type Query { text: String }")
+        self.assertNotIn("ID", minimal.type_map)
+        self.assertNotIn("Float", minimal.type_map)
+        inputs, outputs, _ = mapped_type_declarations(minimal, mappings, ())
+        self.assertEqual(inputs["ID"], "IDInput")
+        self.assertEqual(outputs["Float"], "FloatOutput")
+        operation = render_operation_types(
+            schema,
+            "query Q($filter:Filter) { title identifier ratio search(value:$filter) }",
+            name="Read",
+            scalars=mappings,
+        )
+        self.assertIn("'title': 'StringOutput | None'", operation)
+        fixture = """from typing_extensions import assert_type
+from generated import Filter,StringInput,StringOutput,IDInput,IDOutput
+from operation import ReadResult,ReadVariables
+from unused import factory
+from models import IDInput as InputID,IDOutput as OutputID,FloatInput,FloatOutput
+value:Filter={'value':b'x','identifiers':[InputID()],'rate':FloatInput()}
+variables:ReadVariables={'filter':value}
+result:ReadResult={'title':1,'identifier':OutputID(),'ratio':FloatOutput(),'search':2}
+assert_type(factory.scalar('ID',InputID()),IDInput)
+assert_type(factory.scalar('Float',FloatInput()),FloatInput)
+assert_type(factory.scalar('String',b'x'),StringInput)
+assert_type(factory.scalar('String',None),None)
+assert_type(result['title'],StringOutput|None)
+assert_type(result['identifier'],IDOutput|None)
+wrong_input:Filter={'value':'x','identifiers':[]} # BAD
+wrong_id:Filter={'value':b'x','identifiers':[OutputID()]} # BAD
+badout:ReadResult={'title':b'x','identifier':None,'ratio':None,'search':None} # BAD
+badid:ReadResult={'title':None,'identifier':InputID(),'ratio':None,'search':None} # BAD
+factory.scalar('ID',OutputID()) # BAD
+factory.scalar('Float',FloatOutput()) # BAD
+factory.scalar('String','x') # BAD
+"""
+        expected = {
+            line for line, text in enumerate(fixture.splitlines(), 1) if "# BAD" in text
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "models.py").write_text(
+                "class IDInput: pass\nclass IDOutput: pass\n"
+                "class FloatInput: pass\nclass FloatOutput: pass\n",
+                encoding="utf8",
+            )
+            (root / "generated.py").write_text(output, encoding="utf8")
+            (root / "operation.py").write_text(operation, encoding="utf8")
+            (root / "unused.pyi").write_text(
+                render_schema_types(minimal, scalars=mappings)
+                + "\nfrom typing import Protocol as __graphql_desk_Protocol, "
+                "Literal as __graphql_desk_Literal, "
+                "overload as __graphql_desk_overload\n"
+                "class Factory(__graphql_desk_Protocol):\n"
+                + render_scalar_method(minimal, scalars=mappings)
+                + "\nfactory:Factory\n",
+                encoding="utf8",
+            )
+            (root / "fixture.py").write_text(fixture, encoding="utf8")
+            checked = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    "--python-version",
+                    "3.10",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
+            self.assertEqual(
+                {
+                    int(line)
+                    for line in re.findall(r"fixture.py:(\d+): error:", checked.stdout)
+                },
+                expected,
+                checked.stdout,
+            )
+            self.assertNotIn("generated.py:", checked.stdout)
+            self.assertNotIn("operation.py:", checked.stdout)
+            self.assertNotIn("unused.pyi:", checked.stdout)
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": [
+                            "fixture.py",
+                            "generated.py",
+                            "operation.py",
+                            "unused.pyi",
+                        ],
+                        "pythonVersion": "3.10",
+                        "typeCheckingMode": "strict",
+                        "reportMissingModuleSource": False,
+                    }
+                ),
+                encoding="utf8",
+            )
+            checked = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
+            diagnostics = json.loads(checked.stdout)["generalDiagnostics"]
+            self.assertTrue(
+                all(Path(item["file"]).name == "fixture.py" for item in diagnostics),
+                diagnostics,
+            )
+            self.assertEqual(
+                {item["range"]["start"]["line"] + 1 for item in diagnostics},
+                expected,
+                diagnostics,
             )
 
     def test_wrappers_defaults_and_keyword_fields(self) -> None:
@@ -317,6 +478,8 @@ class SchemaTypesTests(unittest.TestCase):
                     "pyright",
                     "--project",
                     str(config),
+                    "--pythonpath",
+                    sys.executable,
                     "--outputjson",
                 ],
                 cwd=root,

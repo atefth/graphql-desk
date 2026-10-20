@@ -9,6 +9,7 @@ from pathlib import Path
 
 from graphql import build_schema
 
+from graphql_desk.config import ScalarMapping
 from graphql_desk.factory_generation import FactoryArtifacts, generate_factory_artifacts
 from graphql_desk.fragments import SchemaContext, index_fragments
 from graphql_desk.source_graph import (
@@ -20,6 +21,93 @@ from graphql_desk.source_graph import (
 
 
 class FactoryGenerationTests(unittest.TestCase):
+    def test_generated_callable_scalar_methods_share_schema_input_types(self) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema(
+                "scalar Date enum Color { RED BLUE } "
+                "input Filter { id: ID! color: Color date: Date } "
+                "type Query { greeting: String! search(filter: Filter): String }"
+            ),
+            "generation-1",
+        )
+        source = """from typing import Literal
+from generated.main import graphql, Filter
+from typing_extensions import assert_type
+q = graphql('query Q { greeting }')
+assert_type(q.operation_name, Literal['Q'])
+value: Filter = {'id':'1','date':'today'}
+assert_type(graphql.scalar('Filter',value),Filter)
+assert_type(graphql.scalar('Date','today'),str)
+assert_type(graphql.scalar('Date',None),None)
+assert_type(graphql.scalar('Color','RED'),Literal['BLUE','RED'])
+assert_type(graphql.scalar('Color',None),None)
+def maybe_filter(value:Filter|None)->None:
+ assert_type(graphql.scalar('Filter',value),Filter|None)
+assert_type(graphql.scalar('Int',1),int)
+assert_type(graphql.scalar('Float',1.5),float)
+assert_type(graphql.scalar('ID','1'),str)
+assert_type(graphql.scalar('Boolean',True),bool)
+assert_type(graphql.scalar('String','text'),str)
+assert graphql.scalar('Filter',value) is value
+assert graphql.scalar('Date',None) is None
+"""
+        modules = (ModuleSnapshot("p", "app", "app.py", 1, source),)
+        resolved = resolve_project(
+            modules,
+            bindings=(
+                ProjectBindings(
+                    "p",
+                    ("main",),
+                    factories=(FactoryBinding("generated.main", "graphql", "main"),),
+                ),
+            ),
+        )
+        index = index_fragments(resolved, schemas={("p", "main"): context})
+        artifacts = generate_factory_artifacts(
+            context,
+            index,
+            modules=modules,
+            project_id="p",
+            generated_package="generated",
+            scalars=(ScalarMapping("Date", "builtins.str", "builtins.bytes"),),
+        )
+        self.assertFalse(artifacts.diagnostics)
+        negative = """from generated.main import graphql
+graphql.scalar('Unknown',None) # error
+graphql.scalar('Query',{}) # error
+graphql.scalar('Date',b'today') # error
+graphql.scalar('Color','GREEN') # error
+graphql.scalar('Filter',{}) # error
+graphql.scalar('Filter',{'id':None}) # error
+graphql.scalar('Int','1') # error
+graphql.scalar('String') # error
+def dynamic(name:str)->None:
+ graphql.scalar(name,1) # error
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            self.check(root)
+            runtime = subprocess.run(
+                [sys.executable, str(root / "app.py")],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+            (root / "bad.py").write_text(negative, encoding="utf8")
+            self.check(
+                root,
+                {
+                    "bad.py": {
+                        line
+                        for line, text in enumerate(negative.splitlines(), 1)
+                        if "# error" in text
+                    }
+                },
+            )
+
     def context(self) -> SchemaContext:
         return SchemaContext(
             "main",

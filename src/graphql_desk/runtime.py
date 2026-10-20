@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from graphql import (
     DocumentNode,
@@ -21,6 +21,32 @@ from graphql import (
 
 if TYPE_CHECKING:
     from . import TypedDocument
+
+_Value = TypeVar("_Value")
+
+
+def scalar(name: str, value: _Value) -> _Value:
+    """Return the exact value; generated signatures supply schema input checks."""
+    return value
+
+
+class _DocumentConstructor(Protocol):
+    def __call__(
+        self,
+        source: str,
+        fragments: Iterable[TypedDocument[Any, Any]] = (),
+        *,
+        operation: str | None = None,
+    ) -> TypedDocument[Any, Any]: ...
+
+
+class _RootGraphQL(_DocumentConstructor, Protocol):
+    def scalar(self, name: str, value: _Value) -> _Value: ...
+
+
+def _attach_scalar(function: _DocumentConstructor) -> _RootGraphQL:
+    setattr(function, "scalar", scalar)
+    return cast(_RootGraphQL, function)
 
 
 class _Spreads(Visitor):
@@ -144,6 +170,7 @@ def _construct(
     )
 
 
+@_attach_scalar
 def graphql(
     source: str,
     fragments: Iterable[TypedDocument[Any, Any]] = (),
@@ -177,6 +204,10 @@ class GraphQLFactory:
         return _construct(
             source, fragments, operation=operation, schema_name=self.schema_name
         )
+
+    def scalar(self, name: str, value: _Value) -> _Value:
+        """Use this binding's generated scalar types without runtime conversion."""
+        return scalar(name, value)
 
 
 def init_graphql(schema: str) -> GraphQLFactory:
