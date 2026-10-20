@@ -48,7 +48,9 @@ show a status item linked to that command. Credential fingerprints stay private;
 only random opaque revisions cross the protocol. Changed configuration/credentials
 remove trusted schema precision, while unrelated source edits can retain explicitly
 fetched schemas without HTTP. URI mapping preserves associated untitled documents
-at the provider boundary.
+at the provider boundary. Missing buffers inherit existing parent path aliases;
+the deepest canonical workspace owns analysis, and ambiguous duplicate owners
+produce no semantic results.
 
 Run `npm run test:host -- 1.141.0 activation` or `1.142.0 activation` for the actual
 activation suite. Checked-in observations cover the two pinned hosts, dirty source,

@@ -290,3 +290,74 @@ test("a missed closed disk edit clears failed freshness so the very next analysi
   assert.equal(diagnostics.some(item => /oldMissing/.test(item.message)), false);
   assert.equal(analyses, 2, "The next analysis repairs freshness without another failed provider cycle");
 });
+
+
+test("real worker retains associated unsaved sources through an aliased workspace and missing parents", async t => {
+  const fixture = await setup(t);
+  const alias = path.join(fixture.root, "workspace-alias");
+  await fs.symlink(fixture.root, alias, process.platform === "win32" ? "junction" : "dir");
+  const folder = fixture.vscode.workspace.workspaceFolders[0];
+  folder.uri = Uri.file(alias);
+  fixture.vscode.workspace.getWorkspaceFolder = value => value.fsPath.startsWith(alias + path.sep) ? folder : undefined;
+  fixture.main.uri = Uri.file(path.join(alias, "main.py"));
+  const unsaved = fixture.document("future/deep/new.py", 'from graphql_desk import gql\nq=gql("{title}")\n', "untitled");
+  unsaved.uri = uri(pathToFileURL(path.join(alias, "future/deep/new.py")).href.replace(/^file:/, "untitled:"));
+  const controller = createAnalysisController(fixture.vscode); t.after(() => controller.dispose());
+  const snapshot = controller.snapshot(unsaved);
+  assert.equal(fixture.vscode.workspace.getWorkspaceFolder(Uri.parse(snapshot.uri)), undefined, "Canonical identity differs from the lexical workspace URI");
+  const bundle = await controller.analyze(snapshot); assert.ok(bundle);
+  const mapped = controller.mapSnapshot(snapshot, bundle);
+  assert.equal(bundle.request.modules.find(item => item.uri === mapped.uri).source, unsaved.text);
+  assert.equal(controller.resolveUri(mapped.uri).toString(), unsaved.uri.toString());
+  assert.equal(await controller.isCurrent(bundle, mapped), true);
+  assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
+});
+
+
+test("deepest canonical workspace owns a nested alias even when native lookup chooses its outer folder", async t => {
+  const fixture = await setup(t);
+  const nested = path.join(fixture.root, "nested");
+  await fs.mkdir(nested);
+  const alias = path.join(fixture.root, "nested-alias");
+  await fs.symlink(nested, alias, process.platform === "win32" ? "junction" : "dir");
+  await fs.writeFile(path.join(nested, "pyproject.toml"), '[tool.graphql-desk]\nschema="../schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n');
+  const source = 'from graphql_desk import gql\nq=gql("{title}")\n';
+  await fs.writeFile(path.join(nested, "main.py"), source);
+  const outer = fixture.vscode.workspace.workspaceFolders[0];
+  const inner = { uri: Uri.file(alias) };
+  fixture.vscode.workspace.workspaceFolders.push(inner);
+  fixture.vscode.workspace.getWorkspaceFolder = () => outer;
+  fixture.vscode.workspace.findFiles = async () => [Uri.file(path.join(alias, "main.py"))];
+  const document = fixture.document("nested/main.py", source);
+  document.uri = Uri.file(path.join(alias, "main.py"));
+  let selectedWorkspace;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => { selectedWorkspace = options.workspace; return createAnalysisWorker(options); } });
+  t.after(() => controller.dispose());
+  const snapshot = controller.snapshot(document);
+  const bundle = await controller.analyze(snapshot); assert.ok(bundle);
+  assert.equal(selectedWorkspace.toLowerCase(), (await fs.realpath(nested)).toLowerCase());
+  assert.equal(await controller.isCurrent(bundle, controller.mapSnapshot(snapshot, bundle)), true);
+  assert.equal(await controller.analyze({ uri: Uri.file(path.dirname(fixture.root)).toString(), version: 1, text: "" }), null);
+});
+
+
+test("two configured aliases for one canonical workspace reject ambiguous ownership without a worker", async t => {
+  const fixture = await setup(t);
+  const alias = path.join(fixture.root, "other-workspace");
+  await fs.symlink(fixture.root, alias, process.platform === "win32" ? "junction" : "dir");
+  const original = fixture.vscode.workspace.workspaceFolders[0];
+  const alternate = { uri: Uri.file(alias) };
+  fixture.vscode.workspace.workspaceFolders.push(alternate);
+  fixture.vscode.workspace.getWorkspaceFolder = () => original;
+  fixture.vscode.workspace.getConfiguration = (_section, folder) => ({ get(name, fallback) {
+    if (name === "pythonPath") return python;
+    if (name === "project") return { schema: folder.toString() === alternate.uri.toString() ? "alternate.graphql" : "schema.graphql", schema_output: "graphql_desk_generated/default.pyi" };
+    return fallback;
+  } });
+  fixture.main.uri = Uri.file(path.join(alias, "main.py"));
+  let launches = 0;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => { launches += 1; return createAnalysisWorker(options); } });
+  t.after(() => controller.dispose());
+  assert.equal(await controller.analyze(controller.snapshot(fixture.main)), null);
+  assert.equal(launches, 0);
+});
