@@ -33,7 +33,11 @@ schemas or explicitly fetches configured HTTP(S) schemas using the current proce
 environment for header references. It does not import project Python or write files.
 
 Doctor reports interpreter/checker distribution versions and schema availability on
-stderr. Its status remains degraded (exit 1): mapping symbols, generated ownership,
+stderr. For each loaded schema it checks declaration compatibility through the
+existing schema renderer, including missing custom-scalar mappings, without writing
+its output. Explicit `typing.Any` scalar input/output and enum mappings are named
+separately. Declaration readiness does not verify imported type compatibility;
+failed schema loads do not produce a declaration-readiness claim. Its status remains degraded (exit 1): mapping symbols, generated ownership,
 active editor and live bridge health do not yet have authoritative CLI inputs.
 `--help` and `--version` exit 0; invalid arguments exit 2 without echoing supplied
 values. This command is a diagnostic foundation, not full doctor acceptance.

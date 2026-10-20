@@ -1,6 +1,6 @@
 # Feature status and remaining work
 
-Implementation baseline: **66 foundation slices** are merged, with 342 Python tests and 49 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
+Implementation baseline: **67 foundation slices** are merged, with 344 Python tests and 49 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
 
 Merged #134–#137 preserve original-source validation and rejected resolver/index
 ownership, and type introspection selections. #138 assembles captured multi-schema
@@ -76,3 +76,10 @@ Persisted operations and independent editor conveniences are **required** and be
 | Additional editors/unclaimed platforms | Optional evaluation only; no support promise without tests. Browser-only constraints and remote-host verification remain explicit |
 
 APQ/server registration and a new runtime transport are not GraphQL Desk parity deliverables. Existing clients remain external; required typed-document client interoperability is tracked under API-01. See the [canonical plan](parity-plan.md) and [contracts](contracts/api-and-types.md) for exact acceptance and maturity labels.
+
+The doctor mapping-report foundation checks loaded schema declarations through the
+existing renderer and names explicit Any scalar input/output and enum mappings.
+Missing or incompatible mappings produce a redacted unavailable report. Imported
+symbol compatibility, generated ownership and active editor/bridge health remain
+unverified, so doctor still exits degraded. This does not start or complete the
+dependency-gated full doctor/CLI acceptance stories.
