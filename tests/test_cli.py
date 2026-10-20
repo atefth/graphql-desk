@@ -170,7 +170,6 @@ class CLITests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {"TOKEN": "${env:OTHER}", "OTHER": "PRIVATE_MARKER"},
-                clear=True,
             ):
                 for _ in range(2):
                     code, out, err = self.invoke(["doctor"])
@@ -181,13 +180,15 @@ class CLITests(unittest.TestCase):
             self.assertEqual(
                 [record[1]["X-Key"] for record in server.records], ["${env:OTHER}"] * 4
             )
-            with patch.dict(os.environ, {}, clear=True):
+            without_token = dict(os.environ)
+            without_token.pop("TOKEN", None)
+            with patch.dict(os.environ, without_token, clear=True):
                 _code, _out, err = self.invoke(["doctor"])
                 self.assertIn("schema default: unavailable", err)
                 self.assertNotIn("PRIVATE_MARKER", err)
             self.assertEqual(len(server.records), 4)
             server.mode = "auth"
-            with patch.dict(os.environ, {"TOKEN": "PRIVATE_MARKER"}, clear=True):
+            with patch.dict(os.environ, {"TOKEN": "PRIVATE_MARKER"}):
                 _code, _out, err = self.invoke(["doctor"])
                 self.assertIn("schema default: unavailable", err)
                 self.assertNotIn("PRIVATE_MARKER", err)
