@@ -93,7 +93,14 @@ original object without reading metadata, copying data or inserting markers.
 Rejected fragment owners do not export readers. Schema/helper alias collisions
 reject atomically. See [reader limits](fragment-refs.md).
 
-Sixteen focused tests check unchanged original Python source with both strict
+Configured scalar input/output and enum symbols also receive captured-local
+preflight. Supported classes, aliases and reexports retain ordinary generated
+imports; captured missing/non-type/unsupported exports reject atomically without
+importing project code. Uncaptured dependencies remain unverified and must be
+resolved by the consuming checker/runtime. This is not complete Python type
+compatibility or external stub discovery.
+
+Seventeen focused tests check unchanged original Python source with both strict
 checkers and actual generated runtime imports, generic client inference and
 negative variable/result cases, exact ASTs, explicit fallback limits, aliases,
 source packages, diagnostics and stale/collision failures. Dynamic discovery,

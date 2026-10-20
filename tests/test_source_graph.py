@@ -12,6 +12,7 @@ from graphql_desk.source_graph import (
     ProjectBindings,
     ProjectSources,
     resolve_project,
+    resolve_type_symbols,
 )
 
 
@@ -24,6 +25,226 @@ def module(
 
 
 class SourceGraphTests(unittest.TestCase):
+    def test_captured_type_symbols_follow_classes_aliases_and_reexports(self) -> None:
+        snapshots = (
+            module("pkg", "from .exports import Public", package=True),
+            module("pkg.exports", "from .types import Alias as Public"),
+            module(
+                "pkg.types",
+                "from typing_extensions import TypedDict\n"
+                "from enum import Enum\nclass Plain: pass\nAlias=Plain\n"
+                "class Child(Plain): pass\n"
+                "class Payload(TypedDict,total=False):\n value:str\n"
+                "class Choice(str,Enum):\n RED='red'\n"
+                "from datetime import datetime as External",
+            ),
+        )
+        names = (
+            "pkg.Public",
+            "pkg.types.Child",
+            "pkg.types.Payload",
+            "pkg.types.Choice",
+            "pkg.types.External",
+            "absent.Type",
+        )
+        original_import = __import__
+
+        def guard(name: str, *args: object, **kwargs: object) -> object:
+            if name != "collections":  # ast.walk imports deque lazily on Python 3.10.
+                raise AssertionError(name)
+            return original_import(name)
+
+        with (
+            patch("builtins.open", side_effect=AssertionError("No files")),
+            patch("builtins.__import__", side_effect=guard),
+        ):
+            results = resolve_type_symbols(names, modules=snapshots, project_id="app")
+        facts = {result.symbol: result for result in results}
+        self.assertEqual(facts["pkg.Public"].target, "pkg.types.Plain")
+        for name in names[:4]:
+            self.assertEqual(facts[name].status, "resolved")
+        self.assertEqual(facts["pkg.types.External"].status, "external")
+        self.assertEqual(facts["pkg.types.External"].target, "datetime.datetime")
+        self.assertEqual(facts["absent.Type"].status, "external")
+        self.assertEqual(
+            results,
+            resolve_type_symbols(
+                tuple(reversed(names)) + names[:1],
+                modules=tuple(reversed(snapshots)),
+                project_id="app",
+            ),
+        )
+        changed = resolve_type_symbols(
+            names,
+            modules=(*snapshots[:2], replace(snapshots[2], version=2)),
+            project_id="app",
+        )
+        self.assertNotEqual(results[0].dependencies, changed[0].dependencies)
+        with self.assertRaises(FrozenInstanceError):
+            setattr(results[0], "status", "missing")
+        # Document resolution and its cached syntax retain the preexisting behavior.
+        self.assertEqual(
+            resolve_project(snapshots),
+            source_graph.IncrementalResolver().resolve(snapshots),
+        )
+
+    def test_captured_type_symbols_distinguish_known_failures_and_unknown_forms(
+        self,
+    ) -> None:
+        cases = (
+            ("class Plain: pass", "Missing", "missing"),
+            ("VALUE=42", "VALUE", "not-type"),
+            ("VALUE='private value'", "VALUE", "not-type"),
+            ("def make(): pass", "make", "not-type"),
+            ("class Plain: pass\nAlias=Plain\nAlias=other", "Alias", "unresolved"),
+            ("from other import *\nclass Plain: pass", "Plain", "unresolved"),
+            ("def __getattr__(name): pass", "Missing", "unresolved"),
+            ("class Plain: pass\nglobals()['Plain']=other", "Plain", "unresolved"),
+            ("@decorate\nclass Plain: pass", "Plain", "unresolved"),
+            ("class Plain(metaclass=meta): pass", "Plain", "unresolved"),
+            (
+                "from typing import TypedDict\n"
+                "class Plain(TypedDict,closed=True): pass",
+                "Plain",
+                "unresolved",
+            ),
+            ("class Plain(unknown.Base): pass", "Plain", "unresolved"),
+            ("Base='builtins.str'\nclass Plain(Base): pass", "Plain", "unresolved"),
+            ("Base='enum.Enum'\nclass Plain(Base): pass", "Plain", "unresolved"),
+            ("Alias=NewType('Alias',str)", "Alias", "unresolved"),
+            (
+                "from typing import TypeAlias\nAlias:TypeAlias='Plain'",
+                "Alias",
+                "unresolved",
+            ),
+            ("class Plain(", "Plain", "unresolved"),
+        )
+        for source, name, status in cases:
+            with self.subTest(source=source):
+                (result,) = resolve_type_symbols(
+                    ("types." + name,),
+                    modules=(module("types", source),),
+                    project_id="app",
+                )
+                self.assertEqual(result.status, status, result)
+                if status == "not-type":
+                    self.assertIsNone(result.target)
+        cycle = (
+            module("a", "from b import B as A"),
+            module("b", "from a import A as B"),
+        )
+        (result,) = resolve_type_symbols(("a.A",), modules=cycle, project_id="app")
+        self.assertEqual(result.status, "unresolved")
+        (result,) = resolve_type_symbols(
+            ("types.Outer.Inner",),
+            modules=(module("types", "class Outer:\n class Inner: pass"),),
+            project_id="app",
+        )
+        self.assertEqual(result.status, "unresolved")
+        (result,) = resolve_type_symbols(
+            ("foreign.Plain",),
+            modules=(module("foreign", "class Plain: pass", project="other"),),
+            project_id="app",
+        )
+        self.assertEqual(result.status, "external")
+        (result,) = resolve_type_symbols(
+            ("types.Plain",),
+            modules=(
+                module("types", "class Plain: pass"),
+                module("other", "import types\ntypes.Plain=int"),
+            ),
+            project_id="app",
+        )
+        self.assertEqual(result.status, "unresolved")
+        (result,) = resolve_type_symbols(
+            ("types.Plain",),
+            modules=(
+                module("typing_extensions", "class TypedDict: pass"),
+                module(
+                    "types",
+                    "from typing_extensions import TypedDict\n"
+                    "class Plain(TypedDict,closed=True): pass",
+                ),
+            ),
+            project_id="app",
+        )
+        self.assertEqual(result.status, "unresolved")
+        for invalid in ("str", "pkg.class", "pkg.\u212a"):
+            with self.assertRaises(ValueError):
+                resolve_type_symbols((invalid,), modules=(), project_id="app")
+
+    def test_namespace_dict_escapes_invalidate_type_and_document_facts(self) -> None:
+        for escape in (
+            "exec('Plain=42', types.__dict__)",
+            "mutate(types.__dict__)",
+            "namespace=types.__dict__\nmutate(namespace)",
+            "namespace=types.__dict__\nexec('Plain=42',namespace)",
+            "mutate({'namespace':types.__dict__})",
+            "types.__dict__.clear()",
+            "namespace=types.__dict__\nnamespace.clear()",
+        ):
+            with self.subTest(escape=escape):
+                snapshots: tuple[ModuleSnapshot, ...] = (
+                    module("types", "class Plain: pass"),
+                    module("other", "import types\n" + escape),
+                )
+                (result,) = resolve_type_symbols(
+                    ("types.Plain",), modules=snapshots, project_id="app"
+                )
+                self.assertEqual(result.status, "unresolved")
+                snapshots = (
+                    module("types", "from graphql_desk import gql\nTEXT='{ok}'"),
+                    module("other", "import types\n" + escape),
+                    module(
+                        "main",
+                        "from graphql_desk import gql\n"
+                        "from types import TEXT\nq=gql(TEXT)",
+                    ),
+                )
+                graph = resolve_project(snapshots)
+                self.assertEqual(graph.calls, ())
+                self.assertTrue(graph.diagnostics)
+        for reflection in (
+            "sys.modules['app.models'].Plain=42",
+            "mutate(sys.modules)",
+            "registry=sys.modules\nmutate(registry)",
+        ):
+            with self.subTest(reflection=reflection):
+                snapshots = (
+                    module("app", "", package=True),
+                    module("app.models", "class Plain: pass"),
+                    module("other", "import app.models\nimport sys\n" + reflection),
+                )
+                (result,) = resolve_type_symbols(
+                    ("app.models.Plain",), modules=snapshots, project_id="app"
+                )
+                self.assertEqual(result.status, "unresolved")
+        # Passing an ordinary exported value does not escape the module namespace.
+        snapshots = (
+            module("types", "class Plain: pass\nTEXT='{ok}'"),
+            module("other", "import types\nprint(types.TEXT)"),
+        )
+        (result,) = resolve_type_symbols(
+            ("types.Plain",), modules=snapshots, project_id="app"
+        )
+        self.assertEqual(result.status, "resolved")
+        snapshots = (
+            module("templates", "TEXT='{ok}'\ndef noop(): pass"),
+            module(
+                "main",
+                "from graphql_desk import gql\nimport templates\n"
+                "templates.noop()\nq=gql(templates.TEXT)",
+            ),
+        )
+        self.assertEqual(len(resolve_project(snapshots).calls), 1)
+        snapshots = (
+            module(
+                "main",
+                "from graphql_desk import gql\ngql.scalar('String','x')\nq=gql('{ok}')",
+            ),
+        )
+        self.assertEqual(len(resolve_project(snapshots).calls), 1)
+
     def test_rejected_call_ownership_without_invented_semantics(self) -> None:
         item = module(
             "main",
