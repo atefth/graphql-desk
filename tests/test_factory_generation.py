@@ -619,6 +619,85 @@ BadResult() # error
                 self.assertEqual(artifacts.files, ())
                 self.assertIn("collide", artifacts.diagnostics[0].message)
 
+    def test_captured_mapping_types_are_checked_before_artifact_emission(self) -> None:
+        context = self.context()
+        source = (
+            "from typing import TYPE_CHECKING\n"
+            "from typing_extensions import assert_type\n"
+            "from generated.main import graphql\n"
+            "from generated.sources.main import QueryResult\n"
+            "from local_types import Text\n"
+            "query=graphql('{greeting}')\n"
+            "value=Text('hello')\n"
+            "assert graphql.scalar('String',value) is value\n"
+            "if TYPE_CHECKING:\n"
+            " result: QueryResult={'greeting':value}\n"
+            " assert_type(result['greeting'],Text)\n"
+        )
+        for declaration, valid in (
+            ("class Text(str): pass", True),
+            ("class Other: pass", False),
+            ("def Text() -> str: return 'x'", False),
+            ("Text='PRIVATE_VALUE'", False),
+            ("@unknown\nclass Text: pass", False),
+        ):
+            with self.subTest(declaration=declaration):
+                modules = (
+                    ModuleSnapshot("p", "main", "file:///main.py", 1, source),
+                    ModuleSnapshot(
+                        "p", "local_types", "file:///local_types.py", 1, declaration
+                    ),
+                )
+                resolved = resolve_project(
+                    modules,
+                    bindings=(
+                        ProjectBindings(
+                            "p",
+                            ("main",),
+                            factories=(
+                                FactoryBinding("generated.main", "graphql", "main"),
+                            ),
+                        ),
+                    ),
+                )
+                index = index_fragments(resolved, schemas={("p", "main"): context})
+                with patch(
+                    "importlib.import_module",
+                    side_effect=AssertionError("No project import"),
+                ):
+                    artifacts = generate_factory_artifacts(
+                        context,
+                        index,
+                        modules=modules,
+                        project_id="p",
+                        generated_package="generated",
+                        scalars=(
+                            ScalarMapping(
+                                "String", "local_types.Text", "local_types.Text"
+                            ),
+                        ),
+                    )
+                if valid:
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        self.write(root, artifacts, modules)
+                        self.check(root)
+                        runtime = subprocess.run(
+                            [sys.executable, "main.py"],
+                            cwd=root,
+                            capture_output=True,
+                            text=True,
+                        )
+                        self.assertEqual(
+                            runtime.returncode, 0, runtime.stdout + runtime.stderr
+                        )
+                else:
+                    self.assertEqual(artifacts.files, ())
+                    self.assertIn(
+                        "Configured mapping", artifacts.diagnostics[0].message
+                    )
+                    self.assertNotIn("PRIVATE_VALUE", artifacts.diagnostics[0].message)
+
     def generate(self, modules: tuple[ModuleSnapshot, ...]) -> FactoryArtifacts:
         context = self.context()
         sources = resolve_project(

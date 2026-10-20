@@ -9,6 +9,7 @@ import keyword
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from typing import Literal
 
 from .source import Span
 
@@ -16,6 +17,21 @@ _REFLECTION = frozenset(
     f"builtins.{name}" for name in ("globals", "locals", "vars", "exec", "eval")
 )
 _SETTERS = frozenset({"builtins.setattr", "builtins.delattr"})
+_TYPE_BASES = frozenset(
+    {
+        "builtins.object",
+        "builtins.str",
+        "builtins.int",
+        "builtins.float",
+        "builtins.bytes",
+        "typing.TypedDict",
+        "typing_extensions.TypedDict",
+        "enum.Enum",
+        "enum.IntEnum",
+        "enum.Flag",
+        "enum.IntFlag",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -110,6 +126,15 @@ class ProjectSources:
 
 
 @dataclass(frozen=True)
+class TypeSymbolResolution:
+    symbol: str
+    status: Literal["resolved", "external", "unresolved", "missing", "not-type"]
+    target: str | None
+    dependencies: tuple[ModuleDependency, ...]
+    message: str | None = None
+
+
+@dataclass(frozen=True)
 class _Value:
     kind: str
     text: str
@@ -120,6 +145,10 @@ class _Value:
 
 
 class _Unresolved(Exception):
+    pass
+
+
+class _MissingType(_Unresolved):
     pass
 
 
@@ -140,7 +169,9 @@ def _parse(snapshot: ModuleSnapshot) -> _Parsed:
 
 
 class _Module:
-    def __init__(self, snapshot: ModuleSnapshot, parsed: _Parsed) -> None:
+    def __init__(
+        self, snapshot: ModuleSnapshot, parsed: _Parsed, *, type_symbols: bool = False
+    ) -> None:
         self.snapshot = snapshot
         self.identity = ModuleDependency(
             snapshot.project, snapshot.module, snapshot.uri, snapshot.version
@@ -155,6 +186,7 @@ class _Module:
         self.bindings: dict[
             str, list[tuple[tuple[int, int], ast.expr | tuple[str, str] | _Value]]
         ] = {}
+        self.types: dict[str, ast.ClassDef] = {}
         self.blocked: set[str] = set()
         self.star = False
         self.call_bindings: dict[int, str] = {}
@@ -175,6 +207,15 @@ class _Module:
                             statement,
                             (module, alias.name),
                         )
+            elif type_symbols and isinstance(statement, ast.ClassDef):
+                self.types[statement.name] = statement
+                self.add(
+                    statement.name,
+                    statement,
+                    _Value("type", f"{snapshot.module}.{statement.name}"),
+                )
+                if statement.decorator_list:
+                    self.blocked.add(statement.name)
             elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.add(statement.name, statement, _Value("opaque", statement.name))
                 if statement.decorator_list:
@@ -190,7 +231,10 @@ class _Module:
                     and isinstance(targets[0], ast.Name)
                     and statement.value is not None
                 ):
-                    self.add(targets[0].id, statement, statement.value)
+                    value: ast.expr | _Value = statement.value
+                    if type_symbols and isinstance(statement, ast.AnnAssign):
+                        value = _Value("unsupported", targets[0].id)
+                    self.add(targets[0].id, statement, value)
                     if isinstance(statement.value, ast.Call):
                         self.call_bindings[id(statement.value)] = targets[0].id
                 else:
@@ -378,7 +422,11 @@ class _Graph:
         snapshots: tuple[ModuleSnapshot, ...],
         bindings: tuple[ProjectBindings, ...],
         parses: dict[tuple[str, str], _Parsed] | None = None,
+        *,
+        type_symbols: bool = False,
     ) -> None:
+        self.type_symbols = type_symbols
+        self.reflected_type_projects: set[str] = set()
         self.documents: dict[DocumentIdentity, ResolvedCall] = {}
         self.active_documents: set[DocumentIdentity] = set()
         self.failed_modules: set[ModuleDependency] = set()
@@ -396,7 +444,7 @@ class _Graph:
                     if parses is None
                     else parses[(snapshot.uri, snapshot.source)]
                 )
-                self.modules[key] = _Module(snapshot, parsed)
+                self.modules[key] = _Module(snapshot, parsed, type_symbols=type_symbols)
             except (SyntaxError, ValueError, UnicodeError, RecursionError) as error:
                 identity = ModuleDependency(
                     snapshot.project, snapshot.module, snapshot.uri, snapshot.version
@@ -411,14 +459,32 @@ class _Graph:
                 )
         for module in self.modules.values():
             for node in ast.walk(module.tree):
-                roots: list[tuple[ast.expr, bool]] = []
+                if type_symbols and isinstance(node, (ast.Attribute, ast.Name)):
+                    try:
+                        registry = self.expression(
+                            module,
+                            node,
+                            (node.lineno, node.col_offset),
+                            set(),
+                            probe=True,
+                        )
+                        if (
+                            registry.kind == "external"
+                            and registry.text == "sys.modules"
+                        ):
+                            # shortcut: registry access invalidates all project types;
+                            # track literal keys when module-level precision is needed.
+                            self.reflected_type_projects.add(module.snapshot.project)
+                    except (_Unresolved, RecursionError):
+                        pass
+                roots: list[tuple[ast.expr, bool, bool]] = []
                 if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(
                     node.ctx, (ast.Store, ast.Del)
                 ):
                     root = node.value
                     while isinstance(root, (ast.Attribute, ast.Subscript)):
                         root = root.value
-                    roots.append((root, True))
+                    roots.append((root, True, False))
                 elif isinstance(node, ast.Call):
                     if node.args and self.namespace_reflection(
                         module, node.func, set(), identities=_SETTERS
@@ -426,7 +492,7 @@ class _Graph:
                         root = node.args[0]
                         while isinstance(root, (ast.Attribute, ast.Subscript)):
                             root = root.value
-                        roots.append((root, True))
+                        roots.append((root, True, False))
                     if self.namespace_reflection(module, node.func, set()):
                         module.star = True
                     try:
@@ -440,10 +506,12 @@ class _Graph:
                     except (_Unresolved, RecursionError):
                         trusted = False
                     if not trusted:
+                        if isinstance(node.func, ast.Attribute):
+                            roots.append((node.func.value, False, True))
                         pending = [*node.args, *(item.value for item in node.keywords)]
                         while pending:
                             argument = pending.pop()
-                            roots.append((argument, False))
+                            roots.append((argument, False, False))
                             if isinstance(argument, (ast.List, ast.Tuple, ast.Set)):
                                 pending.extend(argument.elts)
                             elif isinstance(argument, ast.Dict):
@@ -451,25 +519,16 @@ class _Graph:
                                     item for item in argument.keys if item is not None
                                 )
                                 pending.extend(argument.values)
-                for root, mutates in roots:
+                for root, mutates, dict_receiver in roots:
                     # Opaque code can expose or write namespace capabilities.
                     if self.namespace_reflection(module, root, set()):
                         module.star = True
                     if mutates:
                         values = self.mutation_origins(module, root)
                     else:
-                        try:
-                            values = [
-                                self.expression(
-                                    module,
-                                    root,
-                                    (root.lineno, root.col_offset),
-                                    set(),
-                                    probe=True,
-                                )
-                            ]
-                        except (_Unresolved, RecursionError):
-                            values = []
+                        values = self.mutation_origins(
+                            module, root, escape_only=True, dict_only=dict_receiver
+                        )
                     for value in values:
                         if value.kind == "module":
                             self.mutated.add((module.snapshot.project, value.text))
@@ -487,13 +546,20 @@ class _Graph:
                                 target.star = True
         self.ready = True
 
-    def mutation_origins(self, module: _Module, node: ast.expr) -> list[_Value]:
-        """Trace capabilities only for write targets, never arbitrary object code."""
-        pending = [(module, node)]
-        seen: set[tuple[ModuleDependency, str]] = set()
+    def mutation_origins(
+        self,
+        module: _Module,
+        node: ast.expr,
+        *,
+        escape_only: bool = False,
+        dict_only: bool = False,
+    ) -> list[_Value]:
+        """Trace write/escape capabilities; method receivers require __dict__."""
+        pending = [(module, node, not dict_only)]
+        seen: set[tuple[ModuleDependency, str, bool]] = set()
         origins: list[_Value] = []
         while pending:
-            owner, expression = pending.pop()
+            owner, expression, capability = pending.pop()
             try:
                 value = self.expression(
                     owner,
@@ -502,7 +568,7 @@ class _Graph:
                     set(),
                     probe=True,
                 )
-                if value.kind in {
+                if capability and value.kind in {
                     "module",
                     "callable",
                     "initializer",
@@ -513,22 +579,35 @@ class _Graph:
             except (_Unresolved, RecursionError):
                 pass
             if isinstance(expression, ast.Name):
-                key = (owner.identity, expression.id)
+                key = (owner.identity, expression.id, capability)
                 if key in seen:
                     continue
                 seen.add(key)
                 for _, definition in owner.bindings.get(expression.id, []):
                     if isinstance(definition, ast.expr):
-                        pending.append((owner, definition))
+                        pending.append((owner, definition, capability))
                     elif isinstance(definition, tuple) and definition[1]:
                         target = self.modules.get(
                             (owner.snapshot.project, definition[0])
                         )
                         if target is not None:
                             pending.append(
-                                (target, ast.Name(id=definition[1], ctx=ast.Load()))
+                                (
+                                    target,
+                                    ast.Name(id=definition[1], ctx=ast.Load()),
+                                    capability,
+                                )
                             )
             elif isinstance(expression, (ast.Attribute, ast.Subscript)):
+                if escape_only:
+                    if (
+                        isinstance(expression, ast.Attribute)
+                        and expression.attr == "__dict__"
+                    ):
+                        pending.append((owner, expression.value, True))
+                    elif dict_only and isinstance(expression, ast.Subscript):
+                        pending.append((owner, expression.value, capability))
+                    continue
                 if isinstance(expression, ast.Attribute):
                     try:
                         parent = self.expression(
@@ -545,17 +624,25 @@ class _Graph:
                         )
                         if target is not None:
                             pending.append(
-                                (target, ast.Name(id=expression.attr, ctx=ast.Load()))
+                                (
+                                    target,
+                                    ast.Name(id=expression.attr, ctx=ast.Load()),
+                                    capability,
+                                )
                             )
                     except (_Unresolved, RecursionError):
                         pass
-                pending.append((owner, expression.value))
+                pending.append((owner, expression.value, capability))
             elif isinstance(expression, ast.Starred):
-                pending.append((owner, expression.value))
+                pending.append((owner, expression.value, capability))
             elif isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
-                pending.extend((owner, element) for element in expression.elts)
+                pending.extend(
+                    (owner, element, capability) for element in expression.elts
+                )
             elif isinstance(expression, ast.Dict):
-                pending.extend((owner, value) for value in expression.values)
+                pending.extend(
+                    (owner, value, capability) for value in expression.values
+                )
         return origins
 
     def namespace_reflection(
@@ -613,6 +700,12 @@ class _Graph:
             )
         if not probe and (module.star or name in module.blocked):
             raise _Unresolved(f"Binding {name!r} is shadowed or mutation-dependent")
+        if (
+            self.type_symbols
+            and name not in module.bindings
+            and f"builtins.{name}" in _TYPE_BASES
+        ):
+            return _Value("type", f"builtins.{name}")
         definitions = module.bindings.get(name, [])
         if not definitions or (
             not probe and (len(definitions) != 1 or definitions[0][0] >= before)
@@ -629,6 +722,53 @@ class _Graph:
             try:
                 if isinstance(definition, _Value):
                     value = definition
+                    if self.type_symbols and value.kind == "type":
+                        declaration = module.types[name]
+                        bases = [
+                            self.expression(
+                                module,
+                                base,
+                                (declaration.lineno, declaration.col_offset),
+                                active,
+                            )
+                            for base in declaration.bases
+                        ]
+                        if any(
+                            not (
+                                base.kind == "type"
+                                or base.kind == "external"
+                                and base.text in _TYPE_BASES
+                            )
+                            for base in bases
+                        ):
+                            raise _Unresolved(
+                                "Class bases are not statically established types"
+                            )
+                        typed_dict = any(
+                            base.kind == "external"
+                            and base.text
+                            in {"typing.TypedDict", "typing_extensions.TypedDict"}
+                            for base in bases
+                        )
+                        keywords = {"total"}
+                        if any(
+                            base.kind == "external"
+                            and base.text == "typing_extensions.TypedDict"
+                            for base in bases
+                        ):
+                            keywords.add("closed")
+                        if declaration.keywords and not (
+                            typed_dict
+                            and all(
+                                item.arg in keywords
+                                and isinstance(item.value, ast.Constant)
+                                and isinstance(item.value.value, bool)
+                                for item in declaration.keywords
+                            )
+                        ):
+                            raise _Unresolved(
+                                "Class metaclass or keyword semantics are unresolved"
+                            )
                 elif isinstance(definition, tuple):
                     imported, symbol = definition
                     if not imported:
@@ -761,6 +901,8 @@ class _Graph:
                 else frozenset[ModuleDependency]()
             )
             return _Value("module", submodule, dependencies=dependencies)
+        if self.type_symbols and target is not None:
+            raise _MissingType(f"Captured module {imported!r} has no export {symbol!r}")
         return _Value("external", f"{imported}.{symbol}")
 
     def declared_factory(
@@ -859,6 +1001,12 @@ class _Graph:
         *,
         probe: bool = False,
     ) -> _Value:
+        if self.type_symbols and (
+            isinstance(node, (ast.List, ast.Tuple, ast.Dict, ast.Set, ast.Lambda))
+            or isinstance(node, ast.Constant)
+            and not isinstance(node.value, str)
+        ):
+            return _Value("value", "")
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             contribution = StringContribution(
                 module.identity, module.span(node), node.value
@@ -1272,3 +1420,111 @@ class IncrementalResolver:
         self._parses = parses
         self._projects = projects
         return result
+
+
+def resolve_type_symbols(
+    symbols: tuple[str, ...],
+    *,
+    modules: tuple[ModuleSnapshot, ...],
+    project_id: str,
+) -> tuple[TypeSymbolResolution, ...]:
+    """Resolve captured local class exports; uncaptured symbols stay external.
+
+    This establishes symbol availability only, not full checker type validity.
+    Dependencies conservatively retain the entire supplied project snapshot,
+    including negative lookups. No project files or Python objects are loaded.
+    """
+    if not project_id or any(
+        len(symbol.split(".")) < 2
+        or any(
+            not part.isidentifier()
+            or keyword.iskeyword(part)
+            or unicodedata.normalize("NFKC", part) != part
+            for part in symbol.split(".")
+        )
+        for symbol in symbols
+    ):
+        raise ValueError("Type symbols require a project and qualified canonical names")
+    graph = _Graph(modules, (), type_symbols=True)
+    dependencies = tuple(
+        sorted(
+            (
+                ModuleDependency(
+                    module.project,
+                    module.module,
+                    module.uri,
+                    module.version,
+                )
+                for module in modules
+                if module.project == project_id
+            ),
+            key=lambda item: (item.module, item.uri, item.version),
+        )
+    )
+    results: list[TypeSymbolResolution] = []
+    for symbol in sorted(set(symbols)):
+        imported, _, name = symbol.rpartition(".")
+        owner = next(
+            (
+                module
+                for module in graph.modules.values()
+                if module.snapshot.project == project_id
+            ),
+            None,
+        )
+        status: Literal["resolved", "external", "unresolved", "missing", "not-type"]
+        target = None
+        message = None
+        if owner is None:
+            captured = any(
+                (project_id, ".".join(imported.split(".")[:length])) in graph.supplied
+                for length in range(1, len(imported.split(".")) + 1)
+            )
+            status = "unresolved" if captured else "external"
+            target = None if captured else symbol
+            message = (
+                "Captured Python source is invalid"
+                if captured
+                else "Symbol is outside the captured project snapshot"
+            )
+        else:
+            try:
+                if project_id in graph.reflected_type_projects:
+                    raise _Unresolved(
+                        "Module registry reflection prevents static type resolution"
+                    )
+                value = graph.export(owner, imported, name, set())
+                target = value.text if value.kind in {"type", "external"} else None
+                if value.kind == "type":
+                    status = "resolved"
+                elif value.kind == "external":
+                    status = "external"
+                    message = "Symbol leaves the captured project snapshot"
+                elif value.kind in {
+                    "opaque",
+                    "string",
+                    "value",
+                    "module",
+                    "callable",
+                    "initializer",
+                    "document",
+                    "document-candidate",
+                }:
+                    status = "not-type"
+                    message = "Captured export is not a supported type declaration"
+                else:
+                    status = "unresolved"
+                    message = "Captured export has unsupported static type semantics"
+            except _MissingType as error:
+                status, message = "missing", str(error)
+            except (_Unresolved, RecursionError) as error:
+                status = "unresolved"
+                message = (
+                    str(error)
+                    if isinstance(error, _Unresolved)
+                    else "Excessive type alias graph"
+                )
+        results.append(
+            TypeSymbolResolution(symbol, status, target, dependencies, message)
+        )
+    return tuple(results)

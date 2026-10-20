@@ -21,7 +21,12 @@ from .operation_types import (
 from .runtime import init_graphql
 from .scalar_types import render_scalar_method
 from .schema_types import mapped_type_declarations, render_schema_types
-from .source_graph import DocumentIdentity, GraphDiagnostic, ModuleSnapshot
+from .source_graph import (
+    DocumentIdentity,
+    GraphDiagnostic,
+    ModuleSnapshot,
+    resolve_type_symbols,
+)
 from .source_maps import build_source_map
 
 
@@ -252,6 +257,25 @@ def _generate_factory_artifacts(
 
     try:
         schema_text = render_schema_types(context.schema, scalars=scalars, enums=enums)
+        symbols = tuple(
+            {
+                *(
+                    symbol
+                    for mapping in scalars
+                    for symbol in (mapping.input, mapping.output)
+                ),
+                *(symbol for _, symbol in enums),
+            }
+        )
+        if symbols:
+            for resolution in resolve_type_symbols(
+                symbols, modules=modules, project_id=project_id
+            ):
+                if resolution.status not in {"resolved", "external"}:
+                    raise ValueError(
+                        f"Configured mapping {resolution.symbol!r}: "
+                        f"{resolution.message}"
+                    )
         if "graphql" in context.schema.type_map:
             raise ValueError("Schema aliases collide with generated factory exports")
         rejected: set[DocumentIdentity] = set()

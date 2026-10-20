@@ -49,9 +49,23 @@ Eight cache tests compare cold and incremental results, count actual parse and
 semantic work, and cover unchanged inputs, project/binding changes, negative
 lookups, mutation/reexports, failure recovery, ordering and atomic cache updates.
 This is incremental parsing and project-level semantic reuse, not module-level
-semantic invalidation or a performance acceptance result. Worker integration,
-schema/index caching and measured
-large-project responsiveness remain open. Snapshot acquisition can retain exact
+semantic invalidation or a performance acceptance result. The bounded worker
+serializes this resolver; schema/index caching and measured large-project
+responsiveness remain open. Snapshot acquisition can retain exact
 unchanged disk-source identities through an explicit previous-snapshot baseline;
-schema tokens still conservatively change on every acquisition. Worker use of
-these primitives remains separate work.
+local schema tokens still conservatively change on every acquisition.
+
+`resolve_type_symbols(symbols, *, modules, project_id)` resolves configured type
+exports against captured Python snapshots without importing or evaluating project
+code. Immutable results distinguish supported captured class declarations,
+uncaptured external symbols, unsupported forms, missing exports and known non-types.
+Class aliases and package reexports reuse the existing source graph. Dependencies
+retain the entire captured project, including negative lookups.
+
+Decorators, unsupported class keywords/bases, richer annotated aliases and dynamic
+type factories remain unresolved. Recognized namespace escapes invalidate affected
+facts; `sys.modules` reflection conservatively prevents project type resolution.
+External symbols remain explicitly unverified. This establishes bounded symbol
+availability, not full Python type compatibility or guaranteed runtime imports.
+Factory mapping preflight consumes these facts before emitting artifacts; checker,
+editor/doctor and complete external/stub search-path integration remain open.
