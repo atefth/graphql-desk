@@ -229,6 +229,14 @@ with Client(schema=transport.schema,transport=transport) as session:
         transport = SyncSchemaTransport(schema_)
         with Client(schema=schema_, transport=transport) as session:
             doc = document()
+            omitted = Variables()
+            response = execute_gql_sync(session, doc, omitted)
+            self.assertEqual(response.data, {"hello": "Ada"})
+            self.assertIs(transport.requests[-1].variable_values, omitted)
+            explicit_null = Variables(name=None)
+            response = execute_gql_sync(session, doc, explicit_null)
+            self.assertEqual(response.data, {"hello": "NULL"})
+            self.assertIs(transport.requests[-1].variable_values, explicit_null)
             response = execute_gql_sync(session, doc, Variables(name="Grace"))
             self.assertIs(response, transport.responses[-1])
             self.assertIs(transport.requests[-1].document, doc.ast)
@@ -389,6 +397,14 @@ class AsyncClientBindingsTests(unittest.IsolatedAsyncioTestCase):
             {"hello": "Ada"},
         )
         async with Client(schema=schema_, execute_timeout=None) as session:
+            self.assertEqual(
+                (await execute_gql(session, document(), Variables())).data,
+                {"hello": "Ada"},
+            )
+            self.assertEqual(
+                (await execute_gql(session, document(), Variables(name=None))).data,
+                {"hello": "NULL"},
+            )
             self.assertEqual(
                 (await execute_gql(session, document(), Variables(name="Grace"))).data,
                 {"hello": "Grace"},
