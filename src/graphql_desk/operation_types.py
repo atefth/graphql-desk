@@ -411,12 +411,35 @@ def _render_operation_types(
                     previous.append((scope, node, forced))
         return bounded(alternatives)
 
+    def child_selections(
+        fields: list[_Field],
+    ) -> tuple[
+        list[GraphQLCompositeType], list[tuple[GraphQLCompositeType, SelectionNode]]
+    ]:
+        parents: list[GraphQLCompositeType] = []
+        children: list[tuple[GraphQLCompositeType, SelectionNode]] = []
+        for scope, node, _ in fields:
+            assert not isinstance(scope, GraphQLUnionType)
+            child_type = schema.get_type(
+                _named_type(parse_type(str(_field_type(schema, scope, node))))
+            )
+            assert isinstance(
+                child_type, (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType)
+            )
+            parents.append(child_type)
+            assert node.selection_set is not None
+            children.extend(
+                (child_type, child) for child in node.selection_set.selections
+            )
+        return parents, children
+
     def selection(
         parents: list[GraphQLCompositeType],
         nodes: list[tuple[GraphQLCompositeType, SelectionNode]],
         class_name: str,
         *,
         closed: bool = False,
+        authored_nodes: list[tuple[GraphQLCompositeType, SelectionNode]] | None = None,
     ) -> None:
         nonlocal variant_index, needs_never, conditional_alternatives
         nonlocal needs_capabilities, needs_reader_sequence, needs_reader_readonly
@@ -450,13 +473,27 @@ def _render_operation_types(
                 raise ValueError(
                     "Operation exceeds 256 conditional presence alternatives"
                 )
-        owns_typename = any(
-            (node.alias.value if node.alias else node.name.value) == "__typename"
-            for _, alternatives in choices
-            for fields in alternatives
-            for _, node, _ in fields
-        )
         for concrete, alternatives in choices:
+            authored_groups: dict[str, list[_Field]] = {}
+            if fragment_keys and not disable_masking:
+                for authored_fields in collect(
+                    concrete,
+                    nodes if authored_nodes is None else authored_nodes,
+                    mask_spreads=False,
+                ):
+                    for field in authored_fields:
+                        _, node, _ = field
+                        key = node.alias.value if node.alias else node.name.value
+                        authored_groups.setdefault(key, []).append(field)
+            owns_typename = abstract and any(
+                (node.alias.value if node.alias else node.name.value) == "__typename"
+                for fields in alternatives
+                for _, node, _ in fields
+            )
+            owns_typename = owns_typename or any(
+                node.name.value != "__typename"
+                for _, node, _ in authored_groups.get("__typename", ())
+            )
             for variant_fields in alternatives:
                 branch = class_name
                 if abstract or correlated:
@@ -566,36 +603,18 @@ def _render_operation_types(
                         (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType),
                     ):
                         child_name = f"{branch}_{key}"
-                        children: list[tuple[GraphQLCompositeType, SelectionNode]] = []
-                        child_parents: list[GraphQLCompositeType] = []
-                        for item_scope, item, _ in group:
-                            assert not isinstance(item_scope, GraphQLUnionType)
-                            child_type = schema.get_type(
-                                _named_type(
-                                    parse_type(
-                                        str(_field_type(schema, item_scope, item))
-                                    )
-                                )
-                            )
-                            assert isinstance(
-                                child_type,
-                                (
-                                    GraphQLObjectType,
-                                    GraphQLInterfaceType,
-                                    GraphQLUnionType,
-                                ),
-                            )
-                            child_parents.append(child_type)
-                            assert item.selection_set is not None
-                            children.extend(
-                                (child_type, child)
-                                for child in item.selection_set.selections
+                        child_parents, children = child_selections(group)
+                        authored_children = None
+                        if key in authored_groups:
+                            _, authored_children = child_selections(
+                                authored_groups[key]
                             )
                         selection(
                             child_parents,
                             children,
                             child_name,
                             closed=closed or correlated,
+                            authored_nodes=authored_children,
                         )
                         leaf = child_name
                         input_leaf = child_name + "Input"
