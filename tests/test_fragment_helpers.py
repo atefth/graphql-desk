@@ -157,6 +157,7 @@ class FragmentHelpersTests(unittest.TestCase):
             dict[str, object](),
             list[object](),
             [dict[str, object](), None],
+            [{"title": "t"}, None],
             NoReads(),
         )
         for value in values:
@@ -183,10 +184,13 @@ class FragmentHelpersTests(unittest.TestCase):
             render_fragment_helpers(rendered, name="class", identity_name="Identity")
         with self.assertRaises(ValueError):
             render_fragment_helpers(rendered, name="F", identity_name="FReader")
-        with self.assertRaises(ValueError):
-            render_fragment_helpers(
-                rendered, name="F", identity_name="__graphql_desk_Ref"
-            )
+        for reserved in (
+            "__graphql_desk_Ref",
+            "__graphql_desk_FragmentExtra",
+            "__graphql_desk_TypeVar",
+        ):
+            with self.assertRaises(ValueError):
+                render_fragment_helpers(rendered, name="F", identity_name=reserved)
 
     def test_can_import_before_root_document_class_exists(self) -> None:
         package = Path(__file__).resolve().parents[1] / "src" / "graphql_desk"
@@ -226,14 +230,14 @@ from correlated import CorrelatedReadFragment as read_correlated, CorrelatedResu
 from vacant import VacantReadFragment as read_vacant
 from vacant import document as vacant
 from required import RequiredIdentity, RequiredVariables
-from graphql_desk.fragment_refs import FragmentDocument
+from graphql_desk.fragment_refs import FragmentDocument, FragmentRef
 base:FragmentDocument[RequiredIdentity,RequiredResult,RequiredVariables]=required
 
 def check(query:QueryResult, absent:Absent)->None:
  assert_type(read_required(absent),FragmentAbsent)
  assert_type(read_optional(absent),OptionalResult)
  assert_type(read_required(query['conditional']),RequiredResult|FragmentAbsent)
- assert_type(read_required([query['conditional'],None]),Sequence[RequiredResult|FragmentAbsent|None])
+ assert_type(read_required([query['conditional'],None]),Sequence[RequiredResult|Absent|None])
  assert_type(read_fragment(required,[query['conditional'],None]),Sequence[RequiredResult|FragmentAbsent|None])
  assert_type(read_required({}),FragmentAbsent)
  assert_type(read_optional({}),OptionalResult)
@@ -261,11 +265,26 @@ def check(query:QueryResult, absent:Absent)->None:
   assert_type(read_abstract(query['node']),UserResult)
   assert_type(read_fragment(abstract,query['node']),UserResult)
   assert_type(read_fragment(abstract,[query['node'],None]),Sequence[UserResult|None])
-  assert_type(read_abstract([query['node'],None]),Sequence[AbstractResult|FragmentAbsent|None])
+  assert_type(read_abstract([query['node'],None]),Sequence[AbstractResult|None])
 
 def nullable(values:list[OptionalResult|None]|None)->None:
  assert_type(read_optional(values),Sequence[OptionalResult|None]|None)
  assert_type(read_fragment(optional,values),Sequence[OptionalResult|None]|None)
+
+def nullable_required(values:list[FragmentRef[RequiredIdentity]|None]|None)->None:
+ assert_type(read_required(values),Sequence[RequiredResult|None]|None)
+ assert_type(read_fragment(required,values),Sequence[RequiredResult|None]|None)
+
+def nullable_raw(values:list[RequiredResult|None]|None)->None:
+ assert_type(read_required(values),Sequence[RequiredResult|None]|None)
+
+def nullable_absent(
+ values:list[FragmentRef[RequiredIdentity]|FragmentAbsent|None]
+)->None:
+ assert_type(read_required(values),Sequence[RequiredResult|FragmentAbsent|None])
+
+def absent_only(values:list[FragmentRef[RequiredIdentity]|FragmentAbsent])->None:
+ assert_type(read_required(values),Sequence[RequiredResult|FragmentAbsent])
 """
         negative = """from typing import Literal
 from graphql_desk.fragment_refs import FragmentIdentity, FragmentRef
@@ -286,6 +305,8 @@ Other=FragmentIdentity[Literal['other']]
 def wrong(ref:FragmentRef[Other])->None:
  optional(ref) # error
  read_fragment(document,ref) # error
+ required([ref,None]) # error
+ required([{'title':1},None]) # error
 def operation(doc:TypedDocument[dict[str,str],dict[str,str]])->None:
  read_fragment(doc,{}) # error
 """
