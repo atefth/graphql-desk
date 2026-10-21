@@ -369,6 +369,7 @@ class EditorWorker:
             raise ValueError("Remote credential revision changed")
         remote_schemas = tuple(self._remote[key] for key in sorted(self._remote))
         if operation in {"current", "artifacts"}:
+            has_analyzed_job = self._snapshot is not None and self._analysis is not None
             current = (
                 self._snapshot is not None
                 and schema_buffers == self._schema_buffers
@@ -384,7 +385,11 @@ class EditorWorker:
                 self._clear_job()
             if operation == "current":
                 return {"ok": True, "current": current}
-            if not current or self._snapshot is None or self._analysis is None:
+            if not current:
+                if not has_analyzed_job:
+                    raise ValueError("Artifacts require an analyzed job")
+                return {"ok": True, "id": item["id"], "current": False}
+            if self._snapshot is None or self._analysis is None:
                 raise ValueError("Artifacts require a current analyzed job")
             projects: list[dict[str, object]] = []
             facts = self._analysis

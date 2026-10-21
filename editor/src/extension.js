@@ -7,6 +7,35 @@ const { registerHighlighting } = require("./highlighting");
 const { createManagedStubPath } = require("./managedStubPath");
 const { createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
 
+async function reconfigureWorkspaceRoots({ roots, folders, create, retire }) {
+  const errors = [];
+  for (const [folderRoot, promise] of [...roots]) {
+    let current;
+    try { current = await promise; }
+    catch (error) { if (roots.get(folderRoot) === promise) roots.delete(folderRoot); errors.push(error); continue; }
+    const folder = folders.find(item => path.resolve(item.uri.fsPath) === folderRoot);
+    if (!folder) continue;
+    let next;
+    try { next = await create(folder); }
+    catch (error) {
+      if (roots.get(folderRoot) === promise) roots.delete(folderRoot);
+      try { await retire(folderRoot, current); } catch (cleanupError) { errors.push(cleanupError); }
+      errors.push(error);
+      continue;
+    }
+    if (next.root === current.root) { next.cleanup(); continue; }
+    const replacement = Promise.resolve(next);
+    if (roots.get(folderRoot) === promise) roots.set(folderRoot, replacement);
+    try { await retire(folderRoot, current); }
+    catch (error) {
+      if (roots.get(folderRoot) === replacement) roots.delete(folderRoot);
+      next.cleanup();
+      errors.push(error);
+    }
+  }
+  if (errors.length) throw new AggregateError(errors, "One or more workspace stub roots could not be reconfigured");
+}
+
 let active;
 function activate(context) {
   const vscode = require("vscode");
@@ -35,23 +64,8 @@ function activate(context) {
     managed.cleanup();
   }
   async function reconfigureRoots() {
-    for (const [folderRoot, promise] of roots) {
-      let current;
-      try { current = await promise; }
-      catch (error) { roots.delete(folderRoot); throw error; }
-      const folder = vscode.workspace.workspaceFolders?.find(item => path.resolve(item.uri.fsPath) === folderRoot);
-      if (!folder) continue;
-      let next;
-      try { next = await createManagedStubPath(vscode, folder); }
-      catch (error) {
-        roots.delete(folderRoot);
-        await retireRoot(folderRoot, current);
-        throw error;
-      }
-      if (next.root === current.root) { next.cleanup(); continue; }
-      await retireRoot(folderRoot, current);
-      roots.set(folderRoot, Promise.resolve(next));
-    }
+    await reconfigureWorkspaceRoots({ roots, folders: vscode.workspace.workspaceFolders ?? [],
+      create: folder => createManagedStubPath(vscode, folder), retire: retireRoot });
   }
   async function publishTypes(editor, ticket) {
     const document = editor.document;
@@ -146,4 +160,4 @@ function activate(context) {
   refreshVisible();
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, reconfigureWorkspaceRoots };

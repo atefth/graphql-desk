@@ -64,6 +64,7 @@ function validReply(reply, request) {
     reply.error === (reply.status === "ready" ? null : "schema-refresh-failed");
   if (request.op === "current") return keys(reply, ["ok", "current"]) && typeof reply.current === "boolean";
   if (request.op === "artifacts") {
+    if (keys(reply, ["ok", "id", "current"])) return string(reply.id) && reply.id === request.id && reply.current === false;
     const identifier = value => typeof value === "string" && /^[\p{ID_Start}_][\p{ID_Continue}_]*$/u.test(value);
     const span = value => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 && Number.isSafeInteger(value.end) && value.end >= value.start;
     const module = value => keys(value, ["project", "module", "uri", "version"]) && [value.project, value.module, value.uri].every(string) && Number.isSafeInteger(value.version) && value.version >= 0;

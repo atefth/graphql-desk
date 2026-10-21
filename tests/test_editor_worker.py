@@ -700,7 +700,15 @@ if TYPE_CHECKING:
                 ]
             else:
                 self.prepare(capture)
-            self.assertFalse(self.worker.handle(request)["ok"], mutation)
+            result = self.worker.handle(request)
+            if mutation in {"source", "config"}:
+                self.assertEqual(
+                    result,
+                    {"ok": True, "id": identity, "current": False},
+                    mutation,
+                )
+            else:
+                self.assertFalse(result["ok"], mutation)
 
     def test_factory_artifacts_preserve_healthy_project_beside_unfetched_remote(
         self,

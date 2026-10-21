@@ -413,6 +413,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         }
         const reply = await state.worker.request({ op: "artifacts", ...cached.request });
         check(cached.ticket, token, state);
+        if (reply.current === false) { state.cached = null; return null; }
         const final = await capture(state);
         check(cached.ticket, token, state);
         if (final.signature !== cached.capture.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
