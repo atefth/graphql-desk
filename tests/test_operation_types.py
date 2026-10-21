@@ -2305,6 +2305,17 @@ present_both: Composite = {'user': {'id': '1', 'title': None}}
 bad_missing_id: Composite = {'user': {'title': 'x'}}  # BAD
 bad_title: Composite = {'user': {'id': '1', 'title': False}}  # BAD
 """
+        fixture += (
+            "from coalesced import CoalescedResult\n"
+            "coalesced: CoalescedResult = {'f0':'x','f1':'x','f2':'x','f3':'x',"
+            "'f4':'x','f5':'x','f6':'x'}\n"
+            "missing: CoalescedResult = {'f0':'x','f1':'x','f2':'x','f3':'x',"
+            "'f4':'x','f5':'x'}  # BAD\n"
+            "null: CoalescedResult = {'f0':None,'f1':'x','f2':'x','f3':'x',"
+            "'f4':'x','f5':'x','f6':'x'}  # BAD\n"
+            "extra: CoalescedResult = {'f0':'x','f1':'x','f2':'x','f3':'x',"
+            "'f4':'x','f5':'x','f6':'x','f7':'x'}  # BAD\n"
+        )
         expected = {
             index
             for index, line in enumerate(fixture.splitlines(), 1)
@@ -2314,6 +2325,20 @@ bad_title: Composite = {'user': {'id': '1', 'title': False}}  # BAD
             root = Path(directory)
             (root / "generated.py").write_text(output, encoding="utf-8")
             (root / "composite.py").write_text(conditional_output, encoding="utf-8")
+            (root / "coalesced.py").write_text(
+                render_operation_types(
+                    schema,
+                    "{ "
+                    + " ".join(f"f{i}:value @required" for i in range(7))
+                    + " ".join(
+                        f"... @include(if:true) {{ f{i}:value @_required }}"
+                        for i in range(7)
+                    )
+                    + " }",
+                    name="Coalesced",
+                ),
+                encoding="utf-8",
+            )
             (root / "fixture.py").write_text(fixture, encoding="utf-8")
             runtime = subprocess.run(
                 [sys.executable, "-c", "import generated"],
@@ -2397,6 +2422,62 @@ bad_title: Composite = {'user': {'id': '1', 'title': False}}  # BAD
         )
         self.assertNotIn("__graphql_desk_variant_", output)
         self.assertEqual(output.count(": 'String | None'"), 12)
+
+    def test_equivalent_nullability_overrides_coalesce_before_presence_bounds(
+        self,
+    ) -> None:
+        schema = build_schema(
+            "directive @defer on INLINE_FRAGMENT | FRAGMENT_SPREAD "
+            "interface Node { fixed: String! nullable: String matrix: [[String!]!]! "
+            "children: [Node]! } "
+            "type User implements Node { fixed: String! nullable: String "
+            "matrix: [[String!]!]! children: [Node]! } "
+            "type Query { node: Node! }"
+        )
+        for field, override in (
+            ("fixed", "@required"),
+            ("fixed", "@_required @optional"),
+            ("nullable", "@optional"),
+            ("nullable", "@_optional"),
+            ("matrix", "@_required"),
+            ("children", "@required"),
+            ("__typename", "@optional"),
+        ):
+            children = "{ kind:__typename }" if field == "children" else ""
+            base = " ".join(f"f{i}:{field} {children}" for i in range(7))
+            expected = render_operation_types(
+                schema, "{ node { " + base + " } }", name="Read"
+            )
+            for gate in ("@include(if:true)", "@skip(if:false)", "@defer"):
+                for named in (False, True):
+                    blocks = " ".join(
+                        f"...F{i} {gate}"
+                        if named
+                        else f"... on Node {gate} "
+                        f"{{ f{i}:{field} {override} {children} }}"
+                        for i in range(7)
+                    )
+                    definitions = (
+                        " ".join(
+                            f"fragment F{i} on Node "
+                            f"{{ f{i}:{field} {override} {children} }}"
+                            for i in range(7)
+                        )
+                        if named
+                        else ""
+                    )
+                    with self.subTest(
+                        field=field, override=override, gate=gate, named=named
+                    ):
+                        self.assertEqual(
+                            render_operation_types(
+                                schema,
+                                "{ node { " + base + blocks + " } } " + definitions,
+                                name="Read",
+                                disable_masking=named,
+                            ),
+                            expected,
+                        )
 
     def test_guaranteed_non_null_repetitions_do_not_expand_nullable_conditionals(
         self,

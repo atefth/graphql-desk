@@ -271,7 +271,9 @@ def _render_operation_types(
                     node.alias.value if node.alias else node.name.value,
                     scope.name,
                     node.name.value,
-                    str(_null_override(node)),
+                    str(_outer_nullable(schema, scope, node))
+                    if node.name.value != "_graphql_desk_φ"
+                    else "",
                     str(bool(_directives(node) & _CONDITIONAL) and not forced),
                     print_ast(node.selection_set) if node.selection_set else "",
                 )
