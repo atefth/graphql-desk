@@ -115,9 +115,9 @@ function activate(context) {
       if (disposed) return;
       for (const editor of vscode.window.visibleTextEditors) {
         if (editor.document.languageId !== "python") continue;
-        void language.refresh(editor.document);
-        void highlighting.refresh(editor);
-        void publishTypes(editor, ticket);
+        void Promise.allSettled([language.refresh(editor.document), highlighting.refresh(editor)]).then(() => {
+          if (!disposed && ticket === generation) return publishTypes(editor, ticket);
+        });
       }
     }, 100);
   };
