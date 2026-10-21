@@ -13,7 +13,11 @@ from uuid import uuid4
 
 from graphql import introspection_from_schema
 
-from .editor_analysis import analyze_editor_snapshot
+from .editor_analysis import (
+    EditorAnalysis,
+    analyze_editor_snapshot_details,
+    editor_diagnostic,
+)
 from .editor_snapshot import (
     EditorPreparation,
     EditorSnapshot,
@@ -23,8 +27,10 @@ from .editor_snapshot import (
     is_editor_snapshot_current,
     prepare_editor_snapshot,
 )
+from .factory_generation import FactoryArtifacts, generate_project_factory_artifacts
+from .fragments import FragmentIndex
 from .schema_url import load_from_url
-from .source_graph import IncrementalResolver
+from .source_graph import IncrementalResolver, ModuleDependency
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
 _CAPTURE_KEYS = {"workspace", "candidates", "buffers", "documents", "editor_fallback"}
@@ -195,6 +201,7 @@ class EditorWorker:
         self._capture: _Capture | None = None
         self._preparation: EditorPreparation | None = None
         self._snapshot: EditorSnapshot | None = None
+        self._analysis: EditorAnalysis | None = None
         self._previous: EditorSnapshot | None = None
         self._schema_buffers: tuple[OpenBuffer, ...] = ()
         self._resolver = IncrementalResolver()
@@ -207,6 +214,7 @@ class EditorWorker:
         self._capture = None
         self._preparation = None
         self._snapshot = None
+        self._analysis = None
         self._previous = None
         self._schema_buffers = ()
         self._resolver.clear()
@@ -235,6 +243,7 @@ class EditorWorker:
             "analyze",
             "current",
             "refresh",
+            "artifacts",
         }:
             raise ValueError("Invalid operation")
         keys = {"op"} | _CAPTURE_KEYS
@@ -243,7 +252,8 @@ class EditorWorker:
         if operation == "refresh":
             keys |= {"project", "schema_name", "credential_revision", "environment"}
         elif (
-            operation in {"prepare", "analyze", "current"} and "remote_revisions" in raw
+            operation in {"prepare", "analyze", "current", "artifacts"}
+            and "remote_revisions" in raw
         ):
             keys.add("remote_revisions")
         item = _object(raw, keys)
@@ -255,6 +265,7 @@ class EditorWorker:
         if operation == "prepare":
             self._identity = None
             self._snapshot = None
+            self._analysis = None
             self._schema_buffers = ()
             revisions = self._revisions(item)
             preparation = prepare_editor_snapshot(
@@ -357,7 +368,7 @@ class EditorWorker:
         if revisions != self._remote_revisions:
             raise ValueError("Remote credential revision changed")
         remote_schemas = tuple(self._remote[key] for key in sorted(self._remote))
-        if operation == "current":
+        if operation in {"current", "artifacts"}:
             current = (
                 self._snapshot is not None
                 and schema_buffers == self._schema_buffers
@@ -371,7 +382,83 @@ class EditorWorker:
             )
             if not current:
                 self._clear_job()
-            return {"ok": True, "current": current}
+            if operation == "current":
+                return {"ok": True, "current": current}
+            if not current or self._snapshot is None or self._analysis is None:
+                raise ValueError("Artifacts require a current analyzed job")
+            projects: list[dict[str, object]] = []
+            facts = self._analysis
+            snapshots = {
+                ModuleDependency(
+                    module.project, module.module, module.uri, module.version
+                ): module.source
+                for module in facts.modules
+            }
+            for config in self._snapshot.project_configs:
+                project = config.path.as_uri()
+                index = FragmentIndex(
+                    tuple(
+                        document
+                        for document in facts.index.documents
+                        if document.call.module.project == project
+                    ),
+                    tuple(
+                        diagnostic
+                        for diagnostic in facts.index.diagnostics
+                        if diagnostic.module.project == project
+                    ),
+                    tuple(
+                        document
+                        for document in facts.index.unavailable
+                        if document.call.module.project == project
+                    ),
+                    tuple(
+                        call
+                        for call in facts.index.rejected_calls
+                        if call.module.project == project
+                    ),
+                )
+                artifacts = (
+                    FactoryArtifacts((), index.diagnostics)
+                    if any(
+                        unavailable_project == project
+                        for unavailable_project, _ in self._snapshot.unavailable_schemas
+                    )
+                    else generate_project_factory_artifacts(
+                        config,
+                        tuple(
+                            facts.schemas[(project, schema.name)]
+                            for schema in config.schemas
+                        ),
+                        index,
+                        modules=tuple(
+                            module
+                            for module in facts.modules
+                            if module.project == project
+                        ),
+                        project_id=project,
+                    )
+                )
+                projects.append(
+                    {
+                        "project": project,
+                        "generated_package": config.generated_package,
+                        "files": [
+                            {"relative_path": file.relative_path, "text": file.text}
+                            for file in artifacts.files
+                        ],
+                        "diagnostics": [
+                            editor_diagnostic(diagnostic, snapshots)
+                            for diagnostic in artifacts.diagnostics
+                        ],
+                    }
+                )
+            return {
+                "ok": True,
+                "id": self._identity,
+                "projects": projects,
+                "unavailable_schemas": self._snapshot.unavailable_schemas,
+            }
         if self._snapshot is not None:
             raise ValueError("Job already analyzed")
         self._generation += 1
@@ -386,14 +473,15 @@ class EditorWorker:
             remote_schemas=remote_schemas,
         )
         request = snapshot.request
-        response = analyze_editor_snapshot(request, resolver=self._resolver)
+        analysis = analyze_editor_snapshot_details(request, resolver=self._resolver)
+        self._analysis = analysis
         self._snapshot = self._previous = snapshot
         self._schema_buffers = schema_buffers
         return {
             "ok": True,
             "id": self._identity,
             "request": request,
-            "response": response,
+            "response": analysis.response,
             "unavailable_schemas": snapshot.unavailable_schemas,
             "remote_schemas": [
                 {

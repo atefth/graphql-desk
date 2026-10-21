@@ -63,6 +63,23 @@ function validReply(reply, request) {
     ["ready", "stale", "unavailable"].includes(reply.status) && reply.last_good === (reply.status === "stale") &&
     reply.error === (reply.status === "ready" ? null : "schema-refresh-failed");
   if (request.op === "current") return keys(reply, ["ok", "current"]) && typeof reply.current === "boolean";
+  if (request.op === "artifacts") {
+    const identifier = value => typeof value === "string" && /^[\p{ID_Start}_][\p{ID_Continue}_]*$/u.test(value);
+    const span = value => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 && Number.isSafeInteger(value.end) && value.end >= value.start;
+    const module = value => keys(value, ["project", "module", "uri", "version"]) && [value.project, value.module, value.uri].every(string) && Number.isSafeInteger(value.version) && value.version >= 0;
+    const diagnostic = value => keys(value, ["module", "code", "message", "range"]) && module(value.module) && string(value.code) && string(value.message) &&
+      keys(value.range, ["codepoint", "utf16"]) && span(value.range.codepoint) && span(value.range.utf16);
+    const file = value => keys(value, ["relative_path", "text"]) && typeof value.text === "string" && string(value.relative_path) &&
+      !value.relative_path.includes("\\") && !value.relative_path.includes("\0") && !path.posix.isAbsolute(value.relative_path) && !path.win32.isAbsolute(value.relative_path) &&
+      /\.pyi?$/.test(value.relative_path) && value.relative_path.replace(/\.pyi?$/, "").split("/").every(identifier);
+    return keys(reply, ["ok", "id", "projects", "unavailable_schemas"]) && string(reply.id) && reply.id === request.id && Array.isArray(reply.projects) &&
+      Array.isArray(reply.unavailable_schemas) && reply.unavailable_schemas.every(value => Array.isArray(value) && value.length === 2 && value.every(string) && reply.projects.some(project => project?.project === value[0])) &&
+      new Set(reply.unavailable_schemas.map(value => JSON.stringify(value))).size === reply.unavailable_schemas.length &&
+      new Set(reply.projects.map(project => project?.project)).size === reply.projects.length && reply.projects.every(project =>
+        keys(project, ["project", "generated_package", "files", "diagnostics"]) && string(project.project) && string(project.generated_package) && project.generated_package.split(".").every(identifier) &&
+        Array.isArray(project.files) && project.files.every(value => file(value) && value.relative_path.startsWith(project.generated_package.replaceAll(".", "/") + "/")) && new Set(project.files.map(file => file.relative_path.toLowerCase())).size === project.files.length &&
+        Array.isArray(project.diagnostics) && project.diagnostics.every(value => diagnostic(value) && value.module.project === project.project));
+  }
   return keys(reply, ["ok", "id", "request", "response", "unavailable_schemas", "remote_schemas"]) && reply.id === request.id &&
     Array.isArray(reply.remote_schemas) && reply.remote_schemas.every(item =>
       keys(item, ["project", "schema_name", "status"]) && string(item.project) && string(item.schema_name) &&
@@ -158,7 +175,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
       if (disposed || !trusted() || signal?.aborted) { stop(); throw failure(); }
       let encoded;
       try {
-        if (!object(message) || !["prepare", "analyze", "current", "refresh"].includes(message.op) ||
+        if (!object(message) || !["prepare", "analyze", "current", "refresh", "artifacts"].includes(message.op) ||
             message.workspace !== workspace) throw failure();
         encoded = Buffer.from(JSON.stringify(message) + "\n", "utf8");
         if (encoded.length > MAX_FRAME_BYTES) throw failure();

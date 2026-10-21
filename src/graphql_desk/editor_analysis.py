@@ -1,15 +1,17 @@
 """Pure JSON boundary for editor snapshots; no discovery, imports or transport."""
 
 import json
+from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit
 
-from .fragments import DefinitionFact, SchemaContext, index_fragments
+from .fragments import DefinitionFact, FragmentIndex, SchemaContext, index_fragments
 from .schema_loading import load_from_introspection, load_from_sdl
 from .source import Span
 from .source_graph import (
     DocumentIdentity,
     FactoryBinding,
+    GraphDiagnostic,
     IncrementalResolver,
     ModuleDependency,
     ModuleSnapshot,
@@ -127,6 +129,38 @@ def analyze_editor_snapshot(
     Invalid GraphQL leaves resolved source maps available for online completion.
     An explicit serialized resolver reuses source facts only, not schema/index work.
     """
+    return analyze_editor_snapshot_details(request, resolver=resolver).response
+
+
+@dataclass(frozen=True)
+class EditorAnalysis:
+    response: dict[str, object]
+    modules: tuple[ModuleSnapshot, ...]
+    schemas: dict[tuple[str, str | None], SchemaContext]
+    index: FragmentIndex
+
+
+def editor_diagnostic(
+    item: GraphDiagnostic, snapshots: dict[ModuleDependency, str]
+) -> dict[str, object]:
+    source = snapshots[item.module]
+    return {
+        "module": _module(item.module),
+        "code": item.code,
+        "message": item.message,
+        "range": {
+            "codepoint": _span(item.range),
+            "utf16": {
+                "start": convert_offset(source, item.range.start),
+                "end": convert_offset(source, item.range.end),
+            },
+        },
+    }
+
+
+def analyze_editor_snapshot_details(
+    request: object, *, resolver: IncrementalResolver | None = None
+) -> EditorAnalysis:
     payload = _object(
         request, {"request_id", "modules", "bindings", "schemas"}, "request"
     )
@@ -370,18 +404,13 @@ def analyze_editor_snapshot(
                 },
             }
         )
-    return {
+    response: dict[str, object] = {
         "request_id": request_id,
         "modules": [_module(item) for item in snapshots],
         "schemas": schema_facts,
         "calls": calls,
         "diagnostics": [
-            {
-                "module": _module(item.module),
-                "code": item.code,
-                "message": item.message,
-                "range": range_(item.module, item.range),
-            }
-            for item in index.diagnostics
+            editor_diagnostic(item, snapshots) for item in index.diagnostics
         ],
     }
+    return EditorAnalysis(response, tuple(modules), schemas, index)
