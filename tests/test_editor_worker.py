@@ -17,6 +17,7 @@ from graphql import GraphQLSchema, build_schema, introspection_from_schema
 
 from graphql_desk.config import SchemaOrigin
 from graphql_desk.editor_worker import MAX_LINE_BYTES, EditorWorker, serve
+from tests import test_factory_generation as factory_tests
 from tests.test_schema_url import endpoint
 
 
@@ -533,6 +534,271 @@ class EditorWorkerTests(unittest.TestCase):
                 "schema_buffers": buffers or [],
             }
         )
+
+    def test_captured_factory_artifacts_reuse_analysis_and_type_original_source(
+        self,
+    ) -> None:
+        config = (
+            self.config.read_text(encoding="utf8")
+            + 'scalars={Token={input="builtins.str",output="builtins.int"}}\n'
+        )
+        source = """from typing import TYPE_CHECKING,TypeVar
+from typing_extensions import assert_type
+from graphql_desk import TypedDocument
+from graphql_desk_generated.default import graphql
+doc=graphql("query Q { selected token }")
+if TYPE_CHECKING:
+ R=TypeVar("R")
+ V=TypeVar("V")
+ def execute(document:TypedDocument[R,V])->R: raise RuntimeError
+ assert_type(execute(doc)["selected"],str|None)
+ assert_type(execute(doc)["token"],int)
+"""
+        capture = self.capture()
+        capture["documents"] = [
+            {**self.document(self.source), "id": "source"},
+            {**self.document(self.config), "id": "config"},
+            self.document(self.schema),
+        ]
+        capture["buffers"] = [
+            self.buffer(self.source, source),
+            self.buffer(self.config, config),
+        ]
+        buffers = [
+            self.buffer(
+                self.schema, "scalar Token type Query {selected:String token:Token!}"
+            )
+        ]
+        identity = self.prepare(capture)
+        self.assertTrue(self.analyze(capture, identity, buffers)["ok"])
+        original = {
+            path: path.read_bytes() for path in (self.source, self.schema, self.config)
+        }
+        with (
+            patch(
+                "graphql_desk.editor_analysis.resolve_project",
+                side_effect=AssertionError("duplicate resolver"),
+            ),
+            patch(
+                "graphql_desk.editor_analysis.index_fragments",
+                side_effect=AssertionError("duplicate index"),
+            ),
+        ):
+            result = self.worker.handle(
+                {
+                    "op": "artifacts",
+                    **capture,
+                    "id": identity,
+                    "schema_buffers": buffers,
+                }
+            )
+        self.assertTrue(result["ok"], result)
+        projects = cast(list[dict[str, object]], result["projects"])
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(projects[0]["project"], self.config.as_uri())
+        self.assertEqual(projects[0]["diagnostics"], [])
+        files = cast(list[dict[str, str]], projects[0]["files"])
+        self.assertIn(
+            "graphql_desk_generated/default.pyi",
+            {file["relative_path"] for file in files},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for file in files:
+                path = root / file["relative_path"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(file["text"], encoding="utf8")
+            (root / "main.py").write_text(source, encoding="utf8")
+            factory_tests.FactoryGenerationTests().check(root)
+            runtime = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import main; assert main.doc.schema_name=='default'",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stderr)
+        for path, content in original.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertFalse((self.root / "graphql_desk_generated").exists())
+
+    def test_factory_artifacts_invalid_and_repaired_calls_preserve_diagnostics(
+        self,
+    ) -> None:
+        self.schema.write_text("type Query {value:String!}", encoding="utf8")
+        for selected in ("value", "missing", "value"):
+            source = (
+                'from graphql_desk_generated.default import graphql\nq=graphql("{ '
+                + selected
+                + ' }")\n'
+            )
+            capture = self.capture()
+            capture["documents"] = [self.document(self.source)]
+            capture["buffers"] = [self.buffer(self.source, source)]
+            identity = self.prepare(capture)
+            analyzed = self.analyze(capture, identity)
+            self.assertTrue(analyzed["ok"], analyzed)
+            result = self.worker.handle(
+                {"op": "artifacts", **capture, "id": identity, "schema_buffers": []}
+            )
+            self.assertTrue(result["ok"], result)
+            project = cast(list[dict[str, object]], result["projects"])[0]
+            files = cast(list[dict[str, str]], project["files"])
+            factory = next(
+                file["text"]
+                for file in files
+                if file["relative_path"].endswith("/default.pyi")
+            )
+            self.assertEqual("GraphqlDeskUnavailable" in factory, selected == "missing")
+            codes = [
+                item["code"]
+                for item in cast(list[dict[str, object]], project["diagnostics"])
+            ]
+            self.assertEqual(
+                codes,
+                ["graphql-validation", "factory-unavailable"]
+                if selected == "missing"
+                else [],
+            )
+
+    def test_factory_artifacts_require_exact_current_analyzed_capture(self) -> None:
+        capture = self.capture()
+        identity = self.prepare(capture)
+        request: dict[str, object] = {
+            "op": "artifacts",
+            **capture,
+            "id": identity,
+            "schema_buffers": [],
+        }
+        self.assertFalse(self.worker.handle(request)["ok"])
+        for mutation in ("source", "config", "snapshot", "generation"):
+            capture = self.capture()
+            identity = self.prepare(capture)
+            self.assertTrue(self.analyze(capture, identity)["ok"])
+            request = {
+                "op": "artifacts",
+                **capture,
+                "id": identity,
+                "schema_buffers": [],
+            }
+            if mutation == "source":
+                self.source.write_text(
+                    self.source.read_text(encoding="utf8") + "# changed\n",
+                    encoding="utf8",
+                )
+            elif mutation == "config":
+                self.config.write_text(
+                    self.config.read_text(encoding="utf8") + "disable_masking=true\n",
+                    encoding="utf8",
+                )
+            elif mutation == "snapshot":
+                request["schema_buffers"] = [
+                    self.buffer(self.schema, "type Query {changed:Int}")
+                ]
+            else:
+                self.prepare(capture)
+            result = self.worker.handle(request)
+            if mutation in {"source", "config"}:
+                self.assertEqual(
+                    result,
+                    {"ok": True, "id": identity, "current": False},
+                    mutation,
+                )
+            else:
+                self.assertFalse(result["ok"], mutation)
+
+    def test_factory_artifacts_preserve_healthy_project_beside_unfetched_remote(
+        self,
+    ) -> None:
+        self.source.write_text(
+            'from graphql_desk_generated.default import graphql\nq=graphql("{disk}")\n',
+            encoding="utf8",
+        )
+        nested = self.root / "nested"
+        nested.mkdir()
+        nested_config = nested / "pyproject.toml"
+        nested_config.write_text(
+            '[tool.graphql-desk]\nschema={url="http://127.0.0.1:1/graphql"}\nschema_output="graphql_desk_generated/default.pyi"\n',
+            encoding="utf8",
+        )
+        nested_source = nested / "main.py"
+        nested_source.write_text(
+            "from graphql_desk_generated.default import graphql\n"
+            'q=graphql("{missing}")\n',
+            encoding="utf8",
+        )
+        capture = self.capture()
+        capture["candidates"] = [str(self.source), str(nested_source)]
+        with patch("graphql_desk.editor_worker.load_from_url") as loader:
+            identity = self.prepare(capture)
+            self.assertTrue(self.analyze(capture, identity)["ok"])
+            result = self.worker.handle(
+                {"op": "artifacts", **capture, "id": identity, "schema_buffers": []}
+            )
+            loader.assert_not_called()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            result["unavailable_schemas"], ((nested_config.as_uri(), "default"),)
+        )
+        projects = {
+            project["project"]: project
+            for project in cast(list[dict[str, object]], result["projects"])
+        }
+        self.assertTrue(projects[self.config.as_uri()]["files"])
+        self.assertEqual(projects[self.config.as_uri()]["diagnostics"], [])
+        self.assertEqual(projects[nested_config.as_uri()]["files"], [])
+        self.assertEqual(
+            [
+                diagnostic["code"]
+                for diagnostic in cast(
+                    list[dict[str, object]],
+                    projects[nested_config.as_uri()]["diagnostics"],
+                )
+            ],
+            ["missing-schema-context"],
+        )
+
+    def test_factory_artifacts_generate_all_named_schemas_for_one_project(self) -> None:
+        (self.base / "alpha.graphql").write_text(
+            "type Query { alpha: String! }", encoding="utf8"
+        )
+        (self.base / "beta.graphql").write_text(
+            "type Query { beta: Int! }", encoding="utf8"
+        )
+        self.config.write_text(
+            "[tool.graphql-desk]\n"
+            '[[tool.graphql-desk.schemas]]\nname="alpha"\n'
+            'schema="../alpha.graphql"\n'
+            'schema_output="graphql_desk_generated/alpha.pyi"\n'
+            '[[tool.graphql-desk.schemas]]\nname="beta"\n'
+            'schema="../beta.graphql"\n'
+            'schema_output="graphql_desk_generated/beta.pyi"\n',
+            encoding="utf8",
+        )
+        self.source.write_text(
+            "from graphql_desk_generated.alpha import graphql as alpha\n"
+            "from graphql_desk_generated.beta import graphql as beta\n"
+            'a=alpha("{ alpha }")\nb=beta("{ beta }")\n',
+            encoding="utf8",
+        )
+        capture = self.capture()
+        identity = self.prepare(capture)
+        analyzed = self.analyze(capture, identity)
+        self.assertTrue(analyzed["ok"], analyzed)
+        result = self.worker.handle(
+            {"op": "artifacts", **capture, "id": identity, "schema_buffers": []}
+        )
+        self.assertTrue(result["ok"], result)
+        projects = cast(list[dict[str, object]], result["projects"])
+        self.assertEqual(len(projects), 1)
+        files = cast(list[dict[str, object]], projects[0]["files"])
+        paths = {cast(str, file["relative_path"]) for file in files}
+        self.assertIn("graphql_desk_generated/alpha.pyi", paths)
+        self.assertIn("graphql_desk_generated/beta.pyi", paths)
+        self.assertEqual(result["unavailable_schemas"], ())
 
     def test_dirty_external_sdl_and_final_recheck(self) -> None:
         capture = self.capture()

@@ -396,6 +396,35 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       return Boolean(current) && !token?.isCancellationRequested && trusted() && state.cached?.bundle === bundle;
     } catch { state.cached = null; return false; }
   }
+  async function artifacts(value, token) {
+    if (!trusted() || token?.isCancellationRequested) return null;
+    const state = await stateFor(value);
+    if (!state || token?.isCancellationRequested) return null;
+    try {
+      return await enqueue(state, async () => {
+        const cached = state.cached ?? await build(state, token);
+        if (!cached) return null;
+        check(cached.ticket, token, state);
+        const latest = await capture(state);
+        check(cached.ticket, token, state);
+        if (latest.signature !== cached.capture.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
+          state.cached = null;
+          return null;
+        }
+        const reply = await state.worker.request({ op: "artifacts", ...cached.request });
+        check(cached.ticket, token, state);
+        if (reply.current === false) { state.cached = null; return null; }
+        const final = await capture(state);
+        check(cached.ticket, token, state);
+        if (final.signature !== cached.capture.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
+          state.cached = null;
+          return null;
+        }
+        return { ...reply, isCurrent: () => trusted() && !token?.isCancellationRequested &&
+          epoch === cached.ticket && states.get(state.root) === state && state.cached === cached };
+      }, "artifacts");
+    } catch { state.cached = null; return null; }
+  }
   async function refresh() {
     if (!trusted()) { report("Trust this workspace before refreshing a schema."); return; }
     const document = vscode.window.activeTextEditor?.document;
@@ -451,7 +480,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }));
   }
   reconcileFolderWatches();
-  return { analyze, isCurrent, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
+  return { analyze, isCurrent, artifacts, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
     dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
 module.exports = { createAnalysisController };

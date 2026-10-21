@@ -104,6 +104,25 @@ test("real worker captures unsaved source/config/schema, shares concurrent provi
   await assert.rejects(fs.stat(path.join(root, "new.py")), { code: "ENOENT" });
 });
 
+test("stale artifact reply is a no-publish result and the worker remains usable", async t => {
+  const fixture = await setup(t);
+  const requests = [];
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, request(message, requestOptions) {
+      requests.push(message.op);
+      if (message.op === "artifacts") return Promise.resolve({ ok: true, id: message.id, current: false });
+      return worker.request(message, requestOptions);
+    } };
+  } });
+  t.after(() => controller.dispose());
+  const snapshot = controller.snapshot(fixture.main);
+  assert.equal(await controller.artifacts(snapshot), null);
+  assert.ok(await controller.analyze(snapshot), "a stale artifact response must not kill the worker");
+  assert.equal(requests.filter(operation => operation === "artifacts").length, 1);
+  assert.ok(requests.filter(operation => operation === "analyze").length >= 2, "cleared stale analysis is rebuilt");
+});
+
 test("real configured factory capture highlights incomplete Python lexically and repairs without semantic promotion", async t => {
   const fixture = await setup(t);
   const { main } = fixture;

@@ -99,6 +99,7 @@ class EditorSnapshot:
     _configs: tuple[tuple[str, str, str], ...] = field(repr=False)
     _disk_modules: tuple[ModuleSnapshot, ...] = field(repr=False)
     _remote_schemas: tuple[RemoteSchemaSnapshot, ...] = field(default=(), repr=False)
+    project_configs: tuple[ProjectConfig, ...] = field(default=(), repr=False)
 
     @property
     def request(self) -> dict[str, object]:
@@ -555,6 +556,7 @@ def acquire_editor_snapshot(
         captured.config_facts,
         tuple(disk_modules),
         remote_schemas,
+        tuple(config for config, _ in captured.projects),
     )
     return snapshot.reuse_disk_sources(previous) if previous is not None else snapshot
 

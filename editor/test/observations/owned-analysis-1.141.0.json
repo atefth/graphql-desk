@@ -1,0 +1,38 @@
+{
+  "host": "1.141.0",
+  "disk": {
+    "seededBeforeActivation": true,
+    "duringPublicationWritesOwnedAnalysisFile": true,
+    "ownedArtifactsRemoved": true,
+    "originalProjectUnchangedThroughout": true
+  },
+  "pylance": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1",
+    "savedBaseline": "```python\n(variable) selected: str\n```\n<!--moduleHash:-567770122-->",
+    "baselineDefinitions": [
+      "file:///c%3A/Users/ateft/AppData/Local/Temp/graphql-desk-features-gkTGdK/workspace/generated.py"
+    ],
+    "diskOnlyUpdate": true,
+    "nullableHover": "```python\n(variable) selected: str | None\n```\n<!--moduleHash:-567770122-->",
+    "nullableDiagnostics": [
+      "Type \"str | None\" is not assignable to declared type \"str\"\n  Type \"str | None\" is not assignable to type \"str\"\n    \"None\" is not assignable to \"str\""
+    ],
+    "consumerUpdated": true,
+    "repaired": true,
+    "beforeCleanupNullable": true,
+    "beforeCleanupHover": "```python\n(variable) selected: str | None\n```\n<!--moduleHash:-567770122-->",
+    "consumerStillOpen": true,
+    "cleanupRestored": true
+  },
+  "lifecycle": {
+    "restartLeftoverRefused": true,
+    "staleRejectedBeforeWrite": true,
+    "saveAllDoesNotAlterProject": true,
+    "shadowNotDirty": true,
+    "userDirtyBufferPreserved": true,
+    "dirtyOwnedBufferPreserved": true,
+    "associatedUntitledPreserved": true
+  },
+  "outcome": "bounded-owned-analysis-observed"
+}
