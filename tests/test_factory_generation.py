@@ -1756,6 +1756,191 @@ asyncio.run(async_build())
                 },
             )
 
+    def test_abstract_typename_ownership_is_local_to_each_concrete_type(self) -> None:
+        sdl = (
+            "interface Node { id: ID! child: Node! } "
+            "type User implements Node { id: ID! child: Node! name: String! } "
+            "type Org implements Node { id: ID! child: Node! title: String! } "
+            "union Search = User | Org "
+            "type Query { nodes: [Node] search: [Search!]! }"
+        )
+        context = SchemaContext(
+            "main",
+            build_schema(sdl),
+            "abstract-typename",
+        )
+        source = """from typing import TYPE_CHECKING, Literal, TypeVar
+from typing_extensions import assert_type
+from graphql_desk import TypedDocument
+from generated.main import graphql
+from generated.sources.main import InterfaceQueryResult as Interface
+from generated.sources.main import UnionQueryResult as Union
+from generated.sources.main import MaskedQueryResult as Masked
+from generated.sources.main import ConditionalQueryResult as Conditional
+from generated.sources.main import NestedQueryResult as Nested
+from generated.sources.main import CanonicalQueryResult as Canonical
+from generated.sources.main import InterfaceQueryVariables, UnionQueryVariables
+interface_query=graphql("query I {nodes {kind:__typename "
+                        "... on User {__typename name} ... on Org {title}}}")
+union_query=graphql("query U {search {kind:__typename "
+                    "... on User {__typename:id} ... on Org {title}}}")
+deep=graphql("fragment Deep on Org {__typename:id}")
+hidden=graphql("fragment Hidden on Org {...Deep}",(deep,))
+masked_query=graphql("query M {search {kind:__typename "
+                     "... on User {__typename} ...Hidden}}",(hidden,))
+conditional_query=graphql("query C($show:Boolean!) {search {kind:__typename "
+    "... on User {__typename} ...Hidden @include(if:$show)}}",(hidden,))
+nested_hidden=graphql("fragment Nested on Node "
+                     "{child {... on Org {__typename:id}}}")
+nested_query=graphql("query N {nodes {child {kind:__typename "
+    "... on User {__typename}} ...Nested}}",(nested_hidden,))
+canonical_hidden=graphql("fragment Canonical on Org {__typename}")
+canonical_query=graphql("query K {search {kind:__typename "
+    "... on User {__typename} ...Canonical}}",(canonical_hidden,))
+R=TypeVar('R')
+V=TypeVar('V')
+def execute(document:TypedDocument[R,V],variables:V)->R: raise RuntimeError
+def inspect(result:Interface)->None:
+ nodes=result['nodes']
+ if nodes is not None:
+  for node in nodes:
+   if node is not None and '__typename' in node:
+    if node['__typename']=='Org':
+     assert_type(node['title'],str)
+     assert_type(node['kind'],Literal['Org'])
+    else:
+     assert_type(node['name'],str)
+def aliases(result:Union)->None:
+ for node in result['search']:
+  if node['kind']=='User':
+   assert_type(node['__typename'],str)
+  elif '__typename' in node:
+   assert_type(node['__typename'],Literal['Org'])
+def masked_aliases(result:Masked|Conditional)->None:
+ for node in result['search']:
+  if node['kind']=='Org':
+   _=node['__typename'] # error
+def nested_aliases(result:Nested)->None:
+ if result['nodes'] is not None:
+  for node in result['nodes']:
+   if node is not None:
+    child=node['child']
+    if child['kind']=='Org':
+     _=child['__typename'] # error
+def canonical_aid(result:Canonical)->None:
+ for node in result['search']:
+  if node['kind']=='Org' and '__typename' in node:
+   assert_type(node['__typename'],Literal['Org'])
+if TYPE_CHECKING:
+ assert_type(execute(interface_query,InterfaceQueryVariables()),Interface)
+ assert_type(execute(union_query,UnionQueryVariables()),Union)
+ absent:Interface={'nodes':[None,{'kind':'Org','title':'t'}]}
+ present:Interface={'nodes':[{'kind':'Org','__typename':'Org','title':'t'}]}
+ nullable:Interface={'nodes':None}
+ alias:Union={'search':[{'kind':'User','__typename':'id'}]}
+ aid:Union={'search':[{'kind':'Org','__typename':'Org','title':'t'}]}
+ bad_aid:Interface={'nodes':[{'kind':'Org','__typename':'User','title':'t'}]} # error
+ missing_selected:Interface={'nodes':[{'kind':'User','name':'n'}]} # error
+ null_list:Union={'search':None} # error
+ null_item:Union={'search':[None]} # error
+ impossible:Union={'search':[{'kind':'Other','title':'t'}]} # error
+ wrong_alias:Union={'search':[{'kind':'User','__typename':1}]} # error
+"""
+        modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+        resolved = resolve_project(
+            modules,
+            bindings=(
+                ProjectBindings(
+                    "p",
+                    ("main",),
+                    factories=(FactoryBinding("generated.main", "graphql", "main"),),
+                ),
+            ),
+        )
+        index = index_fragments(resolved, schemas={("p", "main"): context})
+        artifacts = generate_factory_artifacts(
+            context,
+            index,
+            modules=modules,
+            project_id="p",
+            generated_package="generated",
+        )
+        self.assertEqual(artifacts.diagnostics, ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            self.check(
+                root,
+                {
+                    "main.py": {
+                        n
+                        for n, line in enumerate(source.splitlines(), 1)
+                        if "# error" in line
+                    }
+                },
+            )
+            runtime = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from graphql import build_schema,execute_sync\n"
+                    "from main import interface_query,union_query,"
+                    "masked_query,conditional_query,nested_query,canonical_query\n"
+                    "from generated.sources.main import "
+                    "MaskedQueryResult,ConditionalQueryResult,NestedQueryResult\n"
+                    "from typing import Literal,get_args,get_type_hints\n"
+                    f"schema=build_schema({sdl!r})\n"
+                    "user={'__typename':'User','id':'u','name':'n'}\n"
+                    "org={'__typename':'Org','id':'User','title':'t'}\n"
+                    "user['child']=org\norg['child']=org\n"
+                    "value={'nodes':[None,user,org],'search':[user,org]}\n"
+                    "a=execute_sync(schema,interface_query.ast,root_value=value)\n"
+                    "b=execute_sync(schema,union_query.ast,root_value=value)\n"
+                    "assert a.errors is None and b.errors is None\n"
+                    "assert a.data=={'nodes':[None,{'kind':'User',"
+                    "'__typename':'User','name':'n'},{'kind':'Org','title':'t'}]}\n"
+                    "assert b.data=={'search':[{'kind':'User','__typename':'u'},"
+                    "{'kind':'Org','title':'t'}]}\n"
+                    "for result in (MaskedQueryResult,ConditionalQueryResult):\n"
+                    " items=get_args(get_type_hints(result)['search'])[0]\n"
+                    " for branch in get_args(items):\n"
+                    "  hints=get_type_hints(branch)\n"
+                    "  if hints['kind']==Literal['Org']:\n"
+                    "   assert '__typename' not in hints\n"
+                    "for doc in (masked_query,conditional_query):\n"
+                    " for show in (False,True):\n"
+                    "  c=execute_sync(schema,doc.ast,root_value=value,"
+                    "variable_values={'show':show})\n"
+                    "  assert c.errors is None\n"
+                    "  expected={'kind':'Org'}\n"
+                    "  if doc is masked_query or show:\n"
+                    "   expected['__typename']='User'\n"
+                    "  assert c.data=={'search':[{'kind':'User',"
+                    "'__typename':'User'},expected]}\n"
+                    "nodes=get_args(get_type_hints(NestedQueryResult)['nodes'])[0]\n"
+                    "for parent in get_args(get_args(nodes)[0]):\n"
+                    " if parent is type(None): continue\n"
+                    " for child in get_args(get_type_hints(parent)['child']):\n"
+                    "  hints=get_type_hints(child)\n"
+                    "  if hints['kind']==Literal['Org']:\n"
+                    "   assert '__typename' not in hints\n"
+                    "org['id']='not-Org'\n"
+                    "d=execute_sync(schema,nested_query.ast,root_value=value)\n"
+                    "assert d.errors is None\n"
+                    "assert d.data=={'nodes':[None,"
+                    "{'child':{'kind':'Org','__typename':'not-Org'}},"
+                    "{'child':{'kind':'Org','__typename':'not-Org'}}]}\n"
+                    "e=execute_sync(schema,canonical_query.ast,root_value=value)\n"
+                    "assert e.errors is None\n"
+                    "assert e.data=={'search':[{'kind':'User','__typename':'User'},"
+                    "{'kind':'Org','__typename':'Org'}]}\n",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+
     def test_opaque_fallback_preserves_dynamic_ast_access_without_precise_types(
         self,
     ) -> None:
