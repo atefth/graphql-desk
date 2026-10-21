@@ -310,10 +310,12 @@ test("refresh replies are redacted and guarded after the await", async t => {
 
 test("extended preparation validates redacted preferences, environment names and opaque active revisions", async t => {
   const extended = { ...reply, project_preferences: [{ project: "p", client_directives: ["local"] }],
-    remote_schemas: [{ project: "p", schema_name: "default", environment_names: ["TOKEN"] }],
+    remote_schemas: [{ project: "p", schema_name: "default", environment_names: ["TOKEN"], refresh_interval: 0 }],
     remote_revisions: [{ project: "p", schema_name: "default", revision: "opaque" }] };
   for (const malformed of [null, { ...extended, project_preferences: [{ project: "p", client_directives: "local" }] },
-    { ...extended, remote_schemas: [{ project: "p", schema_name: "default", environment_names: ["TOKEN", "TOKEN"] }] },
+    { ...extended, remote_schemas: [{ project: "p", schema_name: "default", environment_names: ["TOKEN", "TOKEN"], refresh_interval: 0 }] },
+    ...[-1, "2", null, true].map(refresh_interval => ({ ...extended,
+      remote_schemas: [{ project: "p", schema_name: "default", environment_names: [], refresh_interval }] })),
     { ...extended, remote_revisions: [{ project: "p", schema_name: "default", revision: 1 }] }]) {
     const fake = fakeSpawn((child) => child.stdout.write(JSON.stringify(malformed ?? extended) + "\n"));
     const { worker, workspace } = setup(t, fake);
