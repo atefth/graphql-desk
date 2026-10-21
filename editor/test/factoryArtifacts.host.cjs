@@ -63,6 +63,56 @@ exports.run = async () => {
     assert.match(results.pylance.countType, /Int|int/);
     assert.ok(results.pylance.variableError.length);
     results.lifecycle.publishedRealWorkerArtifacts = generated.initial.length;
+    const consumerOnDisk = await fs.readFile(consumerUri.fsPath, "utf8");
+    const originalSource = consumer.getText();
+    const generatedDocumentPath = path.join(stubRoot, "graphql_desk_generated", "_documents", "default", "d0.pyi");
+    const documentStubBefore = await fs.readFile(generatedDocumentPath, "utf8");
+    results.lifecycle.unsavedEditBefore = {
+      bufferVersion: consumer.version,
+      dirty: consumer.isDirty,
+      pythonBuffer: originalSource,
+      pythonFile: consumerOnDisk,
+      embeddedOperation: originalSource.match(/graphql\('([^']+)'\)/)?.[1] ?? null,
+      documentStubBytes: documentStubBefore,
+      pylanceHover: observed.selected,
+      stubPath: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath"),
+    };
+    const changedSource = originalSource.replace("selected count(limit:", "count(limit:").replace("result['selected']", "result['count']");
+    assert.notEqual(changedSource, originalSource);
+    const sourceEdit = new vscode.WorkspaceEdit();
+    sourceEdit.replace(consumer.uri, new vscode.Range(consumer.positionAt(0), consumer.positionAt(consumer.getText().length)), changedSource);
+    assert.equal(await vscode.workspace.applyEdit(sourceEdit), true);
+    results.lifecycle.unsavedArtifactRefresh = await until(async () => {
+      const stub = await fs.readFile(generatedDocumentPath, "utf8").catch(() => "");
+      return /'count': 'Int'/.test(stub) && !/'selected': 'String'/.test(stub);
+    }, "unsaved embedded GraphQL edit republishes the changed result shape");
+    results.pylance.unsavedOperationRefresh = results.lifecycle.unsavedArtifactRefresh && await until(async () => /Int/.test(await hover(8, 2)) && !/String/.test(await hover(8, 2)), "Pylance hover updates after the unsaved operation edit");
+    if (!results.pylance.unsavedOperationRefresh) results.lifecycle.unsavedEditProbe = {
+      buffer: consumer.getText(),
+      disk: await fs.readFile(consumerUri.fsPath, "utf8"),
+      hover: await hover(8, 2),
+      documentStub: await fs.readFile(generatedDocumentPath, "utf8").catch(() => null),
+    };
+    assert.ok(results.pylance.unsavedOperationRefresh);
+    results.lifecycle.unsavedPythonBufferPreserved = consumer.isDirty && await fs.readFile(consumerUri.fsPath, "utf8").then(text => text === consumerOnDisk);
+    assert.ok(results.lifecycle.unsavedPythonBufferPreserved, "The GraphQL edit must remain unsaved and leave the Python file unchanged on disk");
+    const documentStubAfter = await fs.readFile(generatedDocumentPath, "utf8");
+    results.lifecycle.unsavedEditAfter = {
+      bufferVersion: consumer.version,
+      dirty: consumer.isDirty,
+      pythonBuffer: consumer.getText(),
+      pythonFile: await fs.readFile(consumerUri.fsPath, "utf8"),
+      embeddedOperation: consumer.getText().match(/graphql\('([^']+)'\)/)?.[1] ?? null,
+      documentStubBytes: documentStubAfter,
+      pylanceHover: await hover(8, 2),
+      stubPath: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath"),
+    };
+    assert.notEqual(results.lifecycle.unsavedEditAfter.embeddedOperation, results.lifecycle.unsavedEditBefore.embeddedOperation);
+    assert.notEqual(documentStubAfter, documentStubBefore, "The owned operation stub must change for the unsaved GraphQL edit");
+    const restoreSource = new vscode.WorkspaceEdit();
+    restoreSource.replace(consumer.uri, new vscode.Range(consumer.positionAt(0), consumer.positionAt(consumer.getText().length)), originalSource);
+    assert.equal(await vscode.workspace.applyEdit(restoreSource), true);
+    assert.ok(await until(async () => /String/.test(await hover(8, 2)) && !/None/.test(await hover(8, 2)), "restored operation republishes its original type"));
     const settingsPath = path.join(workspace, ".vscode", "settings.json");
     const settings = JSON.parse(await fs.readFile(settingsPath, "utf8"));
     assert.equal(settings["python.analysis.stubPath"], ".graphql-desk/typings");
