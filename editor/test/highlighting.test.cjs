@@ -109,6 +109,31 @@ test("configured factory candidates accept exact direct/qualified aliases and pr
   ]) assert.deepEqual(lexicalCandidates(text, factories), [], text);
 });
 
+test("incomplete lexical calls cannot borrow an imported callee suffix", async () => {
+  for (const [imported, callee, factories] of [
+    ["from graphql_desk import gql", "gql", []],
+    ["import graphql_desk as desk", "desk.gql", []],
+    ["from generated.default import graphql as query", "query", [{ module: "generated.default", export: "graphql" }]],
+    ["import generated.default as documents", "documents.graphql", [{ module: "generated.default", export: "graphql" }]],
+  ]) {
+    for (const prefix of ["other . ", "other.\t", "λ", "a\u0301", "𐐀"]) {
+      const text = `# 😀\r\n${imported}\r\nq=${prefix}${callee}('''query Read { user`;
+      assert.deepEqual(lexicalCandidates(text, factories), [], text);
+    }
+    const text = `${imported}\nq=${callee}('''query Read { user`;
+    assert.equal(lexicalCandidates(text, factories).length, 1, "The imported callee itself remains a candidate");
+  }
+  for (const callee of ["other . gql", "λgql", "a\u0301gql"]) {
+    const text = `from graphql_desk import gql\nq=${callee}('''query Read { user`;
+    const incomplete = bundle(text);
+    assert.ok(incomplete.response.diagnostics.some(item => item.code === "invalid-python"));
+    assert.deepEqual(await createHighlighting(options(incomplete)).highlight(document(incomplete)), []);
+    const repaired = bundle(`${text} } }''')`);
+    assert.equal(repaired.response.calls.length, 0);
+    assert.deepEqual(await createHighlighting(options(repaired)).highlight(document(repaired)), []);
+  }
+});
+
 test("valid Python semantic shadowing does not fall back to lexical precision", async () => {
   const value = bundle("from graphql_desk import gql\ndef gql(source):return source\nq=gql('query { field }')");
   assert.deepEqual(await createHighlighting(options(value)).highlight(document(value)), []);

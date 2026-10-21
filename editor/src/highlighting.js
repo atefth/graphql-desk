@@ -91,6 +91,7 @@ function lexicalCandidates(text, factories = []) {
     if (!literal.prefix.includes("r") && body.includes("\\")) return [];
     const match = /([_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*)\s*\(\s*(?:source\s*=\s*)?$/.exec(code.slice(0, literal.start));
     if (!match || !callees.has(match[1])) return [];
+    if (/(?:[\p{ID_Continue}]|\.\s*)$/u.test(code.slice(0, match.index))) return [];
     const name = match[1].split(".")[0];
     if (imports.get(name) !== 1) return [];
     if (new RegExp(`(?:\\b(?:def|class)\\s+${name}\\b|\\b${name}\\s*=(?!=))`).test(code)) return [];
