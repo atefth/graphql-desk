@@ -150,6 +150,40 @@ test("external fragment completion and definitions use real imported source, nev
   assert.ok(completion.some((item) => item.label === "Card"));
 });
 
+test("fragment definitions reject ambiguous authored targets and recover after repair", async () => {
+  const modules = ["left", "right"].map((module) => ({ project: "p", module,
+    uri: `file:///workspace/${module}.py`, version: 4, is_package: false,
+    source: `# 😀\r\nfrom graphql_desk import gql\r\ncard=gql('fragment Card on User { ${module === "left" ? "id" : "name"} }')`,
+  }));
+  const prefix = "# 😀\r\nfrom graphql_desk import gql\r\n";
+  const imported = prefix + "from left import card as a\r\nfrom right import card as b\r\nq=gql('{user{name ...Card}}',[a,b])";
+  const local = prefix + "q=gql('{user{name ...Card}} fragment Card on User{id} fragment Card on User{name}')";
+  const mixed = prefix + "from left import card\r\nq=gql('{user{name ...Card}} fragment Card on User{name}',[card])";
+  for (const [source, code] of [[local, "duplicate-definition"], [imported, "conflicting-fragment"], [mixed, "conflicting-fragment"]]) {
+    const value = bundle(source, { modules });
+    const snapshot = document(value);
+    const service = createLanguageFeatures(options(value));
+    assert.ok(value.response.diagnostics.some(item => item.code === code));
+    assert.deepEqual(await service.definition(snapshot, source.indexOf("...Card") + 4), [], code);
+    const fields = await service.definition(snapshot, source.indexOf("name ...") + 1);
+    assert.equal(fields.length, 1);
+    assert.equal(fields[0].module.uri, value.request.schemas[0].uri);
+    assert.ok((await service.diagnostics(snapshot)).some(item => item.code === `graphql-desk.${code}`));
+  }
+  for (const source of [
+    imported.replace("[a,b]", "[b]"),
+    local.replace(" fragment Card on User{id}", ""),
+    imported.replace("[a,b]", "[b,b]"),
+  ]) {
+    const value = bundle(source, { modules });
+    const definitions = await createLanguageFeatures(options(value)).definition(document(value), source.indexOf("...Card") + 4);
+    assert.equal(definitions.length, 1);
+    const target = value.request.modules.find(item => item.uri === definitions[0].module.uri);
+    assert.equal(target.source.slice(definitions[0].range.start, definitions[0].range.end), "Card");
+    assert.equal(target.uri, source.includes("from right") ? modules[1].uri : document(value).uri);
+  }
+});
+
 test("escapes, adjacent literals and repeated/shared origins never become speculative completion edits", async () => {
   for (const source of [
     "from graphql_desk import gql\nq=gql('{user{na\\u006de}}')",

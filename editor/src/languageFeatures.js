@@ -188,8 +188,10 @@ function definitionNodes(schema, ast, fragments, offset) {
       if (gql.isInputObjectType(input)) result.push(input.getFields()[node.name.value]?.astNode?.name);
     },
     FragmentSpread(node) {
-      if (selected(node.name)) result.push([...ast.definitions, ...fragments]
-        .find((item) => item.kind === gql.Kind.FRAGMENT_DEFINITION && item.name.value === node.name.value)?.name);
+      if (!selected(node.name)) return;
+      const targets = [...ast.definitions, ...fragments]
+        .filter((item) => item.kind === gql.Kind.FRAGMENT_DEFINITION && item.name.value === node.name.value);
+      if (targets.length === 1) result.push(targets[0].name);
     },
     Variable(node) {
       if (selected(node.name)) result.push(operation?.variableDefinitions

@@ -8,7 +8,7 @@ The pinned lower-level `graphql-language-service==5.7.0` and `graphql==16.12.0` 
 
 Incomplete GraphQL inside valid Python still has real maps and can complete. Completion inserts a plain GraphQL name/value label where one linear current-file map span supplies an unambiguous replacement, or inserts at a uniquely mapped zero-width boundary with no matching linear occurrence. The latter preserves escaped whitespace and physical CRLF bytes while allowing the existing language-service suggestions. Atomic escape interiors, ranges crossing literal gaps and repeated/shared origins remain rejected, including repeated empty constants whose identical origins deduplicate. It does not rewrite Python escaping, insert snippets, plan refactors or claim project-wide edit safety. Native hover signatures/descriptions/deprecation are retained; input-member qualification is corrected from actual input type metadata, and actual argument/input defaults are shown. Hover Markdown is untrusted and HTML-disabled.
 
-Definitions cover schema fields, arguments, directives, named types, enum/input members, local variables and explicit indexed fragments. They use original SDL/node locations and raw call maps; printed definition offsets are never treated as authored positions. Introspection schemas lack authored SDL definitions, so no schema location is invented. Definition traversal requires parseable GraphQL. Missing or unresolved fragment facts do not become trusted navigation targets.
+Definitions cover schema fields, arguments, directives, named types, enum/input members, local variables and explicit indexed fragments. They use original SDL/node locations and raw call maps; printed definition offsets are never treated as authored positions. Fragment spreads require one matching authored target: duplicate local declarations or conflicting imported definitions cannot select an arbitrary first target. Their diagnostics and unrelated schema navigation remain available, and repairing the conflict restores fragment navigation. Introspection schemas lack authored SDL definitions, so no schema location is invented. Definition traversal requires parseable GraphQL. Missing or unresolved fragment facts do not become trusted navigation targets.
 
 `registerLanguageFeatures(vscode, options)` adds supplemental Python completion/hover/definition providers and a separate diagnostic collection. The returned `refresh(document, token)`, `close(uri)` and `dispose()` functions are lifecycle hooks for the activation owner. Per-document generations prevent an older diagnostic refresh from overwriting a newer one. No source or generated buffer is edited, saved or reverted.
 
@@ -22,6 +22,9 @@ commands, diagnostics, decorations, native Python hover coexistence, trust
 revocation and disposal while preserving fixture disk bytes and clean buffers.
 The feature suites also verify an exact empty insertion range on a blank CRLF
 GraphQL line with preceding Unicode through the registered completion provider.
+They also reject arbitrary navigation for duplicate local and conflicting imported
+fragment names while retaining unique fragment targets, schema navigation and
+conflict diagnostics.
 Observations are under `editor/test/observations/`; reproduce with
 `npm run test:host -- 1.141.0` or `1.142.0` after the Python development environment
 is installed. The runner installs pinned official extensions into an isolated

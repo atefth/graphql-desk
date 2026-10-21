@@ -30,6 +30,9 @@ async function run() {
     "blank.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''\r\n\r\n''')\r\n",
     "selected.py": "outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql('{ user { name ...Card } }',[card])\n",
     "fragments.py": "from graphql_desk import gql\ncard=gql('fragment Card on User { id }')\n",
+    "other.py": "# 😀\r\nfrom graphql_desk import gql\r\ncard=gql('fragment Card on User { name }')\r\n",
+    "ambiguous.py": "# 😀\r\nfrom graphql_desk import gql\r\nfrom fragments import card as a\r\nfrom other import card as b\r\nq=gql('{ user { name ...Card } }',[a,b])\r\n",
+    "duplicate.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('{ user { name ...Card } } fragment Card on User { id } fragment Card on User { name }')\r\n",
   };
   for (const [name, text] of Object.entries(fixtures)) await fs.writeFile(path.join(workspace, name), text, { encoding: "utf8", flag: "wx" });
   const documents = new Map();
@@ -56,8 +59,10 @@ async function run() {
       return bundle(snapshot.text, { uri: snapshot.uri, version: snapshot.version,
         schema: schemaDoc.getText(), schemaUri: schemaDoc.uri.toString(), schemaVersion: schemaDoc.version,
         schemaToken: `schema-${schemaDoc.version}`,
-        modules: snapshot.uri === fragmentDoc.uri.toString() ? [] : [{ project: "p", module: "fragments",
-          uri: fragmentDoc.uri.toString(), version: fragmentDoc.version, source: fragmentDoc.getText(), is_package: false }],
+        modules: ["fragments.py", "other.py"].map(name => documents.get(name))
+          .filter(document => snapshot.uri !== document.uri.toString())
+          .map(document => ({ project: "p", module: path.basename(document.fileName, ".py"),
+            uri: document.uri.toString(), version: document.version, source: document.getText(), is_package: false })),
       });
     },
     isCurrent: async (value) => value.request.modules.every((item) => [...documents.values()].some((document) =>
@@ -70,7 +75,7 @@ async function run() {
     provideHover() { return new vscode.Hover("native-python-fixture"); },
   });
   const observations = { outcome: "read-only-features-observed", vscode: vscode.version, diagnostics: false, completion: false, boundaryCompletion: false, hover: false,
-    schemaDefinition: false, fragmentDefinition: false, nativeCoexistence: false,
+    schemaDefinition: false, fragmentDefinition: false, ambiguousFragmentDefinition: false, nativeCoexistence: false,
     highlighting: false, nativePythonHover: false, untrustedNoAnalysis: false, diskUnchanged: false, cleanBuffers: false };
   try {
     const invalid = documents.get("main.py");
@@ -126,6 +131,18 @@ async function run() {
       selected.positionAt(selected.getText().indexOf("...Card") + 4));
     assert.ok(fragments.map(locationTarget).some((item) => item.uri.toString() === fragmentDoc.uri.toString() && fragmentDoc.getText(item.range) === "Card"));
     observations.fragmentDefinition = true;
+    for (const [filename, code] of [["ambiguous.py", "conflicting-fragment"], ["duplicate.py", "duplicate-definition"]]) {
+      const document = documents.get(filename);
+      const targets = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", document.uri,
+        document.positionAt(document.getText().indexOf("...Card") + 4));
+      assert.deepEqual(targets, [], filename);
+      const fields = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", document.uri,
+        document.positionAt(document.getText().indexOf("name ...") + 1));
+      assert.ok(fields.map(locationTarget).some(item => item.uri.toString() === schemaDoc.uri.toString() && schemaDoc.getText(item.range) === "name"), filename);
+      await registration.refresh(document);
+      assert.ok(vscode.languages.getDiagnostics(document.uri).some(item => item.code === `graphql-desk.${code}`), filename);
+    }
+    observations.ambiguousFragmentDefinition = true;
     const editor = await vscode.window.showTextDocument(selected);
     let decorations = 0;
     await highlighting.refresh({ document: selected, setDecorations(type, ranges) {
