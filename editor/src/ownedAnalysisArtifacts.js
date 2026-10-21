@@ -87,16 +87,31 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
   function makeDirectories(relativePaths) {
     for (const relativePath of relativePaths) for (const directory of directoriesFor(relativePath)) {
       if (directoryStats.has(directory)) continue;
+      checkDirectories();
       fs.mkdirSync(directory);
       directoryStats.set(directory, identity(directory));
     }
   }
-  function verify(extraFiles = new Set()) {
+  function checkDirectories() {
     environment();
     for (const [directory, stat] of directoryStats) if (!same(stat, identity(directory))) throw new Error("Analysis package changed externally; preserved");
+  }
+  function checkDirty(file) {
+    if (dirty(file)) throw new Error("Analysis artifact has user edits; preserved");
+  }
+  function checkOwned(file, record, partial = false) {
+    checkDirty(file);
+    const stat = identity(file);
+    if (!stat.isFile() || !same(record.identity, stat)) throw new Error("Analysis artifact changed externally; preserved");
+    const bytes = fs.readFileSync(file);
+    if (!(partial
+      ? bytes.length <= record.bytes.length && record.bytes.subarray(0, bytes.length).equals(bytes)
+      : record.bytes.equals(bytes))) throw new Error("Analysis artifact changed externally; preserved");
+  }
+  function verify(extraFiles = new Set()) {
+    checkDirectories();
     for (const [relativePath, record] of expected) {
-      const file = target(relativePath);
-      if (dirty(file) || !same(record.identity, identity(file)) || !record.bytes.equals(fs.readFileSync(file))) throw new Error("Analysis artifact changed externally; preserved");
+      checkOwned(target(relativePath), record);
     }
     const actual = new Set();
     function visit(directory, prefix = "") {
@@ -111,15 +126,18 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
     for (const file of actual) if (!expected.has(file) && !extraFiles.has(file)) throw new Error("Foreign analysis package entries; preserved");
   }
   function writeExclusive(file, bytes) {
+    checkDirectories();
+    checkDirty(file);
     const descriptor = fs.openSync(file, "wx");
     const stat = fs.fstatSync(descriptor);
-    try { fs.writeFileSync(descriptor, bytes); fs.fsyncSync(descriptor); }
+    let written = false;
+    try { fs.writeFileSync(descriptor, bytes); written = true; fs.fsyncSync(descriptor); }
     catch (error) {
       try {
         fs.closeSync(descriptor);
-        const current = identity(file);
-        const content = fs.readFileSync(file);
-        if (same(stat, current) && content.length <= bytes.length && bytes.subarray(0, content.length).equals(content)) fs.unlinkSync(file);
+        checkDirectories();
+        checkOwned(file, { bytes, identity: stat }, !written);
+        fs.unlinkSync(file);
       } catch { /* Preserve bytes that are no longer verified as ours. */ }
       throw error;
     }
@@ -128,11 +146,13 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
   }
   function removeOwned(relativePath, record) {
     const file = target(relativePath);
-    if (dirty(file) || !same(record.identity, identity(file)) || !record.bytes.equals(fs.readFileSync(file))) throw new Error("Analysis artifact changed externally; preserved");
+    checkDirectories();
+    checkOwned(file, record);
     fs.unlinkSync(file);
     expected.delete(relativePath);
   }
   function removeEmptyDirectories() {
+    checkDirectories();
     for (const [directory, stat] of [...directoryStats].reverse()) {
       if (!same(stat, identity(directory))) throw new Error("Analysis package changed externally; preserved");
       if (fs.readdirSync(directory).length === 0) { fs.rmdirSync(directory); directoryStats.delete(directory); }
@@ -140,6 +160,7 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
   }
 
   environment();
+  for (const relativePath of artifacts.keys()) checkDirty(target(relativePath));
   try {
     makeDirectories([...artifacts.keys()]);
     for (const [relativePath, text] of artifacts) {
@@ -167,6 +188,7 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
         const next = artifactEntries(nextFiles, generatedPackage);
         verify();
         if (typeof isCurrent !== "function" || isCurrent() !== true) return false;
+        for (const relativePath of next.keys()) checkDirty(target(relativePath));
         const staged = new Map();
         const updated = [];
         const removed = [];
@@ -179,7 +201,7 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
             const file = target(relativePath);
             if (expected.has(relativePath)) {
               const previous = expected.get(relativePath);
-              if (dirty(file) || !same(previous.identity, identity(file)) || !previous.bytes.equals(fs.readFileSync(file))) throw new Error("Analysis artifact changed externally; preserved");
+              checkOwned(file, previous);
             } else if (fs.existsSync(file)) throw new Error("Foreign analysis artifact; preserved");
             const temporary = path.join(path.dirname(file), `.graphql-desk-${randomUUID()}.tmp`);
             const stat = writeExclusive(temporary, bytes);
@@ -190,7 +212,8 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
             const file = target(relativePath);
             if (isCurrent() !== true) throw new Error("Superseded analysis");
             verify(new Set([...staged.values()].map(value => path.relative(packageRoot, value.temporary).split(path.sep).join("/"))));
-            if (!same(stage.identity, identity(stage.temporary)) || !stage.bytes.equals(fs.readFileSync(stage.temporary))) throw new Error("Staged analysis artifact changed externally; preserved");
+            checkDirty(file);
+            checkOwned(stage.temporary, stage);
             const previous = expected.get(relativePath);
             fs.renameSync(stage.temporary, file);
             const current = { bytes: stage.bytes, identity: stage.identity };
@@ -211,11 +234,15 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
           for (const { relativePath, previous, current } of updated.reverse()) {
             const file = target(relativePath);
             try {
-              if (!same(current.identity, identity(file)) || !current.bytes.equals(fs.readFileSync(file))) continue;
+              checkDirectories();
+              checkOwned(file, current);
               if (!previous) { fs.unlinkSync(file); expected.delete(relativePath); }
               else {
                 const temporary = path.join(path.dirname(file), `.graphql-desk-${randomUUID()}.tmp`);
                 const identityValue = writeExclusive(temporary, previous.bytes);
+                checkDirectories();
+                checkOwned(file, current);
+                checkOwned(temporary, { bytes: previous.bytes, identity: identityValue });
                 fs.renameSync(temporary, file);
                 expected.set(relativePath, { bytes: previous.bytes, identity: identityValue });
               }
@@ -232,7 +259,7 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
           throw error;
         } finally {
           for (const stage of staged.values()) {
-            try { if (fs.existsSync(stage.temporary) && same(stage.identity, identity(stage.temporary)) && stage.bytes.equals(fs.readFileSync(stage.temporary))) fs.unlinkSync(stage.temporary); } catch { /* Preserve unverified staging data. */ }
+            try { checkDirectories(); checkOwned(stage.temporary, stage); fs.unlinkSync(stage.temporary); } catch { /* Preserve unverified staging data. */ }
           }
           try { verify(); removeEmptyDirectories(); } catch { /* Preserve unverified package paths. */ }
         }

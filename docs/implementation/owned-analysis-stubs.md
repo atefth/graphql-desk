@@ -37,3 +37,50 @@ dirty aliases, partial initialization, rollback and teardown ordering. These
 results prove only this narrow generated-artifact bridge. They do not establish
 restart recovery after a crash, cross-process compare-and-swap, multi-workspace
 conflict handling, performance under edit storms, or the broad full-parity gate.
+
+## Lifecycle ownership and recovery limits
+
+The multi-file writer checks dirty file and associated untitled buffers before
+initial creation and before adding a new destination. It rechecks staged files,
+destination buffers, workspace trust and directory identity before replacement,
+rollback and cleanup. If ownership changes during a failed update, preserving
+the user's buffer or foreign path takes priority over restoring the previous
+bytes. That conflict can leave owned or staged files in place and makes managed
+typing unavailable; cleanup does not force saves, revert buffers or delete the
+unverified files. A completed write shortened externally before a sync failure
+is also preserved rather than mistaken for the writer's own partial write.
+
+Source inventory starts with the current disk enumeration, adding dirty or
+untitled Python buffers. A clean document retained by VS Code after its backing
+file is renamed or deleted does not resurrect that source or its obsolete
+generated companion. The retained document and user buffers are not edited by
+this inventory change.
+
+The extended real-worker fixture passed on Windows VS Code 1.141.0 and 1.142.0
+with Python 2026.10.0 and Pylance 2026.4.1. It checks undo/redo of an unsaved
+operation, clean source close, external edits to the closed source, rename and
+deletion of its generated companion/overload, and convergence of the unaffected
+consumer's `String` hover. A separate deliberately user-edited generated buffer
+keeps its text, version, dirty state and disk bytes after rejected publication
+and cleanup. This fixture's intentional user edits are not extension-created
+dirty state. Root migration, external-root refusal and shutdown cleanup also
+remain covered. Selected observations are recorded in
+[`artifact-lifecycle-1.141.0.json`](../../editor/test/observations/artifact-lifecycle-1.141.0.json)
+and [`artifact-lifecycle-1.142.0.json`](../../editor/test/observations/artifact-lifecycle-1.142.0.json).
+Native editor checks pass 86/86; the Python worker suite passes 28/28.
+One concurrent host rerun passed the new source lifecycle assertions on 1.141.0
+but exceeded the existing 30-second schema-nullability convergence check. The
+unchanged assertions passed when rerun in isolation. This evidence does not
+establish edit-storm or checker-restart reliability.
+
+This remains a session-owned **analysis `.pyi` writer**. It does not publish saved
+runtime `.py`/`.pyi` pairs or a durable generation manifest. A sequence of atomic
+file replacements is not an atomic multi-file generation for Python or checker
+readers. The worker's current captured facts and in-process rollback do not
+provide restart recovery, generation-ID rejection by readers or the last-complete
+pair required by issue #37. Existing packages from earlier sessions remain
+foreign and are refused, including after an interrupted process. A recovery
+design must prove those reader and ownership guarantees before #37 can close;
+this slice does not infer permission to adopt pre-existing packages or alter
+workspace settings beyond the approved managed stub-root behavior. Issues #23
+and #24 and the broad live-typing gate remain open.

@@ -1,0 +1,21 @@
+{
+  "host": "1.142.0",
+  "suite": "factoryArtifacts",
+  "scope": "Selected lifecycle observations; broader live typing and durable runtime/stub pair recovery remain open.",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "lifecycle": {
+    "sourceUndoRedoCloseRenameDelete": true,
+    "foreignDirtyGeneratedBufferPreserved": true,
+    "runtimeStubPathChange": true,
+    "externalRootConflictPreserved": true,
+    "ownedArtifactsRemoved": true,
+    "settingsPreserved": true,
+    "userConfigurationPreserved": true,
+    "userFilesUntouched": true
+  },
+  "unaffectedConsumerExpectedHover": "String",
+  "outcome": "generated-factory-artifacts-observed"
+}
