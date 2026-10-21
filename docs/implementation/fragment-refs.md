@@ -51,8 +51,10 @@ without changing the mutable result view. Generated bound helpers provide litera
 context and typename narrowing; the root reader uses checker-only callable facts.
 Neither function reads the phantom property at runtime.
 
-This is bounded reader support. Nullable arrays retain the full result union and,
-when needed, the absent alternative. Generic raw literals and contextual fallback
+This is bounded reader support. Nullable arrays retain the full result union;
+bound readers exclude the absent alternative when their input elements are
+matching references, compatible result shapes or nulls. Inputs that also admit
+an absent shape retain that alternative. Generic raw literals and contextual fallback
 inputs can retain a wider result/absence union. Upstream unmatched-reference
 passthrough is not yet exposed by these typed Python helpers. Required conditional
 empty branches remain absent rather than inventing selected fields. These limits,

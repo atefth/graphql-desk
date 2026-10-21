@@ -1636,6 +1636,7 @@ asyncio.run(async_build())
         source = (
             (
                 "from typing import TYPE_CHECKING, TypeVar\n"
+                "from collections.abc import Sequence\n"
                 "from typing_extensions import assert_type\n"
                 "from graphql_desk import "
                 "TypedDocument, read_fragment, unsafe_read_result\n"
@@ -1681,6 +1682,10 @@ asyncio.run(async_build())
                 "data: BookFieldsResult = {'title':'x'}\n"
                 "assert read_book_fields(data) is data\n"
                 "assert read_fragment(book_fields, data) is data\n"
+                "nullable_data: list[BookFieldsResult | None] = [data, None]\n"
+                "assert_type(read_book_fields(nullable_data), "
+                "Sequence[BookFieldsResult | None])\n"
+                "assert read_book_fields(nullable_data) is nullable_data\n"
                 "fixture: BookQueryFixtureInput={'book':{'id':'1','title':99}}\n"
                 "if not TYPE_CHECKING:\n"
                 " assert unsafe_read_result(book_query,fixture) is fixture\n"

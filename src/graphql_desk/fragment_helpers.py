@@ -192,6 +192,8 @@ def render_fragment_helpers(
         "__graphql_desk_ReadOnly",
         "__graphql_desk_TypedDict",
         "__graphql_desk_FragmentAbsent",
+        "__graphql_desk_FragmentExtra",
+        "__graphql_desk_TypeVar",
         "__graphql_desk_identity_fragment",
     }
     if (generated_names | imported_names) & set(identifiers):
@@ -215,6 +217,10 @@ def render_fragment_helpers(
         imports += (
             "from graphql_desk.fragment_helpers import "
             "FragmentAbsent as __graphql_desk_FragmentAbsent\n"
+            "from typing import TypeVar as __graphql_desk_TypeVar\n"
+            "__graphql_desk_FragmentExtra = __graphql_desk_TypeVar("
+            "'__graphql_desk_FragmentExtra', "
+            "bound=__graphql_desk_FragmentAbsent | None)\n"
         )
     scalar: list[tuple[str, str]] = []
     empty = "__graphql_desk_FragmentAbsent"
@@ -264,13 +270,15 @@ def render_fragment_helpers(
         for input_, output in narrowed
     )
     signatures.append((f"{sequence}[{raw}]", f"{sequence}[{result}]"))
+    # shortcut: nullable arrays retain all typename alternatives; refine when
+    # checker-valid overloads can exclude their shared all-None input.
     if absence:
-        raw += f" | {empty}"
-        result += f" | {empty}"
-        signatures.append((f"{sequence}[{raw}]", f"{sequence}[{result}]"))
-    # shortcut: nullable arrays retain all result/absence alternatives; refine
-    # when checker-valid overloads can exclude their shared all-None input.
-    signatures.append((f"{sequence}[{raw} | None]", f"{sequence}[{result} | None]"))
+        extra = "__graphql_desk_FragmentExtra"
+        signatures.append(
+            (f"{sequence}[{raw} | {extra}]", f"{sequence}[{result} | {extra}]")
+        )
+    else:
+        signatures.append((f"{sequence}[{raw} | None]", f"{sequence}[{result} | None]"))
     functions = "\n" + "".join(
         "@__graphql_desk_overload\n"
         f"def {function_name}(data: {input_}) -> {output}: ...\n"
