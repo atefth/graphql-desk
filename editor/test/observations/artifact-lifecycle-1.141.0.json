@@ -1,0 +1,27 @@
+{
+  "host": "1.141.0",
+  "suite": "factoryArtifacts",
+  "scope": "Selected lifecycle observations; broader live typing and durable runtime/stub pair recovery remain open.",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "lifecycle": {
+    "sourceUndoRedoCloseRenameDelete": true,
+    "foreignDirtyGeneratedBufferPreserved": true,
+    "runtimeStubPathChange": true,
+    "externalRootConflictPreserved": true,
+    "ownedArtifactsRemoved": true,
+    "settingsPreserved": true,
+    "userConfigurationPreserved": true,
+    "userFilesUntouched": true
+  },
+  "unaffectedConsumerExpectedHover": "String",
+  "outcome": "generated-factory-artifacts-observed",
+  "priorConcurrentAttempt": {
+    "outcome": "generated-factory-artifacts-failed",
+    "failedCheck": "nullable output and Pylance refresh from GraphQL edit",
+    "sourceUndoRedoCloseRenameDelete": true,
+    "recheck": "Passed the unchanged assertions when rerun in isolation; edit-storm and restart reliability remain unproved."
+  }
+}

@@ -52,7 +52,7 @@ test("rejects stale work, dirty aliases and foreign artifacts without overwritin
   assert.equal(await handle.publish(original, () => false), false);
   assert.deepEqual(fs.readFileSync(file), before);
   f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(file), isDirty: true });
-  await assert.rejects(handle.publish(original, () => true), /changed externally/);
+  await assert.rejects(handle.publish(original, () => true), /user edits/);
   f.vscode.workspace.textDocuments.length = 0;
   fs.writeFileSync(file, "user bytes");
   await assert.rejects(handle.cleanup(), /changed externally/);
@@ -87,4 +87,162 @@ test("an empty fresh generation removes only this manager's artifacts", async t 
   assert.deepEqual(fs.readdirSync(f.root), ["preexisting.txt"]);
   assert.equal(fs.readFileSync(path.join(f.root, "preexisting.txt"), "utf8"), "keep");
   await handle.cleanup();
+});
+
+test("dirty and associated untitled destinations are refused before creating any output", async t => {
+  for (const scheme of ["file", "untitled"]) {
+    const f = fixture(t);
+    const file = path.join(f.root, "graphql_desk_generated", "default.pyi");
+    const uri = { ...f.vscode.Uri.file(file), scheme, toString: () => `${scheme}:${file}` };
+    const document = { uri, isDirty: true, version: 7, getText: () => "user text" };
+    f.vscode.workspace.textDocuments.push(document);
+    assert.throws(() => f.make(original), /user edits/);
+    assert.deepEqual(fs.readdirSync(f.root), ["preexisting.txt"]);
+    assert.equal(document.version, 7);
+    assert.equal(document.getText(), "user text");
+    assert.equal(document.isDirty, true);
+  }
+});
+
+test("new destinations and staging files are checked again immediately before replacement", async t => {
+  for (const destination of ["new", "staged"]) {
+    const f = fixture(t);
+    const handle = f.make(original);
+    const base = path.join(f.root, "graphql_desk_generated");
+    const next = [...original, { relative_path: "graphql_desk_generated/nested/new.pyi", text: "new: int\n" }];
+    const file = path.join(base, "nested", "new.pyi");
+    let checks = 0;
+    let edited;
+    await assert.rejects(handle.publish(next, () => {
+      if (++checks === 2) {
+        edited = destination === "new" ? file : path.join(path.dirname(file), fs.readdirSync(path.dirname(file)).find(name => name.endsWith(".tmp")));
+        f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(edited), isDirty: true });
+      }
+      return true;
+    }), /user edits/);
+    assert.equal(fs.existsSync(file), false);
+    if (destination === "staged") assert.match(fs.readFileSync(edited, "utf8"), /new: int/);
+    for (const artifact of original) assert.ok(fs.readFileSync(path.join(f.root, artifact.relative_path), "utf8").endsWith(artifact.text));
+  }
+});
+
+test("failed publication never rolls back over a dirty buffer or a changed parent", async t => {
+  for (const mutation of ["dirty", "parent", "trust"]) {
+    const f = fixture(t);
+    const handle = f.make(original);
+    const base = path.join(f.root, "graphql_desk_generated");
+    const file = path.join(base, "default.pyi");
+    const before = fs.readFileSync(file);
+    const rename = fs.renameSync;
+    let replacements = 0;
+    fs.renameSync = (...args) => {
+      if (++replacements === 2) {
+        if (mutation === "dirty") f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(file), isDirty: true });
+        if (mutation === "trust") f.vscode.workspace.isTrusted = false;
+        if (mutation === "parent") {
+          rename(base, `${base}-old`);
+          fs.mkdirSync(base);
+          fs.writeFileSync(file, "foreign");
+        }
+        throw new Error("injected replacement failure");
+      }
+      return rename(...args);
+    };
+    try { await assert.rejects(handle.publish(original.map(item => ({ ...item, text: "changed\n" })), () => true), /injected/); }
+    finally { fs.renameSync = rename; }
+    if (mutation === "parent") assert.equal(fs.readFileSync(file, "utf8"), "foreign");
+    else {
+      assert.notDeepEqual(fs.readFileSync(file), before, "rollback must preserve the bytes associated with the newly dirty/untrusted output");
+      assert.match(fs.readFileSync(file, "utf8"), /changed/);
+    }
+  }
+});
+
+test("partial initialization removes only unchanged own bytes and preserves dirty or truncated writes", t => {
+  for (const mutation of ["failure", "dirty", "truncated"]) {
+    const f = fixture(t);
+    const file = path.join(f.root, "graphql_desk_generated", "default.pyi");
+    const sync = fs.fsyncSync;
+    fs.fsyncSync = () => {
+      if (mutation === "dirty") f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(file), isDirty: true });
+      if (mutation === "truncated") fs.truncateSync(file, 3);
+      throw new Error("injected sync failure");
+    };
+    try { assert.throws(() => f.make(original), /injected/); }
+    finally { fs.fsyncSync = sync; }
+    if (mutation === "failure") assert.deepEqual(fs.readdirSync(f.root), ["preexisting.txt"]);
+    if (mutation === "dirty") assert.match(fs.readFileSync(file, "utf8"), /selected: str/);
+    if (mutation === "truncated") assert.equal(fs.readFileSync(file, "utf8"), "# G");
+  }
+});
+
+test("publication queues serialize and teardown rejects queued work", async t => {
+  const f = fixture(t);
+  const handle = f.make(original);
+  const first = original.map(item => ({ ...item, text: "first\n" }));
+  const second = original.map(item => ({ ...item, text: "second\n" }));
+  assert.deepEqual(await Promise.all([handle.publish(first, () => true), handle.publish(second, () => true)]), [true, true]);
+  const file = path.join(f.root, "graphql_desk_generated", "default.pyi");
+  assert.match(fs.readFileSync(file, "utf8"), /second/);
+  const pending = handle.publish(original, () => true);
+  const cleanup = handle.cleanup();
+  assert.equal(await pending, false);
+  await cleanup;
+  await handle.cleanup();
+  assert.deepEqual(fs.readdirSync(f.root), ["preexisting.txt"]);
+});
+
+test("failed obsolete-file removal cannot recreate a newly dirty destination", async t => {
+  const f = fixture(t);
+  const handle = f.make(original);
+  const file = path.join(f.root, "graphql_desk_generated", "default.pyi");
+  const unlink = fs.unlinkSync;
+  let removals = 0;
+  fs.unlinkSync = target => {
+    if (++removals === 2) {
+      f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(file), isDirty: true });
+      throw new Error("injected deletion failure");
+    }
+    return unlink(target);
+  };
+  try { await assert.rejects(handle.publish([], () => true), /injected deletion/); }
+  finally { fs.unlinkSync = unlink; }
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(f.vscode.workspace.textDocuments[0].isDirty, true);
+  assert.ok(fs.readFileSync(path.join(f.root, "graphql_desk_generated", "default_ast.pyi"), "utf8").endsWith(original[1].text));
+});
+
+test("a generation superseded during replacement restores the previous complete owned files", async t => {
+  const f = fixture(t);
+  const handle = f.make(original);
+  const base = path.join(f.root, "graphql_desk_generated");
+  const before = original.map(item => fs.readFileSync(path.join(f.root, item.relative_path)));
+  let checks = 0;
+  await assert.rejects(handle.publish(original.map(item => ({ ...item, text: "changed\n" })), () => ++checks < 3), /Superseded/);
+  original.forEach((item, index) => assert.deepEqual(fs.readFileSync(path.join(f.root, item.relative_path)), before[index]));
+  assert.deepEqual(fs.readdirSync(base).sort(), ["default.pyi", "default_ast.pyi"]);
+});
+
+test("replacement inodes and non-files are rejected without reading foreign content", async t => {
+  for (const replacement of ["file", "directory"]) {
+    const f = fixture(t);
+    const handle = f.make(original);
+    const file = path.join(f.root, "graphql_desk_generated", "default.pyi");
+    fs.renameSync(file, path.join(f.root, "previous.pyi"));
+    if (replacement === "file") fs.writeFileSync(file, "foreign content");
+    else fs.mkdirSync(file);
+    const read = fs.readFileSync;
+    let foreignReads = 0;
+    fs.readFileSync = (target, ...options) => {
+      if (target === file) { foreignReads += 1; throw new Error("foreign content was read"); }
+      return read(target, ...options);
+    };
+    try {
+      await assert.rejects(handle.publish(original, () => true), /changed externally/);
+      await assert.rejects(handle.cleanup(), /changed externally/);
+      assert.equal(foreignReads, 0);
+    } finally { fs.readFileSync = read; }
+    if (replacement === "file") assert.equal(fs.readFileSync(file, "utf8"), "foreign content");
+    else assert.deepEqual(fs.readdirSync(file), []);
+  }
 });

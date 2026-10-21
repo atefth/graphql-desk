@@ -200,7 +200,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const candidates = new Set(found.filter(uri => uri.scheme === "file").map(uri => canonical(uri.fsPath)));
     for (const document of documents) {
       const filename = localPath(document);
-      if (filename.endsWith(".py") && inside(state.root, filename)) candidates.add(filename);
+      // VS Code can retain a clean document after its backing file was renamed or deleted.
+      if (filename.endsWith(".py") && inside(state.root, filename) &&
+          (document.isDirty || document.uri.scheme === "untitled")) candidates.add(filename);
     }
     const allowed = new Set(candidates);
     for (const filename of candidates) {

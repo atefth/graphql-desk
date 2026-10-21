@@ -11,6 +11,7 @@ const { createAnalysisController } = require("../src/analysisController");
 const { createAnalysisWorker } = require("../src/analysisWorker");
 const { createLanguageFeatures } = require("../src/languageFeatures");
 const { createHighlighting } = require("../src/highlighting");
+const { createOwnedAnalysisArtifacts } = require("../src/ownedAnalysisArtifacts");
 const python = process.env.GRAPHQL_DESK_PYTHON ?? path.resolve(__dirname, "../../.venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
 const realTimeout = setTimeout;
 
@@ -121,6 +122,46 @@ test("stale artifact reply is a no-publish result and the worker remains usable"
   assert.ok(await controller.analyze(snapshot), "a stale artifact response must not kill the worker");
   assert.equal(requests.filter(operation => operation === "artifacts").length, 1);
   assert.ok(requests.filter(operation => operation === "analyze").length >= 2, "cleared stale analysis is rebuilt");
+});
+
+test("closed-source rename and deletion replace only owned obsolete companion artifacts", async t => {
+  const fixture = await setup(t);
+  const controller = createAnalysisController(fixture.vscode);
+  t.after(() => controller.dispose());
+  const dependency = path.join(fixture.root, "dependency.py");
+  const renamed = path.join(fixture.root, "renamed.py");
+  const source = 'from graphql_desk_generated.default import graphql\ndoc=graphql("query Dependency { title }")\n';
+  await fs.writeFile(dependency, source);
+  fixture.document("dependency.py", source);
+  fixture.candidates(["main.py", "dependency.py"]);
+  const snapshot = controller.snapshot(fixture.main);
+  const initial = await controller.artifacts(snapshot);
+  assert.ok(initial);
+  const stubs = path.join(fixture.root, "stubs");
+  await fs.mkdir(stubs);
+  const stubFiles = result => result.projects.flatMap(project => project.files.filter(file => file.relative_path.endsWith(".pyi")));
+  const owned = createOwnedAnalysisArtifacts(fixture.vscode, fixture.root, stubs, "graphql_desk_generated", stubFiles(initial));
+  const alias = name => path.join(stubs, "graphql_desk_generated", "sources", `${name}.pyi`);
+  await fs.access(alias("dependency"));
+  await fs.rename(dependency, renamed);
+  fixture.candidates(["main.py", "renamed.py"]);
+  fixture.watchers.find(watcher => watcher.pattern.pattern === "**/*").fire(Uri.file(dependency));
+  const next = await controller.artifacts(snapshot);
+  assert.ok(next);
+  assert.equal(initial.isCurrent(), false);
+  await owned.publish(stubFiles(next), next.isCurrent);
+  await fs.access(alias("renamed"));
+  await assert.rejects(fs.access(alias("dependency")), { code: "ENOENT" });
+  fixture.document("renamed.py", source);
+  await fs.unlink(renamed);
+  fixture.candidates(["main.py"]);
+  fixture.watchers.find(watcher => watcher.pattern.pattern === "**/*").fire(Uri.file(renamed));
+  const removed = await controller.artifacts(snapshot);
+  assert.ok(removed);
+  await owned.publish(stubFiles(removed), removed.isCurrent);
+  await assert.rejects(fs.access(alias("renamed")), { code: "ENOENT" });
+  assert.doesNotMatch(await fs.readFile(path.join(stubs, "graphql_desk_generated", "default.pyi"), "utf8"), /query Dependency/);
+  await owned.cleanup();
 });
 
 test("real configured factory capture highlights incomplete Python lexically and repairs without semantic promotion", async t => {

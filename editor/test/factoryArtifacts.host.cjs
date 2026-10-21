@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const vscode = require("vscode");
 const fs = require("node:fs/promises");
+const { createOwnedAnalysisArtifacts } = require("../src/ownedAnalysisArtifacts");
 
 async function until(check, label, milliseconds = 30000) {
   const deadline = Date.now() + milliseconds;
@@ -113,6 +114,46 @@ exports.run = async () => {
     restoreSource.replace(consumer.uri, new vscode.Range(consumer.positionAt(0), consumer.positionAt(consumer.getText().length)), originalSource);
     assert.equal(await vscode.workspace.applyEdit(restoreSource), true);
     assert.ok(await until(async () => /String/.test(await hover(8, 2)) && !/None/.test(await hover(8, 2)), "restored operation republishes its original type"));
+    const lifecycleUri = vscode.Uri.file(path.join(workspace, "lifecycle_source.py"));
+    const renamedUri = vscode.Uri.file(path.join(workspace, "lifecycle_renamed.py"));
+    const lifecycleSource = "from graphql_desk_generated.default import graphql\ndoc = graphql('query Lifecycle { selected }')\n";
+    await fs.writeFile(lifecycleUri.fsPath, lifecycleSource);
+    const sourceAlias = name => path.join(stubRoot, "graphql_desk_generated", "sources", `${name}.pyi`);
+    const exists = file => fs.access(file).then(() => true, () => false);
+    const factoryText = () => fs.readFile(path.join(stubRoot, "graphql_desk_generated", "default.pyi"), "utf8").catch(() => "");
+    assert.ok(await until(async () => await exists(sourceAlias("lifecycle_source")) && (await factoryText()).includes("query Lifecycle { selected }"), "new closed source publishes its companion"));
+    const lifecycleDocument = await vscode.workspace.openTextDocument(lifecycleUri);
+    await vscode.window.showTextDocument(lifecycleDocument, { preview: false });
+    const lifecycleEdit = new vscode.WorkspaceEdit();
+    lifecycleEdit.replace(lifecycleUri, new vscode.Range(lifecycleDocument.positionAt(0), lifecycleDocument.positionAt(lifecycleSource.length)), lifecycleSource.replace("{ selected }", "{ count(limit: 1) }"));
+    assert.equal(await vscode.workspace.applyEdit(lifecycleEdit), true);
+    assert.ok(await until(async () => (await factoryText()).includes("query Lifecycle { count(limit: 1) }"), "unsaved companion operation update"));
+    await vscode.commands.executeCommand("undo");
+    assert.ok(await until(async () => (await factoryText()).includes("query Lifecycle { selected }"), "undo restores the captured operation"));
+    await vscode.commands.executeCommand("redo");
+    assert.ok(await until(async () => (await factoryText()).includes("query Lifecycle { count(limit: 1) }"), "redo restores the new captured operation"));
+    await vscode.commands.executeCommand("undo");
+    assert.equal(lifecycleDocument.getText(), lifecycleSource);
+    assert.equal(lifecycleDocument.isDirty, false);
+    assert.equal(await fs.readFile(lifecycleUri.fsPath, "utf8"), lifecycleSource);
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    await vscode.window.showTextDocument(consumer, { preview: false });
+    assert.ok(await until(async () => (await factoryText()).includes("query Lifecycle { selected }"), "source close keeps the saved operation"));
+    await fs.writeFile(lifecycleUri.fsPath, lifecycleSource.replace("{ selected }", "{ count(limit: 1) }"));
+    assert.ok(await until(async () => (await factoryText()).includes("query Lifecycle { count(limit: 1) }"), "closed source disk edit refreshes its operation"));
+    await fs.rename(lifecycleUri.fsPath, renamedUri.fsPath);
+    const renamed = await until(async () => await exists(sourceAlias("lifecycle_renamed")) && !await exists(sourceAlias("lifecycle_source")), "rename replaces only the owned obsolete companion");
+    if (!renamed) results.lifecycle.renameProbe = {
+      documents: vscode.workspace.textDocuments.map(document => ({ uri: document.uri.toString(), dirty: document.isDirty, closed: document.isClosed })),
+      aliases: await fs.readdir(path.dirname(sourceAlias("lifecycle_source"))),
+      factory: await factoryText(),
+    };
+    assert.ok(renamed);
+    assert.ok(await until(async () => /String/.test(await hover(8, 2)), "unaffected consumer converges after source rename"));
+    await fs.unlink(renamedUri.fsPath);
+    assert.ok(await until(async () => !await exists(sourceAlias("lifecycle_renamed")) && !(await factoryText()).includes("query Lifecycle"), "deletion removes the owned companion and overload"));
+    assert.ok(await until(async () => /String/.test(await hover(8, 2)), "unaffected consumer converges after source deletion"));
+    results.lifecycle.sourceUndoRedoCloseRenameDelete = true;
     const settingsPath = path.join(workspace, ".vscode", "settings.json");
     const settings = JSON.parse(await fs.readFile(settingsPath, "utf8"));
     assert.equal(settings["python.analysis.stubPath"], ".graphql-desk/typings");
@@ -139,8 +180,30 @@ exports.run = async () => {
       const stub = await fs.readFile(path.join(stubRoot, "graphql_desk_generated", "_documents", "default", "d0.pyi"), "utf8").catch(() => "");
       return stub.includes("'selected': 'String | None'") && (await hover(8, 2)).includes("None") && diagnostics().some(item => item.range.start.line === 10);
     }, "nullable output and Pylance refresh from GraphQL edit");
+    if (!results.pylance.nullableRefresh) results.lifecycle.nullableProbe = {
+      stub: await fs.readFile(path.join(stubRoot, "graphql_desk_generated", "_documents", "default", "d0.pyi"), "utf8").catch(() => null),
+      hover: await hover(8, 2),
+      diagnostics: diagnostics().map(item => ({ line: item.range.start.line, message: item.message })),
+      stubPath: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath"),
+    };
     assert.ok(results.pylance.nullableRefresh);
     results.lifecycle.nullableArtifactsPublished = true;
+    const dirtyFiles = [{ relative_path: "dirty_fixture/default.pyi", text: "value: str\n" }];
+    const dirtyHandle = createOwnedAnalysisArtifacts(vscode, workspace, stubRoot, "dirty_fixture", dirtyFiles);
+    const dirtyUri = vscode.Uri.file(path.join(stubRoot, "dirty_fixture", "default.pyi"));
+    const dirtyDocument = await vscode.workspace.openTextDocument(dirtyUri);
+    const dirtyEditor = await vscode.window.showTextDocument(dirtyDocument, { preview: false });
+    const dirtyDisk = await fs.readFile(dirtyUri.fsPath);
+    assert.equal(await dirtyEditor.edit(edit => edit.insert(new vscode.Position(0, 0), "# user edit\n")), true);
+    const dirtyState = { text: dirtyDocument.getText(), version: dirtyDocument.version };
+    await assert.rejects(dirtyHandle.publish(dirtyFiles, () => true), /user edits/);
+    await assert.rejects(dirtyHandle.cleanup(), /user edits/);
+    assert.equal(dirtyDocument.getText(), dirtyState.text);
+    assert.equal(dirtyDocument.version, dirtyState.version);
+    assert.equal(dirtyDocument.isDirty, true);
+    assert.deepEqual(await fs.readFile(dirtyUri.fsPath), dirtyDisk);
+    results.lifecycle.foreignDirtyGeneratedBufferPreserved = true;
+    await vscode.window.showTextDocument(consumer, { preview: false });
     const externalRoot = path.join(path.dirname(workspace), "external-stubs");
     await fs.mkdir(externalRoot, { recursive: true });
     await fs.writeFile(path.join(externalRoot, "keep.txt"), "preserve foreign root");
