@@ -1,21 +1,58 @@
 "use strict";
 const assert = require("node:assert/strict");
+const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { runTests, runVSCodeCommand } = require("@vscode/test-electron");
+
+function generatedFactoryFiles(python, workspace, sourcePath) {
+  const base = { workspace, candidates: [sourcePath], buffers: [], documents: [], editor_fallback: null };
+  const script = [
+    "import json, sys",
+    "from graphql_desk.editor_worker import EditorWorker",
+    "base = json.loads(sys.argv[1])",
+    "worker = EditorWorker()",
+    "prepared = worker.handle({'op': 'prepare', **base, 'remote_revisions': []})",
+    "assert prepared['ok'], prepared",
+    "request = {**base, 'id': prepared['id'], 'schema_buffers': [], 'remote_revisions': []}",
+    "analyzed = worker.handle({'op': 'analyze', **request})",
+    "assert analyzed['ok'], analyzed",
+    "print(json.dumps(worker.handle({'op': 'artifacts', **request})))",
+  ].join("\n");
+  function generate() {
+    const child = spawnSync(python, ["-c", script, JSON.stringify(base)], {
+      cwd: workspace,
+      env: { ...process.env, PYTHONPATH: path.resolve(__dirname, "..", "..", "src") },
+      encoding: "utf8",
+    });
+    assert.equal(child.status, 0, child.stderr);
+    const result = JSON.parse(child.stdout);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const files = result.projects[0].files.filter(file => file.relative_path.endsWith(".pyi"));
+    assert.ok(files.length > 1, "The host proof needs the real multi-file generator output");
+    return files;
+  }
+  const initial = generate();
+  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), "type Query { selected: String count(limit: Int!): Int! }\n");
+  const nullable = generate();
+  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), "type Query { selected: String! count(limit: Int!): Int! }\n");
+  return { initial, nullable };
+}
 
 async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "discovery", "activation", "ownedAnalysis"].includes(suite), "Choose a known isolated suite");
+  assert.ok(["features", "discovery", "activation", "ownedAnalysis", "factoryArtifacts"].includes(suite), "Choose a known isolated suite");
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
   const extensions = path.resolve(__dirname, "..", ".vscode-test", `features-${version}`, "extensions");
   const result = path.join(temporary, "result.json");
-  const stubRoot = path.join(workspace, "owned_analysis_stubs");
+  const artifacts = path.join(temporary, "artifacts.json");
+  const stubRoot = suite === "factoryArtifacts" ? path.join(workspace, ".graphql-desk", "typings") : path.join(workspace, "owned_analysis_stubs");
   const python = process.env.GRAPHQL_DESK_PYTHON || path.resolve(__dirname, "..", "..", ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
   assert.ok(path.isAbsolute(python), "Choose an absolute trusted Python interpreter");
   await fs.mkdir(path.join(workspace, ".vscode"), { recursive: true });
@@ -25,10 +62,11 @@ async function main() {
     "telemetry.telemetryLevel": "off",
     "files.autoSave": "off",
     "python.defaultInterpreterPath": python,
-    "graphqlDesk.pythonPath": "",
+    "graphqlDesk.pythonPath": suite === "factoryArtifacts" ? python : "",
     "python.experiments.enabled": false,
     "python.analysis.aiHoverSummaries": false,
     ...(suite === "ownedAnalysis" ? { "python.analysis.typeCheckingMode": "strict", "python.analysis.stubPath": stubRoot } : {}),
+    ...(suite === "factoryArtifacts" ? { "python.analysis.typeCheckingMode": "strict" } : {}),
   }));
   if (suite === "ownedAnalysis") {
     await fs.mkdir(stubRoot);
@@ -40,6 +78,34 @@ async function main() {
       "user.py": "value = 1\n",
     };
     await Promise.all(Object.entries(files).map(([name, text]) => fs.writeFile(path.join(workspace, name), text)));
+  }
+  if (suite === "factoryArtifacts") {
+    await fs.mkdir(path.join(workspace, ".graphql-desk"));
+    await fs.writeFile(path.join(workspace, ".graphql-desk", "keep.txt"), "preserve this user file");
+    const sourcePath = path.join(workspace, "consumer.py");
+    const source = [
+      "from graphql_desk import TypedDocument",
+      "from graphql_desk_generated.default import graphql",
+      "from typing import TypeVar",
+      "R = TypeVar('R')",
+      "V = TypeVar('V')",
+      "def execute(document: TypedDocument[R, V], variables: V) -> R: ...",
+      "doc = graphql('query Pick($limit: Int!) { selected count(limit: $limit) }')",
+      "result = execute(doc, {'limit': 1})",
+      "selected = result['selected']",
+      "count = result['count']",
+      "needs_str: str = selected",
+      "wrong = execute(doc, {'limit': 'bad'})",
+      "",
+    ].join("\n");
+    await Promise.all([
+      fs.writeFile(path.join(workspace, "pyproject.toml"), '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n'),
+      fs.writeFile(path.join(workspace, "schema.graphql"), "type Query { selected: String! count(limit: Int!): Int! }\n"),
+      fs.writeFile(sourcePath, source),
+    ]);
+    const generated = generatedFactoryFiles(python, workspace, sourcePath);
+    await fs.writeFile(artifacts, JSON.stringify(generated));
+    console.log(`Captured ${generated.initial.length} initial and ${generated.nullable.length} nullable factory stub files.`);
   }
   const isolation = [`--user-data-dir=${profile}`, `--extensions-dir=${extensions}`];
   for (const extension of ["ms-python.python@2026.10.0", "ms-python.vscode-pylance@2026.4.1"]) {
@@ -55,11 +121,23 @@ async function main() {
       GRAPHQL_DESK_PYTHON: python,
       GRAPHQL_DESK_HOST_VERSION: version,
       GRAPHQL_DESK_STUB_ROOT: stubRoot,
+      GRAPHQL_DESK_ARTIFACTS_PATH: artifacts,
     },
     launchArgs: [workspace, ...isolation, "--disable-updates", "--disable-telemetry", "--skip-welcome", "--skip-release-notes", "--disable-workspace-trust"],
   });
   const observed = JSON.parse(await fs.readFile(result, "utf8"));
-  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : `read-only-${suite}-observed`);
+  if (suite === "factoryArtifacts") {
+    await assert.rejects(fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated")), { code: "ENOENT" }, "Extension shutdown must remove only its owned generated package");
+    await assert.rejects(fs.access(path.join(workspace, ".graphql-desk", "typings", "graphql_desk_generated")), { code: "ENOENT" }, "Reconfiguring stubPath must remove only the old owned package");
+    assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
+    const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+    assert.equal(settings["python.analysis.stubPath"], observed.lifecycle.configuredStubPath);
+    assert.equal(settings["files.autoSave"], "off");
+    observed.lifecycle.ownedArtifactsRemoved = true;
+    observed.lifecycle.userConfigurationPreserved = true;
+    await fs.writeFile(result, JSON.stringify(observed, null, 2));
+  }
+  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : `read-only-${suite}-observed`);
   console.log(`${suite} evidence: ${result}`);
 }
 

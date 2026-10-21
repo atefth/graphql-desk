@@ -42,7 +42,7 @@
     "vscode": "^1.141.0"
   },
   "scripts": {
-    "test": "node --test test/languageFeatures.test.cjs test/highlighting.test.cjs test/analysisWorker.test.cjs test/analysisController.test.cjs test/ownedAnalysisStub.test.cjs",
+    "test": "node --test test/languageFeatures.test.cjs test/highlighting.test.cjs test/analysisWorker.test.cjs test/analysisController.test.cjs test/ownedAnalysisStub.test.cjs test/ownedAnalysisArtifacts.test.cjs test/managedStubPath.test.cjs",
     "test:host": "node test/run-host.cjs"
   },
   "dependencies": {

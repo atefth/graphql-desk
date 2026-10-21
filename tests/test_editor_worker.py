@@ -753,6 +753,45 @@ if TYPE_CHECKING:
             ["missing-schema-context"],
         )
 
+    def test_factory_artifacts_generate_all_named_schemas_for_one_project(self) -> None:
+        (self.base / "alpha.graphql").write_text(
+            "type Query { alpha: String! }", encoding="utf8"
+        )
+        (self.base / "beta.graphql").write_text(
+            "type Query { beta: Int! }", encoding="utf8"
+        )
+        self.config.write_text(
+            "[tool.graphql-desk]\n"
+            '[[tool.graphql-desk.schemas]]\nname="alpha"\n'
+            'schema="../alpha.graphql"\n'
+            'schema_output="graphql_desk_generated/alpha.pyi"\n'
+            '[[tool.graphql-desk.schemas]]\nname="beta"\n'
+            'schema="../beta.graphql"\n'
+            'schema_output="graphql_desk_generated/beta.pyi"\n',
+            encoding="utf8",
+        )
+        self.source.write_text(
+            "from graphql_desk_generated.alpha import graphql as alpha\n"
+            "from graphql_desk_generated.beta import graphql as beta\n"
+            'a=alpha("{ alpha }")\nb=beta("{ beta }")\n',
+            encoding="utf8",
+        )
+        capture = self.capture()
+        identity = self.prepare(capture)
+        analyzed = self.analyze(capture, identity)
+        self.assertTrue(analyzed["ok"], analyzed)
+        result = self.worker.handle(
+            {"op": "artifacts", **capture, "id": identity, "schema_buffers": []}
+        )
+        self.assertTrue(result["ok"], result)
+        projects = cast(list[dict[str, object]], result["projects"])
+        self.assertEqual(len(projects), 1)
+        files = cast(list[dict[str, object]], projects[0]["files"])
+        paths = {cast(str, file["relative_path"]) for file in files}
+        self.assertIn("graphql_desk_generated/alpha.pyi", paths)
+        self.assertIn("graphql_desk_generated/beta.pyi", paths)
+        self.assertEqual(result["unavailable_schemas"], ())
+
     def test_dirty_external_sdl_and_final_recheck(self) -> None:
         capture = self.capture()
         capture["documents"] = [self.document(self.schema)]

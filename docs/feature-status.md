@@ -40,7 +40,7 @@ Merged #111 client fixtures preserve native sync/async/subscription behavior. #1
 
 Merged #114/#117/#118 provide the pure analysis bridge, finite read-only acquisition and GLS providers. The provider host suite passed in VS Code1.141.0 and1.142.0 with pinned Python/Pylance extensions, including native Python coexistence and unchanged source files. It directly registers providers; the bounded Python worker/Node connection is separate from production extension activation, a discovery controller and automatic analysis, now supplied by #148; complete lifecycle/discovery acceptance remains open. #122 records successful two-host discovery fixtures, including explicit unsaved-buffer union and symlink checks; it does not prove watcher completeness or full enumeration.
 
-Merged #124 adds incremental parsing and reuse of unchanged project semantic results; #125 retains exact unchanged disk-source versions across acquisition generations. Counter and cold-result comparisons establish bounded cache correctness, not measured PERF-01 acceptance. Merged #126 adds local schema-path preflight, #127 explicit analyzer reuse, #128 a read-only Python worker and #129 its bounded Node connection. The connection itself provides no activation; #148 supplies read-only activation and automatic finite capture/analysis. VSIX release and automatic generated-file publication remain absent; the separate owned-analysis primitive is not wired into activation. Schemas and fragment indexes still rebuild; complete incremental freshness and performance acceptance remain open.
+Merged #124 adds incremental parsing and reuse of unchanged project semantic results; #125 retains exact unchanged disk-source versions across acquisition generations. Counter and cold-result comparisons establish bounded cache correctness, not measured PERF-01 acceptance. Merged #126 adds local schema-path preflight, #127 explicit analyzer reuse, #128 a read-only Python worker and #129 its bounded Node connection. The connection itself provides no activation; #148 supplies read-only activation and automatic finite capture/analysis. The managed artifact adapter now connects activation to the worker, but VSIX release, broad lifecycle acceptance and performance evidence remain open. Schemas and fragment indexes still rebuild.
 
 Merged #143/#147 add explicit remote refresh and safe retention across source captures;
 #148 activates the trusted read-only controller with one active/one pending job,
@@ -62,7 +62,7 @@ changes invalidate affected workers while explicit overrides remain independent.
 Both pinned hosts verify the selected executable with a blank GraphQL override.
 No PATH/default-setting guess or new dependency is introduced.
 
-#23/#24/#38 live typing/lifecycle work and acceptance gate #42 remain open. The user has authorized managed workspace-local generated stubs; safe owned publication and complete lifecycle evidence remain required. Earlier in-memory overlay restoration left the stub dirty and Save All could persist it. Primary virtual-document research was negative; seeded local owned-disk research was positive only within its measured fixture. The earlier unchanged-disk policy is superseded for owned generated analysis files. Preserve every pre-existing file and dirty user buffer; the production adapter and full lifecycle acceptance remain unfinished. These research outcomes neither pass the live gate nor prevent independent read-only editor work.
+#23/#24/#38 live typing/lifecycle work and acceptance gate #42 remain open. The user has authorized managed workspace-local generated stubs. The production adapter now publishes real multi-file worker output; pinned VS Code 1.141/1.142 host tests verify Pylance result/variable inference, schema nullability refresh, workspace stubPath migration, and owned-package cleanup on host shutdown while preserving unrelated settings/files. Earlier in-memory overlay restoration left the stub dirty and Save All could persist it; that route is not used. The earlier unchanged-disk policy is superseded for owned generated analysis files. Preserve every pre-existing file and dirty user buffer. Full lifecycle acceptance remains unfinished; this slice does not pass the live gate.
 
 ## Required post-live work versus optional extras
 
@@ -115,11 +115,11 @@ parameters remain conservative. Actual-source generated factory/parser fixtures 
 both strict checkers and runtime identity. Complete static-source, automatic
 attachment and live typing acceptance remain open.
 
-The managed analysis-stub primitive is independently callable, with guarded
-one-file replacement and cleanup inside a fresh package under an explicitly
-selected workspace-local stubPath root. Both pinned Windows hosts verify native
-Pylance nullable/repair/cleanup refresh, unchanged pre-existing files and dirty
-buffer preservation. Production activation/deactivation, automatic factory artifact
-attachment, restart recovery and the full lifecycle matrix remain unfinished;
-#23/#24/#38/#42 and every broad gate stay open. See
+Managed output is now wired into extension activation and the generated-artifact
+worker. The manager publishes guarded multi-file package updates under the active
+workspace-local stubPath and removes its owned package at extension shutdown.
+Both pinned Windows hosts verify result/variable inference, schema-nullability
+refresh, runtime stubPath migration and cleanup with unrelated settings/files
+preserved. Restart recovery, the full lifecycle matrix and broad typing acceptance
+remain unfinished; #23/#24/#38/#42 and every broad gate stay open. See
 [owned analysis stubs](implementation/owned-analysis-stubs.md).
