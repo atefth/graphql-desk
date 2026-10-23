@@ -69,14 +69,14 @@ function lexicalCandidates(text, factories = []) {
   const imports = new Map();
   const importedName = name => imports.set(name, (imports.get(name) ?? 0) + 1);
   for (const line of code.split(/\r\n|\r|\n/)) {
-    const from = /^\s*from\s+([_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*)\s+import\s+([_0-9A-Za-z, \t]+)\s*$/.exec(line);
+    const from = /^from\s+([_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*)\s+import\s+([_0-9A-Za-z, \t]+)\s*$/.exec(line);
     if (from) for (const entry of from[2].split(",")) {
       const match = /^\s*([_A-Za-z][_0-9A-Za-z]*)(?:\s+as\s+([_A-Za-z][_0-9A-Za-z]*))?\s*$/.exec(entry);
       if (!match) continue;
       importedName(match[2] ?? match[1]);
       if (constructors.some(item => item.module === from[1] && item.export === match[1])) callees.add(match[2] ?? match[1]);
     }
-    const imported = /^\s*import\s+([_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*)(?:\s+as\s+([_A-Za-z][_0-9A-Za-z]*))?\s*$/.exec(line);
+    const imported = /^import\s+([_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*)(?:\s+as\s+([_A-Za-z][_0-9A-Za-z]*))?\s*$/.exec(line);
     if (imported) {
       importedName(imported[2] ?? imported[1].split(".")[0]);
       for (const item of constructors) {
