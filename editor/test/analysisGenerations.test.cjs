@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 const { createAnalysisGenerations } = require("../src/analysisGenerations");
 
 function fixture(t) {
@@ -11,11 +12,17 @@ function fixture(t) {
   const root = path.join(workspace, ".graphql-desk", "typings");
   fs.mkdirSync(root, { recursive: true });
   fs.writeFileSync(path.join(root, "user.txt"), "keep");
+  const owned = new Map();
   const vscode = { Uri: { file: value => ({ scheme: "file", fsPath: value, toString: () => value }) }, workspace: {
     isTrusted: true, textDocuments: [], getWorkspaceFolder: () => ({ uri: { fsPath: workspace } }),
   } };
-  const managed = { ownsSetting: true, selectedSetting: ".graphql-desk/typings", async selectGeneration(directory, isCurrent = () => true) {
+  const managed = { ownsSetting: true, selectedSetting: ".graphql-desk/typings",
+    ownsGeneration(directory, fingerprint) { return owned.get(path.basename(directory)) === fingerprint; },
+    async recordGeneration(directory, fingerprint) { owned.set(path.basename(directory), fingerprint); return true; },
+    async forgetGeneration(directory, fingerprint) { if (owned.get(path.basename(directory)) === fingerprint) owned.delete(path.basename(directory)); return true; },
+    async selectGeneration(directory, isCurrent = () => true, verification) {
     if (isCurrent() !== true) return false;
+    if (!this.ownsGeneration(directory, verification.manifestFingerprint)) return false;
     this.selectedSetting = path.relative(workspace, directory).split(path.sep).join("/");
     return true;
   } };
@@ -46,6 +53,41 @@ test("publishes immutable complete generations and recovers the latest verified 
   assert.equal(await afterRestart.recover(restarted), true);
   assert.equal(path.resolve(f.workspace, restarted.selectedSetting), second);
   assert.equal(fs.readFileSync(path.join(f.root, "user.txt"), "utf8"), "keep");
+});
+
+test("serializes overlapping publication so stale output cannot win recovery ordering", async t => {
+  const f = fixture(t);
+  const record = f.managed.recordGeneration.bind(f.managed);
+  let entered;
+  const registrationStarted = new Promise(resolve => { entered = resolve; });
+  let release;
+  const registrationGate = new Promise(resolve => { release = resolve; });
+  let first = true;
+  f.managed.recordGeneration = async (...args) => {
+    if (first) {
+      first = false;
+      entered();
+      await registrationGate;
+    }
+    return record(...args);
+  };
+
+  let staleIsCurrent = true;
+  const stale = f.publisher.publish(files("str"), "old-analysis", () => staleIsCurrent, f.managed);
+  await registrationStarted;
+  const fresh = f.publisher.publish(files("int"), "new-analysis", () => true, f.managed);
+  staleIsCurrent = false;
+  release();
+  assert.equal(await stale, false);
+  assert.equal(await fresh, true);
+  const current = f.publisher.current(f.managed);
+  assert.equal(current.length, 2);
+  assert.equal(current[0].manifest.sequence, 2);
+  assert.equal(current[0].manifest.analysisId, "new-analysis");
+
+  f.managed.selectedSetting = ".graphql-desk/typings";
+  assert.equal(await f.publisher.recover(f.managed), true);
+  assert.equal(path.resolve(f.workspace, f.managed.selectedSetting), current[0].directory);
 });
 
 test("incomplete publication leaves the active complete generation selected", async t => {
@@ -161,7 +203,7 @@ test("duplicate paths and abandoned incomplete generations are never adopted or 
   fs.mkdirSync(path.join(partial, "graphql_desk_generated"), { recursive: true });
   const partialFile = path.join(partial, "graphql_desk_generated", "default.pyi");
   fs.writeFileSync(partialFile, "partial user-visible bytes");
-  assert.equal(f.publisher.current().length, 0);
+  assert.equal(f.publisher.current(f.managed).length, 0);
   const duplicate = files("str").get("graphql_desk_generated");
   await assert.rejects(f.publisher.publish([
     ["graphql_desk_generated", duplicate], ["graphql_desk_generated", duplicate],
@@ -171,4 +213,28 @@ test("duplicate paths and abandoned incomplete generations are never adopted or 
   assert.equal(await f.publisher.publish(files("str"), "analysis-2", () => true, f.managed), true);
   assert.equal(fs.readFileSync(partialFile, "utf8"), "partial user-visible bytes");
   assert.equal(fs.readdirSync(path.join(f.root, "generations")).length, 2);
+});
+
+test("forged complete generations without an extension ownership record are never adopted or deleted", async t => {
+  const f = fixture(t);
+  const id = "g-99-00000000-0000-0000-0000-000000000000";
+  const directory = path.join(f.root, "generations", id);
+  const artifactPath = "graphql_desk_generated/default.pyi";
+  const artifact = path.join(directory, ...artifactPath.split("/"));
+  fs.mkdirSync(path.dirname(artifact), { recursive: true });
+  const bytes = Buffer.from(`# Generated by GraphQL Desk; analysis artifact ${"a".repeat(64)}\nselected: user\n`);
+  fs.writeFileSync(artifact, bytes);
+  const digest = value => createHash("sha256").update(value).digest("hex");
+  const manifestFiles = [{ path: artifactPath, sha256: digest(bytes) }];
+  const manifest = { owner: "graphql-desk-analysis-generation", format: 1, id, sequence: 99,
+    analysisId: null, inputFingerprint: digest(Buffer.from("forged")),
+    artifactFingerprint: digest(Buffer.from(JSON.stringify(manifestFiles))), files: manifestFiles };
+  fs.writeFileSync(path.join(directory, "complete.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+
+  assert.equal(f.publisher.current(f.managed).length, 0);
+  assert.equal(await f.publisher.recover(f.managed), false);
+  assert.equal(f.managed.selectedSetting, ".graphql-desk/typings");
+  assert.equal(await f.publisher.publish(files("str"), "analysis-1", () => true, f.managed), true);
+  assert.equal(fs.readFileSync(artifact, "utf8"), bytes.toString("utf8"));
+  assert.equal(fs.existsSync(path.join(directory, "complete.json")), true);
 });

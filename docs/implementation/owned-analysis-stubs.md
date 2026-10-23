@@ -139,10 +139,16 @@ When GraphQL Desk owns the previously unset stubPath, it now stages each analysi
 under a unique generation directory. A manifest containing the generated file
 hashes is written last; only a generation whose complete manifest and files
 verify can be selected. Pylance's stubPath is the generation selector. The
-workspace setting is rotated only while its value still matches the extension's
-persisted ownership record; a user change causes GraphQL Desk to stop managing
-that setting. Explicit user-configured stub roots are never rotated and continue
-to use the protected in-place writer.
+extension also records each generation ID and manifest fingerprint in its
+workspace state. A valid-looking directory or manifest without that ownership
+record is never adopted, selected, or deleted. Publication and recovery are
+serialized so overlapping analyses cannot give stale output the newest
+generation order. The workspace setting is rotated only while its value still
+matches the extension's persisted ownership record; a user change causes
+GraphQL Desk to stop managing that setting. The manifest and artifact hashes
+are checked again after ownership persistence and immediately before the
+setting switch. Explicit user-configured stub roots are never rotated and
+continue to use the protected in-place writer.
 
 On activation, the extension scans for complete, unmodified generations and
 selects the newest valid one. Incomplete, dirty, changed, extra-file, or
@@ -156,6 +162,8 @@ Python and GraphQL Desk configuration events and all unrelated watched files sti
 invalidate analysis. The real VS Code/Pylance fixture verifies an unsaved
 cross-file fragment edit updates hover and diagnostics, then leaves the retained
 generation count unchanged after convergence without an explicit restart. The
+native tests also cover forged generation directories, rejected state writes,
+mutation during ownership persistence, and stale overlapping publication. The
 generated artifacts remain `.pyi` only in this
 slice: the full issue #37 contract also requires source/config/schema freshness
 identity and the paired runtime `.py`/`.pyi` behavior. Those requirements are

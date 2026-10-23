@@ -18,9 +18,14 @@ async function fixture(t, setting, dirty = false, settingLayer = "workspaceFolde
   const updates = [];
   const stored = new Map();
   let rejectNextUpdate = false;
+  let rejectNextStateUpdate = false;
   let delayedUpdate;
   let onStateUpdate;
-  const workspaceState = { get: key => stored.get(key), update: async (key, value) => { onStateUpdate?.(value); stored.set(key, value); } };
+  const workspaceState = { get: key => stored.get(key), update: async (key, value) => {
+    onStateUpdate?.(value);
+    if (rejectNextStateUpdate) { rejectNextStateUpdate = false; throw new Error("workspace state write failed"); }
+    stored.set(key, value);
+  } };
   const config = {
     get: (_key, fallback) => values["analysis.stubPath"] ?? fallback,
     inspect: () => ({ defaultValue: "./typings", [settingLayer]: values["analysis.stubPath"] }),
@@ -44,9 +49,15 @@ async function fixture(t, setting, dirty = false, settingLayer = "workspaceFolde
   t.after(() => fs.rm(workspace, { recursive: true, force: true }));
   return { workspace, settings, settingsPath, vscode, folder, values, updates, workspaceState,
     rejectNextUpdate() { rejectNextUpdate = true; },
+    rejectNextStateUpdate() { rejectNextStateUpdate = true; },
     delayNextUpdate() { let release; const promise = new Promise(resolve => { release = resolve; }); delayedUpdate = { promise }; return release; },
     onStateUpdate(callback) { onStateUpdate = callback; },
     stored };
+}
+
+async function ownGeneration(managed, verification) {
+  verification.manifestFingerprint ??= "a".repeat(64);
+  assert.equal(await managed.recordGeneration(verification.directory, verification.manifestFingerprint), true);
 }
 
 test("prepares an owned root without changing stubPath before a complete generation exists", async t => {
@@ -71,6 +82,7 @@ test("rotates only the extension-owned setting and restores ownership across act
   const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
   await fs.mkdir(generation);
   const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 1, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
+  await ownGeneration(first, verified);
   assert.equal(await first.selectGeneration(generation, () => true, verified), true);
   assert.equal(f.values["analysis.stubPath"], ".graphql-desk/typings/generations/g-1-00000000-0000-0000-0000-000000000000");
   const restarted = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
@@ -94,6 +106,7 @@ test("recognizes owned stubPath when VS Code stores a single-folder setting at w
   const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
   await fs.mkdir(generation);
   const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 1, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
+  await ownGeneration(managed, verified);
   assert.equal(await managed.selectGeneration(generation, () => true, verified), true);
   assert.equal(managed.stillOwnsSetting(), true);
   const restarted = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
@@ -109,12 +122,30 @@ test("rolls ownership state back when the workspace setting write fails before m
   const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
   await fs.mkdir(generation);
   const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 1, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
+  await ownGeneration(managed, verified);
   f.rejectNextUpdate();
   await assert.rejects(managed.selectGeneration(generation, () => true, verified), /settings write failed/);
   assert.equal(f.values["analysis.stubPath"], undefined);
   assert.equal(managed.selectedSetting, "");
   assert.equal(managed.stillOwnsSetting(), true);
   assert.ok([...f.stored.values()].some(value => value.current === ""), "persisted ownership must match the unchanged setting");
+});
+
+test("restores in-memory ownership when persisting the selected setting fails before mutation", async t => {
+  const f = await fixture(t, undefined);
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const generations = path.join(managed.root, "generations");
+  await fs.mkdir(generations);
+  const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
+  await fs.mkdir(generation);
+  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 1, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
+  await ownGeneration(managed, verified);
+  f.rejectNextStateUpdate();
+  await assert.rejects(managed.selectGeneration(generation, () => true, verified), /workspace state write failed/);
+  assert.equal(f.values["analysis.stubPath"], undefined);
+  assert.equal(managed.selectedSetting, "");
+  assert.equal(managed.stillOwnsSetting(), true);
+  assert.ok([...f.stored.values()].some(value => value.current === ""), "the previous ownership record remains authoritative");
 });
 
 test("serializes overlapping generation selection so the latest edit wins", async t => {
@@ -127,13 +158,17 @@ test("serializes overlapping generation selection so the latest edit wins", asyn
   await fs.mkdir(first);
   await fs.mkdir(second);
   const verified = directory => ({ directory, manifest: { owner: "graphql-desk-analysis-generation", format: 1, id: path.basename(directory), artifactFingerprint: "a" }, verify() { return this; } });
+  const firstVerification = verified(first);
+  const secondVerification = verified(second);
+  await ownGeneration(managed, firstVerification);
+  await ownGeneration(managed, secondVerification);
   let firstIsCurrent = true;
   const releaseFirstWrite = f.delayNextUpdate();
-  const oldSelection = managed.selectGeneration(first, () => firstIsCurrent, verified(first));
+  const oldSelection = managed.selectGeneration(first, () => firstIsCurrent, firstVerification);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.updates.length, 1, "the first update is waiting on the simulated slow settings write");
   firstIsCurrent = false;
-  const latestSelection = managed.selectGeneration(second, () => true, verified(second));
+  const latestSelection = managed.selectGeneration(second, () => true, secondVerification);
   releaseFirstWrite();
   assert.equal(await oldSelection, false);
   assert.equal(await latestSelection, true);
@@ -162,6 +197,8 @@ test("revalidates generation bytes immediately before selecting stubPath", async
       if (createHash("sha256").update(current).digest("hex") !== fingerprint) throw new Error("generation changed");
       return this;
     } };
+  verified.manifestFingerprint = "b".repeat(64);
+  await ownGeneration(managed, verified);
   await assert.rejects(managed.selectGeneration(generation, () => true, verified), /generation changed/);
   assert.equal(f.values["analysis.stubPath"], undefined);
   assert.equal(managed.selectedSetting, "");

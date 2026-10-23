@@ -73,7 +73,7 @@ function generationFiles(vscode, workspace, directory) {
   const fingerprint = digest(Buffer.from(JSON.stringify([...expected].map(([file, record]) => ({ path: file, sha256: digest(record.bytes) }))
     .sort((left, right) => left.path.localeCompare(right.path)))));
   if (fingerprint !== manifest.artifactFingerprint) throw new Error("Generation fingerprint mismatch");
-  return { directory, manifest, files: expected, directories, manifestBytes, manifestIdentity: stat, identity: fs.lstatSync(directory),
+  return { directory, manifest, manifestFingerprint: digest(manifestBytes), files: expected, directories, manifestBytes, manifestIdentity: stat, identity: fs.lstatSync(directory),
     verify: () => generationFiles(vscode, workspace, directory) };
 }
 
@@ -83,6 +83,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
   const root = path.resolve(managedRoot);
   if (!inside(workspace, root) || root === workspace) throw new Error("Analysis generation root must be inside its workspace");
   const generationsRoot = path.join(root, "generations");
+  let publicationQueue = Promise.resolve();
   const initialRoot = fs.lstatSync(root);
   if (initialRoot.isSymbolicLink() || !initialRoot.isDirectory()) throw new Error("Analysis generation root is not safe");
   const workspaceStat = fs.lstatSync(workspace);
@@ -100,14 +101,15 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
   if (parentIdentity.isSymbolicLink() || !parentIdentity.isDirectory()) throw new Error("Analysis generations directory is not safe");
   rootAncestors.push([generationsRoot, parentIdentity]);
 
-  function currentGenerations() {
+  function currentGenerations(managed) {
     return fs.readdirSync(generationsRoot).flatMap(name => {
       if (!/^g-[0-9]+-[0-9a-f-]{36}$/.test(name)) return [];
       const directory = path.join(generationsRoot, name);
       try {
         const stat = fs.lstatSync(directory);
         if (stat.isSymbolicLink() || !stat.isDirectory()) return [];
-        return [generationFiles(vscode, workspace, directory)];
+        const generation = generationFiles(vscode, workspace, directory);
+        return managed?.ownsGeneration(directory, generation.manifestFingerprint) ? [generation] : [];
       } catch { return []; }
     }).sort((left, right) => right.manifest.sequence - left.manifest.sequence);
   }
@@ -173,19 +175,19 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
     return true;
   }
 
-  async function recover(managed) {
+  async function recoverNow(managed) {
     if (!managed.ownsSetting) return false;
     verifyRoot();
-    const newest = currentGenerations()[0];
+    const newest = currentGenerations(managed)[0];
     if (!newest || path.resolve(managed.selectedSetting ? path.resolve(workspace, managed.selectedSetting) : "") === newest.directory) return false;
     verifyRoot();
     return managed.selectGeneration(newest.directory, () => true, newest);
   }
 
-  async function publish(packages, analysisId, isCurrent, managed) {
+  async function publishNow(packages, analysisId, isCurrent, managed) {
     if (!managed.ownsSetting || typeof isCurrent !== "function" || isCurrent() !== true) return false;
     verifyRoot();
-    const existing = currentGenerations();
+    const existing = currentGenerations(managed);
     const groups = [...packages].filter(([, files]) => files.length).sort(([a], [b]) => a.localeCompare(b));
     let totalInputBytes = 0;
     const paths = new Set();
@@ -251,11 +253,15 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
       completed = true;
       if (isCurrent() !== true) return false;
       verifyRoot();
+      if (!await managed.recordGeneration(directory, verified.manifestFingerprint)) return false;
+      if (isCurrent() !== true) return false;
       const selected = await managed.selectGeneration(directory, isCurrent, verified);
       if (!selected) return false;
-      const obsolete = currentGenerations().slice(2);
+      const obsolete = currentGenerations(managed).slice(2);
       for (const old of obsolete) {
-        try { removeGeneration(old); } catch { /* Keep any generation whose ownership is no longer exact. */ }
+        try {
+          if (removeGeneration(old)) await managed.forgetGeneration(old.directory, old.manifestFingerprint);
+        } catch { /* Keep any generation whose ownership is no longer exact. */ }
       }
       return true;
     } catch (error) {
@@ -278,7 +284,17 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
     }
   }
 
-  return { publish, recover, current: currentGenerations };
+  function serialize(operation) {
+    const pending = publicationQueue.then(operation, operation);
+    publicationQueue = pending.catch(() => {});
+    return pending;
+  }
+
+  return {
+    publish: (...args) => serialize(() => publishNow(...args)),
+    recover: (...args) => serialize(() => recoverNow(...args)),
+    current: managed => currentGenerations(managed),
+  };
 }
 
 module.exports = { createAnalysisGenerations };
