@@ -199,9 +199,7 @@ b=graphql(B)
         ]
         self.assertEqual(len(warnings), 1)
         warning = warnings[0]
-        self.assertEqual(
-            source[warning.range.start : warning.range.end], "SELECTED"
-        )
+        self.assertEqual(source[warning.range.start : warning.range.end], "SELECTED")
         self.assertIn("operation selection", warning.message.lower())
         self.assertTrue(
             any(

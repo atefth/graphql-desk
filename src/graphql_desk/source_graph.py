@@ -1618,9 +1618,7 @@ class _Graph:
             isinstance(operation, ast.Constant) and operation.value is None
         ):
             selector = None
-        elif isinstance(operation, ast.Constant) and isinstance(
-            operation.value, str
-        ):
+        elif isinstance(operation, ast.Constant) and isinstance(operation.value, str):
             selector = operation.value
         else:
             try:
