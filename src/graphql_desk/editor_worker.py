@@ -95,33 +95,36 @@ def _analysis_input_fingerprint(snapshot: EditorSnapshot) -> str:
                 "config": {
                     "root": str(config.root),
                     "generated_package": config.generated_package,
-                    "schemas": sorted([
-                        {
-                            "name": item.name,
-                            "origin": (
-                                "local"
+                    "schemas": sorted(
+                        [
+                            {
+                                "name": item.name,
+                                "origin": (
+                                    "local"
+                                    if item.origin.local_path is not None
+                                    else "remote"
+                                ),
+                                "local_path": str(item.origin.local_path)
                                 if item.origin.local_path is not None
-                                else "remote"
-                            ),
-                            "local_path": str(item.origin.local_path)
-                            if item.origin.local_path is not None
-                            else None,
-                            "schema_output": str(item.schema_output),
-                            "persisted_output": str(item.persisted_output)
-                            if item.persisted_output is not None
-                            else None,
-                            "cache_output": str(item.cache_output)
-                            if item.cache_output is not None
-                            else None,
-                            "scalars": sorted(
-                                (scalar.name, scalar.input, scalar.output)
-                                for scalar in item.scalars
-                            ),
-                            "enums": sorted(item.enums),
-                            "disable_masking": item.disable_masking,
-                        }
-                        for item in config.schemas
-                    ], key=lambda item: str(item["name"])),
+                                else None,
+                                "schema_output": str(item.schema_output),
+                                "persisted_output": str(item.persisted_output)
+                                if item.persisted_output is not None
+                                else None,
+                                "cache_output": str(item.cache_output)
+                                if item.cache_output is not None
+                                else None,
+                                "scalars": sorted(
+                                    (scalar.name, scalar.input, scalar.output)
+                                    for scalar in item.scalars
+                                ),
+                                "enums": sorted(item.enums),
+                                "disable_masking": item.disable_masking,
+                            }
+                            for item in config.schemas
+                        ],
+                        key=lambda item: str(item["name"]),
+                    ),
                     "template": config.template,
                     "track_field_usage": config.track_field_usage,
                     "check_colocated_fragments": config.check_colocated_fragments,
