@@ -124,6 +124,30 @@ test("stale artifact reply is a no-publish result and the worker remains usable"
   assert.ok(requests.filter(operation => operation === "analyze").length >= 2, "cleared stale analysis is rebuilt");
 });
 
+test("a transient Python extension activation failure is traced and retried for live typing", async t => {
+  const fixture = await setup(t);
+  fixture.interpreter("");
+  let activations = 0;
+  const api = pythonApi(fixture, { activate: async value => {
+    activations += 1;
+    if (activations === 1) throw new Error("private activation detail");
+    return value;
+  } });
+  const skipped = [];
+  const controller = createAnalysisController(fixture.vscode);
+  t.after(() => controller.dispose());
+  const snapshot = controller.snapshot(fixture.main);
+
+  assert.equal(await controller.artifacts(snapshot, undefined, reason => skipped.push(reason)), null);
+  assert.deepEqual(skipped, ["python-extension-activation-failed"]);
+  const result = await controller.artifacts(snapshot, undefined, reason => skipped.push(reason));
+  assert.ok(result?.projects.some(project => project.files.some(file => file.relative_path.endsWith(".pyi"))));
+  assert.equal(activations, 2);
+  assert.deepEqual(skipped, ["python-extension-activation-failed"]);
+  assert.ok(!skipped.join(" ").includes("private activation detail"));
+  assert.ok(api.stats.resolutions >= 1);
+});
+
 test("closed-source rename and deletion replace only owned obsolete companion artifacts", async t => {
   const fixture = await setup(t);
   const controller = createAnalysisController(fixture.vscode);

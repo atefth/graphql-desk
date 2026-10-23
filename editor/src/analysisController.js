@@ -4,6 +4,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { createHash, randomUUID } = require("node:crypto");
 const { createAnalysisWorker } = require("./analysisWorker");
+const activationFailed = Symbol("python-extension-activation-failed");
 
 const key = target => JSON.stringify([target.project, target.schema_name]);
 const canonical = value => {
@@ -47,17 +48,24 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
   }
   const selectedKey = selected => selected && typeof selected.id === "string" && selected.id && typeof selected.path === "string" && selected.path ? JSON.stringify([selected.id, selected.path]) : null;
-  async function environments(ticket) {
+  async function environments(ticket, skip) {
     check(ticket);
     if (!pythonApiPromise) {
       const extension = vscode.extensions?.getExtension("ms-python.python");
-      if (!extension) return null;
-      pythonApiPromise = Promise.resolve().then(() => { check(ticket); return extension.activate(); }).catch(() => null);
+      if (!extension) { skip?.("python-extension-unavailable"); return null; }
+      const activation = Promise.resolve().then(() => { check(ticket); return extension.activate(); });
+      const pending = activation.catch(() => {
+        if (pythonApiPromise === pending) pythonApiPromise = undefined;
+        skip?.(!trusted() || epoch !== ticket ? "capture-invalidated" : "python-extension-activation-failed");
+        return activationFailed;
+      });
+      pythonApiPromise = pending;
     }
     const api = await pythonApiPromise;
     check(ticket);
+    if (api === activationFailed) return null;
     const current = api?.environments;
-    if (!current || typeof current.getActiveEnvironmentPath !== "function" || typeof current.resolveEnvironment !== "function" || typeof current.onDidChangeActiveEnvironmentPath !== "function") { pythonApiPromise = null; return null; }
+    if (!current || typeof current.getActiveEnvironmentPath !== "function" || typeof current.resolveEnvironment !== "function" || typeof current.onDidChangeActiveEnvironmentPath !== "function") { pythonApiPromise = null; skip?.("python-environment-api-unavailable"); return null; }
     if (!pythonEnvironments) {
       pythonEnvironments = current;
       subscriptions.push(current.onDidChangeActiveEnvironmentPath(event => {
@@ -80,13 +88,13 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     return current;
   }
-  async function selectedPython(folder, root, ticket) {
-    const api = await environments(ticket);
+  async function selectedPython(folder, root, ticket, skip) {
+    const api = await environments(ticket, skip);
     check(ticket);
     if (!api || configuredPython(folder) !== "") return null;
     const selected = api.getActiveEnvironmentPath(folder.uri);
     const key = selectedKey(selected);
-    if (!key) { interpreters.delete(root); dropState(root); return null; }
+    if (!key) { interpreters.delete(root); dropState(root); skip?.("python-interpreter-not-selected"); return null; }
     let entry = interpreters.get(root);
     if (entry?.key !== key) {
       dropState(root);
@@ -109,7 +117,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       return null;
     }
     const executable = resolved?.executable?.uri;
-    if (!executable || executable.scheme !== "file" || !path.isAbsolute(executable.fsPath)) { interpreters.delete(root); dropState(root); return null; }
+    if (!executable || executable.scheme !== "file" || !path.isAbsolute(executable.fsPath)) { interpreters.delete(root); dropState(root); skip?.("python-interpreter-invalid"); return null; }
     return executable.fsPath;
   }
   const trusted = () => {
@@ -123,11 +131,11 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!["file", "untitled"].includes(uri.scheme) || !path.isAbsolute(uri.fsPath)) return null;
     return canonical(uri.fsPath);
   };
-  async function stateFor(snapshot) {
+  async function stateFor(snapshot, skip) {
     const ticket = epoch;
-    if (!trusted()) return null;
+    if (!trusted()) { skip?.("workspace-untrusted"); return null; }
     const uri = vscode.Uri.parse(snapshot.uri);
-    if (uri.scheme !== "file" || !path.isAbsolute(uri.fsPath)) return null;
+    if (uri.scheme !== "file" || !path.isAbsolute(uri.fsPath)) { skip?.("document-not-file-backed"); return null; }
     const filename = canonical(uri.fsPath);
     // Worker facts use real paths; lexical aliases must not hide a deeper owner.
     const owners = (vscode.workspace.workspaceFolders ?? [])
@@ -135,17 +143,19 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       .sort((left, right) => canonical(right.uri.fsPath).length - canonical(left.uri.fsPath).length);
     const deepest = owners.filter(item => canonical(item.uri.fsPath) === (owners[0] && canonical(owners[0].uri.fsPath)));
     const folder = deepest.length === 1 ? deepest[0] : null;
-    if (!folder || folder.uri.scheme !== "file") return null;
+    if (!folder || folder.uri.scheme !== "file") { skip?.("document-outside-workspace"); return null; }
     const root = canonical(folder.uri.fsPath);
     const setting = configuredPython(folder);
     let python = setting;
     if (setting === "") {
-      try { python = await selectedPython(folder, root, ticket); } catch { return null; }
+      try { python = await selectedPython(folder, root, ticket, skip); } catch { skip?.("python-environment-resolution-failed"); return null; }
     }
-    if (!trusted() || epoch !== ticket || configuredPython(folder) !== setting) return null;
+    if (!trusted() || epoch !== ticket || configuredPython(folder) !== setting) { skip?.("capture-invalidated"); return null; }
+    if (python === null) return null;
     let state = states.get(root);
     if (typeof python !== "string" || !path.isAbsolute(python)) {
       dropState(root);
+      skip?.("python-interpreter-invalid");
       return null;
     }
     if (state && (state.python !== python || state.setting !== setting)) { dropState(root); state = null; }
@@ -304,8 +314,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     state.pollPaused = false;
     schedulePolling(state);
   }
-  async function build(state, token, refreshTarget, pollAbort) {
+  async function build(state, token, refreshTarget, pollAbort, stage = () => {}) {
     const ticket = epoch;
+    stage("analysis-capture-failed");
     check(ticket, token, state, pollAbort?.signal);
     const captured = await capture(state);
     check(ticket, token, state, pollAbort?.signal);
@@ -317,6 +328,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const cancellation = abort && token?.onCancellationRequested?.(() => abort.abort());
     const requestWorker = message => state.worker.request(message, abort ? { signal: abort.signal } : undefined);
     try {
+      stage("worker-prepare-failed");
       const prepared = await requestWorker({ op: "prepare", ...captured.request, remote_revisions: wanted });
       check(ticket, token, state, abort?.signal);
       state.targets = prepared.remote_schemas;
@@ -349,7 +361,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         refreshStatus = refreshed.status;
       }
       const request = { ...captured.request, id: identity, schema_buffers, remote_revisions: state.revisions };
+      stage("worker-analyze-failed");
       const bundle = await requestWorker({ op: "analyze", ...request });
+      stage("analysis-freshness-check-failed");
       check(ticket, token, state, abort?.signal);
       const latest = await capture(state);
       check(ticket, token, state, abort?.signal);
@@ -400,34 +414,41 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       return Boolean(current) && !token?.isCancellationRequested && trusted() && state.cached?.bundle === bundle;
     } catch { state.cached = null; return false; }
   }
-  async function artifacts(value, token) {
-    if (!trusted() || token?.isCancellationRequested) return null;
-    const state = await stateFor(value);
-    if (!state || token?.isCancellationRequested) return null;
+  async function artifacts(value, token, onSkip = () => {}) {
+    const skip = reason => { try { onSkip(reason); } catch { /* Diagnostics must not affect analysis. */ } };
+    if (!trusted()) { skip("workspace-untrusted"); return null; }
+    if (token?.isCancellationRequested) { skip("request-cancelled"); return null; }
+    const state = await stateFor(value, skip);
+    if (!state) return null;
+    if (token?.isCancellationRequested) { skip("request-cancelled"); return null; }
+    let failureReason = "analysis-artifacts-failed";
     try {
       return await enqueue(state, async () => {
-        const cached = state.cached ?? await build(state, token);
-        if (!cached) return null;
+        const cached = state.cached ?? await build(state, token, undefined, undefined, reason => { failureReason = reason; });
+        if (!cached) { skip("analysis-unavailable"); return null; }
+        failureReason = "artifact-preflight-failed";
         check(cached.ticket, token, state);
         const latest = await capture(state);
         check(cached.ticket, token, state);
         if (latest.signature !== cached.capture.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
           state.cached = null;
-          return null;
+          skip("analysis-snapshot-stale"); return null;
         }
+        failureReason = "worker-artifacts-failed";
         const reply = await state.worker.request({ op: "artifacts", ...cached.request });
         check(cached.ticket, token, state);
-        if (reply.current === false) { state.cached = null; return null; }
+        if (reply.current === false) { state.cached = null; skip("worker-artifacts-stale"); return null; }
+        failureReason = "artifact-freshness-check-failed";
         const final = await capture(state);
         check(cached.ticket, token, state);
         if (final.signature !== cached.capture.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
           state.cached = null;
-          return null;
+          skip("analysis-snapshot-stale"); return null;
         }
         return { ...reply, isCurrent: () => trusted() && !token?.isCancellationRequested &&
           epoch === cached.ticket && states.get(state.root) === state && state.cached === cached };
       }, "artifacts");
-    } catch { state.cached = null; return null; }
+    } catch { state.cached = null; skip(failureReason); return null; }
   }
   async function refresh() {
     if (!trusted()) { report("Trust this workspace before refreshing a schema."); return; }

@@ -1978,6 +1978,79 @@ if TYPE_CHECKING:
                     2,
                 )
 
+    def test_generated_factory_variable_defaults_preserve_requiredness(self) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema(
+                "type Book { id: ID! } "
+                "type Query { book(id: ID!, take: Int, filter: String, "
+                "label: String): Book! }"
+            ),
+            "variable-defaults",
+        )
+        source = """from typing import TYPE_CHECKING
+from typing import TypeVar
+from typing_extensions import assert_type
+from graphql_desk import TypedDocument
+from generated.main import graphql
+from generated.sources.main import QueryResult, QueryVariables
+query=graphql(
+ "query Defaults($id:ID!,$take:Int! = 3,$filter:String,$label:String = \\\"x\\\") { "
+ "book(id:$id,take:$take,filter:$filter,label:$label) { id } }")
+R=TypeVar('R')
+V=TypeVar('V')
+def execute(document:TypedDocument[R,V],variables:V)->R: raise RuntimeError
+if TYPE_CHECKING:
+ required: QueryVariables = {"id":"1"}
+ supplied: QueryVariables = {"id":"1","take":4,"filter":None,"label":None}
+ assert_type(execute(query,required),QueryResult)
+ assert_type(execute(query,supplied),QueryResult)
+ missing: QueryVariables = {"take":4} # error
+ nullable_for_non_null: QueryVariables = {"id":"1","take":None} # error
+ wrong_nullable: QueryVariables = {"id":"1","filter":1} # error
+ wrong_defaulted: QueryVariables = {"id":"1","label":1} # error
+"""
+        modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+        sources = resolve_project(
+            modules,
+            bindings=(
+                ProjectBindings(
+                    "p",
+                    ("main",),
+                    factories=(FactoryBinding("generated.main", "graphql", "main"),),
+                ),
+            ),
+        )
+        index = index_fragments(sources, schemas={("p", "main"): context})
+        artifacts = generate_factory_artifacts(
+            context,
+            index,
+            modules=modules,
+            project_id="p",
+            generated_package="generated",
+        )
+        self.assertEqual(artifacts.diagnostics, ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            errors = {
+                n for n, line in enumerate(source.splitlines(), 1) if "# error" in line
+            }
+            self.check(root, {"main.py": errors})
+            runtime = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from generated.sources.main import QueryVariables as V\n"
+                    "assert V.__required_keys__ == {'id'}\n"
+                    "assert V.__optional_keys__ == {'take','filter','label'}\n",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+
     def test_abstract_typename_ownership_is_local_to_each_concrete_type(self) -> None:
         sdl = (
             "interface Node { id: ID! child: Node! } "

@@ -48,8 +48,15 @@ function activate(context) {
   let timer;
   let disposed = false;
   let generation = 0;
+  let lastSkipReason;
   const outputs = new Map();
   const roots = new Map();
+  const output = vscode.window.createOutputChannel("GraphQL Desk");
+  function traceSkip(reason) {
+    if (reason === lastSkipReason) return;
+    lastSkipReason = reason;
+    output.appendLine(`Live typing skipped: ${reason}`);
+  }
   function managedRoot(folder, folderRoot) {
     let promise = roots.get(folderRoot);
     if (!promise) {
@@ -74,15 +81,25 @@ function activate(context) {
   async function publishTypes(editor, ticket) {
     const document = editor.document;
     const snapshot = controller.snapshot(document);
-    const result = await controller.artifacts(snapshot);
-    if (!result || result.unavailable_schemas.length || disposed || ticket !== generation || !result.isCurrent()) return;
+    const result = await controller.artifacts(snapshot, undefined, traceSkip);
+    if (!result) return;
+    if (result.unavailable_schemas.length) { traceSkip("schema-unavailable"); return; }
+    if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
-    if (!folder) return;
+    if (!folder) { traceSkip("document-outside-workspace"); return; }
+    const folderRoot = path.resolve(folder.uri.fsPath);
+    let managed;
     try {
-      const folderRoot = path.resolve(folder.uri.fsPath);
       const managedPromise = managedRoot(folder, folderRoot);
-      const managed = await managedPromise;
-      if (disposed || ticket !== generation || !result.isCurrent()) return;
+      managed = await managedPromise;
+    } catch {
+      traceSkip("managed-stub-root-unavailable");
+      status.text = "GraphQL Desk: managed typing unavailable";
+      status.show();
+      return;
+    }
+    if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
+    try {
       const groups = new Map();
       for (const project of result.projects) {
         const files = project.files.filter(file => file.relative_path.endsWith(".pyi"));
@@ -94,7 +111,7 @@ function activate(context) {
         changedArtifacts = (await handle.publish([], result.isCurrent)) || changedArtifacts;
       }
       for (const [packageName, files] of groups) {
-        if (disposed || ticket !== generation || !result.isCurrent()) return;
+        if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
         const key = `${folderRoot}\0${managed.root}\0${packageName}`;
         let handle = outputs.get(key);
         if (!handle && files.length) {
@@ -104,7 +121,10 @@ function activate(context) {
         } else if (handle) changedArtifacts = (await handle.publish(files, result.isCurrent)) || changedArtifacts;
       }
       if (changedArtifacts) await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
+      if (![...groups.values()].some(files => files.length)) traceSkip("no-generated-stub-files");
+      else lastSkipReason = undefined;
     } catch {
+      traceSkip("managed-stub-publish-failed");
       status.text = "GraphQL Desk: managed typing unavailable";
       status.show();
     }
@@ -159,7 +179,7 @@ function activate(context) {
   const lifecycle = { async dispose() {
     if (disposed) return;
     disposed = true; generation += 1; clearTimeout(timer); command.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
-    textChanged.dispose(); configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose();
+    textChanged.dispose(); configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose(); output.dispose();
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
     outputs.clear();
     const managedRoots = await Promise.all([...roots.values()].map(promise => promise.catch(() => null)));
