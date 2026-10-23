@@ -192,6 +192,18 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const matches = vscode.workspace.textDocuments.filter(document => localPath(document) === canonical(parsed.fsPath));
     return matches.length === 1 ? matches[0].uri : parsed;
   }
+  function captureSignature(captured, schemaPaths = []) {
+    // Clean documents match disk; unrelated host documents are not analysis inputs.
+    const relevantPaths = new Set(captured.request.buffers.map(buffer => canonical(buffer.path)));
+    const schemaPathSet = new Set(schemaPaths.map(canonical));
+    const buffers = captured.request.buffers.filter(buffer => buffer.is_dirty);
+    const documents = captured.request.documents.filter(document => document.is_dirty &&
+      (relevantPaths.has(canonical(document.path)) || schemaPathSet.has(canonical(document.path))));
+    const schemaBuffers = [...captured.texts].filter(([, buffer]) => buffer.is_dirty && schemaPathSet.has(canonical(buffer.path)))
+      .sort(([left], [right]) => left.localeCompare(right));
+    return JSON.stringify([captured.request.workspace, captured.request.candidates, buffers,
+      documents, captured.request.editor_fallback, [...schemaPathSet].sort(), schemaBuffers]);
+  }
   function credential(state, target) {
     const values = Object.create(null);
     const source = environment();
@@ -235,7 +247,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const request = { workspace: state.root, candidates: [...candidates].sort(), buffers, documents: inventory,
       editor_fallback: vscode.workspace.getConfiguration("graphqlDesk", state.folder.uri).get("project", null) };
     const texts = new Map(documents.map(document => [document.uri.toString(), { path: localPath(document), version: document.version, text: document.getText(), is_dirty: document.isDirty }]));
-    return { request, texts, signature: JSON.stringify([request, [...texts]]) };
+    return { request, texts };
   }
   // One wire job and one latest pending capture; edit storms never build a promise queue.
   function enqueue(state, action, kind = "analyze") {
@@ -322,7 +334,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     check(ticket, token, state, pollAbort?.signal);
     const wanted = revisions(state);
     const revisionSignature = JSON.stringify(wanted);
-    if (!refreshTarget && state.cached?.capture.signature === captured.signature && state.cached.revisionSignature === revisionSignature) return state.cached;
+    if (!refreshTarget && state.cached && captureSignature(captured, state.cached.schemaPaths) === state.cached.signature &&
+        state.cached.revisionSignature === revisionSignature) return state.cached;
     // shortcut: stale jobs finish without publishing to retain fetched schemas; refine if measured edit latency needs interruption.
     const abort = pollAbort ?? (refreshTarget ? new AbortController() : null);
     const cancellation = abort && token?.onCancellationRequested?.(() => abort.abort());
@@ -367,12 +380,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       check(ticket, token, state, abort?.signal);
       const latest = await capture(state);
       check(ticket, token, state, abort?.signal);
-      if (latest.signature !== captured.signature) throw new Error("Capture changed");
+      const schemaPaths = prepared.local_schemas.map(schema => schema.path);
+      if (captureSignature(latest, schemaPaths) !== captureSignature(captured, schemaPaths)) throw new Error("Capture changed");
       const latestRevisions = revisions(state);
       if (state.revisions.some(active => !latestRevisions.some(current => key(current) === key(active) && current.revision === active.revision))) throw new Error("Credentials changed during analysis");
       if (refreshStatus && !pollAbort) report(refreshStatus === "ready" ? "Schema refreshed." : "Schema refresh failed; this schema is unavailable for analysis.");
       // Bind newly discovered targets before computing the credential freshness key.
-      const result = { bundle, request, capture: captured, ticket, preferences: prepared.project_preferences,
+      const result = { bundle, request, ticket, preferences: prepared.project_preferences,
+        schemaPaths, signature: captureSignature(captured, schemaPaths),
         revisionSignature: JSON.stringify(latestRevisions) };
       state.cached = result;
       reconcilePolling(state);
@@ -402,12 +417,13 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         check(cached.ticket, undefined, state);
         const latest = await capture(state);
         check(cached.ticket, undefined, state);
-        if (latest.signature !== cached.capture.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) { state.cached = null; return false; }
+        if (captureSignature(latest, cached.schemaPaths) !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) { state.cached = null; return false; }
         const reply = await state.worker.request({ op: "current", ...cached.request });
         check(cached.ticket, undefined, state);
         const final = await capture(state);
         check(cached.ticket, undefined, state);
-        const current = reply.current && final.signature === latest.signature && JSON.stringify(revisions(state)) === cached.revisionSignature;
+        const current = reply.current && captureSignature(final, cached.schemaPaths) === captureSignature(latest, cached.schemaPaths) &&
+          JSON.stringify(revisions(state)) === cached.revisionSignature;
         if (!current) state.cached = null;
         return current;
       }, "current");
@@ -430,7 +446,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         check(cached.ticket, token, state);
         const latest = await capture(state);
         check(cached.ticket, token, state);
-        if (latest.signature !== cached.capture.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
+        if (captureSignature(latest, cached.schemaPaths) !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
           state.cached = null;
           skip("analysis-snapshot-stale"); return null;
         }
@@ -441,7 +457,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         failureReason = "artifact-freshness-check-failed";
         const final = await capture(state);
         check(cached.ticket, token, state);
-        if (final.signature !== cached.capture.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
+        if (captureSignature(final, cached.schemaPaths) !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
           state.cached = null;
           skip("analysis-snapshot-stale"); return null;
         }

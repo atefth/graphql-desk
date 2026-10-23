@@ -18,9 +18,22 @@ async function until(check, label, milliseconds = 30000) {
 
 exports.run = async () => {
   const started = Date.now();
-  const results = { host: vscode.version, pylance: {}, generatedFiles: true, lifecycle: { coldTrace: [] } };
+  const results = { host: vscode.version, pylance: {}, generatedFiles: true, lifecycle: { coldTrace: [], skipTraces: [] } };
   const mark = (stage, details = {}) => results.lifecycle.coldTrace.push({ stage, elapsedMs: Date.now() - started, ...details });
   const workerCalls = new Map();
+  const createOutputChannel = vscode.window.createOutputChannel.bind(vscode.window);
+  vscode.window.createOutputChannel = (name, ...args) => {
+    const channel = createOutputChannel(name, ...args);
+    if (name !== "GraphQL Desk") return channel;
+    return new Proxy(channel, { get(target, property) {
+      if (property === "appendLine") return value => {
+        results.lifecycle.skipTraces.push(value);
+        return target.appendLine(value);
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+  };
   try {
     for (const id of ["ms-python.python", "ms-python.vscode-pylance"]) {
       const extension = vscode.extensions.getExtension(id);
@@ -219,8 +232,11 @@ exports.run = async () => {
       }, "cross-file fragment mutation converges in generated stubs, Pylance hover, and diagnostics", 45000);
       assert.ok(results.lifecycle.crossFileFragmentRefresh, JSON.stringify(results.lifecycle.crossFileFragmentProbe));
       await new Promise(resolve => setTimeout(resolve, 2000));
-      assert.ok(restartCalls.length >= 1 && restartCalls.length <= 2,
-        "the two source edits may trigger separate generations, but neither may cause a refresh loop");
+      const settledRestartCount = restartCalls.length;
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      assert.ok(settledRestartCount >= 1 && restartCalls.length === settledRestartCount,
+        "Pylance restarts must settle after the generated fragment snapshot converges");
+      results.lifecycle.fragmentLanguageServerRestarts = settledRestartCount;
       results.lifecycle.crossFileFragmentMutation = true;
     } finally {
       vscode.commands.executeCommand = executeCommand;
@@ -338,13 +354,14 @@ exports.run = async () => {
     await vscode.window.showTextDocument(consumer, { preview: false });
     await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
     assert.ok(await until(async () => !vscode.window.visibleTextEditors.some(editor => editor.document.uri.toString() === consumerUri.toString()), "saved consumer editor closes"));
+    await new Promise(resolve => setTimeout(resolve, 250));
     results.lifecycle.documentCloseEventObserved = consumerClosed;
     closedListener.dispose();
-    const reopenedConsumer = vscode.workspace.textDocuments.find(document => document.uri.toString() === consumerUri.toString()) ?? await vscode.workspace.openTextDocument(consumerUri);
+    const reopenedConsumer = await vscode.workspace.openTextDocument(consumerUri);
     await vscode.window.showTextDocument(reopenedConsumer, { preview: false });
     assert.ok(await until(async () => (await hover(8, 2)).includes("None") && diagnostics().some(item => item.range.start.line === 10), "saved consumer reopens with current Pylance types"));
     assert.equal(reopenedConsumer.isDirty, false);
-    results.lifecycle.checkerRestartAndSavedConsumerReopen = true;
+    results.lifecycle.savedConsumerEditorReopen = true;
     const dirtyFiles = [{ relative_path: "dirty_fixture/default.pyi", text: "value: str\n" }];
     const dirtyHandle = createOwnedAnalysisArtifacts(vscode, workspace, stubRoot, "dirty_fixture", dirtyFiles);
     const dirtyUri = vscode.Uri.file(path.join(stubRoot, "dirty_fixture", "default.pyi"));
