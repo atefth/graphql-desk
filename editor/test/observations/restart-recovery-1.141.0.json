@@ -1,0 +1,23 @@
+{
+  "host": "1.141.0",
+  "suite": "restartRecovery",
+  "platform": "Windows",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "scope": "Two sequential VS Code processes used the same disposable workspace and user profile. The first published a complete managed generation; the second reopened the saved consumer and confirmed its Pylance typing and diagnostics.",
+  "lifecycle": {
+    "generatedStubAvailableAfterRestart": true,
+    "processRestartReusedCompleteGeneration": true,
+    "savedConsumerReopenRetainsTyping": true,
+    "pylanceHover": "selected: String",
+    "invalidVariableDiagnostic": true,
+    "userFilePreserved": true
+  },
+  "outcome": "owned-output-restart-observed",
+  "limits": [
+    "Normal application shutdown and restart only; no forced process crash during publication.",
+    "This is a bounded issue #24 acceptance slice and does not pass the broad live-typing gate."
+  ]
+}

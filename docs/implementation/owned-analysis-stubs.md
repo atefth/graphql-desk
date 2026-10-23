@@ -169,3 +169,16 @@ slice: the full issue #37 contract also requires source/config/schema freshness
 identity and the paired runtime `.py`/`.pyi` behavior. Those requirements are
 not satisfied here, so #37 and the broad live-typing gate remain open. This
 change does not adopt pre-existing packages or authorize deletion of user files.
+
+The `restartRecovery` host suite now launches two separate VS Code processes
+against the same isolated workspace and profile. After the first process
+publishes a complete generation and exits, the second reopens the saved Python
+consumer and confirms the same generation is selected, Pylance hover reports
+`selected: String`, and the invalid variable diagnostic returns. This passed
+on Windows VS Code 1.141.0 and 1.142.0 with Python 2026.10.0 and Pylance
+2026.4.1; results are in
+[`restart-recovery-1.141.0.json`](../../editor/test/observations/restart-recovery-1.141.0.json)
+and [`restart-recovery-1.142.0.json`](../../editor/test/observations/restart-recovery-1.142.0.json).
+This verifies a normal application restart with a valid completed generation.
+It does not simulate a forced process crash during a write, and it does not
+close #24 or pass the broader live-typing lifecycle gate.
