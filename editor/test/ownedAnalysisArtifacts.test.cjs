@@ -35,6 +35,31 @@ test("a removed workspace rejects publication but cleans up its verified session
   assert.throws(() => f.make(original), /ownership changed/);
 });
 
+test("requesting cleanup during publication cannot authorize ownerless writes", async t => {
+  const f = fixture(t);
+  const handle = f.make(original);
+  let cleanup;
+  const open = fs.openSync;
+  let writes = 0;
+  fs.openSync = (file, flags, ...args) => {
+    if (flags === "wx") writes += 1;
+    return open(file, flags, ...args);
+  };
+  try {
+    const publication = handle.publish(original.map(file => ({ ...file, text: "changed\n" })), () => {
+      f.vscode.workspace.getWorkspaceFolder = () => undefined;
+      cleanup ??= handle.cleanup();
+      return true;
+    });
+    await assert.rejects(publication, /ownership changed/);
+    await cleanup;
+  } finally { fs.openSync = open; }
+  assert.equal(writes, 0, "retirement permission must not allow even staging writes during publication");
+  assert.deepEqual(fs.readdirSync(f.root), ["preexisting.txt"]);
+  assert.equal(fs.readFileSync(path.join(f.root, "preexisting.txt"), "utf8"), "keep");
+  assert.equal(await handle.publish(original, () => true), false);
+});
+
 test("detached cleanup preserves dirty files, changed owners and untrusted workspaces", async t => {
   for (const conflict of ["dirty", "owner", "trust", "foreign"]) {
     const f = fixture(t);

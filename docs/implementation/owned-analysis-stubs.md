@@ -92,6 +92,8 @@ session's verified artifacts even though VS Code no longer reports an owner.
 Publication still requires the original owner. Cleanup still rejects a new
 owner, lost trust, changed directory or file identities, foreign bytes, and
 dirty generated buffers; it never saves or reverts a document.
+A cleanup request immediately blocks new publications, but ownerless verification
+is permitted only inside the serialized cleanup action, never an in-flight publish.
 
 The focused `workspaceRemoval` host suite starts with an explicit two-folder
 workspace and removes the second folder through VS Code's public API. It checks
@@ -99,7 +101,8 @@ that only its owned package disappears, its unsaved Python buffer retains its
 text/version/dirty state and saved disk bytes, a neighboring user file survives,
 and the remaining workspace retains Pylance's `String` hover. Run it with
 `npm run test:host -- 1.142.0 workspaceRemoval` (or `1.141.0`). Native editor
-checks now pass 96/96, including detached cleanup conflicts. This evidence is
+checks now pass 97/97, including detached cleanup conflicts and a cleanup request
+made during publication's current-source check. This evidence is
 bounded to session-owned cleanup; restart recovery and the broad gates remain
 open. Both pinned Windows hosts passed with Python 2026.10.0 / Pylance 2026.4.1;
 selected results are in `editor/test/observations/workspace-removal-*.json`.
