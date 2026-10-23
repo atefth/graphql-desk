@@ -21,10 +21,14 @@ A: t.Final = 'query A{greeting}'
 B: te.Final = 'query B{greeting}'
 C: t.Literal['query C{greeting}'] = 'query C{greeting}'
 D: te.Literal['query D{greeting}'] = 'query D{greeting}'
+AA: t.Final = A
+CC: te.Final = C
 a=graphql(A)
 b=graphql(B)
 c=graphql(C)
 d=graphql(D)
+aa=graphql(AA)
+cc=graphql(CC)
 def local()->int:
  t=1
  return t
@@ -33,6 +37,8 @@ if t.TYPE_CHECKING:
  assert_type(b.operation_name,t.Literal['B'])
  assert_type(c.operation_name,t.Literal['C'])
  assert_type(d.operation_name,t.Literal['D'])
+ assert_type(aa.operation_name,t.Literal['A'])
+ assert_type(cc.operation_name,t.Literal['C'])
 assert a.operation_name=='A' and b.operation_name=='B'
 assert c.operation_name=='C' and d.operation_name=='D'
 """
@@ -182,6 +188,45 @@ b=graphql(B)
         self.assertEqual(
             [item.code for item in artifacts.diagnostics], ["factory-precision"] * 2
         )
+
+    def test_rebound_widened_and_dynamic_alias_chains_keep_call_diagnostics(
+        self,
+    ) -> None:
+        for declarations, expected_code, expected_text in (
+            (
+                "ROOT: Final = 'query Q{greeting}'\n"
+                "SOURCE: Final = ROOT\nSOURCE = 'query Q{greeting}'\n",
+                "source-not-static",
+                "graphql(SOURCE)",
+            ),
+            (
+                "ROOT: Final = 'query Q{greeting}'\nSOURCE: Final[str] = ROOT\n",
+                "factory-precision",
+                "SOURCE",
+            ),
+            (
+                "SOURCE: Final = runtime_source()\n",
+                "source-not-static",
+                "graphql(SOURCE)",
+            ),
+        ):
+            with self.subTest(declarations=declarations):
+                source = (
+                    "from typing import Final\n"
+                    "from generated.main import graphql\n"
+                    + declarations
+                    + "query = graphql(SOURCE)\n"
+                )
+                artifacts = factory_tests.FactoryGenerationTests().generate(
+                    (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+                )
+                self.assertEqual(
+                    [item.code for item in artifacts.diagnostics], [expected_code]
+                )
+                warning = artifacts.diagnostics[0]
+                self.assertEqual(
+                    source[warning.range.start : warning.range.end], expected_text
+                )
 
     def test_static_operation_alias_keeps_semantics_and_warns_at_operand(self) -> None:
         source = (
