@@ -15,9 +15,9 @@ from graphql import introspection_from_schema
 
 from .editor_analysis import (
     EditorAnalysis,
-    _utf16_points,
     analyze_editor_snapshot_details,
     editor_diagnostic,
+    utf16_points,
 )
 from .editor_snapshot import (
     EditorPreparation,
@@ -181,11 +181,16 @@ def _saved_source_fingerprint(snapshot: EditorSnapshot) -> str:
     return hashlib.sha256(payload.encode("utf8")).hexdigest()
 
 
+def _validated_provenance_identity(value: object) -> DocumentIdentity:
+    if not isinstance(value, DocumentIdentity):
+        raise ValueError("Invalid operation provenance identity")
+    return value
+
+
 def _provenance_identity(
     value: object, utf16_positions: dict[ModuleDependency, dict[int, int]]
 ) -> dict[str, object]:
-    if not isinstance(value, DocumentIdentity):
-        raise ValueError("Invalid operation provenance identity")
+    value = _validated_provenance_identity(value)
     positions = utf16_positions[value.module]
     return {
         "module": {
@@ -221,13 +226,12 @@ def _operation_provenance(
         )
         for identity in identities:
             if identity is not None:
-                if not isinstance(identity, DocumentIdentity):
-                    raise ValueError("Invalid operation provenance identity")
+                identity = _validated_provenance_identity(identity)
                 points.setdefault(identity.module, set()).update(
                     (identity.call_range.start, identity.call_range.end)
                 )
     utf16_positions = {
-        module: _utf16_points(snapshots[module], offsets)
+        module: utf16_points(snapshots[module], offsets)
         for module, offsets in points.items()
     }
     result: list[dict[str, object]] = []
