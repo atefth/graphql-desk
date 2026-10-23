@@ -7,10 +7,12 @@ const { positionAt } = require("../src/languageFeatures");
 const { bundle, document, options } = require("./featureFixtures.cjs");
 
 test("resolved highlighting uses real maps with escapes, Unicode, CRLF and adjacent literals", async () => {
-  const source = "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''query Read {\r\n user { na\\u006de ''' 'id } }')";
+  const source = "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''query Read {\r\n user(id: \"😀\", color: RED, filter: { color: BLUE }) { na\\u006de ''' 'id } }')";
   const value = bundle(source);
   const highlights = await createHighlighting(options(value)).highlight(document(value));
   assert.ok(highlights.some((item) => source.slice(item.start, item.end) === "query"));
+  assert.ok(highlights.some((item) => source.slice(item.start, item.end) === '\"😀\"' && item.scope === "string"));
+  assert.ok(highlights.some((item) => source.slice(item.start, item.end) === "BLUE" && item.scope === "string-2"));
   assert.ok(highlights.some((item) => source.slice(item.start, item.end) === "\\u006d"));
   assert.ok(highlights.some((item) => source.slice(item.start, item.end) === "id"));
   assert.ok(highlights.every((item) => item.mode === "resolved"));
@@ -29,14 +31,16 @@ test("token categories tolerate incomplete GraphQL and cover strings, comments, 
 });
 
 test("incomplete GraphQL grammar scopes operation, type, alias, directive, fragment and value tokens", () => {
-  const text = '# 😀\r\nquery Search($id: ID! = "x") @skip(if: true) { alias: user(id: $id) { ...UserFields } } fragment UserFields on User { name: field(arg: 1.2e-4)';
+  const text = '# 😀\r\nquery Search($id: ID! = "x") @skip(if: true) { alias: user(id: $id) { ...UserFields } } fragment UserFields on User { name: field(arg: 1.2e-4, choices: [RED, null], meta: { enabled: false, text: "😀" })';
   const scopes = tokens(text).map((item) => ({ text: text.slice(item.start, item.end), scope: item.scope }));
   for (const [value, scope] of [
     ["query", "keyword"], ["Search", "def"], ["$", "variable"], ["id", "variable"], ["ID", "atom"],
     ['"x"', "string"], ["@", "meta"], ["skip", "meta"], ["if", "attribute"], ["true", "builtin"],
     ["alias", "property"], ["user", "qualifier"], ["UserFields", "def"],
     ["on", "keyword"], ["User", "atom"], ["field", "qualifier"], ["arg", "attribute"],
-    ["1.2e-4", "number"],
+    ["1.2e-4", "number"], ["choices", "attribute"], ["RED", "string-2"], ["null", "keyword"],
+    ["meta", "attribute"], ["enabled", "attribute"], ["false", "builtin"],
+    ["text", "attribute"], ['"😀"', "string"],
   ]) assert.ok(scopes.some((item) => item.text === value && item.scope === scope), `${value}: ${scope}`);
   assert.ok(scopes.every((item) => item.text.length > 0));
 });
