@@ -22,7 +22,8 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
   const stateKey = `managed-analysis-stub:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
   const generationStateKey = `managed-analysis-generations:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
   const previousOwner = workspaceState?.get?.(stateKey);
-  const owned = Boolean(previousOwner?.base === ".graphql-desk/typings" && previousOwner.current === setting);
+  const owned = Boolean(previousOwner?.base === ".graphql-desk/typings" &&
+    (previousOwner.current === setting || (previousOwner.pending === true && previousOwner.previous === setting)));
   let ownsSetting = owned;
   let baseSetting = owned ? previousOwner.base : setting;
   const ownsCurrentValue = expected => {
@@ -149,12 +150,13 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
           const oldSetting = setting;
           try {
             setting = targetSetting;
-            await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
+            await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, previous: oldSetting, pending: true });
             verifyGeneration();
             if (!ownsCurrentValue(oldSetting)) throw new Error(ownershipError());
             verifyGeneration();
             await config.update("analysis.stubPath", targetSetting, vscode.ConfigurationTarget.WorkspaceFolder);
             verifyGeneration();
+            await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
             if (isCurrent() !== true && ownsCurrentValue(targetSetting)) {
               setting = oldSetting;
               await config.update("analysis.stubPath", oldSetting || undefined, vscode.ConfigurationTarget.WorkspaceFolder);
