@@ -31,6 +31,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   const folderWatches = new Map();
   const folderWatchRoots = new Map();
   const ownedAnalysisPaths = new Set();
+  const ownedAnalysisDirectories = new Set();
   const interpreters = new Map();
   let pythonApiPromise;
   let pythonEnvironments;
@@ -502,6 +503,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         for (const filename of ownedAnalysisPaths) {
           if (inside(root, filename) && !remainingRoots.some(remaining => inside(remaining, filename))) ownedAnalysisPaths.delete(filename);
         }
+        for (const directory of ownedAnalysisDirectories) {
+          if (inside(root, directory) && !remainingRoots.some(remaining => inside(remaining, directory))) ownedAnalysisDirectories.delete(directory);
+        }
       }
       folderWatchRoots.delete(uri);
       folderWatches.delete(uri);
@@ -509,8 +513,49 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     for (const [uri, folder] of folders) if (!folderWatches.has(uri)) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, "**/*"));
       const sourceChanged = resource => {
+        if (resource?.scheme === "file" && path.basename(resource.fsPath).toLowerCase() === "settings.json" &&
+            path.basename(path.dirname(resource.fsPath)).toLowerCase() === ".vscode") return;
+        if (resource?.scheme === "file") {
+          const parts = path.resolve(resource.fsPath).split(path.sep);
+          const lower = parts.map(part => part.toLowerCase());
+          const marker = lower.lastIndexOf(".graphql-desk");
+          const managedRoot = marker >= 0 && lower[marker + 1] === "typings" &&
+            (marker + 2 === parts.length || lower[marker + 2] === "generations" && marker + 3 === parts.length);
+          const generation = marker >= 0 && lower[marker + 1] === "typings" && lower[marker + 2] === "generations" &&
+            /^g-\d+-[0-9a-f-]{36}$/i.test(parts[marker + 3] ?? "");
+          const generationDirectory = generation && marker + 4 < parts.length;
+          if (managedRoot || generation) {
+            const filename = canonical(resource.fsPath);
+            try {
+              const stat = fs.lstatSync(resource.fsPath);
+              if (stat.isDirectory() && !stat.isSymbolicLink() && (managedRoot || generationDirectory || marker + 4 === parts.length)) {
+                ownedAnalysisDirectories.add(filename);
+                return;
+              }
+            } catch (error) {
+              if (error.code === "ENOENT" && ownedAnalysisDirectories.delete(filename)) return;
+            }
+            const name = path.basename(resource.fsPath).toLowerCase();
+            if (generation && (name === "complete.json" || /^\.graphql-desk-[0-9a-f-]+\.tmp$/i.test(name))) {
+              let descriptor;
+              try {
+                const stat = fs.lstatSync(resource.fsPath);
+                if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 2 * 1024 * 1024) throw new Error("Unverified generation control file");
+                descriptor = fs.openSync(resource.fsPath, "r");
+                const bytes = Buffer.alloc(stat.size);
+                const size = fs.readSync(descriptor, bytes, 0, bytes.length, 0);
+                if (size === stat.size && JSON.parse(bytes.toString("utf8")).owner === "graphql-desk-analysis-generation") {
+                  ownedAnalysisPaths.add(filename);
+                  return;
+                }
+              } catch (error) { if (error.code === "ENOENT" && ownedAnalysisPaths.delete(filename)) return; }
+              finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
+            }
+          }
+        }
         // Pylance inputs include our generated stubs. Their writes must not invalidate the
-        // capture that produced them, or publication recursively restarts analysis.
+        // capture that produced them, or publication recursively restarts analysis. VS Code
+        // configuration changes are delivered separately by onDidChangeConfiguration.
         const extension = resource?.scheme === "file" ? path.extname(resource.fsPath).toLowerCase() : "";
         const stagedArtifact = extension === ".tmp" && path.basename(resource.fsPath).startsWith(".graphql-desk-");
         const filename = extension === ".pyi" || stagedArtifact ? canonical(resource.fsPath) : null;
@@ -539,9 +584,18 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       folderWatchRoots.set(uri, canonical(folder.uri.fsPath));
     }
   }
+  const extensionSettingsDocument = document => {
+    const uri = document?.uri;
+    return uri?.scheme === "file" && path.basename(uri.fsPath).toLowerCase() === "settings.json" &&
+      path.basename(path.dirname(uri.fsPath)).toLowerCase() === ".vscode";
+  };
   for (const event of ["onDidOpenTextDocument", "onDidChangeTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument", "onDidChangeConfiguration", "onDidChangeWorkspaceFolders", "onDidGrantWorkspaceTrust"]) {
     if (vscode.workspace[event]) subscriptions.push(vscode.workspace[event](change => {
-      if (event === "onDidChangeConfiguration" && change?.affectsConfiguration && !change.affectsConfiguration("graphqlDesk")) return;
+      const document = change?.document ?? (["onDidOpenTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument"].includes(event) ? change : null);
+      if (event !== "onDidChangeConfiguration" && extensionSettingsDocument(document)) return;
+      if (event === "onDidChangeConfiguration" && change?.affectsConfiguration &&
+          !change.affectsConfiguration("graphqlDesk") &&
+          !(change.affectsConfiguration("python") && !change.affectsConfiguration("python.analysis.stubPath"))) return;
       if (event === "onDidChangeConfiguration") {
         for (const [root, state] of states) {
           const python = vscode.workspace.getConfiguration("graphqlDesk", state.folder.uri).get("pythonPath", "");
@@ -558,7 +612,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   }
   reconcileFolderWatches();
   return { analyze, isCurrent, artifacts, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
-    dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); folderWatchRoots.clear(); ownedAnalysisPaths.clear(); subscriptions.forEach(item => item.dispose()); } };
+    dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); folderWatchRoots.clear(); ownedAnalysisPaths.clear(); ownedAnalysisDirectories.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
 module.exports = { createAnalysisController };
 

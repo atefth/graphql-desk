@@ -6,6 +6,7 @@ const { registerLanguageFeatures } = require("./languageFeatures");
 const { registerHighlighting } = require("./highlighting");
 const { createManagedStubPath } = require("./managedStubPath");
 const { createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
+const { createAnalysisGenerations } = require("./analysisGenerations");
 
 async function reconfigureWorkspaceRoots({ roots, folders, create, retire }) {
   const errors = [];
@@ -50,6 +51,7 @@ function activate(context) {
   let generation = 0;
   let lastSkipReason;
   const outputs = new Map();
+  const generations = new Map();
   const roots = new Map();
   const output = vscode.window.createOutputChannel("GraphQL Desk");
   function traceSkip(reason) {
@@ -60,7 +62,7 @@ function activate(context) {
   function managedRoot(folder, folderRoot) {
     let promise = roots.get(folderRoot);
     if (!promise) {
-      promise = createManagedStubPath(vscode, folder);
+      promise = createManagedStubPath(vscode, folder, context.workspaceState);
       roots.set(folderRoot, promise);
       promise.catch(() => { if (roots.get(folderRoot) === promise) roots.delete(folderRoot); });
     }
@@ -76,7 +78,19 @@ function activate(context) {
   }
   async function reconfigureRoots() {
     await reconfigureWorkspaceRoots({ roots, folders: vscode.workspace.workspaceFolders ?? [],
-      create: folder => createManagedStubPath(vscode, folder), retire: retireRoot });
+      create: folder => createManagedStubPath(vscode, folder, context.workspaceState), retire: retireRoot });
+  }
+  async function managedStubPathsAreCurrent() {
+    if (!roots.size) return false;
+    for (const [folderRoot, promise] of roots) {
+      const folder = (vscode.workspace.workspaceFolders ?? []).find(item => path.resolve(item.uri.fsPath) === folderRoot);
+      if (!folder) return false;
+      try {
+        const managed = await promise;
+        if (!managed.stillOwnsSetting()) return false;
+      } catch { return false; }
+    }
+    return true;
   }
   async function publishTypes(editor, ticket) {
     const document = editor.document;
@@ -107,23 +121,33 @@ function activate(context) {
         groups.get(project.generated_package).push(...files);
       }
       let changedArtifacts = false;
-      for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !groups.has(key.split("\0")[2])) {
-        changedArtifacts = (await handle.publish([], result.isCurrent)) || changedArtifacts;
+      if (managed.ownsSetting) {
+        const key = `${folderRoot}\0${managed.root}`;
+        let publisher = generations.get(key);
+        if (!publisher) { publisher = createAnalysisGenerations(vscode, folderRoot, managed.root); generations.set(key, publisher); }
+        changedArtifacts = await publisher.recover(managed);
+        if (disposed || ticket !== generation || !result.isCurrent()) return;
+        changedArtifacts = (await publisher.publish(groups, result.id, result.isCurrent, managed)) || changedArtifacts;
+      } else {
+        for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !groups.has(key.split("\0")[2])) {
+          changedArtifacts = (await handle.publish([], result.isCurrent)) || changedArtifacts;
+        }
+        for (const [packageName, files] of groups) {
+          if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
+          const key = `${folderRoot}\0${managed.root}\0${packageName}`;
+          let handle = outputs.get(key);
+          if (!handle && files.length) {
+            handle = createOwnedAnalysisArtifacts(vscode, folderRoot, managed.root, packageName, files);
+            outputs.set(key, handle);
+            changedArtifacts = true;
+          } else if (handle) changedArtifacts = (await handle.publish(files, result.isCurrent)) || changedArtifacts;
+        }
       }
-      for (const [packageName, files] of groups) {
-        if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
-        const key = `${folderRoot}\0${managed.root}\0${packageName}`;
-        let handle = outputs.get(key);
-        if (!handle && files.length) {
-          handle = createOwnedAnalysisArtifacts(vscode, folderRoot, managed.root, packageName, files);
-          outputs.set(key, handle);
-          changedArtifacts = true;
-        } else if (handle) changedArtifacts = (await handle.publish(files, result.isCurrent)) || changedArtifacts;
-      }
-      if (changedArtifacts) await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
+      if (changedArtifacts && !managed.ownsSetting) await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
       if (![...groups.values()].some(files => files.length)) traceSkip("no-generated-stub-files");
       else lastSkipReason = undefined;
-    } catch {
+    } catch (error) {
+      output.appendLine(`Managed stub publication failed: ${String(error)}`);
       traceSkip("managed-stub-publish-failed");
       status.text = "GraphQL Desk: managed typing unavailable";
       status.show();
@@ -162,9 +186,13 @@ function activate(context) {
   });
   const configChanged = vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration("python.analysis.stubPath")) {
-      // Invalidate any publication paused in async root setup before retiring the old root.
-      generation += 1;
-      void reconfigureRoots().then(refreshVisible, () => { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(); });
+      // Our own generation switch selects already complete immutable output. Treat a
+      // mismatch as an external setting edit and rebuild the manager around it.
+      void managedStubPathsAreCurrent().then(ownedSelection => {
+        if (ownedSelection) return;
+        generation += 1;
+        return reconfigureRoots().then(refreshVisible, () => { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(); });
+      });
     } else if (event.affectsConfiguration("graphqlDesk")) refreshVisible();
   });
   const foldersChanged = vscode.workspace.onDidChangeWorkspaceFolders(() => {
