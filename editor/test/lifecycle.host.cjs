@@ -12,6 +12,7 @@ const freshnessChecks = [];
 const refreshCallbacks = [];
 const artifactCalls = [];
 const skipReasons = [];
+let crashNextArtifacts = false;
 const createWorker = workerModule.createAnalysisWorker;
 workerModule.createAnalysisWorker = options => {
   const worker = createWorker(options);
@@ -20,8 +21,14 @@ workerModule.createAnalysisWorker = options => {
       const record = { op: message.op, id: message.id, buffers: message.buffers?.map(item => ({
         path: item.path, dirty: item.is_dirty, hasSelected: item.text?.includes("{ selected count(limit: $limit) }"),
         hasChangedQuery: item.text?.includes("{ user { id } count(limit: $limit) }")
-      })) };
+      })), schemas: message.schema_buffers?.map(item => ({ path: item.path, hasBoolean: item.text?.includes("selected: Boolean!") })) };
       try {
+        if (message.op === "artifacts" && crashNextArtifacts) {
+          crashNextArtifacts = false;
+          const pending = target.request(message, requestOptions);
+          target.invalidate();
+          await pending;
+        }
         const reply = await target.request(message, requestOptions);
         record.ok = reply.ok;
         record.current = reply.current;
@@ -158,6 +165,8 @@ exports.run = async () => {
       assert.ok(extension);
       assert.equal(extension.packageJSON.version, version);
       await extension.activate();
+      results.extensions ??= {};
+      results.extensions[id] = version;
     }
     const document = await vscode.workspace.openTextDocument(sourceUri);
     let editor = await vscode.window.showTextDocument(document, { preview: false });
@@ -168,6 +177,73 @@ exports.run = async () => {
     await until(async () => /selected:\s*(?:str|String)\b/.test(await selectedHover()), "Pylance sees the saved result field type");
     const savedGeneration = await readGeneration();
     results.lifecycle.savedBaselinePublished = true;
+
+    const schemaUri = vscode.Uri.file(path.join(workspace, "schema.graphql"));
+    const schemaDocument = await vscode.workspace.openTextDocument(schemaUri);
+    const baselineSelectedHover = await selectedHover();
+    const replaceSelectedSchemaType = async (from, to) => {
+      const text = schemaDocument.getText();
+      const offset = text.indexOf(`selected: ${from}!`);
+      assert.notEqual(offset, -1, `Schema contains selected: ${from}!`);
+      const start = schemaDocument.positionAt(offset + "selected: ".length);
+      const end = schemaDocument.positionAt(offset + "selected: ".length + from.length);
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(schemaUri, new vscode.Range(start, end), to);
+      assert.equal(await vscode.workspace.applyEdit(edit), true);
+    };
+    crashNextArtifacts = true;
+    await replaceSelectedSchemaType("String", "Boolean");
+    await until(() => workerRequests.some(request => request.op === "artifacts" && request.error),
+      "a real worker failure interrupts artifact generation");
+    const failedArtifact = workerRequests.find(request => request.op === "artifacts" && request.error);
+    assert.ok(failedArtifact.schemas?.some(schema => schema.hasBoolean),
+      "The interrupted artifact request contains the changed schema snapshot");
+    const failedGeneration = await readGeneration();
+    assert.equal(failedGeneration.stubPath, savedGeneration.stubPath,
+      "The incomplete generation is not selected after worker failure");
+    assert.equal(hasSelected(failedGeneration), true,
+      "The last complete selected-field type remains during the failed refresh");
+    await fs.access(path.join(path.resolve(workspace, failedGeneration.stubPath), "complete.json"));
+    const failedRefreshHover = await selectedHover();
+    assert.match(failedRefreshHover, /selected:\s*String\b/,
+      "The previous type remains visible while refresh is unavailable");
+    results.lifecycle.workerFailureKeepsLastCompleteGeneration = true;
+
+    await replaceSelectedSchemaType("Boolean", "Int");
+    await until(async () => {
+      const current = await readGeneration();
+      return current.stubPath !== savedGeneration.stubPath && /selected:\s*(?:int|Int)\b/i.test(await selectedHover());
+    }, "a fresh schema edit restarts analysis and publishes the current selected type");
+    const otherIdHover = async () => {
+      const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", sourceUri, new vscode.Position(14, 2)) || [];
+      return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
+    };
+    await until(async () => /other_id:\s*ID\b/.test(await otherIdHover()),
+      "the independent ID sibling remains precisely typed after recovery");
+    assert.match(await otherIdHover(), /other_id:\s*ID\b/,
+      "The unaffected sibling keeps its exact GraphQL ID hover");
+    assert.match(await selectedHover(), /selected:\s*Int\b/,
+      "The recovered operation uses the new GraphQL Int type");
+    results.lifecycle.workerFailureRecoversOnFreshEdit = true;
+    results.lifecycle.workerFailurePreservesSiblingId = true;
+    results.lifecycle.workerFailureTyping = {
+      selectedBeforeFailure: baselineSelectedHover,
+      selectedDuringFailure: failedRefreshHover,
+      selectedAfterRecovery: await selectedHover(),
+      siblingIdAfterRecovery: await otherIdHover(),
+    };
+    const failedArtifactIndex = workerRequests.findIndex(request => request.op === "artifacts" && request.error);
+    const recoveryRequests = workerRequests.slice(failedArtifactIndex + 1);
+    assert.ok(recoveryRequests.some(request => request.op === "prepare" && request.ok),
+      "Recovery starts a fresh worker session");
+    assert.ok(recoveryRequests.some(request => request.op === "artifacts" && request.ok),
+      "The fresh worker completes artifact generation");
+    results.lifecycle.workerFailureRequests = workerRequests.filter(request => request.op === "artifacts").slice(-3);
+    results.lifecycle.workerRecoveryOperations = recoveryRequests.filter(request => ["prepare", "analyze", "artifacts"].includes(request.op))
+      .map(({ op, ok, error }) => ({ op, ok: Boolean(ok), ...(error ? { error } : {}) }));
+    await replaceSelectedSchemaType("Int", "String");
+    await until(async () => /selected:\s*(?:str|String)\b/.test(await selectedHover()),
+      "restore the lifecycle fixture schema after the recovery proof");
 
     await replaceQuery(editor, oldQuery, "user { id } count(limit: $limit)");
     await until(async () => {

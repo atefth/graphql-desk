@@ -1,0 +1,32 @@
+{
+  "host": "VS Code 1.142.0",
+  "suite": "lifecycle",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "scope": "Bounded worker-crash recovery during live artifact generation.",
+  "forcedFailure": {
+    "operation": "artifacts",
+    "mechanism": "The host starts a real worker request, then invalidates that worker before the event loop resumes; the pending request rejects.",
+    "capturedSchema": "selected: Boolean!",
+    "selectedBeforeFailure": "String",
+    "selectedDuringFailure": "String",
+    "requestRejected": true,
+    "lastCompleteGenerationRemainedSelected": true,
+    "incompleteGenerationSelected": false
+  },
+  "recovery": {
+    "freshSchemaEdit": "selected: Boolean! -> selected: Int!",
+    "freshWorkerSessionPreparedAndArtifactsSucceeded": true,
+    "selectedAfterRecovery": "Int",
+    "unaffectedSiblingID": "ID",
+    "artifactRequestSucceededAfterFailure": true
+  },
+  "outcome": "passed",
+  "limits": [
+    "This proves recovery after a forced worker failure only when a later schema edit triggers new analysis.",
+    "The last-known String type remains visible during the failed refresh; this does not prove a no-stale interval or cancellation/supersession safety.",
+    "This is bounded evidence only; issue #38 and live-typing gate #42 remain open."
+  ]
+}
