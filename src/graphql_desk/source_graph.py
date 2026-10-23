@@ -199,6 +199,18 @@ class _Parsed:
     error: str | None = None
 
 
+def _pep695_alias(statement: ast.stmt) -> tuple[str, ast.expr, bool] | None:
+    alias_type = getattr(ast, "TypeAlias", None)
+    if alias_type is None or not isinstance(statement, alias_type):
+        return None
+    name = getattr(statement, "name", None)
+    value = getattr(statement, "value", None)
+    type_params = getattr(statement, "type_params", None)
+    if not isinstance(name, ast.Name) or not isinstance(value, ast.expr):
+        return None
+    return name.id, value, bool(type_params)
+
+
 def _parse(snapshot: ModuleSnapshot) -> _Parsed:
     try:
         tree = ast.parse(snapshot.source)
@@ -228,6 +240,7 @@ class _Module:
         ] = {}
         self.types: dict[str, ast.ClassDef] = {}
         self.annotated_types: dict[str, ast.AnnAssign] = {}
+        self.pep695_types: dict[str, tuple[ast.stmt, ast.expr, bool]] = {}
         self.blocked: set[str] = set()
         self.star = False
         self.call_bindings: dict[int, str] = {}
@@ -254,6 +267,14 @@ class _Module:
                     statement.name,
                     statement,
                     _Value("type", f"{snapshot.module}.{statement.name}"),
+                )
+            elif type_symbols and (pep695 := _pep695_alias(statement)) is not None:
+                name, pep695_target, generic = pep695
+                self.pep695_types[name] = (statement, pep695_target, generic)
+                self.add(
+                    name,
+                    statement,
+                    _Value("unsupported", name),
                 )
             elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.add(statement.name, statement, _Value("opaque", statement.name))
@@ -837,6 +858,23 @@ class _Graph:
                             raise _Unresolved(
                                 "Explicit type alias target is not a supported "
                                 "type declaration"
+                            )
+                    elif self.type_symbols and name in module.pep695_types:
+                        declaration, target, generic = module.pep695_types[name]
+                        if generic:
+                            raise _Unresolved(
+                                "Generic PEP 695 aliases are not supported"
+                            )
+                        value = self.alias_target(
+                            module,
+                            name,
+                            target,
+                            (declaration.lineno, declaration.col_offset),
+                            active,
+                        )
+                        if value.kind not in {"type", "external"}:
+                            raise _Unresolved(
+                                "PEP 695 alias target is not a supported type"
                             )
                     elif self.type_symbols and value.kind == "type":
                         declaration = module.types[name]

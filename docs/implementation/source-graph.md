@@ -62,6 +62,8 @@ uncaptured external symbols, unsupported forms, missing exports and known non-ty
 Class aliases and package reexports reuse the existing source graph. Simple explicit
 PEP613 aliases (`Alias: TypeAlias = ClassName`) also reuse those checks when the
 marker resolves to uncaptured `typing.TypeAlias` or `typing_extensions.TypeAlias`.
+On Python 3.12 and newer, non-generic PEP 695 aliases (`type Alias = Target`) use the
+same bounded resolver; generic PEP 695 aliases remain unresolved.
 Direct `typing.NewType` and `typing_extensions.NewType` assignments with a literal
 name and named class supertype resolve as non-base mapping types. Their call is
 never executed; dynamic arguments and using a NewType as a class base stay
