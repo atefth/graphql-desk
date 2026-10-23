@@ -47,16 +47,19 @@ exports.run = async () => {
     };
     const lineDiagnostics = name => vscode.languages.getDiagnostics(uri)
       .filter(item => item.range.start.line === position(name).line).map(item => item.message);
+    const inferredType = (name, text) => text.match(new RegExp(`\\(variable\\) ${name}: ([^\\n]+)`))?.[1] || "";
     const observed = {};
     const ready = await until(async () => {
       observed.nested = await hover("nested_value");
       observed.nullable = await hover("nullable_value");
+      observed.nestedType = inferredType("nested_value", observed.nested);
+      observed.nullableType = inferredType("nullable_value", observed.nullable);
       observed.nestedErrors = lineDiagnostics("nested_bad");
       observed.nullableErrors = lineDiagnostics("nullable_bad");
       observed.defaultsErrors = lineDiagnostics("defaults_bad");
       observed.defaultAcceptedErrors = lineDiagnostics("defaults_result");
-      return /list\[list\[String\]\]/.test(observed.nested) &&
-        /list\[String \| None\] \| None/.test(observed.nullable) &&
+      return observed.nestedType === "list[list[String]]" &&
+        observed.nullableType === "list[String | None] | None" &&
         observed.nestedErrors.length > 0 && observed.nullableErrors.length > 0 &&
         observed.defaultsErrors.length > 0 && observed.defaultAcceptedErrors.length === 0;
     }, "Pylance live typing for aliases, nested list wrappers, nullable lists and defaulted variables", 60000);
