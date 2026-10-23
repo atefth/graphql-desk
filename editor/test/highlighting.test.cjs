@@ -22,9 +22,9 @@ test("resolved highlighting uses real maps with escapes, Unicode, CRLF and adjac
 });
 
 test("token categories tolerate incomplete GraphQL and cover strings, comments, numbers and variables", () => {
-  const text = 'query Read($id:ID){ user(id:$id) { name # comment\n old(arg:12, text:"😀")';
+  const text = 'query Read($id:ID){ user(id:$id) { name # comment\n old(arg:12, text:"😀", enum:GREEN)';
   const styles = new Set(tokens(text).map((item) => item.scope));
-  for (const scope of ["keyword", "variable", "property", "comment", "number", "string"]) assert.ok(styles.has(scope), scope);
+  for (const scope of ["keyword", "variable", "property", "comment", "number", "string", "string-2"]) assert.ok(styles.has(scope), scope);
   assert.ok(tokens(text).every((item) => item.end > item.start && item.end <= text.length));
 });
 
