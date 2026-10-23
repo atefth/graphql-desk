@@ -62,7 +62,10 @@ uncaptured external symbols, unsupported forms, missing exports and known non-ty
 Class aliases and package reexports reuse the existing source graph. Simple explicit
 PEP613 aliases (`Alias: TypeAlias = ClassName`) also reuse those checks when the
 marker resolves to uncaptured `typing.TypeAlias` or `typing_extensions.TypeAlias`.
-Named or qualified type targets are supported. Unary collection aliases accept
+Direct `typing.NewType` and `typing_extensions.NewType` assignments with a literal
+name and named class supertype resolve as non-base mapping types. Their call is
+never executed; dynamic arguments and using a NewType as a class base stay
+unresolved. Named or qualified type targets are supported. Unary collection aliases accept
 one existing named/qualified type operand. Trusted constructors include `list`, `set`,
 `frozenset`, `typing.List`, `typing.Set`, `typing.FrozenSet`, `typing.AbstractSet`,
 `typing.Sequence`, `collections.abc.Sequence` and `collections.abc.Set`.
