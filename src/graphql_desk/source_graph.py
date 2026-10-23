@@ -1425,6 +1425,39 @@ class _Graph:
                 )
         if isinstance(node, ast.Call):
             callee = self.expression(module, node.func, before, active, probe=probe)
+            if (
+                self.type_symbols
+                and callee.kind == "external"
+                and callee.text in {"typing.NewType", "typing_extensions.NewType"}
+            ):
+                binding = module.call_bindings.get(id(node))
+                if (
+                    not self.trusted_external(module, callee)
+                    or binding is None
+                    or len(node.args) != 2
+                    or node.keywords
+                    or not isinstance(node.args[0], ast.Constant)
+                    or not isinstance(node.args[0].value, str)
+                    or not node.args[0].value
+                    or not isinstance(node.args[1], (ast.Name, ast.Attribute))
+                ):
+                    raise _Unresolved(
+                        "NewType requires a literal name and named supertype"
+                    )
+                supertype = self.expression(module, node.args[1], before, active)
+                if (
+                    supertype.kind not in {"type", "external"}
+                    or not supertype.class_base
+                    or supertype.text
+                    in {"typing.TypeAlias", "typing_extensions.TypeAlias"}
+                ):
+                    raise _Unresolved("NewType supertype is not an established class")
+                return _Value(
+                    "type",
+                    f"{module.snapshot.module}.{binding}",
+                    dependencies=callee.dependencies | supertype.dependencies,
+                    class_base=False,
+                )
             if callee.kind == "initializer":
                 if probe:
                     return _Value("callable", "graphql_desk.graphql")

@@ -2033,6 +2033,7 @@ class SourceGraphTests(unittest.TestCase):
         )
         (result,) = resolve_type_symbols(("a.A",), modules=cycle, project_id="app")
         self.assertEqual(result.status, "unresolved")
+
         (result,) = resolve_type_symbols(
             ("types.Outer.Inner",),
             modules=(module("types", "class Outer:\n class Inner: pass"),),
@@ -2070,6 +2071,57 @@ class SourceGraphTests(unittest.TestCase):
         for invalid in ("str", "pkg.class", "pkg.\u212a"):
             with self.assertRaises(ValueError):
                 resolve_type_symbols((invalid,), modules=(), project_id="app")
+
+    def test_newtype_is_a_resolved_non_base_mapping_type(self) -> None:
+        for declaration in (
+            "from typing import NewType\nUserId=NewType('UserId',int)",
+            "from typing import NewType as NT\nUserId=NT('UserId',int)",
+            "import typing as t\nUserId=t.NewType('UserId',int)",
+            "from typing_extensions import NewType\nUserId=NewType('UserId',int)",
+        ):
+            with self.subTest(declaration=declaration):
+                models = module("models", declaration)
+                (result,) = resolve_type_symbols(
+                    ("models.UserId",), modules=(models,), project_id="app"
+                )
+                self.assertEqual(result.status, "resolved")
+                self.assertEqual(result.target, "models.UserId")
+                self.assertEqual(
+                    result.dependencies,
+                    (source_graph.ModuleDependency("app", "models", models.uri, 1),),
+                )
+
+        child = module("child", "from models import UserId\nclass Child(UserId): pass")
+        self.assertEqual(
+            resolve_type_symbols(
+                ("child.Child",), modules=(models, child), project_id="app"
+            )[0].status,
+            "unresolved",
+        )
+
+        unsupported = (
+            "from typing import NewType\nUserId=NewType(name,int)",
+            "from typing import NewType\nUserId=NewType('UserId',factory())",
+            "from unknown import NewType\nUserId=NewType('UserId',int)",
+            "from typing import NewType\nUserId=NewType('UserId',int,extra=True)",
+        )
+        for declaration in unsupported:
+            with self.subTest(declaration=declaration):
+                (result,) = resolve_type_symbols(
+                    ("models.UserId",),
+                    modules=(module("models", declaration),),
+                    project_id="app",
+                )
+                self.assertEqual(result.status, "unresolved")
+
+        mutated = module("models", "import typing\ntyping.NewType=other")
+        mapped_module = module(
+            "mapped", "from typing import NewType\nUserId=NewType('UserId',int)"
+        )
+        (result,) = resolve_type_symbols(
+            ("mapped.UserId",), modules=(mapped_module, mutated), project_id="app"
+        )
+        self.assertEqual(result.status, "unresolved")
 
     def test_namespace_dict_escapes_invalidate_type_and_document_facts(self) -> None:
         for escape in (
