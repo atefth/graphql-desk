@@ -482,6 +482,27 @@ class AsyncClientBindingsTests(unittest.IsolatedAsyncioTestCase):
                 {"hello": "Grace"},
             )
 
+    async def test_real_async_client_selects_mutation_operation(self) -> None:
+        schema_ = schema()
+        assert schema_.mutation_type is not None
+        calls: list[int] = []
+
+        async def increment(*_args: Any) -> int:
+            calls.append(1)
+            await asyncio.sleep(0)
+            return len(calls)
+
+        schema_.mutation_type.fields["increment"].resolve = increment
+        doc = TypedDocument[dict[str, int], NoVariables](
+            parse("mutation Other { other: increment } mutation Update { increment }"),
+            "Update",
+        )
+        async with Client(schema=schema_, execute_timeout=None) as session:
+            response = await execute_gql(session, doc, NoVariables())
+
+        self.assertEqual(response.data, {"increment": 1})
+        self.assertEqual(calls, [1])
+
     async def test_subscription_yields_envelopes_and_closes_original_source(
         self,
     ) -> None:
