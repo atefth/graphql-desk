@@ -116,7 +116,7 @@ function activate(context) {
     try {
       const groups = new Map();
       for (const project of result.projects) {
-        const files = project.files.filter(file => file.relative_path.endsWith(".pyi"));
+        const files = project.files;
         if (!groups.has(project.generated_package)) groups.set(project.generated_package, []);
         groups.get(project.generated_package).push(...files);
       }
@@ -127,7 +127,8 @@ function activate(context) {
         if (!publisher) { publisher = createAnalysisGenerations(vscode, folderRoot, managed.root); generations.set(key, publisher); }
         changedArtifacts = await publisher.recover(managed);
         if (disposed || ticket !== generation || !result.isCurrent()) return;
-        changedArtifacts = (await publisher.publish(groups, result.id, result.isCurrent, managed, result.input_fingerprint)) || changedArtifacts;
+        changedArtifacts = (await publisher.publish(groups, result.id, result.isCurrent, managed,
+          result.input_fingerprint, result.saved_source_fingerprint)) || changedArtifacts;
       } else {
         for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !groups.has(key.split("\0")[2])) {
           changedArtifacts = (await handle.publish([], result.isCurrent)) || changedArtifacts;

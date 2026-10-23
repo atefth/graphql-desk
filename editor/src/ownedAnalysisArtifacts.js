@@ -38,7 +38,7 @@ function artifactEntries(files, generatedPackage) {
     const parts = relativePath.split("/");
     const bytes = typeof file.text === "string" ? Buffer.byteLength(file.text, "utf8") : MAX_FILE_BYTES + 1;
     if (!relativePath || parts.some((part, index) => index === parts.length - 1
-      ? !/^[A-Za-z_][A-Za-z_0-9]*\.pyi$/.test(part)
+      ? !/^[A-Za-z_][A-Za-z_0-9]*\.pyi?$/.test(part)
       : !/^[A-Za-z_][A-Za-z_0-9]*$/.test(part)) ||
         bytes > MAX_FILE_BYTES || result.has(relativePath)) {
       throw new Error("Invalid analysis artifact");
@@ -46,6 +46,11 @@ function artifactEntries(files, generatedPackage) {
     totalBytes += bytes;
     if (totalBytes > 8 * MAX_FILE_BYTES) throw new Error("Invalid analysis artifact set");
     result.set(relativePath, file.text);
+  }
+  for (const relativePath of result.keys()) {
+    if (relativePath.endsWith(".py") && !result.has(`${relativePath}i`)) {
+      throw new Error("Runtime analysis artifact is missing its paired stub");
+    }
   }
   return result;
 }

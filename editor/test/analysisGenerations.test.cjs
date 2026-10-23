@@ -31,6 +31,7 @@ function fixture(t) {
 }
 
 const files = text => new Map([["graphql_desk_generated", [
+  { relative_path: "graphql_desk_generated/default.py", text: "from graphql import parse\n" },
   { relative_path: "graphql_desk_generated/default.pyi", text: `selected: ${text}\n` },
   { relative_path: "graphql_desk_generated/_documents/default/d0.pyi", text: `class Result: value: ${text}\n` },
 ]]]);
@@ -38,7 +39,7 @@ const fingerprint = packages => createHash("sha256").update(JSON.stringify(
   [...packages].flatMap(([, values]) => values.map(({ relative_path, text }) => [relative_path, text])).sort(([a], [b]) => a.localeCompare(b)),
 )).digest("hex");
 const publish = (f, packages, id, isCurrent = () => true, inputFingerprint = fingerprint(packages)) =>
-  f.publisher.publish(packages, id, isCurrent, f.managed, inputFingerprint);
+  f.publisher.publish(packages, id, isCurrent, f.managed, inputFingerprint, createHash("sha256").update("saved sources").digest("hex"));
 
 test("publishes immutable complete generations and recovers the latest verified one", async t => {
   const f = fixture(t);
@@ -46,6 +47,7 @@ test("publishes immutable complete generations and recovers the latest verified 
   const first = path.resolve(f.workspace, f.managed.selectedSetting);
   assert.ok(fs.existsSync(path.join(first, "complete.json")));
   const firstBytes = fs.readFileSync(path.join(first, "graphql_desk_generated", "default.pyi"));
+  assert.ok(fs.existsSync(path.join(first, "graphql_desk_generated", "default.py")));
 
   assert.equal(await publish(f, files("int"), "analysis-2"), true);
   const second = path.resolve(f.workspace, f.managed.selectedSetting);
@@ -60,6 +62,15 @@ test("publishes immutable complete generations and recovers the latest verified 
   assert.equal(fs.readFileSync(path.join(f.root, "user.txt"), "utf8"), "keep");
 });
 
+test("rejects a runtime artifact without its stub before selecting a generation", async t => {
+  const f = fixture(t);
+  const unpaired = files("str");
+  unpaired.set("graphql_desk_generated", unpaired.get("graphql_desk_generated").filter(file => !file.relative_path.endsWith(".pyi")));
+  await assert.rejects(publish(f, unpaired, "analysis-unpaired"), /paired stub/);
+  assert.equal(f.managed.selectedSetting, ".graphql-desk/typings");
+  assert.equal(f.publisher.current(f.managed).length, 0);
+});
+
 test("deduplicates only when both captured inputs and generated stubs match", async t => {
   const f = fixture(t);
   const input1 = createHash("sha256").update("source/schema/config 1").digest("hex");
@@ -70,6 +81,7 @@ test("deduplicates only when both captured inputs and generated stubs match", as
   assert.equal(await publish(f, files("int"), "analysis-4", () => true, input2), true);
   const latest = f.publisher.current(f.managed)[0];
   assert.equal(latest.manifest.inputFingerprint, input2);
+  assert.match(latest.manifest.savedSourceFingerprint, /^[a-f0-9]{64}$/);
   assert.equal(latest.manifest.files[0].path, "graphql_desk_generated/_documents/default/d0.pyi");
 });
 
@@ -225,7 +237,7 @@ test("duplicate paths and abandoned incomplete generations are never adopted or 
   const duplicate = files("str").get("graphql_desk_generated");
   await assert.rejects(f.publisher.publish([
     ["graphql_desk_generated", duplicate], ["graphql_desk_generated", duplicate],
-  ], "analysis-1", () => true, f.managed, fingerprint(files("str"))), /Invalid or oversized generation artifact/);
+  ], "analysis-1", () => true, f.managed, fingerprint(files("str")), createHash("sha256").update("saved sources").digest("hex")), /Invalid or oversized generation artifact/);
   assert.equal(fs.readFileSync(partialFile, "utf8"), "partial user-visible bytes");
   assert.equal(fs.readdirSync(path.join(f.root, "generations")).length, 1);
   assert.equal(await publish(f, files("str"), "analysis-2"), true);

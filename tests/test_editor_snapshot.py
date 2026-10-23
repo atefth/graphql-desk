@@ -3,7 +3,7 @@
 import json
 import tempfile
 import unittest
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import cast
@@ -558,6 +558,66 @@ class EditorSnapshotTests(unittest.TestCase):
         ):
             acquire_editor_snapshot(
                 workspace=self.root, candidates=(source,), generation=1
+            )
+
+    def test_saved_source_change_during_dirty_overlay_acquisition_is_rejected(
+        self,
+    ) -> None:
+        self.project()
+        source = self.write("q.py", _QUERY)
+        buffer = OpenBuffer(source, 3, _QUERY.replace("{ id }", "{ name }"), True)
+        original_read = Path.read_bytes
+        reads = 0
+
+        def changing(path: Path) -> bytes:
+            nonlocal reads
+            data = original_read(path)
+            if path == source:
+                reads += 1
+                if reads == 1:
+                    source.write_bytes(_QUERY.replace("{ id }", "{ name }").encode())
+            return data
+
+        with (
+            patch.object(Path, "read_bytes", changing),
+            self.assertRaisesRegex(ValueError, "changed"),
+        ):
+            acquire_editor_snapshot(
+                workspace=self.root,
+                candidates=(source,),
+                buffers=(buffer,),
+                generation=1,
+            )
+
+    def test_saved_missing_source_appearing_during_acquisition_is_rejected(
+        self,
+    ) -> None:
+        self.project()
+        source = self.root / "q.py"
+        buffer = OpenBuffer(source, 3, _QUERY, True)
+        original_check = getattr(editor_snapshot, "_check_observations")
+
+        def appearing(
+            observations: Iterable[object],
+        ) -> None:
+            captured = tuple(observations)
+            if any(
+                getattr(observation, "path", None) == source
+                and getattr(observation, "origin", None) == "saved-missing"
+                for observation in captured
+            ):
+                source.write_bytes(_QUERY.encode())
+            original_check(captured)
+
+        with (
+            patch.object(editor_snapshot, "_check_observations", appearing),
+            self.assertRaisesRegex(ValueError, "changed"),
+        ):
+            acquire_editor_snapshot(
+                workspace=self.root,
+                candidates=(source,),
+                buffers=(buffer,),
+                generation=1,
             )
 
     def test_dirty_root_config_changes_module_and_schema_routing(self) -> None:

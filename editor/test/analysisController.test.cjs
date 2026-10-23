@@ -11,7 +11,7 @@ const { createAnalysisController } = require("../src/analysisController");
 const { createAnalysisWorker } = require("../src/analysisWorker");
 const { createLanguageFeatures } = require("../src/languageFeatures");
 const { createHighlighting } = require("../src/highlighting");
-const { createOwnedAnalysisArtifacts } = require("../src/ownedAnalysisArtifacts");
+const { createOwnedAnalysisArtifacts, renderOwnedAnalysisArtifact } = require("../src/ownedAnalysisArtifacts");
 const python = process.env.GRAPHQL_DESK_PYTHON ?? path.resolve(__dirname, "../../.venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
 const realTimeout = setTimeout;
 
@@ -57,9 +57,15 @@ async function setup(t, config = 'schema="schema.graphql"\n') {
   const events = {};
   const watchers = [];
   let selectedPython = python;
+  let selectedStubPath = "";
+  const defaultStubPath = "./typings";
+  let explicitlyConfiguredStubPath = false;
   const workspace = { isTrusted: true, workspaceFolders: [folder], textDocuments: [],
     getWorkspaceFolder: value => workspace.workspaceFolders.includes(folder) && value.fsPath.toLowerCase().startsWith(root.toLowerCase()) ? folder : undefined,
-    getConfiguration: () => ({ get: (name, fallback) => name === "pythonPath" ? selectedPython : fallback }),
+    getConfiguration: section => ({
+      get: (name, fallback) => section === "python" && name === "analysis.stubPath" ? (explicitlyConfiguredStubPath ? selectedStubPath : defaultStubPath) : name === "pythonPath" ? selectedPython : fallback,
+      inspect: name => section === "python" && name === "analysis.stubPath" && explicitlyConfiguredStubPath ? { workspaceValue: selectedStubPath } : undefined,
+    }),
     findFiles: async (_pattern, exclude) => { assert.equal(exclude, null); return candidates; },
     createFileSystemWatcher: pattern => { const e = event(); const watcher = { pattern, disposed: false, disposals: 0, onDidChange: e.subscribe, onDidCreate: e.subscribe, onDidDelete: e.subscribe, dispose() { this.disposed = true; this.disposals += 1; }, fire: e.fire }; watchers.push(watcher); return watcher; },
   };
@@ -75,7 +81,8 @@ async function setup(t, config = 'schema="schema.graphql"\n') {
   }
   const main = document("main.py");
   vscode.window.activeTextEditor = { document: main };
-  return { root, vscode, main, document, events, watchers, interpreter: value => { selectedPython = value; }, candidates: values => { candidates = values.map(value => Uri.file(path.join(root, value))); } };
+  return { root, vscode, main, document, events, watchers, interpreter: value => { selectedPython = value; },
+    stubPath: value => { selectedStubPath = value; explicitlyConfiguredStubPath = true; }, candidates: values => { candidates = values.map(value => Uri.file(path.join(root, value))); } };
 }
 
 test("real worker captures unsaved source/config/schema, shares concurrent providers and maps associated untitled identities", async t => {
@@ -103,6 +110,67 @@ test("real worker captures unsaved source/config/schema, shares concurrent provi
   assert.equal(await fs.readFile(path.join(root, "schema.graphql"), "utf8"), "type Query { title: String }");
   assert.equal(unsaved.isDirty, true);
   await assert.rejects(fs.stat(path.join(root, "new.py")), { code: "ENOENT" });
+});
+
+test("managed runtime companions are excluded from project source candidates", async t => {
+  const fixture = await setup(t);
+  const generation = path.join(fixture.root, ".graphql-desk", "typings", "generations", "g-1-01234567-89ab-cdef-0123-456789abcdef");
+  const generated = path.join(generation, "graphql_desk_generated", "default.py");
+  const previousGeneration = path.join(path.dirname(generation), "g-0-01234567-89ab-cdef-0123-456789abcdef");
+  const previousGenerated = path.join(previousGeneration, "graphql_desk_generated", "previous.py");
+  await fs.mkdir(path.dirname(generated), { recursive: true });
+  await fs.mkdir(path.dirname(previousGenerated), { recursive: true });
+  await fs.writeFile(generated, renderOwnedAnalysisArtifact("graphql_desk_generated", "default.py", ""));
+  await fs.writeFile(previousGenerated, renderOwnedAnalysisArtifact("graphql_desk_generated", "previous.py", "value = 1\n"));
+  fixture.stubPath(path.relative(fixture.root, generation));
+  fixture.candidates(["main.py", path.relative(fixture.root, generated), path.relative(fixture.root, previousGenerated)]);
+  const requests = [];
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, requestOptions) { requests.push(message); const reply = await worker.request(message, requestOptions); requests.push(reply); return reply; } };
+  } });
+  t.after(() => controller.dispose());
+
+  assert.ok(await controller.analyze(controller.snapshot(fixture.main)), JSON.stringify(requests));
+  const prepare = requests.find(message => message.op === "prepare");
+  assert.ok(prepare);
+  const canonicalMain = await fs.realpath(fixture.main.uri.fsPath);
+  assert.deepEqual(prepare.candidates.map(value => value.toLowerCase()), [canonicalMain.toLowerCase()]);
+});
+
+test("a custom stubPath excludes only generated artifacts, not user source modules", async t => {
+  const fixture = await setup(t);
+  const canonicalRoot = await fs.realpath(fixture.root);
+  const userSource = path.join(canonicalRoot, "src", "main.py");
+  const generatedSource = path.join(canonicalRoot, "src", "graphql_desk_generated", "generated.py");
+  const largeGeneratedSource = path.join(canonicalRoot, "src", "graphql_desk_generated", "large.py");
+  const forgedSource = path.join(canonicalRoot, "src", "forged.py");
+  await fs.mkdir(path.dirname(userSource), { recursive: true });
+  await fs.writeFile(userSource, "value = 1\n");
+  await fs.mkdir(path.dirname(generatedSource), { recursive: true });
+  await fs.writeFile(generatedSource, renderOwnedAnalysisArtifact("graphql_desk_generated", "generated.py", "value = 2\n"));
+  await fs.writeFile(largeGeneratedSource, renderOwnedAnalysisArtifact("graphql_desk_generated", "large.py", "# x\n".repeat(1024 * 1024 / 4)));
+  await fs.writeFile(forgedSource, "# Generated by GraphQL Desk; analysis artifact " + "b".repeat(64) + "\nvalue = 4\n");
+  fixture.stubPath("src");
+  fixture.candidates(["main.py", path.relative(fixture.root, userSource), path.relative(fixture.root, generatedSource), path.relative(fixture.root, largeGeneratedSource), path.relative(fixture.root, forgedSource)]);
+  const unsaved = fixture.document("src/unsaved.py", "value = 3\n");
+  unsaved.isDirty = true;
+  const requests = [];
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, requestOptions) { requests.push(message); const reply = await worker.request(message, requestOptions); requests.push(reply); return reply; } };
+  } });
+  t.after(() => controller.dispose());
+
+  assert.ok(await controller.analyze(controller.snapshot(fixture.main)), JSON.stringify(requests));
+  const prepare = requests.find(message => message.op === "prepare");
+  assert.ok(prepare);
+  const candidates = prepare.candidates.map(value => value.toLowerCase());
+  assert.ok(candidates.includes(userSource.toLowerCase()), "a user module under stubPath remains a source candidate");
+  assert.ok(candidates.includes(path.join(canonicalRoot, "src", "unsaved.py").toLowerCase()), "a dirty user module under stubPath remains a source candidate");
+  assert.ok(candidates.includes(forgedSource.toLowerCase()), "a forged or copied marker with the wrong digest remains a source candidate");
+  assert.ok(!candidates.includes(generatedSource.toLowerCase()), "a generated runtime artifact is excluded");
+  assert.ok(!candidates.includes(largeGeneratedSource.toLowerCase()), "a valid generated artifact with the maximum permitted source body is excluded");
 });
 
 test("stale artifact reply is a no-publish result and the worker remains usable", async t => {
@@ -306,15 +374,16 @@ test("workspace folder watchers follow additions and removals and refresh closed
   await refresh;
   assert.equal(broad().length, 2, "Unchanged folders keep their watcher");
   const beforeGeneratedStub = invalidations;
-  const generatedStub = path.join(added.root, "graphql_desk_generated", "default.pyi");
+  const generatedStub = path.join(added.root, ".graphql-desk", "typings", "graphql_desk_generated", "default.pyi");
   await fs.mkdir(path.dirname(generatedStub), { recursive: true });
-  await fs.writeFile(generatedStub, `# Generated by GraphQL Desk; analysis artifact ${"a".repeat(64)}\nclass Generated: ...\n`);
+  await fs.writeFile(generatedStub, renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "class Generated: ...\n"));
   addedWatch.fire(Uri.file(generatedStub));
   assert.equal(invalidations, beforeGeneratedStub, "Generated typing files must not invalidate the capture that produced them");
   await fs.unlink(generatedStub);
   addedWatch.fire(Uri.file(generatedStub));
   assert.equal(invalidations, beforeGeneratedStub, "Deleting an observed GraphQL Desk-owned stub must not invalidate its cleanup");
   const generatedStage = path.join(added.root, "graphql_desk_generated", ".graphql-desk-test.tmp");
+  await fs.mkdir(path.dirname(generatedStage), { recursive: true });
   await fs.writeFile(generatedStage, "# Generated by GraphQL Desk; analysis session test\nclass Generated: ...\n");
   addedWatch.fire(Uri.file(generatedStage));
   assert.equal(invalidations, beforeGeneratedStub, "Generated staging files must not invalidate their own publication");
@@ -328,11 +397,14 @@ test("workspace folder watchers follow additions and removals and refresh closed
   assert.equal(invalidations, beforeGeneratedStub, "VS Code workspace settings writes are observed through configuration events, not as source changes");
   const generationDir = path.join(added.root, ".graphql-desk", "typings", "generations", `g-1-${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`);
   await fs.mkdir(generationDir, { recursive: true });
+  const oldActiveGeneration = path.join(path.dirname(generationDir), "g-0-01234567-89ab-cdef-0123-456789abcdef");
+  await fs.mkdir(oldActiveGeneration, { recursive: true });
+  fixture.stubPath(path.relative(added.root, oldActiveGeneration));
   const nestedGenerationDir = path.join(generationDir, "graphql_desk_generated");
   await fs.mkdir(nestedGenerationDir);
   addedWatch.fire(Uri.file(nestedGenerationDir));
   const generationArtifact = path.join(generationDir, "graphql_desk_generated", "default.pyi");
-  await fs.writeFile(generationArtifact, `# Generated by GraphQL Desk; analysis artifact ${"a".repeat(64)}\nclass Generated: ...\n`);
+  await fs.writeFile(generationArtifact, renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "class Generated: ...\n"));
   addedWatch.fire(Uri.file(generationDir));
   addedWatch.fire(Uri.file(generationArtifact));
   assert.equal(invalidations, beforeGeneratedStub, "Immutable generation creation and contents must not self-invalidate the source snapshot");
