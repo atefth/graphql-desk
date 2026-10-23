@@ -65,7 +65,14 @@ The extended real-worker fixture passed on Windows VS Code 1.141.0 and 1.142.0
 with Python 2026.10.0 and Pylance 2026.4.1. It checks undo/redo of an unsaved
 operation, clean source close, external edits to the closed source, rename and
 deletion of its generated companion/overload, and convergence of the unaffected
-consumer's `String` hover. A separate deliberately user-edited generated buffer
+consumer's `String` hover. A saved-operation case saves an edited operation,
+closes its source tab, then reopens the document and checks that saved Python
+source and the generated companion still agree. It passed on VS Code 1.142.0.
+Two 1.142 retries stopped at the earlier initial Pylance typing check; one
+1.141 attempt stopped in the earlier undo/redo check and its retry stopped at
+initial typing. Those attempts did not reach or fail the new case, so it has no
+1.141 result. A separate
+deliberately user-edited generated buffer
 keeps its text, version, dirty state and disk bytes after rejected publication
 and cleanup. This fixture's intentional user edits are not extension-created
 dirty state. Root migration, external-root refusal and shutdown cleanup also
