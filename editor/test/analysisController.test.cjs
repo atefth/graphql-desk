@@ -45,9 +45,10 @@ function event() {
   const listeners = new Set();
   return { subscribe(listener) { listeners.add(listener); return { dispose: () => listeners.delete(listener) }; }, fire(value) { for (const listener of listeners) listener(value); } };
 }
-async function setup(t, config = 'schema="schema.graphql"\n') {
+async function setup(t, config = 'schema="schema.graphql"\n', { deferCleanup = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-controller-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const cleanup = () => fs.rm(root, { recursive: true, force: true });
+  if (!deferCleanup) t.after(cleanup);
   await fs.writeFile(path.join(root, "schema.graphql"), "type Query { title: String }");
   await fs.writeFile(path.join(root, "pyproject.toml"), `[tool.graphql-desk]\n${config}schema_output="graphql_desk_generated/default.pyi"\n`);
   const source = 'raise RuntimeError("NO_IMPORT")\nfrom graphql_desk import gql\nq=gql("{title}")\n';
@@ -81,7 +82,7 @@ async function setup(t, config = 'schema="schema.graphql"\n') {
   }
   const main = document("main.py");
   vscode.window.activeTextEditor = { document: main };
-  return { root, vscode, main, document, events, watchers, interpreter: value => { selectedPython = value; },
+  return { root, vscode, main, document, events, watchers, cleanup, interpreter: value => { selectedPython = value; },
     stubPath: value => { selectedStubPath = value; explicitlyConfiguredStubPath = true; }, candidates: values => { candidates = values.map(value => Uri.file(path.join(root, value))); } };
 }
 
@@ -503,6 +504,8 @@ test("workspace folder watchers follow additions and removals and refresh closed
   fixture.events.onDidChangeConfiguration.fire({ affectsConfiguration: section => section === "graphqlDesk" });
   assert.equal(invalidations, beforeGeneratedStub + 2, "GraphQL Desk settings changes still invalidate analysis through VS Code's configuration event");
   await refresh;
+  fixture.events.onDidChangeConfiguration.fire({ affectsConfiguration: section => section === "python.analysis.stubPath" || section === "python" });
+  assert.equal(invalidations, beforeGeneratedStub + 2, "Managed stub-path rotations are handled by the extension without invalidating their own publication");
   fixture.events.onDidChangeConfiguration.fire({ affectsConfiguration: section => section === "python" });
   assert.equal(invalidations, beforeGeneratedStub + 3, "Python configuration changes still invalidate through VS Code's configuration event");
   await refresh;
@@ -960,6 +963,45 @@ test("edit storms coalesce into one latest capture and cancelling one provider p
   assert.equal(await one, null); assert.equal(await two, results[0]);
 });
 
+test("artifact publication and a newer analysis both survive queue coalescing", async t => {
+  const fixture = await setup(t);
+  let release;
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  let currentCalls = 0;
+  let artifactCalls = 0;
+  let analyzeCalls = 0;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, requestOptions) {
+      if (message.op === "current" && currentCalls++ === 0) { started(); await held; }
+      if (message.op === "artifacts") artifactCalls += 1;
+      if (message.op === "analyze") analyzeCalls += 1;
+      return worker.request(message, requestOptions);
+    } };
+  } }); t.after(() => controller.dispose());
+
+  const snapshot = controller.snapshot(fixture.main);
+  const bundle = await controller.analyze(snapshot);
+  assert.ok(bundle);
+  const current = controller.isCurrent(bundle, snapshot);
+  await ready;
+  const artifacts = controller.artifacts(snapshot);
+  await new Promise(resolve => setImmediate(resolve));
+  const latestAnalysis = controller.analyze(snapshot);
+  await new Promise(resolve => setImmediate(resolve));
+  release();
+
+  assert.equal(await current, true);
+  const generated = await artifacts;
+  assert.ok(generated?.ok, "artifact work queued behind current analysis is not silently discarded");
+  assert.equal(await latestAnalysis, bundle, "the newer analysis still receives the coalesced result");
+  assert.equal(artifactCalls, 1, "artifact work reaches the worker exactly once");
+  assert.equal(analyzeCalls, 1, "the queued analysis reuses the cached bundle without another worker analysis");
+  assert.equal(generated.isCurrent(), true, "the generated artifacts still belong to the live analysis ticket");
+});
+
 test("an invalidated queued analysis is skipped before worker dispatch", async t => {
   const fixture = await setup(t);
   let release;
@@ -1002,12 +1044,15 @@ test("explicit refresh cancellation aborts the worker and cannot admit a late re
   const server = http.createServer(request => { request.resume(); entered(); });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
-  const fixture = await setup(t, `schema="http://127.0.0.1:${server.address().port}/graphql"\n`);
+  const fixture = await setup(t, `schema="http://127.0.0.1:${server.address().port}/graphql"\n`, { deferCleanup: true });
   const cancellation = event();
   const token = { isCancellationRequested: false, onCancellationRequested: cancellation.subscribe };
   fixture.vscode.ProgressLocation = { Notification: 15 };
   fixture.vscode.window.withProgress = async (options, action) => { assert.equal(options.cancellable, true); return action({}, token); };
-  const controller = createAnalysisController(fixture.vscode); t.after(() => controller.dispose());
+  const controller = createAnalysisController(fixture.vscode);
+  t.after(() => controller.dispose());
+  // Register workspace cleanup after controller disposal: Node runs test after-hooks in registration order.
+  t.after(fixture.cleanup);
   const refreshing = controller.refresh();
   await requested;
   token.isCancellationRequested = true; cancellation.fire();
