@@ -98,6 +98,52 @@ test("rotates only the extension-owned setting and restores ownership across act
   assert.equal(custom.values["analysis.stubPath"], customPath);
 });
 
+test("recovers ownership when activation interrupts a managed stubPath rotation", async t => {
+  const f = await fixture(t, undefined);
+  const first = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const generations = path.join(first.root, "generations");
+  await fs.mkdir(generations);
+  const previous = ".graphql-desk/typings/generations/g-1-00000000-0000-0000-0000-000000000000";
+  const next = ".graphql-desk/typings/generations/g-2-00000000-0000-0000-0000-000000000000";
+  const previousPath = path.join(f.workspace, previous);
+  const nextPath = path.join(f.workspace, next);
+  await fs.mkdir(previousPath);
+  await fs.mkdir(nextPath);
+  const verified = { directory: nextPath, manifest: {
+    owner: "graphql-desk-analysis-generation", format: 1,
+    id: path.basename(nextPath), artifactFingerprint: "a",
+  }, verify() { return this; } };
+  await ownGeneration(first, verified);
+
+  const releaseSettingsWrite = f.delayNextUpdate();
+  const selection = first.selectGeneration(nextPath, () => true, verified);
+  await new Promise(resolve => setImmediate(resolve));
+  const pendingOwner = [...f.stored.values()].find(value => value?.pending === true);
+  assert.deepEqual(pendingOwner, {
+    base: ".graphql-desk/typings", current: next,
+    previous: "", pending: true,
+  });
+  assert.equal(f.values["analysis.stubPath"], undefined, "the setting write has not happened yet");
+
+  const restarted = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  assert.equal(restarted.ownsSetting, true);
+  assert.equal(restarted.selectedSetting, "");
+  assert.equal(restarted.stillOwnsSetting(), true);
+  releaseSettingsWrite();
+  assert.equal(await selection, true);
+  assert.deepEqual([...f.stored.values()].find(value => value?.current === next), {
+    base: ".graphql-desk/typings", current: next,
+  }, "successful rotation clears the pending marker");
+
+  f.values["analysis.stubPath"] = ".graphql-desk/typings";
+  const userOverride = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  assert.equal(userOverride.ownsSetting, false, "a third setting value remains user-owned");
+  assert.equal(f.values["analysis.stubPath"], ".graphql-desk/typings");
+  first.cleanup();
+  restarted.cleanup();
+  userOverride.cleanup();
+});
+
 test("recognizes owned stubPath when VS Code stores a single-folder setting at workspace scope", async t => {
   const f = await fixture(t, undefined, false, "workspaceValue");
   const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
