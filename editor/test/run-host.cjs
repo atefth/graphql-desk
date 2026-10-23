@@ -45,8 +45,8 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "discovery", "activation", "ownedAnalysis", "factoryArtifacts", "workspaceRemoval"].includes(suite), "Choose a known isolated suite");
-  const factorySuite = ["factoryArtifacts", "workspaceRemoval"].includes(suite);
+  assert.ok(["features", "discovery", "activation", "ownedAnalysis", "factoryArtifacts", "workspaceRemoval", "restartRecovery"].includes(suite), "Choose a known isolated suite");
+  const factorySuite = ["factoryArtifacts", "workspaceRemoval", "restartRecovery"].includes(suite);
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
@@ -137,7 +137,7 @@ async function main() {
   for (const extension of ["ms-python.python@2026.10.0", "ms-python.vscode-pylance@2026.4.1"]) {
     await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], { version });
   }
-  await runTests({
+  const options = {
     version,
     extensionDevelopmentPath: path.resolve(__dirname, ".."),
     extensionTestsPath: path.join(__dirname, `${suite}.host.cjs`),
@@ -150,9 +150,32 @@ async function main() {
       GRAPHQL_DESK_ARTIFACTS_PATH: artifacts,
     },
     launchArgs: [launchTarget, ...isolation, "--disable-updates", "--disable-telemetry", "--skip-welcome", "--skip-release-notes", "--disable-workspace-trust"],
-  });
+  };
+  const sessions = suite === "restartRecovery" ? ["before-restart", "after-restart"] : [null];
+  let beforeRestart;
+  for (const phase of sessions) {
+    const sessionEnv = phase ? { ...options.extensionTestsEnv, GRAPHQL_DESK_RESTART_PHASE: phase } : options.extensionTestsEnv;
+    await runTests({ ...options, extensionTestsEnv: sessionEnv });
+    if (phase === "before-restart") {
+      beforeRestart = JSON.parse(await fs.readFile(result, "utf8"));
+      assert.equal(beforeRestart.outcome, "owned-output-restart-observed");
+      const oldStubPath = beforeRestart.lifecycle.stubPath;
+      assert.ok(oldStubPath.includes("generations"), "The first host must select a complete owned generation");
+      await fs.access(path.join(workspace, oldStubPath, "complete.json"));
+    }
+  }
   const observed = JSON.parse(await fs.readFile(result, "utf8"));
-  if (factorySuite) {
+  if (suite === "restartRecovery") {
+    observed.lifecycle.processRestartReusedCompleteGeneration = beforeRestart.lifecycle.stubPath === observed.lifecycle.stubPath;
+    observed.lifecycle.beforeRestartHost = beforeRestart.host;
+    observed.lifecycle.afterRestartHost = observed.host;
+    observed.lifecycle.beforeRestartStubPath = beforeRestart.lifecycle.stubPath;
+    assert.ok(observed.lifecycle.processRestartReusedCompleteGeneration, "Restart must recover the persisted complete generation");
+    await fs.access(path.join(workspace, observed.lifecycle.stubPath, "complete.json"));
+    assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
+    observed.lifecycle.userFilePreserved = true;
+    await fs.writeFile(result, JSON.stringify(observed, null, 2));
+  } else if (factorySuite) {
     await assert.rejects(fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated")), { code: "ENOENT" }, "Extension shutdown must remove only its owned generated package");
     const generationsRoot = path.join(workspace, ".graphql-desk", "typings", "generations");
     const generations = await fs.readdir(generationsRoot);
@@ -166,7 +189,7 @@ async function main() {
     observed.lifecycle.userConfigurationPreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   }
-  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : `read-only-${suite}-observed`);
+  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" ? "owned-output-restart-observed" : `read-only-${suite}-observed`);
   console.log(`${suite} evidence: ${result}`);
 }
 

@@ -104,6 +104,8 @@ jobs:
         working-directory: editor
       - run: node --check test/discovery.host.cjs
         working-directory: editor
+      - run: node --check test/restartRecovery.host.cjs
+        working-directory: editor
       - run: npm audit
         working-directory: editor
 
