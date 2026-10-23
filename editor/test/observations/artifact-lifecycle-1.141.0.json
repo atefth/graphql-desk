@@ -7,9 +7,12 @@
     "ms-python.vscode-pylance": "2026.4.1"
   },
   "lifecycle": {
-    "checkerRestartAndSavedConsumerReopen": true,
+    "savedConsumerEditorReopen": true,
     "documentCloseEventObserved": false,
     "sourceUndoRedoCloseRenameDelete": true,
+    "fragmentLanguageServerRestarts": 1,
+    "crossFileFragmentMutation": true,
+    "nullableRefresh": true,
     "foreignDirtyGeneratedBufferPreserved": true,
     "runtimeStubPathChange": true,
     "externalRootConflictPreserved": true,
@@ -20,10 +23,15 @@
   },
   "pylance": {
     "checkerRestart": true,
+    "resultType": "GraphqlDeskResult",
+    "selectedType": "String",
+    "countType": "Int",
+    "invalidVariableDiagnostic": true,
     "version": "2026.4.1"
   },
   "unaffectedConsumerExpectedHover": "String",
   "outcome": "generated-factory-artifacts-observed",
+  "latestRun": "2026-10-23: the full factoryArtifacts host scenario passed on VS Code 1.141.0 with Python 2026.10.0 and Pylance 2026.4.1. The editor tab closed and reopened; VS Code retained the TextDocument and emitted no onDidCloseTextDocument event.",
   "priorConcurrentAttempt": {
     "outcome": "generated-factory-artifacts-failed",
     "failedCheck": "nullable output and Pylance refresh from GraphQL edit",

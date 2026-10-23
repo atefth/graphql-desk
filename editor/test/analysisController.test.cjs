@@ -124,6 +124,39 @@ test("stale artifact reply is a no-publish result and the worker remains usable"
   assert.ok(requests.filter(operation => operation === "analyze").length >= 2, "cleared stale analysis is rebuilt");
 });
 
+test("unrelated host documents do not stale artifacts, but required schema edits do", async t => {
+  const fixture = await setup(t);
+  await fs.writeFile(path.join(fixture.root, "dependency.py"), "dependency = 1\n");
+  fixture.candidates(["main.py", "dependency.py"]);
+  const schema = fixture.document("schema.graphql", "type Query { title: String }");
+  schema.isDirty = true;
+  let artifactCalls = 0;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, requestOptions) {
+      const reply = await worker.request(message, requestOptions);
+      if (message.op === "artifacts" && ++artifactCalls === 1) {
+        fixture.document("../unrelated.pyi", "value: int\n");
+        fixture.document("dependency.py", "dependency = 1\n");
+      }
+      else if (message.op === "artifacts") { schema.text = "type Query { title: String extra: Int }"; schema.version += 1; }
+      return reply;
+    } };
+  } });
+  t.after(() => controller.dispose());
+  const snapshot = controller.snapshot(fixture.main);
+
+  const current = await controller.artifacts(snapshot);
+  assert.ok(current, "an unrelated host document must not invalidate generated artifacts");
+  const analysis = await controller.analyze(snapshot);
+  assert.ok(analysis);
+  assert.equal(await controller.isCurrent(analysis, snapshot), true, "an unrelated host document must not stale editor analysis");
+  const skipped = [];
+  assert.equal(await controller.artifacts(snapshot, undefined, reason => skipped.push(reason)), null,
+    "editing a required schema buffer must invalidate its prior result");
+  assert.deepEqual(skipped, ["analysis-snapshot-stale"]);
+});
+
 test("a transient Python extension activation failure is traced and retried for live typing", async t => {
   const fixture = await setup(t);
   fixture.interpreter("");
@@ -358,7 +391,7 @@ test("untrusted, cancelled, superseded and disposed captures cannot publish or l
   const pending = controller.analyze(snapshot);
   fixture.events.onDidChangeTextDocument.fire({ document: fixture.main });
   // Jobs queued before invalidation may start afterward, but never match an edited document.
-  fixture.main.version += 1; fixture.main.text += "# edited\n";
+  fixture.main.version += 1; fixture.main.text += "# edited\n"; fixture.main.isDirty = true;
   const result = await pending;
   if (result) assert.equal(result.request.modules[0].version, fixture.main.version);
   const current = await controller.analyze(controller.snapshot(fixture.main)); assert.ok(current);
@@ -428,7 +461,7 @@ test("opt-in polling reuses authenticated refresh, retains source-edit deadlines
   const snapshot = () => controller.snapshot(fixture.main);
   assert.equal((await controller.analyze(snapshot())).request.schemas.length, 0);
   t.mock.timers.tick(1000);
-  fixture.main.text += "# dirty source\n"; fixture.main.version += 1;
+  fixture.main.text += "# dirty source\n"; fixture.main.version += 1; fixture.main.isDirty = true;
   fixture.events.onDidChangeTextDocument.fire({ document: fixture.main });
   await controller.analyze(snapshot());
   assert.equal(headers.length, 0);
@@ -486,7 +519,7 @@ test("polling waits for interactive work without losing its deadline and cancels
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
   await controller.analyze(controller.snapshot(fixture.main));
   hold = true;
-  fixture.main.text += "# edit\n"; fixture.main.version += 1;
+  fixture.main.text += "# edit\n"; fixture.main.version += 1; fixture.main.isDirty = true;
   const interactive = controller.analyze(controller.snapshot(fixture.main));
   await ready;
   t.mock.timers.tick(1000);
@@ -685,7 +718,7 @@ test("edit storms coalesce into one latest capture and cancelling one provider p
   await ready;
   const pending = [];
   for (let index = 0; index < 50; index += 1) {
-    fixture.main.version += 1; fixture.main.text += "# edit\n";
+    fixture.main.version += 1; fixture.main.text += "# edit\n"; fixture.main.isDirty = true;
     fixture.events.onDidChangeTextDocument.fire({ document: fixture.main });
     pending.push(controller.analyze(controller.snapshot(fixture.main)));
   }

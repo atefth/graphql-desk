@@ -79,18 +79,26 @@ dirty state. Root migration, external-root refusal and shutdown cleanup also
 remain covered. Selected observations are recorded in
 [`artifact-lifecycle-1.141.0.json`](../../editor/test/observations/artifact-lifecycle-1.141.0.json)
 and [`artifact-lifecycle-1.142.0.json`](../../editor/test/observations/artifact-lifecycle-1.142.0.json).
-Both hosts now also verify that a Pylance analysis-server restart and reopening
+Both hosts also verify that a Pylance analysis-server restart and reopening
 the saved consumer retain current nullability hover and diagnostics. The test
-closes the visible editor tab, but VS Code did not emit
+closes and reopens the visible editor tab, but VS Code did not emit
 `onDidCloseTextDocument`; the public extension API offers no command to close a
 `TextDocument` directly. Therefore this is saved-tab reopen evidence, not proof
 that GraphQL Desk's document-close handler ran or that a user can close a dirty
 source document without a prompt.
-Native editor checks pass 89/89; the Python worker suite passes 28/28.
-One concurrent host rerun passed the new source lifecycle assertions on 1.141.0
-but exceeded the existing 30-second schema-nullability convergence check. The
-unchanged assertions passed when rerun in isolation. This evidence does not
-establish edit-storm or checker-restart reliability.
+The freshness identity now includes the candidate set, dirty source/config
+buffers, dirty buffers for configured local schemas, and project settings. It
+ignores unrelated open documents and clean documents, whose text matches disk;
+the worker still verifies disk-backed sources before publication. A focused
+regression confirms that opening a clean source document during publication
+does not stale the result, while editing a required dirty schema does.
+The full `factoryArtifacts` scenario now passes on VS Code 1.141.0 and 1.142.0
+with pinned Python 2026.10.0 / Pylance 2026.4.1. It verifies operation result
+and variable inference, unsaved operation and nullable refresh, cross-file
+fragment refresh, saved-tab close/reopen, undo/redo, rename/delete, settings
+preservation, and bounded restarts after fragment convergence. Earlier runs
+intermittently failed before initial publication; these two passes do not prove
+the broad cancellation, interpreter-change, crash-recovery, or edit-storm gates.
 
 ### Removed workspace folder (#23 / #24)
 
