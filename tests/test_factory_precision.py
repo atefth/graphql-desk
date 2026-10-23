@@ -23,12 +23,17 @@ C: t.Literal['query C{greeting}'] = 'query C{greeting}'
 D: te.Literal['query D{greeting}'] = 'query D{greeting}'
 AA: t.Final = A
 CC: te.Final = C
+SOURCE: t.Final = 'query Source{greeting}'
+def other() -> None:
+ SOURCE = 'query Local{greeting}'
+ assert SOURCE
 a=graphql(A)
 b=graphql(B)
 c=graphql(C)
 d=graphql(D)
 aa=graphql(AA)
 cc=graphql(CC)
+source=graphql(SOURCE)
 def local()->int:
  t=1
  return t
@@ -39,6 +44,7 @@ if t.TYPE_CHECKING:
  assert_type(d.operation_name,t.Literal['D'])
  assert_type(aa.operation_name,t.Literal['A'])
  assert_type(cc.operation_name,t.Literal['C'])
+ assert_type(source.operation_name,t.Literal['Source'])
 assert a.operation_name=='A' and b.operation_name=='B'
 assert c.operation_name=='C' and d.operation_name=='D'
 """

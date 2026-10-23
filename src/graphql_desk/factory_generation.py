@@ -194,12 +194,88 @@ def _precision_diagnostics(
                     for alias in node.names
                 )
             pending.extend(ast.iter_child_nodes(node))
-        stores: dict[str, list[ast.Name]] = {}
+
+        class ModuleStores(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.names: dict[str, list[ast.Name]] = {}
+
+            def visit_Name(self, node: ast.Name) -> None:
+                if isinstance(node.ctx, (ast.Store, ast.Del)):
+                    self.names.setdefault(node.id, []).append(node)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self._visit_definition(
+                    node.name, (*node.decorator_list, *node.args.defaults)
+                )
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                self._visit_definition(
+                    node.name, (*node.decorator_list, *node.args.defaults)
+                )
+
+            def _visit_definition(
+                self, name: str, expressions: tuple[ast.expr, ...]
+            ) -> None:
+                self.visit_Name(ast.Name(id=name, ctx=ast.Store()))
+                for expression in expressions:
+                    self.visit(expression)
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                self.visit_Name(ast.Name(id=node.name, ctx=ast.Store()))
+                for expression in (*node.decorator_list, *node.bases):
+                    self.visit(expression)
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                for expression in node.args.defaults:
+                    self.visit(expression)
+
+            def visit_Import(self, node: ast.Import) -> None:
+                for alias in node.names:
+                    name = alias.asname or alias.name.split(".")[0]
+                    self.visit_Name(ast.Name(id=name, ctx=ast.Store()))
+
+            def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+                for alias in node.names:
+                    if alias.name != "*":
+                        name = alias.asname or alias.name
+                        self.visit_Name(ast.Name(id=name, ctx=ast.Store()))
+
+        stores = ModuleStores()
+        stores.visit(tree)
+
+        class ScopeGlobals(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.names: set[str] = set()
+                self.globals: set[str] = set()
+
+            def visit_Name(self, node: ast.Name) -> None:
+                if isinstance(node.ctx, (ast.Store, ast.Del)):
+                    self.names.add(node.id)
+
+            def visit_Global(self, node: ast.Global) -> None:
+                self.globals.update(node.names)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                return
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                return
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                return
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                return
+
         for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and isinstance(
-                node.ctx, (ast.Store, ast.Del)
-            ):
-                stores.setdefault(node.id, []).append(node)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                writes = ScopeGlobals()
+                for statement in node.body:
+                    writes.visit(statement)
+                for name in writes.names & writes.globals:
+                    stores.names.setdefault(name, []).append(
+                        ast.Name(name, ast.Store())
+                    )
         exact_literals: dict[str, str] = {}
         for statement in tree.body:
             if statement.lineno >= call.lineno:
@@ -227,7 +303,7 @@ def _precision_diagnostics(
             ):
                 continue
             target = statement.target.id
-            if len(stores.get(target, ())) != 1 or statement.value is None:
+            if len(stores.names.get(target, ())) != 1 or statement.value is None:
                 continue
             annotation = statement.annotation
             marker = (
