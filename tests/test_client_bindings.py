@@ -160,6 +160,10 @@ if TYPE_CHECKING:
  def wrong(schema:GraphQLSchema,session:SyncClientSession)->None:
   execute_core_sync(schema,doc,ReadVariables(name=1)) # error
   execute_gql_sync(session,doc,{"name":1}) # error
+ async def wrong_async(schema:GraphQLSchema,session:AsyncClientSession)->None:
+  await execute_core(schema,doc,ReadVariables(name=1)) # error
+  await execute_gql(session,doc,{"name":1}) # error
+  subscribe_gql(session,doc,ReadVariables(name=1)) # error
 """
         module = ModuleSnapshot("p", "authored", "file:///authored.py", 1, source)
         context = SchemaContext("main", schema(), "client-fixture")
@@ -214,6 +218,7 @@ with Client(schema=transport.schema,transport=transport) as session:
  assert response is transport.responses[-2]
  assert response.data=={{"hello":"Grace"}}
  assert response.extensions=={{"unchanged":True}}
+ assert transport.responses[-1].data=={{"incrementBy":3}}
  request=transport.requests[-2]
  assert request.document is doc.ast
  assert request.operation_name==doc.operation_name=="Read"
