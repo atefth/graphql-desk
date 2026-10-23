@@ -222,3 +222,12 @@ See
 This does not test delayed/superseded publication or prove the full lifecycle
 matrix.
 This is bounded evidence only; broad TYPE-01 and gate #42 remain open.
+
+The lifecycle host also forces the real worker to fail while an `artifacts`
+request is pending. It confirms that the previous complete generation remains
+selected, then changes the schema again and observes Pylance update the selected
+field from `String` to `Int` while the sibling `ID` hover stays intact. The
+last-known `String` hover remains visible during the failed refresh, so this
+does not prove a no-stale interval or cancellation/supersession safety. See
+[`issue-38-worker-crash-recovery-1.142.0.json`](../../editor/test/observations/issue-38-worker-crash-recovery-1.142.0.json).
+This bounded recovery result does not close #38 or gate #42.
