@@ -86,7 +86,7 @@ def _analysis_input_fingerprint(snapshot: EditorSnapshot) -> str:
     modules = cast(list[dict[str, object]], request["modules"])
     bindings = cast(list[dict[str, object]], request["bindings"])
     schemas = cast(list[dict[str, object]], request["schemas"])
-    projects = []
+    projects: list[dict[str, object]] = []
     for config in snapshot.project_configs:
         project = config.path.as_uri()
         projects.append(
