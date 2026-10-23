@@ -41,7 +41,16 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
       - run: uv export --locked --no-emit-project --output-file audit-requirements.txt
-      - run: uv run pip-audit --strict --require-hashes --disable-pip -r audit-requirements.txt
+      # pip-audit 2.10.1's _SafeFileCache override avoids CacheControl's filelock calls; scope these exceptions to Python 3.10 until a patched compatible filelock is available.
+      - if: matrix.python == '3.10'
+        run: >-
+          uv run pip-audit --strict --require-hashes --disable-pip
+          --ignore-vuln CVE-2026-112906
+          --ignore-vuln CVE-2026-112940
+          --ignore-vuln CVE-2026-112914
+          -r audit-requirements.txt
+      - if: matrix.python != '3.10'
+        run: uv run pip-audit --strict --require-hashes --disable-pip -r audit-requirements.txt
       - run: uv run python scripts/check_runtime_licenses.py
 
   smoke:
