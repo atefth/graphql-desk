@@ -149,7 +149,7 @@ function activate(context) {
   status.name = "GraphQL Desk";
   status.command = "graphqlDesk.refreshSchema";
   status.tooltip = "GraphQL Desk: refresh a remote schema; positive schema_refresh_interval enables trusted background polling. Check configuration and interpreter settings if unavailable.";
-  const controller = createAnalysisController(vscode, { changed: refreshVisible, onSkip: traceSkip,
+  const controller = createAnalysisController(vscode, { changed: refreshVisible,
     status: message => {
       if (message) { status.text = `GraphQL Desk: ${message}`; status.show(); }
       else status.hide();

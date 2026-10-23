@@ -23,7 +23,7 @@ const inside = (root, value) => {
 };
 
 /** Captures are finite capabilities; watchers only request earlier invalidation. */
-function createAnalysisController(vscode, { workerFactory = createAnalysisWorker, environment = () => process.env, changed = () => {}, report = () => {}, status = () => {}, onSkip = () => {} } = {}) {
+function createAnalysisController(vscode, { workerFactory = createAnalysisWorker, environment = () => process.env, changed = () => {}, report = () => {}, status = () => {} } = {}) {
   let disposed = false;
   let epoch = 0;
   const states = new Map();
