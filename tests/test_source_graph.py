@@ -33,6 +33,7 @@ class SourceGraphTests(unittest.TestCase):
             "models",
             "class User: pass\n"
             "type UserAlias = User\n"
+            "type ChainedAlias = UserAlias\n"
             "type MaybeUser = User | None\n"
             "type Text = str\n"
             "type Generic[T] = list[T]\n"
@@ -43,6 +44,7 @@ class SourceGraphTests(unittest.TestCase):
         resolutions = resolve_type_symbols(
             (
                 "models.UserAlias",
+                "models.ChainedAlias",
                 "models.MaybeUser",
                 "models.Text",
                 "models.Generic",
@@ -56,6 +58,7 @@ class SourceGraphTests(unittest.TestCase):
         self.assertEqual(
             [(item.status, item.target) for item in resolutions],
             [
+                ("resolved", "models.User"),
                 ("resolved", "models.User"),
                 ("unresolved", None),
                 ("resolved", "models.MaybeUser"),
