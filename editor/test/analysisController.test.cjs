@@ -997,7 +997,7 @@ test("artifact publication and a newer analysis both survive queue coalescing", 
   assert.ok(generated?.ok, "artifact work queued behind current analysis is not silently discarded");
   assert.equal(await latestAnalysis, bundle, "the newer analysis still receives the coalesced result");
   assert.equal(artifactCalls, 1, "artifact work reaches the worker exactly once");
-  assert.equal(analyzeCalls, 1, "same-kind analysis requests coalesce to one worker analysis");
+  assert.equal(analyzeCalls, 1, "the queued analysis reuses the cached bundle without another worker analysis");
   assert.equal(generated.isCurrent(), true, "the generated artifacts still belong to the live analysis ticket");
 });
 
