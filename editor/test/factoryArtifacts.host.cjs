@@ -3,7 +3,8 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const vscode = require("vscode");
 const fs = require("node:fs/promises");
-const { createOwnedAnalysisArtifacts } = require("../src/ownedAnalysisArtifacts");
+const artifactModule = require("../src/ownedAnalysisArtifacts");
+const { createOwnedAnalysisArtifacts } = artifactModule;
 
 async function until(check, label, milliseconds = 30000) {
   const deadline = Date.now() + milliseconds;
@@ -16,7 +17,10 @@ async function until(check, label, milliseconds = 30000) {
 }
 
 exports.run = async () => {
-  const results = { host: vscode.version, pylance: {}, generatedFiles: true, lifecycle: {} };
+  const started = Date.now();
+  const results = { host: vscode.version, pylance: {}, generatedFiles: true, lifecycle: { coldTrace: [] } };
+  const mark = (stage, details = {}) => results.lifecycle.coldTrace.push({ stage, elapsedMs: Date.now() - started, ...details });
+  const workerCalls = new Map();
   try {
     for (const id of ["ms-python.python", "ms-python.vscode-pylance"]) {
       const extension = vscode.extensions.getExtension(id);
@@ -29,12 +33,43 @@ exports.run = async () => {
     assert.ok(generated.initial.length > 1 && generated.nullable.length > 1);
     const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
     let stubRoot = process.env.GRAPHQL_DESK_STUB_ROOT;
+    const workerModule = require("../src/analysisWorker");
+    const createWorker = workerModule.createAnalysisWorker;
+    workerModule.createAnalysisWorker = options => {
+      const worker = createWorker(options);
+      return new Proxy(worker, { get(target, property) {
+        if (property === "request") return async (message, requestOptions) => {
+          const count = (workerCalls.get(message.op) ?? 0) + 1;
+          workerCalls.set(message.op, count);
+          if (count === 1) mark(`worker.${message.op}.started`, { candidates: message.candidates?.length, buffers: message.buffers?.length });
+          try {
+            const reply = await target.request(message, requestOptions);
+            if (count === 1) mark(`worker.${message.op}.returned`, { ok: reply.ok, projects: reply.projects?.length,
+              files: reply.projects?.reduce((total, project) => total + (project.files?.length ?? 0), 0),
+              unavailableSchemas: reply.unavailable_schemas?.length });
+            return reply;
+          } catch (error) { if (count === 1) mark(`worker.${message.op}.failed`, { error: String(error) }); throw error; }
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    };
+    const createArtifacts = artifactModule.createOwnedAnalysisArtifacts;
+    artifactModule.createOwnedAnalysisArtifacts = (...args) => {
+      mark("publisher.create.started", { files: args[4]?.length });
+      try {
+        const handle = createArtifacts(...args);
+        mark("publisher.create.returned", { files: args[4]?.length });
+        return handle;
+      } catch (error) { mark("publisher.create.failed", { error: String(error) }); throw error; }
+    };
     const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
     assert.ok(extension, "GraphQL Desk extension must be loaded in the host");
     const consumerUri = vscode.Uri.file(path.join(process.env.GRAPHQL_DESK_TEST_WORKSPACE, "consumer.py"));
     const consumer = await vscode.workspace.openTextDocument(consumerUri);
     await vscode.window.showTextDocument(consumer, { preview: false });
     await extension.activate();
+    mark("extension.activation.returned", { active: extension.isActive });
     const hover = async (line, character) => {
       const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", consumerUri, new vscode.Position(line, character)) || [];
       return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
@@ -51,6 +86,12 @@ exports.run = async () => {
         results.lifecycle.defaultStub = await fs.readFile(path.join(stubRoot, "graphql_desk_generated", "default.pyi"), "utf8");
       } catch { results.lifecycle.publishedPaths = []; }
       results.pylance = { ...results.pylance, ...observed };
+      if (/String|str/.test(observed.selected) && !results.lifecycle.coldTrace.some(item => item.stage === "pylance.hover.indexed")) {
+        mark("pylance.hover.indexed", { hover: observed.selected });
+      }
+      if (observed.diagnostics.length && !results.lifecycle.coldTrace.some(item => item.stage === "pylance.diagnostic.indexed")) {
+        mark("pylance.diagnostic.indexed", { count: observed.diagnostics.length });
+      }
       try { await fs.access(path.join(stubRoot, "graphql_desk_generated", "__init__.pyi")); } catch { return false; }
       return /String|str/.test(observed.selected) && observed.diagnostics.length > 0;
     }, "generated result and variable types");
