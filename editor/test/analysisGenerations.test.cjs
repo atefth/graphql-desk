@@ -34,15 +34,20 @@ const files = text => new Map([["graphql_desk_generated", [
   { relative_path: "graphql_desk_generated/default.pyi", text: `selected: ${text}\n` },
   { relative_path: "graphql_desk_generated/_documents/default/d0.pyi", text: `class Result: value: ${text}\n` },
 ]]]);
+const fingerprint = packages => createHash("sha256").update(JSON.stringify(
+  [...packages].flatMap(([, values]) => values.map(({ relative_path, text }) => [relative_path, text])).sort(([a], [b]) => a.localeCompare(b)),
+)).digest("hex");
+const publish = (f, packages, id, isCurrent = () => true, inputFingerprint = fingerprint(packages)) =>
+  f.publisher.publish(packages, id, isCurrent, f.managed, inputFingerprint);
 
 test("publishes immutable complete generations and recovers the latest verified one", async t => {
   const f = fixture(t);
-  assert.equal(await f.publisher.publish(files("str"), "analysis-1", () => true, f.managed), true);
+  assert.equal(await publish(f, files("str"), "analysis-1"), true);
   const first = path.resolve(f.workspace, f.managed.selectedSetting);
   assert.ok(fs.existsSync(path.join(first, "complete.json")));
   const firstBytes = fs.readFileSync(path.join(first, "graphql_desk_generated", "default.pyi"));
 
-  assert.equal(await f.publisher.publish(files("int"), "analysis-2", () => true, f.managed), true);
+  assert.equal(await publish(f, files("int"), "analysis-2"), true);
   const second = path.resolve(f.workspace, f.managed.selectedSetting);
   assert.notEqual(first, second);
   assert.deepEqual(fs.readFileSync(path.join(first, "graphql_desk_generated", "default.pyi")), firstBytes);
@@ -53,6 +58,18 @@ test("publishes immutable complete generations and recovers the latest verified 
   assert.equal(await afterRestart.recover(restarted), true);
   assert.equal(path.resolve(f.workspace, restarted.selectedSetting), second);
   assert.equal(fs.readFileSync(path.join(f.root, "user.txt"), "utf8"), "keep");
+});
+
+test("binds identical stubs to distinct source and schema snapshots", async t => {
+  const f = fixture(t);
+  const input1 = createHash("sha256").update("source/schema/config 1").digest("hex");
+  const input2 = createHash("sha256").update("source/schema/config 2").digest("hex");
+  assert.equal(await publish(f, files("str"), "analysis-1", () => true, input1), true);
+  assert.equal(await publish(f, files("str"), "analysis-2", () => true, input1), false);
+  assert.equal(await publish(f, files("str"), "analysis-3", () => true, input2), true);
+  const latest = f.publisher.current(f.managed)[0];
+  assert.equal(latest.manifest.inputFingerprint, input2);
+  assert.equal(latest.manifest.files[0].path, "graphql_desk_generated/_documents/default/d0.pyi");
 });
 
 test("serializes overlapping publication so stale output cannot win recovery ordering", async t => {
@@ -73,9 +90,9 @@ test("serializes overlapping publication so stale output cannot win recovery ord
   };
 
   let staleIsCurrent = true;
-  const stale = f.publisher.publish(files("str"), "old-analysis", () => staleIsCurrent, f.managed);
+  const stale = publish(f, files("str"), "old-analysis", () => staleIsCurrent);
   await registrationStarted;
-  const fresh = f.publisher.publish(files("int"), "new-analysis", () => true, f.managed);
+  const fresh = publish(f, files("int"), "new-analysis");
   staleIsCurrent = false;
   release();
   assert.equal(await stale, false);
@@ -92,14 +109,14 @@ test("serializes overlapping publication so stale output cannot win recovery ord
 
 test("incomplete publication leaves the active complete generation selected", async t => {
   const f = fixture(t);
-  await f.publisher.publish(files("str"), "analysis-1", () => true, f.managed);
+  await publish(f, files("str"), "analysis-1");
   const active = f.managed.selectedSetting;
   const rename = fs.renameSync;
   fs.renameSync = (source, destination) => {
     if (destination.endsWith("complete.json")) throw new Error("injected manifest commit failure");
     return rename(source, destination);
   };
-  try { await assert.rejects(f.publisher.publish(files("int"), "analysis-2", () => true, f.managed), /injected manifest/); }
+  try { await assert.rejects(publish(f, files("int"), "analysis-2"), /injected manifest/); }
   finally { fs.renameSync = rename; }
   assert.equal(f.managed.selectedSetting, active);
   const generations = fs.readdirSync(path.join(f.root, "generations"));
@@ -109,9 +126,9 @@ test("incomplete publication leaves the active complete generation selected", as
 
 test("recovery falls back from a changed newest generation and preserves it", async t => {
   const f = fixture(t);
-  await f.publisher.publish(files("str"), "analysis-1", () => true, f.managed);
+  await publish(f, files("str"), "analysis-1");
   const first = path.resolve(f.workspace, f.managed.selectedSetting);
-  await f.publisher.publish(files("int"), "analysis-2", () => true, f.managed);
+  await publish(f, files("int"), "analysis-2");
   const second = path.resolve(f.workspace, f.managed.selectedSetting);
   const artifact = path.join(second, "graphql_desk_generated", "default.pyi");
   fs.writeFileSync(artifact, "user bytes");
@@ -124,24 +141,24 @@ test("recovery falls back from a changed newest generation and preserves it", as
 
 test("retention never deletes a generation with dirty artifacts", async t => {
   const f = fixture(t);
-  await f.publisher.publish(files("str"), "analysis-1", () => true, f.managed);
+  await publish(f, files("str"), "analysis-1");
   const first = path.resolve(f.workspace, f.managed.selectedSetting);
   const dirtyFile = path.join(first, "graphql_desk_generated", "default.pyi");
   f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(dirtyFile), isDirty: true });
-  await f.publisher.publish(files("int"), "analysis-2", () => true, f.managed);
-  await f.publisher.publish(files("float"), "analysis-3", () => true, f.managed);
+  await publish(f, files("int"), "analysis-2");
+  await publish(f, files("float"), "analysis-3");
   assert.equal(fs.readFileSync(dirtyFile, "utf8").includes("selected: str"), true);
   assert.ok(fs.existsSync(path.join(first, "complete.json")));
 });
 
 test("retention preserves a generation containing an unlisted empty directory", async t => {
   const f = fixture(t);
-  await f.publisher.publish(files("str"), "analysis-1", () => true, f.managed);
+  await publish(f, files("str"), "analysis-1");
   const first = path.resolve(f.workspace, f.managed.selectedSetting);
   const foreignDirectory = path.join(first, "user-data");
   fs.mkdirSync(foreignDirectory);
-  await f.publisher.publish(files("int"), "analysis-2", () => true, f.managed);
-  await f.publisher.publish(files("float"), "analysis-3", () => true, f.managed);
+  await publish(f, files("int"), "analysis-2");
+  await publish(f, files("float"), "analysis-3");
   assert.equal(fs.existsSync(path.join(first, "complete.json")), true);
   assert.equal(fs.existsSync(foreignDirectory), true);
   assert.deepEqual(fs.readdirSync(foreignDirectory), []);
@@ -149,7 +166,7 @@ test("retention preserves a generation containing an unlisted empty directory", 
 
 test("an ancestor symlink swap prevents publication outside the workspace", async t => {
   const f = fixture(t);
-  await f.publisher.publish(files("str"), "analysis-1", () => true, f.managed);
+  await publish(f, files("str"), "analysis-1");
   const active = path.resolve(f.workspace, f.managed.selectedSetting);
   const artifact = path.join(active, "graphql_desk_generated", "default.pyi");
   const originalBytes = fs.readFileSync(artifact);
@@ -159,16 +176,16 @@ test("an ancestor symlink swap prevents publication outside the workspace", asyn
   t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
   fs.renameSync(managedParent, movedRoot);
   fs.symlinkSync(movedRoot, managedParent, process.platform === "win32" ? "junction" : "dir");
-  await assert.rejects(f.publisher.publish(files("int"), "analysis-2", () => true, f.managed), /root changed/);
+  await assert.rejects(publish(f, files("int"), "analysis-2"), /root changed/);
   assert.deepEqual(fs.readFileSync(artifact), originalBytes);
   assert.equal(fs.readdirSync(path.join(movedRoot, "typings", "generations")).length, 1);
 });
 
 test("preflight rejects a foreign generation entry before deleting any owned bytes", async t => {
   const f = fixture(t);
-  await f.publisher.publish(files("str"), "analysis-1", () => true, f.managed);
+  await publish(f, files("str"), "analysis-1");
   const first = path.resolve(f.workspace, f.managed.selectedSetting);
-  await f.publisher.publish(files("int"), "analysis-2", () => true, f.managed);
+  await publish(f, files("int"), "analysis-2");
   const ownedFile = path.join(first, "graphql_desk_generated", "default.pyi");
   const ownedBefore = fs.readFileSync(ownedFile);
   const foreign = path.join(first, "foreign.txt");
@@ -189,7 +206,7 @@ test("preflight rejects a foreign generation entry before deleting any owned byt
     }
     return result;
   };
-  try { await f.publisher.publish(files("float"), "analysis-3", () => true, f.managed); }
+  try { await publish(f, files("float"), "analysis-3"); }
   finally { fs.readdirSync = readdir; fs.renameSync = rename; }
   assert.equal(injected, true);
   assert.deepEqual(fs.readFileSync(ownedFile), ownedBefore);
@@ -207,10 +224,10 @@ test("duplicate paths and abandoned incomplete generations are never adopted or 
   const duplicate = files("str").get("graphql_desk_generated");
   await assert.rejects(f.publisher.publish([
     ["graphql_desk_generated", duplicate], ["graphql_desk_generated", duplicate],
-  ], "analysis-1", () => true, f.managed), /Invalid or oversized generation artifact/);
+  ], "analysis-1", () => true, f.managed, fingerprint(files("str"))), /Invalid or oversized generation artifact/);
   assert.equal(fs.readFileSync(partialFile, "utf8"), "partial user-visible bytes");
   assert.equal(fs.readdirSync(path.join(f.root, "generations")).length, 1);
-  assert.equal(await f.publisher.publish(files("str"), "analysis-2", () => true, f.managed), true);
+  assert.equal(await publish(f, files("str"), "analysis-2"), true);
   assert.equal(fs.readFileSync(partialFile, "utf8"), "partial user-visible bytes");
   assert.equal(fs.readdirSync(path.join(f.root, "generations")).length, 2);
 });
@@ -234,7 +251,7 @@ test("forged complete generations without an extension ownership record are neve
   assert.equal(f.publisher.current(f.managed).length, 0);
   assert.equal(await f.publisher.recover(f.managed), false);
   assert.equal(f.managed.selectedSetting, ".graphql-desk/typings");
-  assert.equal(await f.publisher.publish(files("str"), "analysis-1", () => true, f.managed), true);
+  assert.equal(await publish(f, files("str"), "analysis-1"), true);
   assert.equal(fs.readFileSync(artifact, "utf8"), bytes.toString("utf8"));
   assert.equal(fs.existsSync(path.join(directory, "complete.json")), true);
 });

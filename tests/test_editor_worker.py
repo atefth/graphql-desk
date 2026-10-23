@@ -22,6 +22,57 @@ from tests.test_schema_url import endpoint
 
 
 class EditorWorkerTests(unittest.TestCase):
+    def test_analysis_fingerprint_tracks_source_config_and_schema_content(self) -> None:
+        def fingerprint() -> str:
+            capture = self.capture()
+            identity = self.prepare(capture)
+            self.assertTrue(self.analyze(capture, identity)["ok"])
+            result = self.worker.handle(
+                {"op": "artifacts", **capture, "id": identity, "schema_buffers": []}
+            )
+            self.assertTrue(result["ok"], result)
+            value = cast(str, result["input_fingerprint"])
+            self.assertRegex(value, r"^[a-f0-9]{64}$")
+            return value
+
+        self.source.write_text(
+            'from graphql_desk import gql\nq=gql("{ disk }")\n', encoding="utf8"
+        )
+        baseline = fingerprint()
+        self.assertEqual(fingerprint(), baseline)
+
+        self.source.write_text(
+            self.source.read_text() + "# source change\n", encoding="utf8"
+        )
+        source_change = fingerprint()
+        self.assertNotEqual(source_change, baseline)
+
+        self.config.write_text(
+            self.config.read_text() + 'client_directives=["local"]\n', encoding="utf8"
+        )
+        config_change = fingerprint()
+        self.assertNotEqual(config_change, source_change)
+
+        self.schema.write_text("type Query { disk: Int }", encoding="utf8")
+        self.assertNotEqual(fingerprint(), config_change)
+
+    def test_analysis_fingerprint_does_not_expose_remote_credentials(self) -> None:
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema={url="https://example.test/graphql?token=PRIVATE",'
+            'headers={Authorization="PRIVATE"}}\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n',
+            encoding="utf8",
+        )
+        capture = self.capture()
+        identity = self.prepare(capture)
+        self.assertTrue(self.analyze(capture, identity)["ok"])
+        result = self.worker.handle(
+            {"op": "artifacts", **capture, "id": identity, "schema_buffers": []}
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertRegex(cast(str, result["input_fingerprint"]), r"^[a-f0-9]{64}$")
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
     def remote_capture(self, url: str) -> tuple[dict[str, object], str, str]:
         self.config.write_text(
             '[tool.graphql-desk]\nschema={url="' + url + '/PRIVATE_MARKER",'

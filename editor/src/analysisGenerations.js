@@ -184,8 +184,9 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
     return managed.selectGeneration(newest.directory, () => true, newest);
   }
 
-  async function publishNow(packages, analysisId, isCurrent, managed) {
-    if (!managed.ownsSetting || typeof isCurrent !== "function" || isCurrent() !== true) return false;
+  async function publishNow(packages, analysisId, isCurrent, managed, inputFingerprint) {
+    if (!managed.ownsSetting || typeof isCurrent !== "function" || isCurrent() !== true ||
+        typeof inputFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(inputFingerprint)) return false;
     verifyRoot();
     const existing = currentGenerations(managed);
     const groups = [...packages].filter(([, files]) => files.length).sort(([a], [b]) => a.localeCompare(b));
@@ -203,8 +204,6 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
         totalInputBytes += bytes;
       }
     }
-    const preparedText = groups.flatMap(([, files]) => files.map(file => [file.relative_path, file.text])).sort(([a], [b]) => a.localeCompare(b));
-    const inputFingerprint = digest(Buffer.from(JSON.stringify(preparedText)));
     if (existing[0]?.manifest.inputFingerprint === inputFingerprint &&
         path.resolve(workspace, managed.selectedSetting) === existing[0].directory) return false;
     let sequence = Math.max(0, ...existing.map(item => item.manifest.sequence)) + 1;
