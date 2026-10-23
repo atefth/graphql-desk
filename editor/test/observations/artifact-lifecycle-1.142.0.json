@@ -10,6 +10,14 @@
     "checkerRestartAndSavedConsumerReopen": true,
     "documentCloseEventObserved": false,
     "sourceUndoRedoCloseRenameDelete": true,
+    "savedOperationSurvivesCloseReopen": true,
+    "savedOperationProbe": {
+      "pass": "VS Code 1.142.0: saved source text and generated companion matched after closing the source tab and reopening the document",
+      "notReached": [
+        "VS Code 1.142.0: two retries stopped at the existing initial Pylance typing readiness check",
+        "VS Code 1.141.0: one attempt stopped at the existing undo/redo check; a retry stopped at initial typing readiness"
+      ]
+    },
     "foreignDirtyGeneratedBufferPreserved": true,
     "runtimeStubPathChange": true,
     "externalRootConflictPreserved": true,

@@ -214,9 +214,25 @@ exports.run = async () => {
     assert.equal(lifecycleDocument.getText(), lifecycleSource);
     assert.equal(lifecycleDocument.isDirty, false);
     assert.equal(await fs.readFile(lifecycleUri.fsPath, "utf8"), lifecycleSource);
+    const savedLifecycleSource = lifecycleSource.replace("{ selected }", "{ count(limit: 1) }");
+    const savedLifecycleEdit = new vscode.WorkspaceEdit();
+    savedLifecycleEdit.replace(lifecycleUri, new vscode.Range(lifecycleDocument.positionAt(0), lifecycleDocument.positionAt(lifecycleDocument.getText().length)), savedLifecycleSource);
+    assert.equal(await vscode.workspace.applyEdit(savedLifecycleEdit), true);
+    assert.equal(await lifecycleDocument.save(), true);
+    assert.ok(await until(async () => await fs.readFile(lifecycleUri.fsPath, "utf8") === savedLifecycleSource &&
+      (await factoryText()).includes("query Lifecycle { count(limit: 1) }"), "saving an operation publishes its persisted companion"));
     await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
     await vscode.window.showTextDocument(consumer, { preview: false });
-    assert.ok(await until(async () => (await factoryText()).includes("query Lifecycle { selected }"), "source close keeps the saved operation"));
+    assert.ok(await until(async () => (await factoryText()).includes("query Lifecycle { count(limit: 1) }"), "source close keeps the saved operation"));
+    const reopenedLifecycle = await vscode.workspace.openTextDocument(lifecycleUri);
+    assert.equal(reopenedLifecycle.getText(), savedLifecycleSource);
+    assert.ok((await factoryText()).includes("query Lifecycle { count(limit: 1) }"), "reopening the saved source keeps its generated operation current");
+    results.lifecycle.savedOperationSurvivesCloseReopen = true;
+    const restoreLifecycle = new vscode.WorkspaceEdit();
+    restoreLifecycle.replace(lifecycleUri, new vscode.Range(reopenedLifecycle.positionAt(0), reopenedLifecycle.positionAt(reopenedLifecycle.getText().length)), lifecycleSource);
+    assert.equal(await vscode.workspace.applyEdit(restoreLifecycle), true);
+    assert.equal(await reopenedLifecycle.save(), true);
+    assert.ok(await until(async () => (await factoryText()).includes("query Lifecycle { selected }"), "saving the restored source republishes its companion"));
     await fs.writeFile(lifecycleUri.fsPath, lifecycleSource.replace("{ selected }", "{ count(limit: 1) }"));
     assert.ok(await until(async () => (await factoryText()).includes("query Lifecycle { count(limit: 1) }"), "closed source disk edit refreshes its operation"));
     await fs.rename(lifecycleUri.fsPath, renamedUri.fsPath);
