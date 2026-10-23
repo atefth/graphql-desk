@@ -29,7 +29,7 @@ class ParseGenerationTests(unittest.TestCase):
         with patch("builtins.open", side_effect=AssertionError("No writes")):
             output = render_parse_companion(sources)
         self.assertEqual(output, render_parse_companion((*reversed(sources), *sources)))
-        self.assertEqual(output.stub.count("def parse(source: _ParseLiteral["), 2)
+        self.assertEqual(output.stub.count("def parse(source: _ParseLiteral["), 4)
         ordinary = render_parse_companion(("scalar Date",))
         self.assertNotIn("@_overload", ordinary.stub)
         self.assertEqual(ordinary, render_parse_companion(()))
@@ -119,7 +119,7 @@ class ParseGenerationTests(unittest.TestCase):
                 (module,), project_id="p", module="main"
             )
         self.assertEqual(
-            output.companion.stub.count("def parse(source: _ParseLiteral["), 2
+            output.companion.stub.count("def parse(source: _ParseLiteral["), 4
         )
         self.assertIn("_ParseLiteral['{ id }']", output.companion.stub)
         self.assertIn("_ParseLiteral['{ other }']", output.companion.stub)
@@ -181,7 +181,7 @@ class ParseGenerationTests(unittest.TestCase):
             output = render_captured_parse_companion(
                 (constants, main), project_id="p", module="main"
             )
-        self.assertEqual(parser.call_count, 2)
+        self.assertEqual(parser.call_count, 3)
         self.assertEqual(
             [d.module.module for d in output.diagnostics], ["constants", "main"]
         )
@@ -265,7 +265,9 @@ assert_type(value.definitions[0].name.value,Literal["Q"])
 assert_type(value.definitions[0].selection_set.selections[0].name.value,Literal["missing"])
 assert reader is root_parse
 assert_type(reader(Source(TEXT)),DocumentNode)
-assert_type(reader(TEXT,no_location=True),DocumentNode)
+without_locations=reader(TEXT,no_location=True)
+assert_type(without_locations.loc,None)
+assert_type(without_locations.definitions[0].name.value,Literal["Q"])
 assert_type(reader("scalar Date"),DocumentNode)
 def dynamic(text:str)->DocumentNode:
  assert_type(reader(text),DocumentNode)
@@ -300,6 +302,7 @@ import asyncio
 asyncio.run(async_scoped())
 if TYPE_CHECKING:
  wrong:Literal["Other"]=value.definitions[0].name.value
+ wrong_location:Literal[False]=without_locations.loc
  value.nonexistent
 """
         modules = (
@@ -344,7 +347,9 @@ if TYPE_CHECKING:
             errors = {
                 index
                 for index, line in enumerate(fixture.splitlines(), 1)
-                if "wrong:" in line or "value.nonexistent" in line
+                if "wrong:" in line
+                or "wrong_location:" in line
+                or "value.nonexistent" in line
             }
             factory_tests.FactoryGenerationTests().check(root, {"main.py": errors})
             result = subprocess.run(
@@ -381,10 +386,13 @@ field = operation.selection_set.selections[0]
 assert field.loc is not None
 assert field.loc.source.body[field.loc.start:field.loc.end] == "missing(arg: 1)"
 assert_type(parse(Source({source!r})), DocumentNode)
-assert_type(parse({source!r}, True), DocumentNode)
+assert_type(parse({source!r}, True).loc, None)
 assert_type(parse({source!r}, max_tokens=100), DocumentNode)
 assert_type(parse({source!r}, experimental_fragment_arguments=True), DocumentNode)
 assert_type(parse("scalar Date"), DocumentNode)
+without_locations = parse({source!r}, no_location=True)
+assert_type(without_locations.loc, None)
+assert_type(without_locations.definitions[0].name.value, Literal["Q"])
 def dynamic(text: str, flag: bool) -> DocumentNode:
  assert_type(parse(text), DocumentNode)
  assert_type(parse({source!r}, no_location=flag), DocumentNode)
@@ -403,6 +411,7 @@ else:
  raise AssertionError("Token bound must retain runtime errors")
 if TYPE_CHECKING:
  wrong: Literal["Other"] = exact.definitions[0].name.value
+ wrong_location: Literal[False] = without_locations.loc
  exact.nonexistent
 """
         with tempfile.TemporaryDirectory() as directory:
@@ -415,7 +424,9 @@ if TYPE_CHECKING:
             errors = {
                 index
                 for index, line in enumerate(fixture.splitlines(), 1)
-                if "wrong:" in line or "exact.nonexistent" in line
+                if "wrong:" in line
+                or "wrong_location:" in line
+                or "exact.nonexistent" in line
             }
             factory_tests.FactoryGenerationTests().check(root, {"fixture.py": errors})
             result = subprocess.run(
