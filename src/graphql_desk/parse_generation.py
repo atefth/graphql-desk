@@ -65,7 +65,7 @@ def render_captured_parse_companion(
     owner = owners[0]
     identity = ModuleDependency(owner.project, owner.module, owner.uri, owner.version)
     diagnostics = [item for item in facts.diagnostics if item.module == identity]
-    documents: dict[str, str] = {}
+    documents: dict[str, tuple[str, str]] = {}
     seen: set[str] = set()
     failures: dict[str, tuple[str, str, tuple[int, ...]]] = {}
     for call in facts.calls:
@@ -76,8 +76,13 @@ def render_captured_parse_companion(
             try:
                 document = parse(call.source)
                 if _executable(document):
-                    documents[call.source] = render_document_ast_types(
-                        document, name=f"Parse{len(documents)}"
+                    index = len(documents)
+                    documents[call.source] = (
+                        render_document_ast_types(document, name=f"Parse{index}"),
+                        render_document_ast_types(
+                            parse(call.source, no_location=True),
+                            name=f"Parse{index}NoLocation",
+                        ),
                     )
             except GraphQLError as error:
                 failures[call.source] = (
@@ -124,13 +129,20 @@ def render_captured_parse_companion(
 def _render_parse_companion(
     parsed: tuple[tuple[str, DocumentNode], ...],
 ) -> ParseCompanion:
-    documents: list[tuple[str, str]] = []
+    documents: list[tuple[str, tuple[str, str]]] = []
     for source, document in parsed:
         if _executable(document):
+            index = len(documents)
             documents.append(
                 (
                     source,
-                    render_document_ast_types(document, name=f"Parse{len(documents)}"),
+                    (
+                        render_document_ast_types(document, name=f"Parse{index}"),
+                        render_document_ast_types(
+                            parse(source, no_location=True),
+                            name=f"Parse{index}NoLocation",
+                        ),
+                    ),
                 )
             )
     return _assemble_parse_companion(tuple(documents))
@@ -143,7 +155,9 @@ def _executable(document: DocumentNode) -> bool:
     )
 
 
-def _assemble_parse_companion(documents: tuple[tuple[str, str], ...]) -> ParseCompanion:
+def _assemble_parse_companion(
+    documents: tuple[tuple[str, tuple[str, str]], ...],
+) -> ParseCompanion:
     fallback = (
         "def parse(source: str | _Source, no_location: bool = False, "
         "max_tokens: int | None = None, "
@@ -152,8 +166,8 @@ def _assemble_parse_companion(documents: tuple[tuple[str, str], ...]) -> ParseCo
     stub = "from graphql import DocumentNode as _DocumentNode, Source as _Source\n"
     if documents:
         stub += "from typing import Literal as _ParseLiteral, overload as _overload\n"
-        for _, declaration in documents:
-            stub += declaration + "\n"
+        for _, declarations in documents:
+            stub += "\n".join(declarations) + "\n"
         for index, (source, _) in enumerate(documents):
             stub += (
                 "@_overload\n"
@@ -162,6 +176,12 @@ def _assemble_parse_companion(documents: tuple[tuple[str, str], ...]) -> ParseCo
                 "max_tokens: None = None, "
                 "experimental_fragment_arguments: _ParseLiteral[False] = False) "
                 f"-> Parse{index}Document: ...\n"
+                "@_overload\n"
+                f"def parse(source: _ParseLiteral[{source!r}], "
+                "no_location: _ParseLiteral[True], "
+                "max_tokens: None = None, "
+                "experimental_fragment_arguments: _ParseLiteral[False] = False) "
+                f"-> Parse{index}NoLocationDocument: ...\n"
             )
         stub += "@_overload\n"
     stub += fallback
