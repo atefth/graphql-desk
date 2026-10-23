@@ -85,7 +85,7 @@ function lexicalCandidates(text, factories = []) {
     }
   }
   return strings.flatMap((literal) => {
-    if (/[bf]/.test(literal.prefix)) return [];
+    if (!["", "r", "u"].includes(literal.prefix)) return [];
     const body = text.slice(literal.bodyStart, literal.bodyEnd);
     // Escaped ordinary literals require the semantic decoder, never guessed offsets.
     if (!literal.prefix.includes("r") && body.includes("\\")) return [];
