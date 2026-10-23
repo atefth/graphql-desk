@@ -137,6 +137,28 @@ test("configured factory candidates accept exact direct/qualified aliases and pr
   ]) assert.deepEqual(lexicalCandidates(text, factories), [], text);
 });
 
+test("incomplete Python recognizes parenthesized imports without promoting lexical candidates", async () => {
+  for (const [imported, callee, factories] of [
+    ["from graphql_desk import (\n    gql as query, # comment\n)", "query", []],
+    ["from graphql_desk import(\n    gql as\n        query,\n)", "query", []],
+    ["from generated.default import (\n    graphql as query,\n)", "query", [{ module: "generated.default", export: "graphql" }]],
+  ]) {
+    const text = `${imported}\nresult=${callee}(source='''query Read { user`;
+    const candidates = lexicalCandidates(text, factories);
+    assert.equal(candidates.length, 1, text);
+    assert.equal(candidates[0].mode, "lexical");
+    assert.equal(text.slice(candidates[0].start, candidates[0].end), "query Read { user");
+    assert.deepEqual(lexicalCandidates(text), factories.length ? [] : candidates);
+  }
+  const text = "from graphql_desk import (\n    gql as query,\n)\nresult=query(source='''query Read { user";
+  const value = bundle(text);
+  const highlights = await createHighlighting(options(value)).highlight(document(value));
+  assert.ok(highlights.some(item => text.slice(item.start, item.end) === "query"));
+  assert.ok(highlights.every(item => item.mode === "lexical"));
+  assert.deepEqual(lexicalCandidates("from graphql_desk import (\n    other,\n)\nq=gql('''query { field"), []);
+  assert.deepEqual(lexicalCandidates("from\ngraphql_desk import gql\nq=gql('''query { field"), []);
+});
+
 test("incomplete lexical calls cannot borrow an imported callee suffix", async () => {
   for (const [imported, callee, factories] of [
     ["from graphql_desk import gql", "gql", []],
