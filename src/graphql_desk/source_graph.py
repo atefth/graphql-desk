@@ -1613,18 +1613,35 @@ class _Graph:
                     "Fragment references belong to different schema bindings"
                 )
         operation = keywords.get("operation")
-        if operation is not None and not (
-            isinstance(operation, ast.Constant)
-            and (isinstance(operation.value, str) or operation.value is None)
+        selector_dependencies: frozenset[ModuleDependency] = frozenset()
+        if operation is None or (
+            isinstance(operation, ast.Constant) and operation.value is None
         ):
-            raise _Unresolved("Operation selection must be a literal string or None")
-        selector = operation.value if isinstance(operation, ast.Constant) else None
+            selector = None
+        elif isinstance(operation, ast.Constant) and isinstance(operation.value, str):
+            selector = operation.value
+        else:
+            try:
+                selected = self.expression(
+                    module, operation, (node.lineno, node.col_offset), set()
+                )
+            except _DynamicExpression:
+                raise _Unresolved(
+                    "Operation selection must resolve to a static string or None"
+                ) from None
+            if selected.kind != "string":
+                raise _Unresolved(
+                    "Operation selection must resolve to a static string or None"
+                )
+            selector = selected.text
+            selector_dependencies = selected.dependencies
         assert isinstance(selector, str) or selector is None
         dependencies = tuple(
             sorted(
                 source.dependencies
                 | callable_.dependencies
                 | reference_dependencies
+                | selector_dependencies
                 | {module.identity},
                 key=lambda item: (item.project, item.module),
             )
