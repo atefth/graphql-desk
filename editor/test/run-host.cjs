@@ -7,7 +7,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { runTests, runVSCodeCommand } = require("@vscode/test-electron");
 
-function generatedFactoryFiles(python, workspace, sourcePath) {
+function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix) {
   const base = { workspace, candidates: [sourcePath], buffers: [], documents: [], editor_fallback: null };
   const script = [
     "import json, sys",
@@ -35,9 +35,10 @@ function generatedFactoryFiles(python, workspace, sourcePath) {
     return files;
   }
   const initial = generate();
-  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), "type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User! }\n");
+  const shapeFields = typingMatrix ? " nested: [[String!]!]! nullable: [String]" : "";
+  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), `type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User!${shapeFields} }\n`);
   const nullable = generate();
-  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), "type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User! }\n");
+  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), `type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${shapeFields} }\n`);
   return { initial, nullable };
 }
 
@@ -45,8 +46,8 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "workspaceRemoval", "restartRecovery"].includes(suite), "Choose a known isolated suite");
-  const factorySuite = ["factoryArtifacts", "workspaceRemoval", "restartRecovery"].includes(suite);
+  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "workspaceRemoval", "restartRecovery"].includes(suite), "Choose a known isolated suite");
+  const factorySuite = ["factoryArtifacts", "typingMatrix", "workspaceRemoval", "restartRecovery"].includes(suite);
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
@@ -102,11 +103,25 @@ async function main() {
       "other_result = execute(other_doc, {})",
       "other_id = other_result['user']['id']",
       "other_needs_id: str = other_id",
+      ...(suite === "typingMatrix" ? [
+        "nested_doc = graphql('query Nested { alias: nested }')",
+        "nested_result = execute(nested_doc, {})",
+        "nested_value = nested_result['alias']",
+        "nested_bad: str = nested_value",
+        "nullable_doc = graphql('query Nullable { nullable }')",
+        "nullable_result = execute(nullable_doc, {})",
+        "nullable_value = nullable_result['nullable']",
+        "nullable_bad: list[str] = nullable_value",
+        "defaults_doc = graphql('query Defaults($limit: Int! = 1) { count(limit: $limit) }')",
+        "defaults_result = execute(defaults_doc, {})",
+        "defaults_bad = execute(defaults_doc, {'limit': None})",
+      ] : []),
       "",
     ].join("\n");
+    const shapeFields = suite === "typingMatrix" ? " nested: [[String!]!]! nullable: [String]" : "";
     await Promise.all([
       fs.writeFile(path.join(workspace, "pyproject.toml"), '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n'),
-      fs.writeFile(path.join(workspace, "schema.graphql"), "type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User! }\n"),
+      fs.writeFile(path.join(workspace, "schema.graphql"), `type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${shapeFields} }\n`),
       fs.writeFile(sourcePath, source),
       fs.writeFile(path.join(workspace, "fragments.py"), "from graphql_desk_generated.default import graphql\ncard = graphql('fragment Card on User { name }')\n"),
     ]);
@@ -123,7 +138,7 @@ async function main() {
         "",
       ].join("\n")),
     ]);
-    const generated = generatedFactoryFiles(python, workspace, sourcePath);
+    const generated = generatedFactoryFiles(python, workspace, sourcePath, suite === "typingMatrix");
     await fs.writeFile(artifacts, JSON.stringify(generated));
     console.log(`Captured ${generated.initial.length} initial and ${generated.nullable.length} nullable factory stub files.`);
   }
@@ -191,7 +206,12 @@ async function main() {
     observed.lifecycle.userFilePreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (factorySuite) {
-    await assert.rejects(fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated")), { code: "ENOENT" }, "Extension shutdown must remove only its owned generated package");
+    if (suite === "typingMatrix") {
+      await fs.access(path.join(observed.lifecycle.activeStubRoot, "complete.json"));
+      await fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated", "default.pyi"));
+    } else {
+      await assert.rejects(fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated")), { code: "ENOENT" }, "Test cleanup must remove only its owned generated package");
+    }
     const generationsRoot = path.join(workspace, ".graphql-desk", "typings", "generations");
     const generations = await fs.readdir(generationsRoot);
     assert.ok(generations.some(name => name.startsWith("g-") && fsSync.existsSync(path.join(generationsRoot, name, "complete.json"))), "A complete immutable generation survives shutdown for restart recovery");
@@ -204,7 +224,7 @@ async function main() {
     observed.lifecycle.userConfigurationPreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   }
-  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" ? "owned-output-restart-observed" : `read-only-${suite}-observed`);
+  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" ? "owned-output-restart-observed" : `read-only-${suite}-observed`);
   console.log(`${suite} evidence: ${result}`);
 }
 

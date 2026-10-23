@@ -1,0 +1,21 @@
+{
+  "host": "VS Code 1.142.0",
+  "suite": "typingMatrix",
+  "scope": "Pylance inference for nested lists, nullable list wrappers, and defaulted required variables.",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "hover": {
+    "nestedAlias": "list[list[String]]",
+    "nullableList": "list[String | None] | None"
+  },
+  "diagnostics": {
+    "nestedListAssignedToString": true,
+    "nullableListAssignedToNonNullableList": true,
+    "nullPassedToDefaultedRequiredVariable": true,
+    "omittedDefaultedVariable": false
+  },
+  "outcome": "passed",
+  "parityGate": "partial evidence only; does not pass the complete live-typing or gql.tada parity gate"
+}
