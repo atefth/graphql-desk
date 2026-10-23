@@ -77,7 +77,9 @@ Union/interface selections distribute across concrete possible types, merging ma
 Worked acceptance fixture (schema: `Query.book(id: ID!): Book`, `Book.id: ID!`, `Book.title: String`, `Book.tags: [String!]!`):
 
 ```python
-book_query = graphql('query Book($id: ID!, $show: Boolean! = true) { book(id: $id) { key: id title tags @include(if: $show) } }')
+book_query = graphql(
+    "query Book($id: ID!, $show: Boolean! = true) { book(id: $id) { key: id title tags @include(if: $show) } }"
+)
 # BookQueryVariables: id: str; show: NotRequired[bool]
 # BookQueryResult: book: BookQueryBook | None
 # BookQueryBook: key: str; title: str | None; tags: NotRequired[list[str]]

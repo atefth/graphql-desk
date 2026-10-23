@@ -52,11 +52,14 @@ from typing import TypedDict
 from graphql import parse
 from graphql_desk import TypedDocument
 
+
 class GreetingResult(TypedDict):
     greeting: str
 
+
 class GreetingVariables(TypedDict):
     name: str
+
 
 document = TypedDocument[GreetingResult, GreetingVariables](
     parse("query Greeting($name: String!) { greeting(name: $name) }"),
