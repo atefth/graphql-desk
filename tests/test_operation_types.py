@@ -1681,9 +1681,7 @@ optional:OptionalResultInput={}
             "query($show:Boolean!){ required:fixed @include(if:$show) "
             "strict:loose @skip(if:$show) }"
         )
-        runtime_schema = build_schema(
-            "type Query { fixed: String! loose: String }"
-        )
+        runtime_schema = build_schema("type Query { fixed: String! loose: String }")
         for show, expected in (
             (False, {"strict": None}),
             (True, {"required": "x"}),
