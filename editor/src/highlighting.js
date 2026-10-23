@@ -11,6 +11,7 @@ const COLORS = {
   comment: "descriptionForeground", attribute: "symbolIcon.eventForeground",
   atom: "symbolIcon.enumMemberForeground", builtin: "symbolIcon.classForeground",
   qualifier: "symbolIcon.fieldForeground",
+  "string-2": "symbolIcon.enumMemberForeground",
 };
 
 function tokens(text) {
