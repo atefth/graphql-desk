@@ -5,15 +5,15 @@ import keyword
 import re
 import symtable
 import unicodedata
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Literal
 
 from . import TypedDocument
 from .config import ProjectConfig, ScalarMapping
 from .document_validation import validate_indexed_document
 from .fragment_helpers import render_fragment_helpers
 from .fragment_refs import fragment_identity_key
-from .fragments import FragmentIndex, IndexedDocument, SchemaContext
+from .fragments import DefinitionKind, FragmentIndex, IndexedDocument, SchemaContext
 from .literal_ast import render_document_ast_types
 from .operation_types import (
     render_indexed_fragment_reader_types,
@@ -42,9 +42,47 @@ class GeneratedFile:
 
 
 @dataclass(frozen=True)
+class SourceCompanionExport:
+    relative_path: str
+    symbol: str
+    alias: str
+
+
+@dataclass(frozen=True)
+class OperationProvenance:
+    """Captured ownership of published types, without executable source text.
+
+    Each record belongs to one versioned generation. A precise status describes
+    the declaration; constructor precision warnings still apply at the source
+    call. Unknown dependencies require wider invalidation.
+    """
+
+    owner: DocumentIdentity
+    selector: str | None
+    operation_name: str | None
+    operation_kind: DefinitionKind | None
+    schema_identity: tuple[str, str] | None
+    context_token: str | None
+    binding: str | None
+    status: Literal["precise", "unavailable", "rejected"]
+    declaration_path: str | None
+    declaration_symbol: str | None
+    source_exports: tuple[SourceCompanionExport, ...]
+    dependencies: tuple[ModuleDependency, ...]
+    direct_fragments: tuple[DocumentIdentity, ...] | None
+    definition_owners: tuple[DocumentIdentity, ...] | None
+    canonical_owner: DocumentIdentity | None
+    selector_known: bool = True
+    source_dependencies_known: bool = True
+    schema_dependencies: Literal["unknown"] = "unknown"
+    config_dependencies: Literal["unknown"] = "unknown"
+
+
+@dataclass(frozen=True)
 class FactoryArtifacts:
     files: tuple[GeneratedFile, ...]
     diagnostics: tuple[GraphDiagnostic, ...]
+    provenance: tuple[OperationProvenance, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -557,7 +595,8 @@ def _generate_factory_artifacts(
     declarations: dict[DocumentIdentity, tuple[str, str, str]] = {}
     carriers: dict[DocumentIdentity, TypedDocument[Any, Any]] = {}
     active: set[DocumentIdentity] = set()
-    signatures: dict[tuple[str, str | None, tuple[str, ...]], str] = {}
+    signatures: dict[tuple[str, str | None, tuple[str, ...]], DocumentIdentity] = {}
+    canonical_owners: dict[DocumentIdentity, DocumentIdentity] = {}
     overloads: list[str] = []
     error_call = documents[0].call if documents else None
     imports: list[str] = []
@@ -613,6 +652,7 @@ def _generate_factory_artifacts(
             )
             if item.status == "external" and item.target == item.symbol
         }
+        generation_dependencies: set[ModuleDependency] = set()
         schema_text = render_schema_types(context.schema, scalars=scalars, enums=enums)
         symbols = tuple(
             {
@@ -633,6 +673,7 @@ def _generate_factory_artifacts(
                         f"Configured mapping {resolution.symbol!r}: "
                         f"{resolution.message}"
                     )
+                generation_dependencies.update(resolution.dependencies)
         if "graphql" in context.schema.type_map:
             raise ValueError("Schema aliases collide with generated factory exports")
         rejected: set[DocumentIdentity] = set()
@@ -1005,8 +1046,10 @@ def _generate_factory_artifacts(
                         "Identical fragment call signatures have "
                         "distinct owner identities"
                     )
+                canonical_owners[identity] = previous
                 continue
-            signatures[signature] = module
+            signatures[signature] = identity
+            canonical_owners[identity] = identity
             imports.extend(reference_imports)
             return_alias = f"__graphql_desk_Document{number}"
             suffix = "Unavailable" if identity in rejected else "Document"
@@ -1096,13 +1139,118 @@ def _generate_factory_artifacts(
                 FactoryArtifacts((), (*diagnostics, diagnostic)), ()
             )
         raise ValueError("Cannot generate schema factory artifacts") from None
+    provenance: list[OperationProvenance] = []
+    for document in documents:
+        identity = DocumentIdentity(document.call.module, document.call.range)
+        definition = document.selected_operation or document.primary_fragment
+        assert definition is not None
+        module, name, _ = declarations[identity]
+        provenance.append(
+            OperationProvenance(
+                owner=identity,
+                selector=document.call.operation,
+                operation_name=definition.name,
+                operation_kind=definition.kind,
+                schema_identity=document.schema_identity,
+                context_token=document.context_token,
+                binding=document.call.binding,
+                status="unavailable" if identity in rejected else "precise",
+                declaration_path=module.replace(".", "/") + ".pyi",
+                declaration_symbol=name
+                + ("Unavailable" if identity in rejected else "Document"),
+                source_exports=(),
+                dependencies=tuple(
+                    sorted(
+                        {*document.dependencies, *generation_dependencies},
+                        key=lambda item: (item.project, item.module),
+                    )
+                ),
+                direct_fragments=tuple(
+                    reference.target for reference in document.call.fragments
+                ),
+                definition_owners=_definition_owners(identity, owners),
+                canonical_owner=canonical_owners[identity],
+            )
+        )
     return _SchemaArtifacts(
         FactoryArtifacts(
             tuple(GeneratedFile(path, files[path]) for path in sorted(files)),
             tuple(diagnostics),
+            tuple(provenance),
         ),
         tuple(exports),
     )
+
+
+def _definition_owners(
+    identity: DocumentIdentity, owners: dict[DocumentIdentity, IndexedDocument]
+) -> tuple[DocumentIdentity, ...]:
+    pending = [identity]
+    found: dict[DocumentIdentity, None] = {}
+    while pending:
+        current = pending.pop()
+        if current in found:
+            continue
+        found[current] = None
+        pending.extend(
+            reference.target for reference in reversed(owners[current].call.fragments)
+        )
+    return tuple(found)
+
+
+def _rejected_provenance(
+    index: FragmentIndex,
+    contexts: tuple[SchemaContext, ...],
+    default_schema: str | None,
+) -> tuple[OperationProvenance, ...]:
+    tokens = {context.schema_name: context.token for context in contexts}
+    records: list[OperationProvenance] = []
+    for document in index.unavailable:
+        call = document.call
+        schema = call.schema_name or default_schema
+        records.append(
+            OperationProvenance(
+                owner=DocumentIdentity(call.module, call.range),
+                selector=call.operation,
+                operation_name=None,
+                operation_kind=None,
+                schema_identity=(call.module.project, schema) if schema else None,
+                context_token=tokens.get(schema) if schema else None,
+                binding=call.binding,
+                status="unavailable",
+                declaration_path=None,
+                declaration_symbol=None,
+                source_exports=(),
+                dependencies=tuple(dict.fromkeys((call.module, *call.dependencies))),
+                direct_fragments=tuple(item.target for item in call.fragments),
+                definition_owners=None,
+                canonical_owner=None,
+                source_dependencies_known=False,
+            )
+        )
+    for rejected in index.rejected_calls:
+        records.append(
+            OperationProvenance(
+                owner=DocumentIdentity(rejected.module, rejected.range),
+                selector=None,
+                operation_name=None,
+                operation_kind=None,
+                schema_identity=None,
+                context_token=None,
+                binding=rejected.binding,
+                status="rejected",
+                declaration_path=None,
+                declaration_symbol=None,
+                source_exports=(),
+                dependencies=(rejected.module,),
+                direct_fragments=None,
+                definition_owners=None,
+                canonical_owner=None,
+                selector_known=False,
+                source_dependencies_known=False,
+            )
+        )
+    return tuple(records)
 
 
 def _assemble(
@@ -1110,6 +1258,7 @@ def _assemble(
     modules: tuple[ModuleSnapshot, ...],
     project_id: str,
     generated_package: str,
+    rejected: tuple[OperationProvenance, ...] = (),
 ) -> FactoryArtifacts:
     diagnostics = tuple(item for part in parts for item in part.artifacts.diagnostics)
     if any(not part.artifacts.files for part in parts):
@@ -1121,6 +1270,7 @@ def _assemble(
     )
     snapshots = {(item.project, item.module): item for item in modules}
     owner = exports[0].owner if exports else None
+    companion_exports: dict[DocumentIdentity, list[SourceCompanionExport]] = {}
     try:
         for part in parts:
             for file in part.artifacts.files:
@@ -1160,6 +1310,10 @@ def _assemble(
             )
             text += f"\n__all__ = {[item.name for item in aliases]!r}\n"
             files[path + ".py"] = files[path + ".pyi"] = text
+            for export in aliases:
+                companion_exports.setdefault(export.owner, []).append(
+                    SourceCompanionExport(path + ".pyi", export.symbol, export.name)
+                )
         paths: dict[str, str] = {}
         module_paths: dict[str, tuple[str, bool]] = {}
         for path in files:
@@ -1177,6 +1331,36 @@ def _assemble(
                 )
                 if previous_module != identity:
                     raise ValueError("Generated module and package paths collide")
+        provenance = tuple(
+            sorted(
+                (
+                    replace(
+                        record,
+                        source_exports=tuple(companion_exports.get(record.owner, ())),
+                    )
+                    for record in (
+                        *(item for part in parts for item in part.artifacts.provenance),
+                        *rejected,
+                    )
+                ),
+                key=lambda record: (
+                    record.owner.module.project,
+                    record.owner.module.module,
+                    record.owner.call_range.start,
+                    record.owner.call_range.end,
+                ),
+            )
+        )
+        for record in provenance:
+            if record.declaration_path is not None and (
+                record.declaration_path not in files
+                or record.declaration_symbol is None
+            ):
+                raise ValueError("Provenance declaration has no assembled artifact")
+            if any(
+                export.relative_path not in files for export in record.source_exports
+            ):
+                raise ValueError("Provenance alias has no assembled companion")
     except ValueError as error:
         if owner is None:
             raise
@@ -1190,7 +1374,9 @@ def _assemble(
             ),
         )
     return FactoryArtifacts(
-        tuple(GeneratedFile(path, files[path]) for path in sorted(files)), diagnostics
+        tuple(GeneratedFile(path, files[path]) for path in sorted(files)),
+        diagnostics,
+        provenance,
     )
 
 
@@ -1218,7 +1404,13 @@ def generate_factory_artifacts(
         client_directives=client_directives,
         disable_masking=disable_masking,
     )
-    return _assemble((part,), modules, project_id, generated_package)
+    return _assemble(
+        (part,),
+        modules,
+        project_id,
+        generated_package,
+        _rejected_provenance(index, (context,), context.schema_name),
+    )
 
 
 def generate_project_factory_artifacts(
@@ -1295,7 +1487,19 @@ def generate_project_factory_artifacts(
         )
         for name in sorted(settings)
     )
-    artifacts = _assemble(parts, modules, project_id, config.generated_package)
+    artifacts = _assemble(
+        parts,
+        modules,
+        project_id,
+        config.generated_package,
+        _rejected_provenance(
+            index,
+            contexts,
+            project_bindings(config, project_id=project_id).default_schema,
+        ),
+    )
     return FactoryArtifacts(
-        artifacts.files, (*index.diagnostics, *artifacts.diagnostics)
+        artifacts.files,
+        (*index.diagnostics, *artifacts.diagnostics),
+        artifacts.provenance,
     )
