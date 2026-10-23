@@ -475,7 +475,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const ticket = epoch;
     stopPolling(state);
     try {
-      await enqueue(state, () => build(state));
+      if (!await enqueue(state, () => build(state))) return;
       stopPolling(state);
       const choices = state.targets.map(target => ({ label: target.schema_name, description: target.project, target }));
       const choice = choices.length === 1 ? choices[0] : await vscode.window.showQuickPick(choices, { placeHolder: "Select a remote GraphQL schema to refresh" });

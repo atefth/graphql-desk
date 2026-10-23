@@ -475,6 +475,42 @@ test("explicit remote refresh survives typing without HTTP, but changed credenti
   assert.equal((await controller.analyze(snapshot)).request.schemas.length, 0);
 });
 
+test("refresh does not offer stale remote targets when its queued capture is invalidated", async t => {
+  const fixture = await setup(t, 'schema={url="http://127.0.0.1:1/graphql"}\n');
+  let release;
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  let holdNextPrepare = false;
+  let choices = 0;
+  fixture.vscode.window.showQuickPick = async values => { choices += 1; return values[0]; };
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, settings) {
+      const reply = await worker.request(message, settings);
+      if (message.op === "prepare" && holdNextPrepare) { holdNextPrepare = false; started(); await held; }
+      return reply;
+    } };
+  } }); t.after(() => controller.dispose());
+
+  const snapshot = controller.snapshot(fixture.main);
+  assert.ok(await controller.analyze(snapshot));
+  controller.invalidate();
+  holdNextPrepare = true;
+  const active = controller.analyze(snapshot);
+  await ready;
+  const refresh = controller.refresh();
+  await new Promise(resolve => setImmediate(resolve));
+  const config = fixture.document("pyproject.toml", '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n');
+  config.isDirty = true;
+  fixture.events.onDidChangeTextDocument.fire({ document: config });
+  release();
+
+  assert.equal(await active, null);
+  await refresh;
+  assert.equal(choices, 0, "refresh must stop when its queued capture is stale");
+});
+
 
 
 test("opt-in polling reuses authenticated refresh, retains source-edit deadlines and stops on config disable", async t => {
