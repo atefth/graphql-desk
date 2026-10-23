@@ -212,4 +212,13 @@ Desk reports the validation diagnostic, while the unaffected operation keeps
 its `ID` hover. Repair restores the affected `String` hover and removes the
 diagnostic. See
 [`issue-38-invalidation-1.142.0.json`](../../editor/test/observations/issue-38-invalidation-1.142.0.json).
+The same pinned host also observed schema and scalar-config invalidation and
+repair, plus switching the worker interpreter from Python 3.10.0 to 3.12.1
+and restoring it. The selected hover changed from `Boolean` to `String`, and
+the test records actual worker requests after each setting change; an
+independent operation retained its `ID` hover.
+See
+[`issue-38-invalidation-repair-interpreter-1.142.0.json`](../../editor/test/observations/issue-38-invalidation-repair-interpreter-1.142.0.json).
+This does not test delayed/superseded publication or prove the full lifecycle
+matrix.
 This is bounded evidence only; broad TYPE-01 and gate #42 remain open.

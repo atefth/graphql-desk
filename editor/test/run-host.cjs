@@ -165,6 +165,7 @@ async function main() {
       GRAPHQL_DESK_TEST_WORKSPACE: workspace,
       GRAPHQL_DESK_RESULT_PATH: result,
       GRAPHQL_DESK_PYTHON: python,
+      GRAPHQL_DESK_ALTERNATE_PYTHON: process.env.GRAPHQL_DESK_ALTERNATE_PYTHON || "",
       GRAPHQL_DESK_HOST_VERSION: version,
       GRAPHQL_DESK_STUB_ROOT: stubRoot,
       GRAPHQL_DESK_ARTIFACTS_PATH: artifacts,

@@ -1,0 +1,41 @@
+{
+  "host": "VS Code 1.142.0",
+  "suite": "typingMatrix",
+  "scope": "Pinned Pylance host evidence for schema/config invalidation and repair, plus worker interpreter switching.",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "schema": {
+    "edit": "selected: String! -> selected: Boolean!",
+    "editedOperationHover": "Boolean",
+    "unaffectedOperationHover": "ID",
+    "repair": "selected: Boolean! -> selected: String!",
+    "repairedOperationHover": "String",
+    "unaffectedOperationAfterRepair": "ID"
+  },
+  "config": {
+    "edit": "String scalar output mapping -> builtins.int",
+    "editedOperationHover": "StringOutput",
+    "unaffectedOperationHover": "ID",
+    "repair": "original scalar mapping restored",
+    "repairedOperationHover": "String",
+    "unaffectedOperationAfterRepair": "ID"
+  },
+  "interpreter": {
+    "initialPython": "3.10.0",
+    "alternatePython": "3.12.1",
+    "alternateWorkerObserved": true,
+    "selectedHoverAfterSwitch": "Boolean",
+    "unaffectedOperationHoverAfterSwitch": "ID",
+    "restoredInitialWorkerObserved": true,
+    "selectedHoverAfterRestore": "String",
+    "workerRequestsRecordedAfterEachSettingChange": true
+  },
+  "outcome": "passed",
+  "limits": [
+    "This verifies only the recorded schema/config refresh and interpreter-switch cases on the pinned Windows host; actual worker requests were recorded after each interpreter setting change, and the selected hover changed Boolean then String.",
+    "It does not exercise delayed or superseded Pylance publication, crash recovery, all invalid-edit forms, or complete issue #38 acceptance.",
+    "This observation is partial evidence only; live-typing gate #42 and issue #38 remain open."
+  ]
+}
