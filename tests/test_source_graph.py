@@ -27,6 +27,47 @@ def module(
 
 
 class SourceGraphTests(unittest.TestCase):
+    @unittest.skipUnless(sys.version_info >= (3, 12), "PEP 695 requires Python3.12")
+    def test_captured_non_generic_pep695_type_aliases(self) -> None:
+        models = module(
+            "models",
+            "class User: pass\n"
+            "type UserAlias = User\n"
+            "type ChainedAlias = UserAlias\n"
+            "type MaybeUser = User | None\n"
+            "type Text = str\n"
+            "type Generic[T] = list[T]\n"
+            "type MissingAlias = Missing\n",
+        )
+        exports = module("exports", "from models import UserAlias as Public")
+
+        resolutions = resolve_type_symbols(
+            (
+                "models.UserAlias",
+                "models.ChainedAlias",
+                "models.MaybeUser",
+                "models.Text",
+                "models.Generic",
+                "models.MissingAlias",
+                "exports.Public",
+            ),
+            modules=(models, exports),
+            project_id="app",
+        )
+
+        self.assertEqual(
+            [(item.status, item.target) for item in resolutions],
+            [
+                ("resolved", "models.User"),
+                ("resolved", "models.User"),
+                ("unresolved", None),
+                ("resolved", "models.MaybeUser"),
+                ("unresolved", None),
+                ("resolved", "builtins.str"),
+                ("resolved", "models.User"),
+            ],
+        )
+
     def test_two_operand_unions_keep_availability_but_no_base_capabilities(
         self,
     ) -> None:
