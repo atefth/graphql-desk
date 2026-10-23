@@ -154,7 +154,10 @@ async function main() {
   const observed = JSON.parse(await fs.readFile(result, "utf8"));
   if (factorySuite) {
     await assert.rejects(fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated")), { code: "ENOENT" }, "Extension shutdown must remove only its owned generated package");
-    await assert.rejects(fs.access(path.join(workspace, ".graphql-desk", "typings", "graphql_desk_generated")), { code: "ENOENT" }, "Reconfiguring stubPath must remove only the old owned package");
+    const generationsRoot = path.join(workspace, ".graphql-desk", "typings", "generations");
+    const generations = await fs.readdir(generationsRoot);
+    assert.ok(generations.some(name => name.startsWith("g-") && fsSync.existsSync(path.join(generationsRoot, name, "complete.json"))), "A complete immutable generation survives shutdown for restart recovery");
+    await assert.rejects(fs.access(path.join(workspace, ".graphql-desk", "typings", "graphql_desk_generated")), { code: "ENOENT" }, "Generated artifacts stay isolated in immutable generations");
     assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
     const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
     assert.equal(settings["python.analysis.stubPath"], observed.lifecycle.configuredStubPath);

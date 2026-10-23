@@ -81,6 +81,9 @@ exports.run = async () => {
     const consumerUri = vscode.Uri.file(path.join(process.env.GRAPHQL_DESK_TEST_WORKSPACE, "consumer.py"));
     const consumer = await vscode.workspace.openTextDocument(consumerUri);
     await vscode.window.showTextDocument(consumer, { preview: false });
+    const selectedStubRoot = () => path.resolve(workspace, vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ".graphql-desk/typings"));
+    stubRoot = selectedStubRoot();
+    const documentStubPath = () => path.join(selectedStubRoot(), "graphql_desk_generated", "_documents", "default", "d0.pyi");
     await extension.activate();
     mark("extension.activation.returned", { active: extension.isActive });
     const hover = async (line, character) => {
@@ -95,6 +98,7 @@ exports.run = async () => {
       observed.count = await hover(9, 2);
       observed.diagnostics = diagnostics().filter(item => item.range.start.line === 11).map(item => item.message);
       try {
+        stubRoot = selectedStubRoot();
         results.lifecycle.publishedPaths = await fs.readdir(path.join(stubRoot, "graphql_desk_generated"));
         results.lifecycle.defaultStub = await fs.readFile(path.join(stubRoot, "graphql_desk_generated", "default.pyi"), "utf8");
       } catch { results.lifecycle.publishedPaths = []; }
@@ -120,8 +124,7 @@ exports.run = async () => {
     results.lifecycle.publishedRealWorkerArtifacts = generated.initial.length;
     const consumerOnDisk = await fs.readFile(consumerUri.fsPath, "utf8");
     const originalSource = consumer.getText();
-    const generatedDocumentPath = path.join(stubRoot, "graphql_desk_generated", "_documents", "default", "d0.pyi");
-    const documentStubBefore = await fs.readFile(generatedDocumentPath, "utf8");
+    const documentStubBefore = await fs.readFile(documentStubPath(), "utf8");
     results.lifecycle.unsavedEditBefore = {
       bufferVersion: consumer.version,
       dirty: consumer.isDirty,
@@ -138,7 +141,7 @@ exports.run = async () => {
     sourceEdit.replace(consumer.uri, new vscode.Range(consumer.positionAt(0), consumer.positionAt(consumer.getText().length)), changedSource);
     assert.equal(await vscode.workspace.applyEdit(sourceEdit), true);
     results.lifecycle.unsavedArtifactRefresh = await until(async () => {
-      const stub = await fs.readFile(generatedDocumentPath, "utf8").catch(() => "");
+      const stub = await fs.readFile(documentStubPath(), "utf8").catch(() => "");
       return /'count': 'Int'/.test(stub) && !/'selected': 'String'/.test(stub);
     }, "unsaved embedded GraphQL edit republishes the changed result shape");
     results.pylance.unsavedOperationRefresh = results.lifecycle.unsavedArtifactRefresh && await until(async () => /Int/.test(await hover(8, 2)) && !/String/.test(await hover(8, 2)), "Pylance hover updates after the unsaved operation edit");
@@ -146,12 +149,13 @@ exports.run = async () => {
       buffer: consumer.getText(),
       disk: await fs.readFile(consumerUri.fsPath, "utf8"),
       hover: await hover(8, 2),
-      documentStub: await fs.readFile(generatedDocumentPath, "utf8").catch(() => null),
+      documentStub: await fs.readFile(documentStubPath(), "utf8").catch(() => null),
     };
     assert.ok(results.pylance.unsavedOperationRefresh);
     results.lifecycle.unsavedPythonBufferPreserved = consumer.isDirty && await fs.readFile(consumerUri.fsPath, "utf8").then(text => text === consumerOnDisk);
     assert.ok(results.lifecycle.unsavedPythonBufferPreserved, "The GraphQL edit must remain unsaved and leave the Python file unchanged on disk");
-    const documentStubAfter = await fs.readFile(generatedDocumentPath, "utf8");
+    stubRoot = selectedStubRoot();
+    const documentStubAfter = await fs.readFile(documentStubPath(), "utf8");
     results.lifecycle.unsavedEditAfter = {
       bufferVersion: consumer.version,
       dirty: consumer.isDirty,
@@ -211,8 +215,8 @@ exports.run = async () => {
       const fragmentDiagnostics = () => diagnostics().map(item => ({
         code: item.code?.value ?? item.code ?? "", source: item.source, severity: item.severity, message: item.message,
       }));
-      const fragmentStubs = path.join(stubRoot, "graphql_desk_generated");
       results.lifecycle.crossFileFragmentRefresh = await until(async () => {
+        const fragmentStubs = path.join(selectedStubRoot(), "graphql_desk_generated");
         const defaultStub = await fs.readFile(path.join(fragmentStubs, "default.pyi"), "utf8").catch(() => "");
         const fragmentStub = await fs.readFile(path.join(fragmentStubs, "sources", "fragments.pyi"), "utf8").catch(() => "");
         const hoverText = await fragmentHover();
@@ -232,11 +236,19 @@ exports.run = async () => {
       }, "cross-file fragment mutation converges in generated stubs, Pylance hover, and diagnostics", 45000);
       assert.ok(results.lifecycle.crossFileFragmentRefresh, JSON.stringify(results.lifecycle.crossFileFragmentProbe));
       await new Promise(resolve => setTimeout(resolve, 2000));
+      results.lifecycle.fragmentLanguageServerRestarts = restartCalls.length;
       const settledRestartCount = restartCalls.length;
+      assert.equal(settledRestartCount, 0, "Owned immutable stubPath rotation must refresh Pylance without an explicit restart command");
       await new Promise(resolve => setTimeout(resolve, 2000));
-      assert.ok(settledRestartCount >= 1 && restartCalls.length === settledRestartCount,
-        "Pylance restarts must settle after the generated fragment snapshot converges");
-      results.lifecycle.fragmentLanguageServerRestarts = settledRestartCount;
+      assert.equal(restartCalls.length, settledRestartCount,
+        "Pylance refreshes must settle after the generated fragment snapshot converges");
+      const generationRoot = path.join(workspace, ".graphql-desk", "typings", "generations");
+      const completeGenerationCount = async () => (await fs.readdir(generationRoot)).filter(name => /^g-\d+-/.test(name)).length;
+      const countAfterConvergence = await completeGenerationCount();
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      assert.equal(await completeGenerationCount(), countAfterConvergence,
+        "A completed owned generation must not trigger repeated settings-driven analysis and publication");
+      results.lifecycle.generationsStableAfterConvergence = countAfterConvergence;
       results.lifecycle.crossFileFragmentMutation = true;
     } finally {
       vscode.commands.executeCommand = executeCommand;
@@ -253,9 +265,9 @@ exports.run = async () => {
     const renamedUri = vscode.Uri.file(path.join(workspace, "lifecycle_renamed.py"));
     const lifecycleSource = "from graphql_desk_generated.default import graphql\ndoc = graphql('query Lifecycle { selected }')\n";
     await fs.writeFile(lifecycleUri.fsPath, lifecycleSource);
-    const sourceAlias = name => path.join(stubRoot, "graphql_desk_generated", "sources", `${name}.pyi`);
+    const sourceAlias = name => path.join(selectedStubRoot(), "graphql_desk_generated", "sources", `${name}.pyi`);
     const exists = file => fs.access(file).then(() => true, () => false);
-    const factoryText = () => fs.readFile(path.join(stubRoot, "graphql_desk_generated", "default.pyi"), "utf8").catch(() => "");
+    const factoryText = () => fs.readFile(path.join(selectedStubRoot(), "graphql_desk_generated", "default.pyi"), "utf8").catch(() => "");
     assert.ok(await until(async () => await exists(sourceAlias("lifecycle_source")) && (await factoryText()).includes("query Lifecycle { selected }"), "new closed source publishes its companion"));
     const lifecycleDocument = await vscode.workspace.openTextDocument(lifecycleUri);
     await vscode.window.showTextDocument(lifecycleDocument, { preview: false });
@@ -307,15 +319,16 @@ exports.run = async () => {
     results.lifecycle.sourceUndoRedoCloseRenameDelete = true;
     const settingsPath = path.join(workspace, ".vscode", "settings.json");
     const settings = JSON.parse(await fs.readFile(settingsPath, "utf8"));
-    assert.equal(settings["python.analysis.stubPath"], ".graphql-desk/typings");
+    assert.match(settings["python.analysis.stubPath"], /^\.graphql-desk\/typings\/generations\/g-[0-9]+-/);
     assert.equal(settings["files.autoSave"], "off", "Automatic stub setup must preserve unrelated workspace settings");
     results.lifecycle.settingsPreserved = true;
     const customRoot = path.join(workspace, "custom_stubs");
     await vscode.workspace.getConfiguration("python", consumerUri).update("analysis.stubPath", "custom_stubs", vscode.ConfigurationTarget.WorkspaceFolder);
+    const previouslySelected = selectedStubRoot();
     const moved = await until(async () => {
       const exists = async target => fs.access(target).then(() => true, () => false);
       return await exists(path.join(customRoot, "graphql_desk_generated", "default.pyi")) &&
-        !await exists(path.join(stubRoot, "graphql_desk_generated")) && (await hover(8, 2)).includes("String");
+        selectedStubRoot() === customRoot && await exists(path.join(previouslySelected, "graphql_desk_generated", "default.pyi")) && (await hover(8, 2)).includes("String");
     }, "runtime workspace stubPath change republishes into the new managed root");
     assert.ok(moved);
     stubRoot = customRoot;
