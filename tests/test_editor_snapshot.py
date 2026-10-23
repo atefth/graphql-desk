@@ -595,14 +595,15 @@ class EditorSnapshotTests(unittest.TestCase):
         self.project()
         source = self.root / "q.py"
         buffer = OpenBuffer(source, 3, _QUERY, True)
-        original_check = editor_snapshot._check_observations
+        original_check = getattr(editor_snapshot, "_check_observations")
 
         def appearing(
-            observations: Iterable[editor_snapshot._Observation],
+            observations: Iterable[object],
         ) -> None:
             captured = tuple(observations)
             if any(
-                observation.path == source and observation.origin == "saved-missing"
+                getattr(observation, "path", None) == source
+                and getattr(observation, "origin", None) == "saved-missing"
                 for observation in captured
             ):
                 source.write_bytes(_QUERY.encode())
