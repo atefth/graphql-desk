@@ -77,6 +77,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const state = states.get(root);
     if (state) {
       stopPolling(state); state.polls.clear();
+      state.artifactsAbort?.abort();
       state.cached = null; state.worker.dispose();
       reconcileSchemaWatches(state, new Set()); states.delete(root);
     }
@@ -195,7 +196,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (state && (state.python !== python || state.setting !== setting)) { dropState(root); state = null; }
     if (!state) {
       state = { root, folder, python, setting, worker: workerFactory({ python, workspace: root, isTrusted: trusted }),
-        running: false, pending: null, cached: null, targets: [], credentials: new Map(), revisions: [], watches: new Map(),
+        running: false, pending: null, cached: null, artifactsAbort: null, targets: [], credentials: new Map(), revisions: [], watches: new Map(),
         polls: new Map(), pollTimer: null, pollAbort: null, polling: false, pollPaused: false };
       states.set(root, state);
     }
@@ -204,7 +205,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   function invalidate() {
     if (disposed) return;
     epoch += 1;
-    for (const state of states.values()) { stopPolling(state); state.cached = null; if (!trusted()) state.worker.invalidate(); }
+    for (const state of states.values()) { stopPolling(state); state.artifactsAbort?.abort(); state.cached = null; if (!trusted()) state.worker.invalidate(); }
     changed();
   }
   function snapshot(document) {
@@ -379,7 +380,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     state.pollPaused = false;
     schedulePolling(state);
   }
-  async function build(state, token, refreshTarget, pollAbort, stage = () => {}) {
+  async function build(state, token, refreshTarget, pollAbort, stage = () => {}, operationAbort) {
     const ticket = epoch;
     stage("analysis-capture-failed");
     check(ticket, token, state, pollAbort?.signal);
@@ -390,8 +391,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!refreshTarget && state.cached && captureSignature(captured, state.cached.schemaPaths) === state.cached.signature &&
         state.cached.revisionSignature === revisionSignature) return state.cached;
     // shortcut: stale jobs finish without publishing to retain fetched schemas; refine if measured edit latency needs interruption.
-    const abort = pollAbort ?? (refreshTarget ? new AbortController() : null);
-    const cancellation = abort && token?.onCancellationRequested?.(() => abort.abort());
+    const abort = operationAbort ?? pollAbort ?? (refreshTarget ? new AbortController() : null);
+    const cancellation = !operationAbort && abort ? token?.onCancellationRequested?.(() => abort.abort()) : undefined;
     const requestWorker = message => state.worker.request(message, abort ? { signal: abort.signal } : undefined);
     try {
       stage("worker-prepare-failed");
@@ -490,10 +491,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const state = await stateFor(value, skip);
     if (!state) return null;
     if (token?.isCancellationRequested) { skip("request-cancelled"); return null; }
+    state.artifactsAbort?.abort();
+    const abort = new AbortController();
+    state.artifactsAbort = abort;
+    const cancellation = token?.onCancellationRequested?.(() => abort.abort());
     let failureReason = "analysis-artifacts-failed";
     try {
       return await enqueue(state, async () => {
-        const cached = state.cached ?? await build(state, token, undefined, undefined, reason => { failureReason = reason; });
+        const cached = state.cached ?? await build(state, token, undefined, undefined, reason => { failureReason = reason; }, abort);
         if (!cached) { skip("analysis-unavailable"); return null; }
         failureReason = "artifact-preflight-failed";
         check(cached.ticket, token, state);
@@ -504,7 +509,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           skip("analysis-snapshot-stale"); return null;
         }
         failureReason = "worker-artifacts-failed";
-        const reply = await state.worker.request({ op: "artifacts", ...cached.request });
+        const reply = await state.worker.request({ op: "artifacts", ...cached.request }, { signal: abort.signal });
         check(cached.ticket, token, state);
         if (reply.current === false) { state.cached = null; skip("worker-artifacts-stale"); return null; }
         failureReason = "artifact-freshness-check-failed";
@@ -516,7 +521,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         }
         return { ...reply, isCurrent: () => trusted() && !token?.isCancellationRequested &&
           epoch === cached.ticket && states.get(state.root) === state && state.cached === cached };
-      }, "artifacts");
+      }, "artifacts").finally(() => {
+        cancellation?.dispose();
+        if (state.artifactsAbort === abort) state.artifactsAbort = null;
+      });
     } catch { state.cached = null; skip(failureReason); return null; }
   }
   async function refresh() {

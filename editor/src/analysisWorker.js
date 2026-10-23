@@ -123,7 +123,33 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
       active.reject(failure());
     }
     if (previous) {
-      try { previous.kill(); } catch { /* State is already invalidated. */ }
+      const systemRoot = process.env.SystemRoot;
+      const taskkill = process.platform === "win32" && Number.isInteger(previous.pid) &&
+        typeof systemRoot === "string" && path.isAbsolute(systemRoot)
+        ? path.join(systemRoot, "System32", "taskkill.exe") : null;
+      if (taskkill) {
+        try {
+          const killer = spawn(taskkill, ["/PID", String(previous.pid), "/T", "/F"], {
+            windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+          });
+          killer.stdout.on("data", () => {});
+          killer.stderr.on("data", () => {});
+          const closeStreams = () => {
+            previous.stdin.destroy();
+            previous.stdout.destroy();
+            previous.stderr.destroy();
+          };
+          const fallback = () => {
+            try { previous.kill(); } catch { /* State is already invalidated. */ }
+            closeStreams();
+          };
+          killer.once("error", fallback);
+          killer.once("exit", code => { if (code !== 0) fallback(); else closeStreams(); });
+          return;
+        } catch { try { previous.kill(); } catch { /* State is already invalidated. */ } }
+      } else {
+        try { previous.kill(); } catch { /* State is already invalidated. */ }
+      }
       previous.stdin.destroy();
       previous.stdout.destroy();
       previous.stderr.destroy();

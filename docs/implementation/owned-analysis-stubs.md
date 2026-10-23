@@ -144,7 +144,7 @@ change. The removal fixture uses a preconfigured
 stub root and starts in a two-folder workspace so no single-to-multi-folder
 transition or unsaved-workspace prompt is needed.
 
-### Immutable generations and recovery (#37 partial)
+### Immutable generations and recovery (#37 acceptance complete)
 
 When GraphQL Desk owns the previously unset stubPath, it now stages each analysis
 under a unique generation directory. A manifest containing the generated file
@@ -178,11 +178,12 @@ mutation during ownership persistence, and stale overlapping publication. Each
 complete generation now includes all returned runtime `.py` companions alongside
 its `.pyi` files. Every runtime path must have a same-generation stub with the
 same module path; stub-only modules remain valid. Both file kinds are hashed and
-verified by the completion manifest before selection. This is a bounded
-implementation slice only: #37 still requires remaining lifecycle, recovery,
-and editor acceptance coverage, so it and the broad live-typing gate remain
-open. This change does not adopt pre-existing packages or authorize deletion of
-user files.
+verified by the completion manifest before selection. The implementation
+acceptance for #37 is complete through #212 and linked #207/#210. This does not
+pass broad live typing TYPE-01 or gate #42: broader invalid-edit recovery,
+cancellation races, forced-crash recovery, and the full editor lifecycle matrix
+remain open under #38/#42. This change does not adopt pre-existing packages or authorize
+deletion of user files.
 
 The `restartRecovery` host suite now launches two separate VS Code processes
 against the same isolated workspace and profile. After the first process
@@ -196,3 +197,19 @@ and [`restart-recovery-1.142.0.json`](../../editor/test/observations/restart-rec
 This verifies a normal application restart with a valid completed generation.
 It does not simulate a forced process crash during a write, and it does not
 close #24 or pass the broader live-typing lifecycle gate.
+
+### Issue #38 cancellation and invalid-operation recovery
+
+The editor refresh generation now passes its cancellation token into artifact
+generation. Source/configuration invalidation, caller cancellation, and
+controller disposal abort active worker requests; a result arriving after any
+of those transitions is rejected before publication. Native controller tests
+cover each transition and a subsequent fresh generation. The pinned VS Code
+1.142.0/Pylance 2026.4.1 host check edits one of two operations in a Python
+module to reference an unknown field: the affected artifact becomes
+`GraphqlDeskUnavailable`, Pylance reports an unknown result type, and GraphQL
+Desk reports the validation diagnostic, while the unaffected operation keeps
+its `ID` hover. Repair restores the affected `String` hover and removes the
+diagnostic. See
+[`issue-38-invalidation-1.142.0.json`](../../editor/test/observations/issue-38-invalidation-1.142.0.json).
+This is bounded evidence only; broad TYPE-01 and gate #42 remain open.

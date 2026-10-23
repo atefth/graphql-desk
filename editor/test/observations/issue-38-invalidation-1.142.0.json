@@ -1,0 +1,23 @@
+{
+  "host": "VS Code 1.142.0",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "scenario": "An invalid edit affects one operation in a Python module with a second independent operation; repair restores the first.",
+  "invalidEdit": {
+    "validationDiagnostic": "Cannot query field \"missing\" on type \"Query\".",
+    "affectedOperationArtifact": "GraphqlDeskUnavailable",
+    "affectedResultHover": "Unknown",
+    "affectedHoverNotStale": true,
+    "unaffectedOperationHover": "ID",
+    "unaffectedOperationArtifact": "GraphqlDeskDocument"
+  },
+  "repair": {
+    "affectedOperationArtifact": "GraphqlDeskDocument",
+    "affectedResultHover": "String",
+    "unaffectedOperationHover": "ID",
+    "invalidOperationDiagnostic": false
+  },
+  "result": "passed"
+}

@@ -98,6 +98,10 @@ async function main() {
       "count = result['count']",
       "needs_str: str = selected",
       "wrong = execute(doc, {'limit': 'bad'})",
+      "other_doc = graphql('query Other { user { id } }')",
+      "other_result = execute(other_doc, {})",
+      "other_id = other_result['user']['id']",
+      "other_needs_id: str = other_id",
       "",
     ].join("\n");
     await Promise.all([
