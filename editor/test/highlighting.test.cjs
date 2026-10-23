@@ -28,6 +28,19 @@ test("token categories tolerate incomplete GraphQL and cover strings, comments, 
   assert.ok(tokens(text).every((item) => item.end > item.start && item.end <= text.length));
 });
 
+test("incomplete GraphQL grammar scopes operation, type, alias, directive, fragment and value tokens", () => {
+  const text = '# 😀\r\nquery Search($id: ID! = "x") @skip(if: true) { alias: user(id: $id) { ...UserFields } } fragment UserFields on User { name: field(arg: 1.2e-4)';
+  const scopes = tokens(text).map((item) => ({ text: text.slice(item.start, item.end), scope: item.scope }));
+  for (const [value, scope] of [
+    ["query", "keyword"], ["Search", "def"], ["$", "variable"], ["id", "variable"], ["ID", "atom"],
+    ['"x"', "string"], ["@", "meta"], ["skip", "meta"], ["if", "attribute"], ["true", "builtin"],
+    ["alias", "property"], ["user", "qualifier"], ["UserFields", "def"],
+    ["on", "keyword"], ["User", "atom"], ["field", "qualifier"], ["arg", "attribute"],
+    ["1.2e-4", "number"],
+  ]) assert.ok(scopes.some((item) => item.text === value && item.scope === scope), `${value}: ${scope}`);
+  assert.ok(scopes.every((item) => item.text.length > 0));
+});
+
 test("untrusted workspace gets lexical highlighting without any Python analysis", async () => {
   const text = "from graphql_desk import gql as document\nq=document('''query Read { user { name";
   let analyses = 0;
