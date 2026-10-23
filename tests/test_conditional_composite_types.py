@@ -12,6 +12,92 @@ from graphql_desk.operation_types import render_operation_types
 
 
 class ConditionalCompositeTypesTests(unittest.TestCase):
+    def test_variable_defer_on_inline_and_named_fragments_types_both_shapes(
+        self,
+    ) -> None:
+        schema = build_schema(
+            "directive @defer(if: Boolean = true) on INLINE_FRAGMENT | FRAGMENT_SPREAD "
+            "type User { id: ID! name: String! title: String! } "
+            "type Query { user: User! }"
+        )
+        source = (
+            "query($inline:Boolean!,$named:Boolean!){ user { id "
+            "... @defer(if:$inline) { name } ...Later @defer(if:$named) } } "
+            "fragment Later on User { title }"
+        )
+        rendered = render_operation_types(
+            schema, source, name="Read", disable_masking=True
+        )
+        self.assertEqual(rendered.count("ReadResult_user ="), 1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "generated.py").write_text(rendered, encoding="utf-8")
+            (root / "fixture.py").write_text(
+                "from generated import ReadResult\n"
+                "base: ReadResult = {'user': {'id': '1'}}\n"
+                "inline: ReadResult = {'user': {'id': '1', 'name': 'N'}}\n"
+                "named: ReadResult = {'user': {'id': '1', 'title': 'T'}}\n"
+                "both: ReadResult = {'user': {'id': '1', 'name': 'N', 'title': 'T'}}\n"
+                "bad: ReadResult = {'user': {'name': 'N'}}  # BAD\n",
+                encoding="utf-8",
+            )
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+            self.assertEqual(
+                {
+                    int(line)
+                    for line in re.findall(r"fixture\.py:(\d+): error:", mypy.stdout)
+                },
+                {6},
+                mypy.stdout,
+            )
+
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["fixture.py", "generated.py"],
+                        "pythonVersion": "3.10",
+                        "typeCheckingMode": "strict",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(pyright.returncode, 1, pyright.stdout + pyright.stderr)
+            diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
+            self.assertEqual(
+                {item["range"]["start"]["line"] + 1 for item in diagnostics},
+                {6},
+                diagnostics,
+            )
+
     def test_inline_and_named_conditions_merge_repeated_composite_fields_soundly(
         self,
     ) -> None:
