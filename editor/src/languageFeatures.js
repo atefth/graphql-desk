@@ -319,6 +319,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
             const origins = toHost(bundle, call, node.name.loc);
             if (origins.length !== 1 || origins[0].module.uri !== snapshot.uri || origins[0].module.version !== snapshot.version) continue;
             const selectionRange = origins[0].range;
+            if (selectionRange.start < callRange.start || selectionRange.end > callRange.end) continue;
             const kind = node.kind === gql.Kind.FRAGMENT_DEFINITION ? "fragment" : "operation";
             const symbolKey = key([node.name.value, kind, origins[0].module.uri, origins[0].module.version, selectionRange]);
             if (seen.has(symbolKey)) continue;

@@ -50,6 +50,11 @@ async function run() {
   assert.equal(symbolText(documents.get("fragments.py"), fragmentSymbol.selectionRange), "Card");
   assert.equal(symbolText(documents.get("outline.py"), operationSymbol.range), "gql('query Main { user { id } }')");
   assert.equal(symbolText(documents.get("fragments.py"), fragmentSymbol.range), 'gql("fragment Card on User { id }")');
+  if (process.env.GRAPHQL_DESK_SYMBOLS_ONLY === "1") {
+    await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-symbols-observed", vscode: vscode.version,
+      actualActivation: extension.isActive, operation: operationSymbol.name, fragment: fragmentSymbol.name }, null, 2));
+    return;
+  }
   for (const [id, version] of [["ms-python.python", "2026.10.0"], ["ms-python.vscode-pylance", "2026.4.1"]]) {
     const native = vscode.extensions.getExtension(id); assert.ok(native); assert.equal(native.packageJSON.version, version); await native.activate();
   }

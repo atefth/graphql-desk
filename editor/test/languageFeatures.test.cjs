@@ -205,12 +205,11 @@ test("document symbols expose named operations and fragments at their embedded P
   }
 });
 
-test("document symbols skip invalid GraphQL and deduplicate shared source literals", async () => {
+test("document symbols skip invalid GraphQL and source names outside their containing call", async () => {
   const source = "from graphql_desk import gql\nTEXT='query Read { user { id } }'\nfirst=gql(TEXT)\nsecond=gql(TEXT)\nbad=gql('query Broken {')";
   const value = bundle(source);
   const symbols = await createLanguageFeatures(options(value)).symbols(document(value));
-  assert.deepEqual(symbols.map(item => item.name), ["Read"]);
-  assert.equal(source.slice(symbols[0].selectionRange.start, symbols[0].selectionRange.end), "Read");
+  assert.deepEqual(symbols, []);
 });
 
 test("fragment definitions reject ambiguous authored targets and recover after repair", async () => {
