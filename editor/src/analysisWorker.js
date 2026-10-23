@@ -73,8 +73,9 @@ function validReply(reply, request) {
     const file = value => keys(value, ["relative_path", "text"]) && typeof value.text === "string" && string(value.relative_path) &&
       !value.relative_path.includes("\\") && !value.relative_path.includes("\0") && !path.posix.isAbsolute(value.relative_path) && !path.win32.isAbsolute(value.relative_path) &&
       /\.pyi?$/.test(value.relative_path) && value.relative_path.replace(/\.pyi?$/, "").split("/").every(identifier);
-    return keys(reply, ["ok", "id", "input_fingerprint", "projects", "unavailable_schemas"]) && string(reply.id) && reply.id === request.id &&
-      typeof reply.input_fingerprint === "string" && /^[a-f0-9]{64}$/.test(reply.input_fingerprint) && Array.isArray(reply.projects) &&
+    return keys(reply, ["ok", "id", "input_fingerprint", "saved_source_fingerprint", "projects", "unavailable_schemas"]) && string(reply.id) && reply.id === request.id &&
+      typeof reply.input_fingerprint === "string" && /^[a-f0-9]{64}$/.test(reply.input_fingerprint) &&
+      typeof reply.saved_source_fingerprint === "string" && /^[a-f0-9]{64}$/.test(reply.saved_source_fingerprint) && Array.isArray(reply.projects) &&
       Array.isArray(reply.unavailable_schemas) && reply.unavailable_schemas.every(value => Array.isArray(value) && value.length === 2 && value.every(string) && reply.projects.some(project => project?.project === value[0])) &&
       new Set(reply.unavailable_schemas.map(value => JSON.stringify(value))).size === reply.unavailable_schemas.length &&
       new Set(reply.projects.map(project => project?.project)).size === reply.projects.length && reply.projects.every(project =>

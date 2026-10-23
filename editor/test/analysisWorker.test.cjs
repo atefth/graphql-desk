@@ -328,13 +328,13 @@ test("extended preparation validates redacted preferences, environment names and
   }
 });
 
-test("analysis artifacts require a captured-input fingerprint", async t => {
-  const valid = { ok: true, id: "job", input_fingerprint: "a".repeat(64), projects: [], unavailable_schemas: [] };
-  for (const reply of [valid, { ...valid, input_fingerprint: "private" }]) {
+test("analysis artifacts require captured live and saved-source fingerprints", async t => {
+  const valid = { ok: true, id: "job", input_fingerprint: "a".repeat(64), saved_source_fingerprint: "b".repeat(64), projects: [], unavailable_schemas: [] };
+  for (const reply of [valid, { ...valid, input_fingerprint: "private" }, { ...valid, saved_source_fingerprint: "private" }]) {
     const fake = fakeSpawn(child => child.stdout.write(JSON.stringify(reply) + "\n"));
     const { worker, workspace } = setup(t, fake);
     const request = { ...message(workspace), op: "artifacts", id: "job", schema_buffers: [] };
-    if (reply.input_fingerprint === "private") await assert.rejects(worker.request(request), generic);
+    if (reply.input_fingerprint === "private" || reply.saved_source_fingerprint === "private") await assert.rejects(worker.request(request), generic);
     else assert.deepEqual(await worker.request(request), valid);
   }
 });

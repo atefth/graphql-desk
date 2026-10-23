@@ -73,6 +73,72 @@ class EditorWorkerTests(unittest.TestCase):
         self.assertRegex(cast(str, result["input_fingerprint"]), r"^[a-f0-9]{64}$")
         self.assertNotIn("PRIVATE", json.dumps(result))
 
+    def test_saved_source_fingerprint_excludes_live_source_overlays(self) -> None:
+        capture = self.capture()
+        identity = self.prepare(capture)
+        self.assertTrue(self.analyze(capture, identity)["ok"])
+        baseline = self.worker.handle(
+            {"op": "artifacts", **capture, "id": identity, "schema_buffers": []}
+        )
+        self.assertTrue(baseline["ok"], baseline)
+        baseline_projects = cast(list[dict[str, object]], baseline["projects"])
+        baseline_files = cast(list[dict[str, str]], baseline_projects[0]["files"])
+        paths = {file["relative_path"] for file in baseline_files}
+        runtime_paths = {path for path in paths if path.endswith(".py")}
+        self.assertTrue(runtime_paths)
+        self.assertTrue(all(f"{path}i" in paths for path in runtime_paths))
+
+        overlay = self.buffer(
+            self.source,
+            self.source.read_text(encoding="utf8") + '\nq=gql("{ overlay }")\n',
+            version=3,
+        )
+        live_capture = {**capture, "buffers": [overlay]}
+        live_capture["documents"] = [self.document(self.source, version=3)]
+        live_identity = self.prepare(live_capture)
+        self.assertTrue(self.analyze(live_capture, live_identity)["ok"])
+        live = self.worker.handle(
+            {
+                "op": "artifacts",
+                **live_capture,
+                "id": live_identity,
+                "schema_buffers": [],
+            }
+        )
+        self.assertTrue(live["ok"], live)
+        self.assertNotEqual(live["input_fingerprint"], baseline["input_fingerprint"])
+        self.assertEqual(
+            live["saved_source_fingerprint"], baseline["saved_source_fingerprint"]
+        )
+
+    def test_backing_source_change_invalidates_a_live_overlay_snapshot(self) -> None:
+        capture = self.capture()
+        overlay = self.buffer(
+            self.source,
+            self.source.read_text(encoding="utf8") + "\n# unsaved overlay\n",
+            version=3,
+        )
+        capture["buffers"] = [overlay]
+        capture["documents"] = [self.document(self.source, version=3)]
+        identity = self.prepare(capture)
+        self.assertTrue(self.analyze(capture, identity)["ok"])
+
+        self.source.write_text(
+            self.source.read_text(encoding="utf8") + "\n# external disk edit\n",
+            encoding="utf8",
+        )
+        self.assertEqual(
+            self.worker.handle(
+                {
+                    "op": "current",
+                    **capture,
+                    "id": identity,
+                    "schema_buffers": [],
+                }
+            ),
+            {"ok": True, "current": False},
+        )
+
     def remote_capture(self, url: str) -> tuple[dict[str, object], str, str]:
         self.config.write_text(
             '[tool.graphql-desk]\nschema={url="' + url + '/PRIVATE_MARKER",'

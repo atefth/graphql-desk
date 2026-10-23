@@ -98,6 +98,7 @@ class EditorSnapshot:
     _observations: tuple[_Observation, ...] = field(repr=False)
     _configs: tuple[tuple[str, str, str], ...] = field(repr=False)
     _disk_modules: tuple[ModuleSnapshot, ...] = field(repr=False)
+    _saved_modules: tuple[ModuleSnapshot, ...] = field(repr=False)
     _remote_schemas: tuple[RemoteSchemaSnapshot, ...] = field(default=(), repr=False)
     project_configs: tuple[ProjectConfig, ...] = field(default=(), repr=False)
 
@@ -105,6 +106,16 @@ class EditorSnapshot:
     def request(self) -> dict[str, object]:
         # A frozen dataclass alone would not freeze a nested caller-mutable dict.
         return cast(dict[str, object], json.loads(self._request_json))
+
+    @property
+    def disk_modules(self) -> tuple[ModuleSnapshot, ...]:
+        """Disk-origin modules used to reuse unchanged analysis versions."""
+        return self._disk_modules
+
+    @property
+    def saved_modules(self) -> tuple[ModuleSnapshot, ...]:
+        """Backing-file source snapshots, independent of open-buffer overlays."""
+        return self._saved_modules
 
     def reuse_disk_sources(self, previous: "EditorSnapshot") -> "EditorSnapshot":
         """Retain only exactly matching captured disk module versions."""
@@ -439,6 +450,7 @@ def acquire_editor_snapshot(
     open_files = captured.buffers
     observations = captured.observations
     disk_modules: list[ModuleSnapshot] = []
+    saved_modules: list[ModuleSnapshot] = []
     modules: list[dict[str, object]] = []
     bindings: list[dict[str, object]] = []
     schemas: list[dict[str, object]] = []
@@ -477,6 +489,38 @@ def acquire_editor_snapshot(
         for source in selected_files:
             text, version = contents(source.path)
             observation = observations[(source.path, "text")]
+            saved_key = (source.path, "saved-source")
+            saved_path = _identity(source.path)
+            buffered = saved_path in open_files
+            saved_text: str | None
+            saved_digest: str | None
+            if buffered and not saved_path.is_relative_to(_identity(base)):
+                raise ValueError("Saved source escapes its workspace")
+            if buffered and saved_path.is_file():
+                saved_text, saved_digest = _read(saved_path)
+            elif buffered:
+                saved_text = None
+                saved_digest = None
+            else:
+                saved_text, saved_digest = text, observation.digest
+            observations[saved_key] = _Observation(
+                source.path,
+                _identity(source.path),
+                "saved-disk" if saved_text is not None else "saved-missing",
+                None,
+                saved_digest,
+            )
+            if saved_text is not None:
+                saved_modules.append(
+                    ModuleSnapshot(
+                        project_id,
+                        source.module,
+                        source.path.as_uri(),
+                        generation,
+                        saved_text,
+                        source.is_package,
+                    )
+                )
             if observation.origin == "disk":
                 module_fact = ModuleSnapshot(
                     project_id,
@@ -555,6 +599,7 @@ def acquire_editor_snapshot(
         ),
         captured.config_facts,
         tuple(disk_modules),
+        tuple(saved_modules),
         remote_schemas,
         tuple(config for config, _ in captured.projects),
     )

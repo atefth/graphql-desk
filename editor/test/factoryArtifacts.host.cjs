@@ -110,6 +110,10 @@ exports.run = async () => {
         mark("pylance.diagnostic.indexed", { count: observed.diagnostics.length });
       }
       try { await fs.access(path.join(stubRoot, "graphql_desk_generated", "__init__.pyi")); } catch { return false; }
+      try {
+        await Promise.all(["default.py", "default.pyi"].map(name =>
+          fs.access(path.join(stubRoot, "graphql_desk_generated", name))));
+      } catch { return false; }
       return /String|str/.test(observed.selected) && observed.diagnostics.length > 0;
     }, "generated result and variable types");
     results.pylance = { ...results.pylance, ...observed };

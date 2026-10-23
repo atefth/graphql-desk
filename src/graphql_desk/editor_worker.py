@@ -166,6 +166,20 @@ def _analysis_input_fingerprint(snapshot: EditorSnapshot) -> str:
     return hashlib.sha256(payload.encode("utf8")).hexdigest()
 
 
+def _saved_source_fingerprint(snapshot: EditorSnapshot) -> str:
+    """Identify captured disk sources separately from live editor overlays."""
+    sources = sorted(
+        (item.project, item.module, item.uri, item.is_package, item.source)
+        for item in snapshot.saved_modules
+    )
+    payload = json.dumps(
+        {"format": 1, "sources": sources},
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class _Document:
     identity: str
@@ -548,6 +562,7 @@ class EditorWorker:
                 "ok": True,
                 "id": self._identity,
                 "input_fingerprint": _analysis_input_fingerprint(self._snapshot),
+                "saved_source_fingerprint": _saved_source_fingerprint(self._snapshot),
                 "projects": projects,
                 "unavailable_schemas": self._snapshot.unavailable_schemas,
             }
