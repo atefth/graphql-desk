@@ -35,9 +35,9 @@ function generatedFactoryFiles(python, workspace, sourcePath) {
     return files;
   }
   const initial = generate();
-  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), "type Query { selected: String count(limit: Int!): Int! }\n");
+  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), "type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User! }\n");
   const nullable = generate();
-  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), "type Query { selected: String! count(limit: Int!): Int! }\n");
+  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), "type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User! }\n");
   return { initial, nullable };
 }
 
@@ -100,8 +100,22 @@ async function main() {
     ].join("\n");
     await Promise.all([
       fs.writeFile(path.join(workspace, "pyproject.toml"), '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n'),
-      fs.writeFile(path.join(workspace, "schema.graphql"), "type Query { selected: String! count(limit: Int!): Int! }\n"),
+      fs.writeFile(path.join(workspace, "schema.graphql"), "type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User! }\n"),
       fs.writeFile(sourcePath, source),
+      fs.writeFile(path.join(workspace, "fragments.py"), "from graphql_desk_generated.default import graphql\ncard = graphql('fragment Card on User { name }')\n"),
+    ]);
+    const runtimePackage = path.join(workspace, "graphql_desk_generated");
+    await fs.mkdir(path.join(runtimePackage, "sources"), { recursive: true });
+    await Promise.all([
+      fs.writeFile(path.join(runtimePackage, "__init__.py"), ""),
+      fs.writeFile(path.join(runtimePackage, "default.py"), 'from graphql_desk import init_graphql\ngraphql = init_graphql("default")\n'),
+      fs.writeFile(path.join(runtimePackage, "sources", "__init__.py"), ""),
+      fs.writeFile(path.join(runtimePackage, "sources", "fragments.py"), [
+        "from graphql_desk_generated.default import graphql",
+        "card = graphql('fragment Card on User { name }')",
+        "def read_card(data): return data",
+        "",
+      ].join("\n")),
     ]);
     const generated = generatedFactoryFiles(python, workspace, sourcePath);
     await fs.writeFile(artifacts, JSON.stringify(generated));

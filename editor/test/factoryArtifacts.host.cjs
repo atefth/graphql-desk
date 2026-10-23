@@ -31,10 +31,10 @@ exports.run = async () => {
     let stubRoot = process.env.GRAPHQL_DESK_STUB_ROOT;
     const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
     assert.ok(extension, "GraphQL Desk extension must be loaded in the host");
-    await extension.activate();
     const consumerUri = vscode.Uri.file(path.join(process.env.GRAPHQL_DESK_TEST_WORKSPACE, "consumer.py"));
     const consumer = await vscode.workspace.openTextDocument(consumerUri);
     await vscode.window.showTextDocument(consumer, { preview: false });
+    await extension.activate();
     const hover = async (line, character) => {
       const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", consumerUri, new vscode.Position(line, character)) || [];
       return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
@@ -114,6 +114,84 @@ exports.run = async () => {
     restoreSource.replace(consumer.uri, new vscode.Range(consumer.positionAt(0), consumer.positionAt(consumer.getText().length)), originalSource);
     assert.equal(await vscode.workspace.applyEdit(restoreSource), true);
     assert.ok(await until(async () => /String/.test(await hover(8, 2)) && !/None/.test(await hover(8, 2)), "restored operation republishes its original type"));
+    const fragmentUri = vscode.Uri.file(path.join(workspace, "fragments.py"));
+    const fragmentSource = "from graphql_desk_generated.default import graphql\ncard = graphql('fragment Card on User { name }')\n";
+    const fragmentFinalSource = fragmentSource.replace("{ name }", "{ name id }");
+    const fragmentDocument = await vscode.workspace.openTextDocument(fragmentUri);
+    const fragmentEdit = new vscode.WorkspaceEdit();
+    fragmentEdit.replace(fragmentUri, new vscode.Range(fragmentDocument.positionAt(0), fragmentDocument.positionAt(fragmentDocument.getText().length)), fragmentFinalSource);
+    const fragmentConsumerSource = [
+      "from graphql_desk import TypedDocument",
+      "from graphql_desk_generated.default import graphql",
+      "from graphql_desk_generated.sources.fragments import read_card",
+      "from fragments import card",
+      "from typing import TypeVar",
+      "R = TypeVar('R')",
+      "V = TypeVar('V')",
+      "def execute(document: TypedDocument[R, V], variables: V) -> R: ...",
+      "doc = graphql('query WithCard { user { ...Card } }', (card,))",
+      "result = execute(doc, {})",
+      "user_id = read_card(result['user'])['id']",
+      "needs_str: str = user_id",
+      "wrong: int = user_id",
+      "",
+    ].join("\n");
+    const fragmentConsumerEdit = new vscode.WorkspaceEdit();
+    fragmentConsumerEdit.replace(consumer.uri, new vscode.Range(consumer.positionAt(0), consumer.positionAt(consumer.getText().length)), fragmentConsumerSource);
+    const restartCalls = [];
+    const executeCommand = vscode.commands.executeCommand.bind(vscode.commands);
+    vscode.commands.executeCommand = async (command, ...args) => {
+      if (command === "python.analysis.restartLanguageServer") restartCalls.push({ time: Date.now() });
+      return executeCommand(command, ...args);
+    };
+    try {
+      assert.equal(await vscode.workspace.applyEdit(fragmentEdit), true);
+      assert.equal(await vscode.workspace.applyEdit(fragmentConsumerEdit), true);
+      await vscode.window.showTextDocument(consumer, { preview: false });
+      const valueOffset = fragmentConsumerSource.indexOf("user_id = read_card") + 1;
+      const valuePosition = consumer.positionAt(valueOffset);
+      const fragmentHover = async () => {
+        const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", consumerUri, valuePosition) || [];
+        return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
+      };
+      const fragmentDiagnostics = () => diagnostics().map(item => ({
+        code: item.code?.value ?? item.code ?? "", source: item.source, severity: item.severity, message: item.message,
+      }));
+      const fragmentStubs = path.join(stubRoot, "graphql_desk_generated");
+      results.lifecycle.crossFileFragmentRefresh = await until(async () => {
+        const defaultStub = await fs.readFile(path.join(fragmentStubs, "default.pyi"), "utf8").catch(() => "");
+        const fragmentStub = await fs.readFile(path.join(fragmentStubs, "sources", "fragments.pyi"), "utf8").catch(() => "");
+        const hoverText = await fragmentHover();
+        const items = fragmentDiagnostics();
+        results.lifecycle.crossFileFragmentProbe = {
+          hover: hoverText,
+          diagnostics: items.map(item => ({ code: item.code, severity: item.severity, message: item.message })),
+          restartCount: restartCalls.length,
+          generatedOperation: defaultStub.includes("query WithCard { user { ...Card } }"),
+          generatedFragmentReader: fragmentStub.includes("GraphqlDeskReadFragment as read_card"),
+        };
+        return results.lifecycle.crossFileFragmentProbe.generatedOperation &&
+          results.lifecycle.crossFileFragmentProbe.generatedFragmentReader &&
+          /\bID\b/.test(hoverText) &&
+          !items.some(item => /reportMissingImports|reportMissingModuleSource|could not be resolved|No overload/i.test(`${JSON.stringify(item.code)} ${item.message}`)) &&
+          items.some(item => /reportAssignmentType|Incompatible/i.test(`${item.code} ${item.message}`));
+      }, "cross-file fragment mutation converges in generated stubs, Pylance hover, and diagnostics", 45000);
+      assert.ok(results.lifecycle.crossFileFragmentRefresh, JSON.stringify(results.lifecycle.crossFileFragmentProbe));
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      assert.ok(restartCalls.length >= 1 && restartCalls.length <= 2,
+        "the two source edits may trigger separate generations, but neither may cause a refresh loop");
+      results.lifecycle.crossFileFragmentMutation = true;
+    } finally {
+      vscode.commands.executeCommand = executeCommand;
+      const restoreFragment = new vscode.WorkspaceEdit();
+      restoreFragment.replace(fragmentUri, new vscode.Range(fragmentDocument.positionAt(0), fragmentDocument.positionAt(fragmentDocument.getText().length)), fragmentSource);
+      await vscode.workspace.applyEdit(restoreFragment);
+      const restoreFragmentConsumer = new vscode.WorkspaceEdit();
+      restoreFragmentConsumer.replace(consumer.uri, new vscode.Range(consumer.positionAt(0), consumer.positionAt(consumer.getText().length)), originalSource);
+      await vscode.workspace.applyEdit(restoreFragmentConsumer);
+      await vscode.window.showTextDocument(consumer, { preview: false });
+      assert.ok(await until(async () => /String/.test(await hover(8, 2)) && !/None/.test(await hover(8, 2)), "fragment fixture cleanup restores original operation typing"));
+    }
     const lifecycleUri = vscode.Uri.file(path.join(workspace, "lifecycle_source.py"));
     const renamedUri = vscode.Uri.file(path.join(workspace, "lifecycle_renamed.py"));
     const lifecycleSource = "from graphql_desk_generated.default import graphql\ndoc = graphql('query Lifecycle { selected }')\n";
@@ -171,7 +249,7 @@ exports.run = async () => {
     results.lifecycle.runtimeStubPathChange = true;
     const schemaUri = vscode.Uri.file(path.join(workspace, "schema.graphql"));
     const schemaDocument = await vscode.workspace.openTextDocument(schemaUri);
-    const schemaText = "type Query { selected: String count(limit: Int!): Int! }\n";
+    const schemaText = "type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User! }\n";
     const schemaEdit = new vscode.WorkspaceEdit();
     schemaEdit.replace(schemaUri, new vscode.Range(schemaDocument.positionAt(0), schemaDocument.positionAt(schemaDocument.getText().length)), schemaText);
     assert.equal(await vscode.workspace.applyEdit(schemaEdit), true);
@@ -251,7 +329,7 @@ exports.run = async () => {
     results.lifecycle.activeStubRoot = stubRoot;
     results.lifecycle.ownedArtifactsRemoved = "verified after actual extension-host shutdown by the parent harness";
     results.lifecycle.userConfigurationPreserved = true;
-    results.lifecycle.userFilesUntouched = await fs.readFile(path.join(workspace, "schema.graphql"), "utf8").then(text => text === "type Query { selected: String count(limit: Int!): Int! }\n\n");
+    results.lifecycle.userFilesUntouched = await fs.readFile(path.join(workspace, "schema.graphql"), "utf8").then(text => text === "type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User! }\n\n");
     assert.ok(results.lifecycle.userFilesUntouched, "The extension must leave the user's GraphQL edit intact");
     results.outcome = "generated-factory-artifacts-observed";
   } catch (error) {
