@@ -23,6 +23,35 @@ test("resolved highlighting uses real maps with escapes, Unicode, CRLF and adjac
   }
 });
 
+test("escaped ordinary literals stay conservative until resolution restores exact Unicode host ranges", async () => {
+  const incompleteText = [
+    "# 😀",
+    "from graphql_desk import gql",
+    String.raw`q=gql("query Q { user(id: \"a\\\"😀\") { name`,
+  ].join("\r\n");
+  const repairedText = [
+    "# 😀",
+    "from graphql_desk import gql",
+    String.raw`q=gql("query Q { user(id: \"a\\\"😀\") { name } }")`,
+  ].join("\r\n");
+  const highlighter = createHighlighting({
+    analyze: async (snapshot) => bundle(snapshot.text, { version: snapshot.version }),
+    isCurrent: async () => true,
+    isTrusted: () => true,
+  });
+
+  const incomplete = { uri: "file:///workspace/main.py", version: 1, text: incompleteText };
+  assert.deepEqual(await highlighter.highlight(incomplete), []);
+
+  const repaired = { ...incomplete, version: 2, text: repairedText };
+  const highlights = await highlighter.highlight(repaired);
+  assert.ok(highlights.some(item => repairedText.slice(item.start, item.end) === "query" && item.scope === "keyword"));
+  for (const escaped of [String.raw`\"`, String.raw`\\`, "😀"]) {
+    assert.ok(highlights.some(item => repairedText.slice(item.start, item.end) === escaped && item.scope === "string"), escaped);
+  }
+  assert.ok(highlights.every(item => item.mode === "resolved"));
+});
+
 test("token categories tolerate incomplete GraphQL and cover strings, comments, numbers and variables", () => {
   const text = 'query Read($id:ID){ user(id:$id) { name # comment\n old(arg:12, text:"😀", enum:GREEN)';
   const styles = new Set(tokens(text).map((item) => item.scope));
