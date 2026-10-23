@@ -774,6 +774,42 @@ test("edit storms coalesce into one latest capture and cancelling one provider p
   assert.equal(await one, null); assert.equal(await two, results[0]);
 });
 
+test("an invalidated queued analysis is skipped before worker dispatch", async t => {
+  const fixture = await setup(t);
+  let release;
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  let prepares = 0;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, settings) {
+      const reply = await worker.request(message, settings);
+      if (message.op === "prepare" && ++prepares === 1) { started(); await held; }
+      return reply;
+    } };
+  } }); t.after(() => controller.dispose());
+
+  const snapshot = controller.snapshot(fixture.main);
+  const active = controller.analyze(snapshot);
+  await ready;
+  const queued = controller.analyze(snapshot);
+  await new Promise(resolve => setImmediate(resolve));
+  fixture.main.version += 1;
+  fixture.main.text += "# newer source\n";
+  fixture.main.isDirty = true;
+  fixture.events.onDidChangeTextDocument.fire({ document: fixture.main });
+  release();
+
+  assert.equal(await active, null, "the in-flight capture cannot survive source invalidation");
+  assert.equal(await queued, null, "queued work captured before invalidation is discarded");
+  assert.equal(prepares, 1, "the stale queued job never reaches the worker");
+  const current = await controller.analyze(controller.snapshot(fixture.main));
+  assert.ok(current);
+  assert.equal(current.request.modules[0].version, fixture.main.version);
+  assert.equal(prepares, 2, "a fresh request still dispatches normally");
+});
+
 test("explicit refresh cancellation aborts the worker and cannot admit a late remote schema", async t => {
   let entered;
   const requested = new Promise(resolve => { entered = resolve; });
