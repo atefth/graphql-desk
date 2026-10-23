@@ -204,13 +204,30 @@ def _precision_diagnostics(
                     self.names.setdefault(node.id, []).append(node)
 
             def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-                self._visit_definition(
-                    node.name, (*node.decorator_list, *node.args.defaults)
-                )
+                self._visit_definition(node.name, self._function_expressions(node))
 
             def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-                self._visit_definition(
-                    node.name, (*node.decorator_list, *node.args.defaults)
+                self._visit_definition(node.name, self._function_expressions(node))
+
+            @staticmethod
+            def _function_expressions(
+                node: ast.FunctionDef | ast.AsyncFunctionDef,
+            ) -> tuple[ast.expr, ...]:
+                arguments = (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                )
+                return (
+                    *node.decorator_list,
+                    *node.args.defaults,
+                    *(value for value in node.args.kw_defaults if value is not None),
+                    *(
+                        arg.annotation
+                        for arg in arguments
+                        if arg.annotation is not None
+                    ),
+                    *((node.returns,) if node.returns is not None else ()),
                 )
 
             def _visit_definition(
@@ -222,7 +239,11 @@ def _precision_diagnostics(
 
             def visit_ClassDef(self, node: ast.ClassDef) -> None:
                 self.visit_Name(ast.Name(id=node.name, ctx=ast.Store()))
-                for expression in (*node.decorator_list, *node.bases):
+                for expression in (
+                    *node.decorator_list,
+                    *node.bases,
+                    *(keyword.value for keyword in node.keywords),
+                ):
                     self.visit(expression)
 
             def visit_Lambda(self, node: ast.Lambda) -> None:
@@ -239,6 +260,31 @@ def _precision_diagnostics(
                     if alias.name != "*":
                         name = alias.asname or alias.name
                         self.visit_Name(ast.Name(id=name, ctx=ast.Store()))
+
+            def _visit_comprehension(
+                self, node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp
+            ) -> None:
+                for generator in node.generators:
+                    self.visit(generator.iter)
+                    for condition in generator.ifs:
+                        self.visit(condition)
+                if isinstance(node, ast.DictComp):
+                    self.visit(node.key)
+                    self.visit(node.value)
+                else:
+                    self.visit(node.elt)
+
+            def visit_ListComp(self, node: ast.ListComp) -> None:
+                self._visit_comprehension(node)
+
+            def visit_SetComp(self, node: ast.SetComp) -> None:
+                self._visit_comprehension(node)
+
+            def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+                self._visit_comprehension(node)
+
+            def visit_DictComp(self, node: ast.DictComp) -> None:
+                self._visit_comprehension(node)
 
         stores = ModuleStores()
         stores.visit(tree)

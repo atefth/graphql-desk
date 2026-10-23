@@ -27,6 +27,8 @@ SOURCE: t.Final = 'query Source{greeting}'
 def other() -> None:
  SOURCE = 'query Local{greeting}'
  assert SOURCE
+shadowed = [SOURCE for SOURCE in ('query Local{greeting}',)]
+assert shadowed
 a=graphql(A)
 b=graphql(B)
 c=graphql(C)
@@ -232,6 +234,29 @@ b=graphql(B)
                 warning = artifacts.diagnostics[0]
                 self.assertEqual(
                     source[warning.range.start : warning.range.end], expected_text
+                )
+
+    def test_module_evaluated_named_expression_rebinds_are_not_trusted(self) -> None:
+        for expression in (
+            "def other(*, value=(SOURCE := 'query Other{greeting}')): pass\n",
+            "def other(value: (SOURCE := str)) -> None: pass\n",
+            "def other() -> (SOURCE := str): return None\n",
+            "class Other(metaclass=(SOURCE := type)): pass\n",
+            "def other() -> None:\n global SOURCE\n SOURCE = 'query Other{greeting}'\n",
+        ):
+            with self.subTest(expression=expression):
+                source = (
+                    "from typing import Final\n"
+                    "from generated.main import graphql\n"
+                    "SOURCE: Final = 'query Q{greeting}'\n"
+                    + expression
+                    + "query = graphql(SOURCE)\n"
+                )
+                artifacts = factory_tests.FactoryGenerationTests().generate(
+                    (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+                )
+                self.assertEqual(
+                    [item.code for item in artifacts.diagnostics], ["source-not-static"]
                 )
 
     def test_static_operation_alias_keeps_semantics_and_warns_at_operand(self) -> None:
