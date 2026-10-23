@@ -1,5 +1,6 @@
 """Factory precision warnings describe actual checker limitations and operands."""
 
+import ast
 import subprocess
 import sys
 import tempfile
@@ -255,8 +256,14 @@ b=graphql(B)
                 artifacts = factory_tests.FactoryGenerationTests().generate(
                     (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
                 )
+                try:
+                    ast.parse(source)
+                except SyntaxError:
+                    expected = ["invalid-python"]
+                else:
+                    expected = ["source-not-static"]
                 self.assertEqual(
-                    [item.code for item in artifacts.diagnostics], ["source-not-static"]
+                    [item.code for item in artifacts.diagnostics], expected
                 )
 
     def test_static_operation_alias_keeps_semantics_and_warns_at_operand(self) -> None:
