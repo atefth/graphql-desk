@@ -503,6 +503,8 @@ test("workspace folder watchers follow additions and removals and refresh closed
   fixture.events.onDidChangeConfiguration.fire({ affectsConfiguration: section => section === "graphqlDesk" });
   assert.equal(invalidations, beforeGeneratedStub + 2, "GraphQL Desk settings changes still invalidate analysis through VS Code's configuration event");
   await refresh;
+  fixture.events.onDidChangeConfiguration.fire({ affectsConfiguration: section => section === "python.analysis.stubPath" || section === "python" });
+  assert.equal(invalidations, beforeGeneratedStub + 2, "Managed stub-path rotations are handled by the extension without invalidating their own publication");
   fixture.events.onDidChangeConfiguration.fire({ affectsConfiguration: section => section === "python" });
   assert.equal(invalidations, beforeGeneratedStub + 3, "Python configuration changes still invalidate through VS Code's configuration event");
   await refresh;
@@ -958,6 +960,45 @@ test("edit storms coalesce into one latest capture and cancelling one provider p
   const two = controller.analyze(controller.snapshot(fixture.main));
   token.isCancellationRequested = true;
   assert.equal(await one, null); assert.equal(await two, results[0]);
+});
+
+test("artifact publication and a newer analysis both survive queue coalescing", async t => {
+  const fixture = await setup(t);
+  let release;
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  let currentCalls = 0;
+  let artifactCalls = 0;
+  let analyzeCalls = 0;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, requestOptions) {
+      if (message.op === "current" && currentCalls++ === 0) { started(); await held; }
+      if (message.op === "artifacts") artifactCalls += 1;
+      if (message.op === "analyze") analyzeCalls += 1;
+      return worker.request(message, requestOptions);
+    } };
+  } }); t.after(() => controller.dispose());
+
+  const snapshot = controller.snapshot(fixture.main);
+  const bundle = await controller.analyze(snapshot);
+  assert.ok(bundle);
+  const current = controller.isCurrent(bundle, snapshot);
+  await ready;
+  const artifacts = controller.artifacts(snapshot);
+  await new Promise(resolve => setImmediate(resolve));
+  const latestAnalysis = controller.analyze(snapshot);
+  await new Promise(resolve => setImmediate(resolve));
+  release();
+
+  assert.equal(await current, true);
+  const generated = await artifacts;
+  assert.ok(generated?.ok, "artifact work queued behind current analysis is not silently discarded");
+  assert.equal(await latestAnalysis, bundle, "the newer analysis still receives the coalesced result");
+  assert.equal(artifactCalls, 1, "artifact work reaches the worker exactly once");
+  assert.equal(analyzeCalls, 1, "same-kind analysis requests coalesce to one worker analysis");
+  assert.equal(generated.isCurrent(), true, "the generated artifacts still belong to the live analysis ticket");
 });
 
 test("an invalidated queued analysis is skipped before worker dispatch", async t => {

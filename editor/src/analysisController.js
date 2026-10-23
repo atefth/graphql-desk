@@ -196,7 +196,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (state && (state.python !== python || state.setting !== setting)) { dropState(root); state = null; }
     if (!state) {
       state = { root, folder, python, setting, worker: workerFactory({ python, workspace: root, isTrusted: trusted }),
-        running: false, pending: null, cached: null, artifactsAbort: null, targets: [], credentials: new Map(), revisions: [], watches: new Map(),
+        running: false, pending: new Map(), cached: null, artifactsAbort: null, targets: [], credentials: new Map(), revisions: [], watches: new Map(),
         polls: new Map(), pollTimer: null, pollAbort: null, polling: false, pollPaused: false };
       states.set(root, state);
     }
@@ -303,24 +303,30 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const texts = new Map(documents.map(document => [document.uri.toString(), { path: localPath(document), version: document.version, text: document.getText(), is_dirty: document.isDirty }]));
     return { request, texts };
   }
-  // One wire job and one latest pending capture; edit storms never build a promise queue.
+  // Keep at most one pending action per operation kind; edit storms never build a promise queue.
   function enqueue(state, action, kind = "analyze", ticket = epoch) {
     if (state.running) {
-      if (state.pending?.kind === "refresh" && kind !== "refresh") return Promise.resolve(null);
-      if (state.pending?.kind === kind) { state.pending.action = action; state.pending.ticket = ticket; return state.pending.promise; }
-      if (state.pending) state.pending.resolve(null);
+      if (state.pending.has("refresh") && kind !== "refresh") return Promise.resolve(null);
+      const existing = state.pending.get(kind);
+      if (existing) { existing.action = action; existing.ticket = ticket; return existing.promise; }
+      if (kind === "refresh") {
+        for (const pending of state.pending.values()) pending.resolve(null);
+        state.pending.clear();
+      }
       let resolve;
       let reject;
       const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-      state.pending = { action, kind, ticket, promise, resolve, reject };
+      state.pending.set(kind, { action, kind, ticket, promise, resolve, reject });
       return promise;
     }
     state.running = true;
     return Promise.resolve().then(() => ticket === epoch && trusted() && states.get(state.root) === state ? action() : null).finally(() => {
       state.running = false;
-      const pending = state.pending;
-      state.pending = null;
-      if (pending) enqueue(state, pending.action, pending.kind, pending.ticket).then(pending.resolve, pending.reject);
+      const pending = state.pending.values().next().value;
+      if (pending) {
+        state.pending.delete(pending.kind);
+        enqueue(state, pending.action, pending.kind, pending.ticket).then(pending.resolve, pending.reject);
+      }
       schedulePolling(state);
     });
   }
@@ -664,6 +670,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (event === "onDidChangeConfiguration" && change?.affectsConfiguration &&
           !change.affectsConfiguration("graphqlDesk") &&
           !(change.affectsConfiguration("python") && !change.affectsConfiguration("python.analysis.stubPath"))) return;
+      if (event === "onDidChangeConfiguration" && change?.affectsConfiguration?.("python.analysis.stubPath") &&
+          !change.affectsConfiguration("graphqlDesk")) return;
       if (event === "onDidChangeConfiguration") {
         for (const [root, state] of states) {
           const python = vscode.workspace.getConfiguration("graphqlDesk", state.folder.uri).get("pythonPath", "");

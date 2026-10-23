@@ -1,0 +1,256 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const vscode = require("vscode");
+const workerModule = require("../src/analysisWorker");
+const artifactModule = require("../src/ownedAnalysisArtifacts");
+const workerRequests = [];
+const publications = [];
+const freshnessChecks = [];
+const refreshCallbacks = [];
+const artifactCalls = [];
+const skipReasons = [];
+const createWorker = workerModule.createAnalysisWorker;
+workerModule.createAnalysisWorker = options => {
+  const worker = createWorker(options);
+  return new Proxy(worker, { get(target, property) {
+    if (property === "request") return async (message, requestOptions) => {
+      const record = { op: message.op, id: message.id, buffers: message.buffers?.map(item => ({
+        path: item.path, dirty: item.is_dirty, hasSelected: item.text?.includes("{ selected count(limit: $limit) }"),
+        hasChangedQuery: item.text?.includes("{ user { id } count(limit: $limit) }")
+      })) };
+      try {
+        const reply = await target.request(message, requestOptions);
+        record.ok = reply.ok;
+        record.current = reply.current;
+        workerRequests.push(record);
+        return reply;
+      } catch (error) { record.error = String(error); workerRequests.push(record); throw error; }
+    };
+    const value = Reflect.get(target, property, target);
+    return typeof value === "function" ? value.bind(target) : value;
+  } });
+};
+const controllerModule = require("../src/analysisController");
+const createController = controllerModule.createAnalysisController;
+controllerModule.createAnalysisController = (...args) => {
+  const [vscodeApi, options] = args;
+  const originalChanged = options.changed;
+  const controller = createController(vscodeApi, { ...options, changed: () => {
+    refreshCallbacks.push({ visible: vscodeApi.window.visibleTextEditors.map(editor => editor.document.uri.fsPath),
+      documents: vscodeApi.workspace.textDocuments.map(document => ({ path: document.uri.fsPath, language: document.languageId, dirty: document.isDirty })) });
+    originalChanged();
+  } });
+  const artifacts = controller.artifacts;
+  controller.artifacts = async (...artifactArgs) => {
+    const onSkip = artifactArgs[2];
+    artifactArgs[2] = reason => { skipReasons.push(reason); onSkip?.(reason); };
+    const result = await artifacts(...artifactArgs);
+    artifactCalls.push({ result: Boolean(result), id: result?.id, cancelled: artifactArgs[1]?.isCancellationRequested });
+    if (result) {
+      const isCurrent = result.isCurrent;
+      result.isCurrent = () => {
+        const current = isCurrent();
+        freshnessChecks.push({ id: result.id, current });
+        return current;
+      };
+    }
+    return result;
+  };
+  return controller;
+};
+const createArtifacts = artifactModule.createOwnedAnalysisArtifacts;
+artifactModule.createOwnedAnalysisArtifacts = (...args) => {
+  const handle = createArtifacts(...args);
+  const publish = handle.publish;
+  handle.publish = async (...publishArgs) => {
+    const changed = await publish(...publishArgs);
+    publications.push({ count: publishArgs[0].length, paths: publishArgs[0].map(file => file.relative_path), changed });
+    return changed;
+  };
+  return handle;
+};
+
+async function until(check, label, timeout = 45000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.fail(label);
+}
+
+exports.run = async () => {
+  const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
+  const results = { host: vscode.version, lifecycle: {} };
+  const sourcePath = path.join(workspace, "consumer.py");
+  const sourceUri = vscode.Uri.file(sourcePath);
+  const source = await fs.readFile(sourcePath, "utf8");
+  let sourceChanges = 0;
+  const outputMessages = [];
+  const documentEvents = [];
+  for (const [eventName, subscribe] of [
+    ["open", handler => vscode.workspace.onDidOpenTextDocument(handler)],
+    ["close", handler => vscode.workspace.onDidCloseTextDocument(handler)],
+    ["change", handler => vscode.workspace.onDidChangeTextDocument(handler)],
+  ]) subscribe(document => {
+    const item = document.document ?? document;
+    if (item.uri?.scheme === "file") documentEvents.push({ eventName, path: item.uri.fsPath,
+      language: item.languageId, dirty: item.isDirty, source: item.uri.toString() === sourceUri.toString() });
+  });
+  const createOutputChannel = vscode.window.createOutputChannel.bind(vscode.window);
+  vscode.window.createOutputChannel = (name, ...args) => {
+    const channel = createOutputChannel(name, ...args);
+    if (name !== "GraphQL Desk") return channel;
+    return new Proxy(channel, { get(target, property) {
+      if (property === "appendLine") return value => { outputMessages.push(value); return target.appendLine(value); };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+  };
+  const changedSubscription = vscode.workspace.onDidChangeTextDocument(event => {
+    if (event.document.uri.toString() === sourceUri.toString()) sourceChanges += 1;
+  });
+  const oldQuery = "query Pick($limit: Int!) { selected count(limit: $limit) }";
+  const newQuery = "query Pick($limit: Int!) { user { id } count(limit: $limit) }";
+  const stubPath = () => vscode.workspace.getConfiguration("python", sourceUri)
+    .get("analysis.stubPath", ".graphql-desk/typings");
+  const readGeneration = async () => {
+    const root = path.resolve(workspace, stubPath());
+    const found = [];
+    async function visit(directory) {
+      for (const entry of await fs.readdir(directory, { withFileTypes: true }).catch(() => [])) {
+        const file = path.join(directory, entry.name);
+        if (entry.isDirectory()) await visit(file);
+        else if (entry.name.endsWith(".pyi")) found.push([file, await fs.readFile(file, "utf8")]);
+      }
+    }
+    await visit(root);
+    return { stubPath: stubPath(), files: found };
+  };
+  const hasSelected = generation => generation.files.some(([file, text]) =>
+    file.includes(`${path.sep}_documents${path.sep}`) && text.includes("'selected': 'String'"));
+  const hasExtra = generation => generation.files.some(([, text]) => text.includes("query Extra { user { id } }"));
+  const selectedHover = async () => {
+    const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", sourceUri, new vscode.Position(8, 2)) || [];
+    return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
+  };
+  const selectedDiagnostic = () => vscode.languages.getDiagnostics(sourceUri)
+    .some(item => item.severity === vscode.DiagnosticSeverity.Error && item.range.start.line === 8);
+  const replaceQuery = async (editor, fromQuery, value) => {
+    const text = editor.document.getText();
+    const offset = text.indexOf(fromQuery);
+    assert.notEqual(offset, -1, "The fixture query remains present");
+    assert.equal(await editor.edit(edit => edit.replace(
+      new vscode.Range(editor.document.positionAt(offset), editor.document.positionAt(offset + fromQuery.length)),
+      `query Pick($limit: Int!) { ${value} }`)), true);
+  };
+  const runEditorCommand = async (document, command) => {
+    await vscode.window.showTextDocument(document, { preview: false });
+    await vscode.commands.executeCommand(command);
+  };
+  try {
+    assert.equal(vscode.version, process.env.GRAPHQL_DESK_HOST_VERSION);
+    for (const [id, version] of [["ms-python.python", "2026.10.0"], ["ms-python.vscode-pylance", "2026.4.1"]]) {
+      const extension = vscode.extensions.getExtension(id);
+      assert.ok(extension);
+      assert.equal(extension.packageJSON.version, version);
+      await extension.activate();
+    }
+    const document = await vscode.workspace.openTextDocument(sourceUri);
+    let editor = await vscode.window.showTextDocument(document, { preview: false });
+    const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
+    assert.ok(extension);
+    await extension.activate();
+    await until(async () => hasSelected(await readGeneration()), "initial saved operation is published");
+    await until(async () => /selected:\s*(?:str|String)\b/.test(await selectedHover()), "Pylance sees the saved result field type");
+    const savedGeneration = await readGeneration();
+    results.lifecycle.savedBaselinePublished = true;
+
+    await replaceQuery(editor, oldQuery, "user { id } count(limit: $limit)");
+    await until(async () => {
+      const current = await readGeneration();
+      return !hasSelected(current);
+    }, "unsaved GraphQL edit publishes a complete changed generation");
+    assert.equal(document.isDirty, true);
+    await until(selectedDiagnostic, "Pylance rejects the removed result field in the unsaved edit");
+    results.lifecycle.unsavedEditRotatesGeneration = true;
+
+    await runEditorCommand(document, "undo");
+    await until(async () => document.getText() === source && hasSelected(await readGeneration()), "undo restores the saved query typing");
+    assert.equal(document.isDirty, false);
+    await until(async () => !selectedDiagnostic() && /selected:\s*(?:str|String)\b/.test(await selectedHover()), "Pylance restores the saved result field after undo");
+    results.lifecycle.undoRestoresSavedTyping = true;
+
+    await runEditorCommand(document, "redo");
+    await until(async () => document.getText().includes(newQuery) && !hasSelected(await readGeneration()), "redo republishes the changed query typing");
+    assert.equal(document.isDirty, true);
+    await until(selectedDiagnostic, "Pylance rejects the removed result field after redo");
+    results.lifecycle.redoRepublishesChangedTyping = true;
+
+    assert.equal(await document.save(), true);
+    const savedChangedText = document.getText();
+    assert.equal(await fs.readFile(sourcePath, "utf8"), savedChangedText);
+    await until(async () => !hasSelected(await readGeneration()), "saved edit remains published");
+    results.lifecycle.savePersistsSourceAndTyping = true;
+
+    await replaceQuery(editor, newQuery, "selected count(limit: $limit)");
+    await until(async () => hasSelected(await readGeneration()), "a later unsaved edit publishes before discard");
+    await runEditorCommand(document, "workbench.action.files.revert");
+    await until(async () => document.getText() === savedChangedText && !hasSelected(await readGeneration()), "revert discards only the active source buffer edit");
+    assert.equal(document.isDirty, false);
+    assert.equal(await fs.readFile(sourcePath, "utf8"), savedChangedText);
+    results.lifecycle.discardRestoresSavedTyping = true;
+
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    const reopened = await vscode.workspace.openTextDocument(sourceUri);
+    editor = await vscode.window.showTextDocument(reopened, { preview: false });
+    assert.equal(reopened.getText(), savedChangedText);
+    await until(async () => !hasSelected(await readGeneration()), "reopened saved source retains the generated type state");
+    await until(selectedDiagnostic, "Pylance restores the saved changed result type after close and reopen");
+    results.lifecycle.savedDocumentCloseReopenRetainsTyping = true;
+
+    const extraPath = path.join(workspace, "lifecycle_calls.py");
+    const renamedPath = path.join(workspace, "renamed_lifecycle_calls.py");
+    await until(async () => hasExtra(await readGeneration()), "the additional operation is indexed");
+    const beforeRename = await readGeneration();
+    await fs.rename(extraPath, renamedPath);
+    await until(async () => {
+      const current = await readGeneration();
+      return current.stubPath !== beforeRename.stubPath && hasExtra(current);
+    }, "rename triggers a replacement generation with the operation retained");
+    results.lifecycle.sourceRenameReindexes = true;
+
+    const beforeDelete = await readGeneration();
+    await fs.unlink(renamedPath);
+    await until(async () => {
+      const current = await readGeneration();
+      return current.stubPath !== beforeDelete.stubPath && !hasExtra(current);
+    }, "delete removes the deleted source operation from generated artifacts");
+    results.lifecycle.sourceDeleteRemovesOwnedTyping = true;
+
+    const keep = path.join(workspace, ".graphql-desk", "keep.txt");
+    assert.equal(await fs.readFile(keep, "utf8"), "preserve this user file");
+    assert.equal(await fs.readFile(sourcePath, "utf8"), savedChangedText);
+    assert.equal(savedGeneration.files.length > 0, true);
+    results.lifecycle.activeStubRoot = path.resolve(workspace, stubPath());
+    results.lifecycle.configuredStubPath = stubPath();
+    results.lifecycle.userSourceAndNeighborFilePreserved = true;
+    results.outcome = "managed-output-lifecycle-observed";
+  } catch (error) {
+    results.error = String(error.stack || error);
+    const current = await readGeneration();
+    results.lifecycle.debug = { sourceChanges, stubPath: current.stubPath,
+      types: current.files.map(([file, text]) => ({ file: path.relative(workspace, file), hasSelected: text.includes("'selected': 'String'"), hasChangedQuery: text.includes(newQuery) })),
+      text: vscode.workspace.textDocuments.find(document => document.uri.toString() === sourceUri.toString())?.getText(), outputMessages,
+      requests: workerRequests, publications, freshnessChecks, documentEvents: documentEvents.slice(-80),
+      refreshCallbacks, artifactCalls, skipReasons };
+    results.outcome = "managed-output-lifecycle-failed";
+    throw error;
+  } finally {
+    changedSubscription.dispose();
+    await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
+  }
+};
