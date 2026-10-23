@@ -45,6 +45,25 @@ test("incomplete GraphQL grammar scopes operation, type, alias, directive, fragm
   assert.ok(scopes.every((item) => item.text.length > 0));
 });
 
+test("incomplete GraphQL scopes every operation form, nested input types and block strings", () => {
+  const text = 'mutation Update($input: [UpdateInput!]! = [{amount: -1.25e+4, note: """first line\nsecond line"""}]) { update(input: $input) { id } }\r\n' +
+    'subscription Watch($room: ID!) { event(room: $room) { ... on Event { payload } } }\r\n' +
+    'fragment Tail on Event';
+  const highlighted = tokens(text);
+  const scoped = highlighted.map((item) => ({
+    text: text.slice(item.start, item.end), scope: item.scope,
+  }));
+  for (const [value, scope] of [
+    ["mutation", "keyword"], ["Update", "def"], ["input", "variable"],
+    ["UpdateInput", "atom"], ["amount", "attribute"], ["-1.25e+4", "number"],
+    ['"""first line', "string"], ['second line"""', "string"],
+    ["subscription", "keyword"], ["Watch", "def"], ["event", "property"],
+    ["on", "keyword"], ["Event", "atom"], ["payload", "property"],
+    ["fragment", "keyword"], ["Tail", "def"],
+  ]) assert.ok(scoped.some((item) => item.text === value && item.scope === scope), `${value}: ${scope}`);
+  assert.ok(highlighted.every((item) => item.end > item.start && item.end <= text.length));
+});
+
 test("untrusted workspace gets lexical highlighting without any Python analysis", async () => {
   const text = "from graphql_desk import gql as document\nq=document('''query Read { user { name";
   let analyses = 0;
