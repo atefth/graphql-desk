@@ -226,7 +226,21 @@ async function main() {
     }
     assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
     const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
-    assert.equal(settings["python.analysis.stubPath"], observed.lifecycle.configuredStubPath);
+    const persistedStubPath = settings["python.analysis.stubPath"];
+    if (suite === "typingMatrix" && persistedStubPath !== observed.lifecycle.configuredStubPath) {
+      assert.match(persistedStubPath.replaceAll("\\", "/"), /^\.graphql-desk\/typings\/generations\/g-\d+-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i,
+        "A later typing refresh may select another managed generation before shutdown");
+      const persistedRoot = path.resolve(workspace, persistedStubPath);
+      await fs.access(path.join(persistedRoot, "complete.json"));
+      assert.equal(
+        await fs.readFile(path.join(persistedRoot, "graphql_desk_generated", "default.pyi"), "utf8"),
+        await fs.readFile(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated", "default.pyi"), "utf8"),
+        "The persisted generation keeps the exact typing Pylance observed",
+      );
+      observed.lifecycle.persistedStubPath = persistedStubPath;
+    } else {
+      assert.equal(persistedStubPath, observed.lifecycle.configuredStubPath);
+    }
     assert.equal(settings["files.autoSave"], "off");
     observed.lifecycle.ownedArtifactsRemoved = true;
     observed.lifecycle.userConfigurationPreserved = true;

@@ -276,6 +276,10 @@ def _recoverable_index(
     accepted = {
         DocumentIdentity(item.call.module, item.call.range) for item in index.documents
     }
+    accepted_documents = {
+        DocumentIdentity(item.call.module, item.call.range): item
+        for item in index.documents
+    }
     owners = [
         (item.module, item.range, item.binding) for item in index.rejected_calls
     ] + [
@@ -303,6 +307,7 @@ def _recoverable_index(
     ):
         return False
     calls: dict[ModuleDependency, dict[Span, str | None]] = {}
+    operations: dict[ModuleDependency, dict[Span, tuple[Span, str]]] = {}
     try:
         for module, range_, binding in owners:
             snapshot = snapshots.get(module)
@@ -328,6 +333,47 @@ def _recoverable_index(
                     if node.end_lineno is not None and node.end_col_offset is not None
                 }
                 calls[module] = {range_: None for range_ in positions.values()}
+                operation_arguments: dict[Span, tuple[Span, str]] = {}
+                for node in nodes:
+                    call_range = positions.get(id(node))
+                    if call_range is None:
+                        continue
+                    operation_node = next(
+                        (
+                            item.value
+                            for item in node.keywords
+                            if item.arg == "operation"
+                        ),
+                        None,
+                    )
+                    if (
+                        isinstance(operation_node, ast.Constant)
+                        and isinstance(operation_node.value, str)
+                        and operation_node.end_lineno is not None
+                        and operation_node.end_col_offset is not None
+                    ):
+                        operation_arguments[call_range] = (
+                            Span(
+                                position_to_offset(
+                                    snapshot.source,
+                                    Position(
+                                        operation_node.lineno - 1,
+                                        operation_node.col_offset,
+                                    ),
+                                    encoding="utf-8",
+                                ),
+                                position_to_offset(
+                                    snapshot.source,
+                                    Position(
+                                        operation_node.end_lineno - 1,
+                                        operation_node.end_col_offset,
+                                    ),
+                                    encoding="utf-8",
+                                ),
+                            ),
+                            operation_node.value,
+                        )
+                operations[module] = operation_arguments
                 for statement in tree.body:
                     if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
                         continue
@@ -374,7 +420,13 @@ def _recoverable_index(
             if schema_name not in schema_names:
                 return False
             if not rejected_document.diagnostics or any(
-                diagnostic.code not in {"invalid-fragments", "unavailable-fragment"}
+                diagnostic.code
+                not in {
+                    "invalid-fragments",
+                    "unavailable-fragment",
+                    "invalid-operation-selection",
+                    "operation-as-fragment",
+                }
                 for diagnostic in rejected_document.diagnostics
             ):
                 return False
@@ -386,6 +438,31 @@ def _recoverable_index(
                     diagnostic.code == "invalid-fragments"
                     and diagnostic.module == rejected_document.call.module
                     and diagnostic.range == rejected_document.call.range
+                )
+                or (
+                    diagnostic.code == "invalid-operation-selection"
+                    and rejected_document.call.operation_range is not None
+                    and rejected_document.call.operation is not None
+                    and diagnostic.module == rejected_document.call.module
+                    and diagnostic.range == rejected_document.call.operation_range
+                    and operations[rejected_document.call.module].get(
+                        rejected_document.call.range
+                    )
+                    == (
+                        rejected_document.call.operation_range,
+                        rejected_document.call.operation,
+                    )
+                )
+                or (
+                    diagnostic.code == "operation-as-fragment"
+                    and any(
+                        reference.target in accepted_documents
+                        and accepted_documents[reference.target].selected_operation
+                        is not None
+                        and diagnostic.module == reference.reference_module
+                        and diagnostic.range == reference.range
+                        for reference in rejected_document.call.fragments
+                    )
                 )
                 or (
                     diagnostic.code == "unavailable-fragment"

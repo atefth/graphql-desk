@@ -73,9 +73,13 @@ diagnostics remain required. Dynamic AST execution and untyped fragment
 composition still use the original runtime carriers without wrappers or copies.
 Owner-bound `source-not-static` and indexed
 `invalid-fragments`/`unavailable-fragment` failures can retain independently valid
-factory artifacts when at least one valid indexed owner remains. Recovery
-requires current, disjoint owner records, explicit source-expression failure
-provenance and bounded diagnostic spans; all original diagnostics remain.
+factory artifacts when at least one valid indexed owner remains. Recovery also
+admits a literal unknown operation selector at its exact keyword value and an
+operation supplied as a fragment at its exact reference span. Both require the
+failed call's verified source map and a distinct valid target/owner; the regular
+opaque factory fallback remains available without precise aliases. Recovery
+requires current, disjoint owner records, explicit failure provenance and bounded
+diagnostic spans; all original diagnostics remain.
 Rejected owners receive no invented precise overloads or companion aliases;
 imports of absent aliases still fail honestly. The ordinary opaque fallback
 remains available, while an existing precise overload may still match a
