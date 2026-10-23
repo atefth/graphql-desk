@@ -977,6 +977,97 @@ if TYPE_CHECKING:
             )
             self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
 
+    def test_stub_backed_external_mappings_flow_through_helpers_and_results(
+        self,
+    ) -> None:
+        """Generated imports defer external mapping types to ordinary stub lookup."""
+        context = SchemaContext(
+            "main",
+            build_schema(
+                "scalar Date enum Color { RED BLUE } "
+                "type Query { date: Date! color: Color! }"
+            ),
+            "external-mapping-stubs",
+        )
+        source = """from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from external_types import Color, DateInput, DateOutput
+from generated.main import graphql
+from generated.sources.main import QueryResult
+query=graphql('query Read { date color }')
+date=DateInput()
+color=Color.RED
+assert graphql.scalar('Date',date) is date
+assert graphql.scalar('Color',color) is color
+assert graphql.scalar('Date',None) is None
+if TYPE_CHECKING:
+ result:QueryResult={'date':DateOutput(),'color':Color.RED}
+ assert_type(result['date'],DateOutput)
+ assert_type(result['color'],Color)
+ graphql.scalar('Date',DateOutput()) # error
+ graphql.scalar('Color','RED') # error
+"""
+        modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+        resolved = resolve_project(
+            modules,
+            bindings=(
+                ProjectBindings(
+                    "p",
+                    ("main",),
+                    factories=(FactoryBinding("generated.main", "graphql", "main"),),
+                ),
+            ),
+        )
+        self.assertEqual(resolved.diagnostics, ())
+        index = index_fragments(resolved, schemas={("p", "main"): context})
+        with patch(
+            "importlib.import_module", side_effect=AssertionError("No project import")
+        ):
+            artifacts = generate_factory_artifacts(
+                context,
+                index,
+                modules=modules,
+                project_id="p",
+                generated_package="generated",
+                scalars=(
+                    ScalarMapping(
+                        "Date", "external_types.DateInput", "external_types.DateOutput"
+                    ),
+                ),
+                enums=(("Color", "external_types.Color"),),
+            )
+        self.assertEqual(artifacts.diagnostics, ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            (root / "external_types.pyi").write_text(
+                "from enum import Enum\n"
+                "class DateInput: ...\n"
+                "class DateOutput: ...\n"
+                "class Color(Enum):\n    RED = ...\n    BLUE = ...\n",
+                encoding="utf8",
+            )
+            (root / "external_types.py").write_text(
+                "from enum import Enum\n"
+                "class DateInput: pass\n"
+                "class DateOutput: pass\n"
+                "class Color(Enum):\n    RED=1\n    BLUE=2\n",
+                encoding="utf8",
+            )
+            errors = {
+                number
+                for number, line in enumerate(source.splitlines(), 1)
+                if "# error" in line
+            }
+            self.check(root, {"main.py": errors})
+            runtime = subprocess.run(
+                [sys.executable, "main.py"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+
     def test_standard_decorated_mappings_check_factory_values_and_final_bases(
         self,
     ) -> None:

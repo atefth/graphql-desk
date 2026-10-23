@@ -371,6 +371,15 @@ assert_type(
 )
 assert exact.loc is not None
 assert exact.loc.start == 0
+assert exact.loc.end == len({source!r})
+assert exact.loc.source.body == {source!r}
+assert exact.loc.source.body[exact.loc.start:exact.loc.end] == {source!r}
+operation = exact.definitions[0]
+assert operation.loc is not None
+assert operation.loc.source.body[operation.loc.start:operation.loc.end] == {source!r}
+field = operation.selection_set.selections[0]
+assert field.loc is not None
+assert field.loc.source.body[field.loc.start:field.loc.end] == "missing(arg: 1)"
 assert_type(parse(Source({source!r})), DocumentNode)
 assert_type(parse({source!r}, True), DocumentNode)
 assert_type(parse({source!r}, max_tokens=100), DocumentNode)
