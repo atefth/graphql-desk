@@ -41,13 +41,16 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
       - run: uv export --locked --no-emit-project --output-file audit-requirements.txt
-      # pip-audit 2.10.1's _SafeFileCache override avoids CacheControl's filelock calls; scope these exceptions to Python 3.10 until a patched compatible filelock is available.
+      # pip-audit 2.10.1 uses _SafeFileCache, so CacheControl's vulnerable lock paths are not called; 4.2.1 drops Python 3.10.
       - if: matrix.python == '3.10'
         run: >-
           uv run pip-audit --strict --require-hashes --disable-pip
-          --ignore-vuln CVE-2026-112906
-          --ignore-vuln CVE-2026-112940
-          --ignore-vuln CVE-2026-112914
+          --ignore-vuln GHSA-2g95-wg33-c5x2
+          --ignore-vuln GHSA-crv4-6mhj-j5jh
+          --ignore-vuln GHSA-v4x8-3wr5-3wq8
+          --ignore-vuln GHSA-9vhv-jxww-xfm5
+          --ignore-vuln GHSA-jqc4-5cvw-7w85
+          --ignore-vuln GHSA-567q-5qvw-pf92
           -r audit-requirements.txt
       - if: matrix.python != '3.10'
         run: uv run pip-audit --strict --require-hashes --disable-pip -r audit-requirements.txt
