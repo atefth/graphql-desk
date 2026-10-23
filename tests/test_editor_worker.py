@@ -719,10 +719,12 @@ if TYPE_CHECKING:
         self.assertEqual(len(provenance), 1)
         self.assertEqual(provenance[0]["status"], "precise")
         owner = cast(dict[str, object], provenance[0]["owner"])
-        self.assertEqual(owner["module"]["module"], "main")
+        owner_module = cast(dict[str, object], owner["module"])
+        self.assertEqual(owner_module["module"], "main")
         self.assertNotEqual(owner["codepoint"], owner["utf16"])
+        dependencies = cast(list[dict[str, object]], provenance[0]["dependencies"])
         self.assertIn(
-            "main", [item["module"] for item in provenance[0]["dependencies"]]
+            "main", [item["module"] for item in dependencies]
         )
         files = cast(list[dict[str, str]], projects[0]["files"])
         self.assertIn(
