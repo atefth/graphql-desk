@@ -207,6 +207,16 @@ test("schema argument/value errors and client directive filtering retain schema 
   assert.equal(diagnostics.some((item) => /Unknown directive/.test(item.message)), false);
 });
 
+test("configured client directives suppress only unknown-directive errors and deduplicate shared origins", async () => {
+  const source = "from graphql_desk import gql\nTEXT='{ user @local { missing old } }'\nfirst=gql(TEXT)\nsecond=gql(TEXT)";
+  const value = bundle(source);
+  const diagnostics = await createLanguageFeatures(options(value, { clientDirectives: () => ["local"] }))
+    .diagnostics(document(value));
+  assert.deepEqual(diagnostics.map((item) => item.code).sort(), ["graphql.deprecation", "graphql.validation"]);
+  assert.deepEqual(diagnostics.map((item) => document(value).text.slice(item.range.start, item.range.end)).sort(), ["missing", "old"]);
+  assert.equal(diagnostics.some((item) => /Unknown directive/.test(item.message)), false);
+});
+
 test("untrusted, cancelled, stale, wrong-schema and failed analysis yield no precise results", async () => {
   const value = bundle("from graphql_desk import gql\nq=gql('{ user { na } }')");
   const snapshot = document(value);

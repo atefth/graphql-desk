@@ -34,8 +34,9 @@ matches the schema and operation. It performs no runtime result validation.
 The `gql` bindings request the native execution envelope. GraphQL errors still
 raise the client's original `TransportQueryError`, including its partial data,
 errors, and extensions. Transport exceptions and cancellation propagate. The
-subscription binding closes the underlying stream when the caller closes it.
-Callers should close a subscription explicitly when stopping consumption early.
+subscription binding returns an `AsyncIterator` and closes the underlying stream
+when the caller closes it. Callers should close a subscription explicitly when
+stopping consumption early.
 
 Run the executable examples and checker fixtures with:
 
@@ -48,6 +49,8 @@ omitted versus null variables, partial errors, mutation, asynchronous execution,
 subscription cleanup, and cancellation. It does not exercise network transports
 or promise inference for arbitrary client APIs. A generated-factory integration
 fixture checks inferred result/variables through every binding signature, rejects
-invalid variables, and executes a selected operation through the real gql binding
-with unchanged AST, variables and native envelope identity. This bounded proof
-does not establish automatic import attachment or a broad compatibility gate.
+invalid variables, and executes generated query and mutation documents through
+graphql-core and gql's sync/async bindings, plus a generated subscription through
+gql. It checks unchanged AST, variables and native envelope identity. This bounded
+proof does not establish automatic import attachment or a broad compatibility
+gate.
