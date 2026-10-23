@@ -27,6 +27,7 @@ from graphql_desk.source_graph import (
     RejectedCall,
     resolve_project,
 )
+from graphql_desk.source_maps import build_source_map
 from tests import test_factory_generation as factory_tests
 
 
@@ -137,6 +138,148 @@ execute(dependent,{}) # error
                 encoding="utf8",
             )
             self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
+
+    def test_known_bad_source_selector_and_fragment_keep_valid_independent_calls(
+        self,
+    ) -> None:
+        helper = factory_tests.FactoryGenerationTests()
+        cases = (
+            (
+                "invalid source",
+                "bad=graphql('query Bad{miss\\u0069ng}')\n",
+                "graphql-validation",
+                r"miss\u0069ng",
+            ),
+            (
+                "unknown selector",
+                "bad=graphql('query Bad{greeting}',operation='Wrong')\n",
+                "invalid-operation-selection",
+                "'Wrong'",
+            ),
+            (
+                "operation used as fragment",
+                "query_source=graphql('query Other{greeting}')\n"
+                "bad=graphql('query Bad{greeting}',[query_source])\n",
+                "operation-as-fragment",
+                "query_source",
+            ),
+        )
+        for label, bad_source, expected_code, expected_text in cases:
+            with self.subTest(label=label):
+                source = (
+                    "from generated.main import graphql\n"
+                    "from graphql import DocumentNode\n"
+                    "from typing_extensions import assert_type\n"
+                    "good=graphql('query Good{greeting}')\n"
+                    + bad_source
+                    + "assert_type(bad.ast, DocumentNode)\n"
+                    + "bad['greeting'] # error\n"
+                )
+                modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+                bindings = (
+                    ProjectBindings(
+                        "p",
+                        ("main",),
+                        "main",
+                        (FactoryBinding("generated.main", "graphql", "main"),),
+                    ),
+                )
+                sources = resolve_project(modules, bindings=bindings)
+                index = index_fragments(
+                    sources,
+                    schemas={
+                        ("p", "main"): helper.context(),
+                    },
+                )
+                artifacts = self.generate(modules, index)
+                self.assertTrue(artifacts.files, artifacts.diagnostics)
+                diagnostics = [
+                    item for item in artifacts.diagnostics if item.code == expected_code
+                ]
+                self.assertTrue(diagnostics)
+                diagnostic = None
+                if expected_code == "graphql-validation":
+                    spans = sorted(
+                        (item.range for item in diagnostics),
+                        key=lambda span: (span.start, span.end),
+                    )
+                    self.assertEqual(
+                        "".join(source[span.start : span.end] for span in spans),
+                        expected_text,
+                    )
+                else:
+                    self.assertEqual(len(diagnostics), 1)
+                    diagnostic = diagnostics[0]
+                    self.assertEqual(
+                        source[diagnostic.range.start : diagnostic.range.end],
+                        expected_text,
+                    )
+                companion = next(
+                    item.text
+                    for item in artifacts.files
+                    if item.relative_path == "generated/sources/main.pyi"
+                )
+                self.assertIn("GoodResult", companion)
+                if expected_code == "graphql-validation":
+                    self.assertIn("BadResult", companion)
+                    self.assertIn("BadUnavailable", companion)
+                else:
+                    self.assertNotIn("BadResult", companion)
+
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    helper.write(root, artifacts, modules)
+                    bad_line = next(
+                        number
+                        for number, line in enumerate(source.splitlines(), 1)
+                        if "# error" in line
+                    )
+                    helper.check(root, {"main.py": {bad_line}})
+
+                if expected_code == "invalid-operation-selection":
+                    assert diagnostic is not None
+                    rejected = index.unavailable[0]
+                    self.assertEqual(rejected.call.operation, "Wrong")
+                    self.assertEqual(rejected.call.operation_range, diagnostic.range)
+                    self.assertTrue(
+                        build_source_map(rejected.call, modules).to_host(
+                            Span(0, len(rejected.call.source))
+                        )
+                    )
+
+                if index.unavailable:
+                    assert diagnostic is not None
+                    bad_call = index.unavailable[0].call
+                    bad_diagnostic = replace(diagnostic, range=bad_call.range)
+                    corrupted = replace(
+                        index,
+                        diagnostics=(bad_diagnostic,),
+                        unavailable=(
+                            replace(
+                                index.unavailable[0],
+                                diagnostics=(bad_diagnostic,),
+                            ),
+                        ),
+                    )
+                    self.assertEqual(self.generate(modules, corrupted).files, ())
+                    if expected_code == "invalid-operation-selection":
+                        forged_range = Span(
+                            bad_call.range.start, bad_call.range.start + 1
+                        )
+                        forged_call = replace(bad_call, operation_range=forged_range)
+                        forged_diagnostic = replace(diagnostic, range=forged_range)
+                        forged = replace(
+                            index,
+                            diagnostics=(forged_diagnostic,),
+                            unavailable=(
+                                replace(
+                                    index.unavailable[0],
+                                    call=forged_call,
+                                    diagnostics=(forged_diagnostic,),
+                                ),
+                            ),
+                        )
+                        self.assertEqual(self.generate(modules, forged).files, ())
 
     def test_project_recovery_preserves_both_schemas_and_diagnostic_order(self) -> None:
         helper = factory_tests.FactoryGenerationTests()

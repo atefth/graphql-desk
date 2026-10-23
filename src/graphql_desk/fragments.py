@@ -24,6 +24,7 @@ from graphql.validation.rules.possible_fragment_spreads import (
     PossibleFragmentSpreadsRule,
 )
 
+from .source import Span
 from .source_graph import (
     DocumentIdentity,
     GraphDiagnostic,
@@ -109,8 +110,10 @@ def _identity(call: ResolvedCall) -> DocumentIdentity:
     return DocumentIdentity(call.module, call.range)
 
 
-def _error(call: ResolvedCall, code: str, message: str) -> _Invalid:
-    return _Invalid(GraphDiagnostic(call.module, code, message, call.range))
+def _error(
+    call: ResolvedCall, code: str, message: str, *, range_: Span | None = None
+) -> _Invalid:
+    return _Invalid(GraphDiagnostic(call.module, code, message, range_ or call.range))
 
 
 def _parse(call: ResolvedCall, context: SchemaContext) -> _Parsed:
@@ -174,7 +177,10 @@ def _parse(call: ResolvedCall, context: SchemaContext) -> _Parsed:
             )
             if selected is None:
                 raise _error(
-                    call, "invalid-operation-selection", "Unknown selected operation"
+                    call,
+                    "invalid-operation-selection",
+                    "Unknown selected operation",
+                    range_=call.operation_range,
                 )
     elif call.operation is not None:
         raise _error(

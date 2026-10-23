@@ -108,6 +108,7 @@ class ResolvedCall:
     binding: str | None = None
     schema_name: str | None = field(default=None, kw_only=True)
     fragments: tuple[FragmentReference, ...] = field(default=(), kw_only=True)
+    operation_range: Span | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -1638,6 +1639,7 @@ class _Graph:
             module.call_bindings.get(id(node)),
             schema_name=next(iter(schemas), None),
             fragments=tuple(references),
+            operation_range=(module.span(operation) if operation is not None else None),
         )
 
 
