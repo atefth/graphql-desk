@@ -28,6 +28,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   const states = new Map();
   const subscriptions = [];
   const folderWatches = new Map();
+  const folderWatchRoots = new Map();
   const ownedAnalysisPaths = new Set();
   const interpreters = new Map();
   let pythonApiPromise;
@@ -458,6 +459,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       .filter(folder => folder.uri.scheme === "file").map(folder => [folder.uri.toString(), folder]));
     for (const [uri, handles] of folderWatches) if (!folders.has(uri)) {
       handles.forEach(handle => handle.dispose());
+      const root = folderWatchRoots.get(uri);
+      if (root) {
+        const remainingRoots = [...folders.values()].map(folder => canonical(folder.uri.fsPath));
+        for (const filename of ownedAnalysisPaths) {
+          if (inside(root, filename) && !remainingRoots.some(remaining => inside(remaining, filename))) ownedAnalysisPaths.delete(filename);
+        }
+      }
+      folderWatchRoots.delete(uri);
       folderWatches.delete(uri);
     }
     for (const [uri, folder] of folders) if (!folderWatches.has(uri)) {
@@ -486,7 +495,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         }
         invalidate();
       };
-      folderWatches.set(uri, [watcher, watcher.onDidChange(sourceChanged), watcher.onDidCreate(sourceChanged), watcher.onDidDelete(sourceChanged)]);
+      const handles = [watcher, watcher.onDidChange(sourceChanged), watcher.onDidCreate(sourceChanged), watcher.onDidDelete(sourceChanged)];
+      folderWatches.set(uri, handles);
+      folderWatchRoots.set(uri, canonical(folder.uri.fsPath));
     }
   }
   for (const event of ["onDidOpenTextDocument", "onDidChangeTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument", "onDidChangeConfiguration", "onDidChangeWorkspaceFolders", "onDidGrantWorkspaceTrust"]) {
@@ -508,7 +519,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   }
   reconcileFolderWatches();
   return { analyze, isCurrent, artifacts, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
-    dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); subscriptions.forEach(item => item.dispose()); } };
+    dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); folderWatchRoots.clear(); ownedAnalysisPaths.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
 module.exports = { createAnalysisController };
 
