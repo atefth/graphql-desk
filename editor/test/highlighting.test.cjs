@@ -23,6 +23,69 @@ test("resolved highlighting uses real maps with escapes, Unicode, CRLF and adjac
   }
 });
 
+test("escaped ordinary literals stay conservative until resolution restores exact Unicode host ranges", async () => {
+  const incompleteText = [
+    "# 😀",
+    "from graphql_desk import gql",
+    String.raw`q=gql("query Q { user(id: \"a\\\"😀\") { name`,
+  ].join("\r\n");
+  const repairedText = [
+    "# 😀",
+    "from graphql_desk import gql",
+    String.raw`q=gql("query Q { user(id: \"a\\\"😀\") { name } }")`,
+  ].join("\r\n");
+  const highlighter = createHighlighting({
+    analyze: async (snapshot) => bundle(snapshot.text, { version: snapshot.version }),
+    isCurrent: async () => true,
+    isTrusted: () => true,
+  });
+
+  const incomplete = { uri: "file:///workspace/main.py", version: 1, text: incompleteText };
+  assert.deepEqual(await highlighter.highlight(incomplete), []);
+
+  const repaired = { ...incomplete, version: 2, text: repairedText };
+  const highlights = await highlighter.highlight(repaired);
+  const queryStart = repairedText.indexOf("query");
+  assert.ok(highlights.some(item => item.start === queryStart && item.end === queryStart + 5 && item.scope === "keyword"));
+  const escapedQuote = repairedText.indexOf(String.raw`\"`);
+  const escapedSlash = repairedText.indexOf(String.raw`\\`);
+  const emoji = repairedText.indexOf("😀", escapedQuote + 2);
+  assert.ok(highlights.some(item => item.start === escapedQuote && item.end === escapedQuote + 2 && item.scope === "string"));
+  assert.ok(highlights.some(item => item.start === escapedSlash && item.end === escapedSlash + 2 && item.scope === "string"));
+  assert.ok(highlights.some(item => item.start === emoji && item.end === emoji + 2 && item.scope === "string"));
+  assert.ok(highlights.every(item => repairedText.slice(item.start, item.end).length === item.end - item.start));
+  assert.ok(highlights.every(item => item.mode === "resolved"));
+});
+
+test("escaped ordinary literals recover from lexical to resolved highlighting with exact CRLF host ranges", async () => {
+  const incompleteText = [
+    "# 😀",
+    "from graphql_desk import gql",
+    String.raw`q=gql("query Q { user(id: "x") { name`,
+  ].join("\r\n");
+  const repairedText = [
+    "# 😀",
+    "from graphql_desk import gql",
+    String.raw`q=gql("query Q { user(id: \"a\\\"😀\") { name } }")`,
+  ].join("\r\n");
+  const highlighter = createHighlighting({
+    analyze: async snapshot => bundle(snapshot.text, { version: snapshot.version }),
+    isCurrent: async () => true,
+    isTrusted: () => true,
+  });
+  const incomplete = { uri: "file:///workspace/main.py", version: 1, text: incompleteText };
+  const lexical = await highlighter.highlight(incomplete);
+  assert.ok(lexical.some(item => item.mode === "lexical"));
+  const repaired = { ...incomplete, version: 2, text: repairedText };
+  const resolved = await highlighter.highlight(repaired);
+  const queryStart = repairedText.indexOf("query");
+  const escapedQuote = repairedText.indexOf(String.raw`\"`);
+  const emojiStart = repairedText.indexOf("😀", escapedQuote + 2);
+  assert.ok(resolved.some(item => item.start === queryStart && item.end === queryStart + 5 && item.scope === "keyword"));
+  assert.ok(resolved.some(item => item.start === emojiStart && item.end === emojiStart + 2 && item.scope === "string"));
+  assert.ok(resolved.every(item => item.mode === "resolved"));
+});
+
 test("token categories tolerate incomplete GraphQL and cover strings, comments, numbers and variables", () => {
   const text = 'query Read($id:ID){ user(id:$id) { name # comment\n old(arg:12, text:"😀", enum:GREEN)';
   const styles = new Set(tokens(text).map((item) => item.scope));
@@ -224,6 +287,30 @@ test("cancelled, stale, changed or newly untrusted semantic results cannot highl
     return true;
   } }));
   assert.deepEqual(await highlighter.highlight(document(value), token), []);
+});
+
+test("VS Code decoration ranges preserve emoji and CRLF host positions", async () => {
+  const sourceText = "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('query { user { name } }')";
+  const value = bundle(sourceText);
+  const source = document(value);
+  const published = [];
+  const vscode = {
+    ThemeColor: class { constructor(id) { this.id = id; } },
+    Range: class { constructor(start, end) { this.start = start; this.end = end; } },
+    window: { createTextEditorDecorationType() { return { dispose() {} }; } },
+  };
+  const document_ = { languageId: "python", uri: { toString: () => source.uri }, version: source.version,
+    getText: () => sourceText, positionAt: offset => positionAt(sourceText, offset) };
+  const editor = { document: document_, setDecorations(_decoration, ranges) { published.push(...ranges); } };
+  const highlighting = registerHighlighting(vscode, options(value));
+  await highlighting.refresh(editor);
+  const start = sourceText.indexOf("query");
+  const expectedStart = positionAt(sourceText, start);
+  const range = published.find(item => item.start.line === expectedStart.line && item.start.character === expectedStart.character);
+  assert.ok(range);
+  assert.deepEqual(range.start, expectedStart);
+  assert.deepEqual(range.end, positionAt(sourceText, start + 5));
+  highlighting.dispose();
 });
 
 test("VS Code decorations stay read-only and disposal prevents late publication", async () => {
