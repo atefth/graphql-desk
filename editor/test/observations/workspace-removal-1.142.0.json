@@ -1,0 +1,16 @@
+{
+  "host": "1.142.0",
+  "suite": "workspaceRemoval",
+  "scope": "Verified session-owned cleanup after removing a workspace folder; broad lifecycle and restart recovery remain open.",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "lifecycle": {
+    "removedWorkspaceCleanupPreservesDirtySource": true,
+    "remainingWorkspaceHover": "```python\n(variable) selected: String\n```\n<!--moduleHash:-567770122-->",
+    "ownedArtifactsRemoved": true,
+    "userConfigurationPreserved": true
+  },
+  "outcome": "managed-workspace-removal-observed"
+}

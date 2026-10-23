@@ -1850,6 +1850,134 @@ asyncio.run(async_build())
                 },
             )
 
+    def test_conditional_operations_keep_public_factory_and_alias_types(self) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema("type Query { values: [[String!]!]! loose: String }"),
+            "conditional-operations",
+        )
+        source = """from typing import TYPE_CHECKING, TypeVar
+from typing_extensions import assert_type
+from graphql_desk import TypedDocument
+from generated.main import graphql
+from generated.sources.main import ReadResult, ReadVariables, FieldsResult
+fragment=graphql("fragment Details on Query @_unmask "
+                 "{ pair:values @required @optional label:loose @_required }")
+read=graphql("query Read($show:Boolean!) { fixed:values @optional "
+             "...Details @include(if:$show) "
+             "... @defer(if:false) { later:loose @_optional } }",(fragment,))
+fields=graphql("query Fields { included:values @include(if:true) "
+               "skipped:values @skip(if:false) deferred:values @defer(if:false) }")
+R=TypeVar('R')
+V=TypeVar('V')
+def execute(document:TypedDocument[R,V],variables:V)->R: raise RuntimeError
+def inspect(result:ReadResult, value:FieldsResult)->None:
+ assert_type(result['fixed'],list[list[str]] | None)
+ if 'pair' in result:
+  assert_type(result['pair'],list[list[str]])
+  assert_type(result['label'],str)
+ if 'later' in result:
+  assert_type(result['later'],str | None)
+ if 'included' in value:
+  assert_type(value['included'],list[list[str]])
+if TYPE_CHECKING:
+ assert_type(execute(read,ReadVariables(show=True)),ReadResult)
+ absent:ReadResult={'fixed':None}
+ present:ReadResult={'fixed':[['x']],'pair':[],'label':'x','later':None}
+ literal_absent:FieldsResult={}
+ literal_present:FieldsResult={'included':[],'skipped':[],'deferred':[]}
+ partial:ReadResult={'fixed':None,'pair':[]} # error
+ required_null:ReadResult={'fixed':None,'pair':[],'label':None} # error
+ precedence:ReadResult={'fixed':None,'pair':None,'label':'x'} # error
+ inner_null:ReadResult={'fixed':[None]} # error
+ item_null:ReadResult={'fixed':[[None]]} # error
+ missing:ReadResult={} # error
+ extra:ReadResult={'fixed':None,'unknown':'x'} # error
+ optional_null:FieldsResult={'deferred':None} # error
+ wrong_variable:ReadVariables={'show':1} # error
+"""
+        for disable_masking in (False, True):
+            with self.subTest(disable_masking=disable_masking):
+                config = parse_project_config(
+                    '[tool.graphql-desk]\ngenerated_package="generated"\n'
+                    'client_directives=["defer"]\n'
+                    '[[tool.graphql-desk.schemas]]\nname="main"\n'
+                    'schema="schema.graphql"\n'
+                    'schema_output="generated/main.pyi"\n'
+                    f"disable_masking={str(disable_masking).lower()}\n",
+                    config_path=Path(tempfile.gettempdir()) / "pyproject.toml",
+                )
+                assert config is not None
+                authored = (
+                    source.replace(" @_unmask", "") if disable_masking else source
+                )
+                modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, authored),)
+                resolved = resolve_project(
+                    modules, bindings=(project_bindings(config, project_id="p"),)
+                )
+                index = index_fragments(resolved, schemas={("p", "main"): context})
+                artifacts = generate_project_factory_artifacts(
+                    config, (context,), index, modules=modules, project_id="p"
+                )
+                self.assertEqual(artifacts.diagnostics, ())
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.write(root, artifacts, modules)
+                    self.check(
+                        root,
+                        {
+                            "main.py": {
+                                n
+                                for n, line in enumerate(authored.splitlines(), 1)
+                                if "# error" in line
+                            }
+                        },
+                    )
+                    runtime = subprocess.run(
+                        [
+                            sys.executable,
+                            "-c",
+                            "from main import read,fields\n"
+                            "from graphql import print_ast\n"
+                            "from generated.sources.main import FieldsResult\n"
+                            "assert FieldsResult.__required_keys__ == set()\n"
+                            "assert FieldsResult.__optional_keys__ == "
+                            "{'included','skipped','deferred'}\n"
+                            "text=print_ast(read.ast)\n"
+                            "assert '@include(if: $show)' in text\n"
+                            "assert '@defer(if: false)' in text\n"
+                            "assert '@required' in text and '@optional' in text\n"
+                            "assert '@_required' in text and '@_optional' in text\n"
+                            "assert '@_unmask' not in text\n"
+                            "assert '@skip(if: false)' in print_ast(fields.ast)\n",
+                        ],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        runtime.returncode, 0, runtime.stdout + runtime.stderr
+                    )
+                rejected = generate_project_factory_artifacts(
+                    replace(config, client_directives=()),
+                    (context,),
+                    index,
+                    modules=modules,
+                    project_id="p",
+                )
+                self.assertEqual(
+                    [
+                        d.message
+                        for d in rejected.diagnostics
+                        if d.code == "graphql-validation"
+                    ],
+                    ["Unknown directive '@defer'."] * 2,
+                )
+                self.assertEqual(
+                    sum(d.code == "factory-unavailable" for d in rejected.diagnostics),
+                    2,
+                )
+
     def test_abstract_typename_ownership_is_local_to_each_concrete_type(self) -> None:
         sdl = (
             "interface Node { id: ID! child: Node! } "

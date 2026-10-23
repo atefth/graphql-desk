@@ -132,6 +132,46 @@ test("definition covers schema arguments, directives, enum/input members, types 
   assert.match(JSON.stringify(argumentHover.contents), /Default:/);
 });
 
+test("field hover includes schema arguments and GraphQL defaults in complete and incomplete sources", async () => {
+  const schema = `
+    enum Color { RED BLUE }
+    input Filter { colors: [Color!]! }
+    type User { name: String! }
+    type Query {
+      "Find a user" user(id: ID!, text: String = "quoted\\\"", enabled: Boolean = false,
+        count: Int = 0, empty: String = null, ids: [ID!] = ["1", "2"], filter: Filter = {colors: [RED, BLUE]}): User
+        @deprecated(reason: "Use viewer")
+      viewer: User
+    }
+  `;
+  const signature = 'Query.user(id: ID!, text: String = "quoted\\\"", enabled: Boolean = false, count: Int = 0, empty: String = null, ids: [ID!] = [1, 2], filter: Filter = {colors: [RED, BLUE]}): User';
+  for (const format of ["sdl", "introspection"]) {
+    const schemaText = format === "sdl" ? schema : JSON.stringify(gql.introspectionFromSchema(gql.buildSchema(schema)));
+    for (const query of ["{ user(id: 1) { name } }", "{ selected: user(id: 1) { name } }", "{ user"]) {
+      const source = `# 😀\r\nfrom graphql_desk import gql\r\nq=gql('${query}')`;
+      const value = bundle(source, { schema: schemaText, schemaFormat: format });
+      const snapshot = document(value);
+      const service = createLanguageFeatures(options(value));
+      const start = source.indexOf("user");
+      const hover = await service.hover(snapshot, start + 1);
+      assert.equal(hover.contents, `\`\`\`graphql\n${signature}\n\`\`\`\n\nFind a user\n\nDeprecated: Use viewer`, `${format}: ${query}`);
+      assert.deepEqual(hover.range, { start, end: start + 4 });
+      if (query.includes("selected:")) assert.equal(await service.hover(snapshot, source.indexOf("selected") + 1), null);
+    }
+    const value = bundle("from graphql_desk import gql\nq=gql('{ viewer { name } }')", { schema: schemaText, schemaFormat: format });
+    const hover = await createLanguageFeatures(options(value)).hover(document(value), document(value).text.indexOf("viewer") + 1);
+    assert.equal(hover.contents, "```graphql\nQuery.viewer: User\n```");
+    const introspection = bundle('from graphql_desk import gql\nq=gql(\'{ __type(name: "User") { name } }\')', { schema: schemaText, schemaFormat: format });
+    const typeHover = await createLanguageFeatures(options(introspection)).hover(document(introspection), document(introspection).text.indexOf("__type") + 1);
+    assert.ok(typeHover.contents.startsWith("```graphql\n__type(name: String!): __Type\n```"));
+  }
+  const value = bundle("from graphql_desk import gql\nq=gql('{ field }')", {
+    schema: 'scalar JSON type Query { "Custom field" field(arg: JSON = {key: 1}): String }',
+  });
+  const hover = await createLanguageFeatures(options(value)).hover(document(value), document(value).text.indexOf("field") + 1);
+  assert.equal(hover.contents, "```graphql\nQuery.field: String\n```\n\nCustom field");
+});
+
 test("external fragment completion and definitions use real imported source, never printed offsets", async () => {
   const fragment = { project: "p", module: "fragments", uri: "file:///workspace/fragments.py", version: 4,
     source: "# 😀\r\nfrom graphql_desk import gql\r\ncard=gql('''fragment Card on User {\r\n id name\r\n}''')", is_package: false };
