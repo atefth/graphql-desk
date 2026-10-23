@@ -182,3 +182,30 @@ b=graphql(B)
         self.assertEqual(
             [item.code for item in artifacts.diagnostics], ["factory-precision"] * 2
         )
+
+    def test_static_operation_alias_keeps_semantics_and_warns_at_operand(self) -> None:
+        source = (
+            "from generated.main import graphql\n"
+            "SELECTED = 'Second'\n"
+            'doc=graphql("query First{greeting} query Second{greeting}", '
+            "operation=SELECTED)\n"
+        )
+        modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+        artifacts = factory_tests.FactoryGenerationTests().generate(modules)
+
+        self.assertTrue(artifacts.files, artifacts.diagnostics)
+        warnings = [
+            item for item in artifacts.diagnostics if item.code == "factory-precision"
+        ]
+        self.assertEqual(len(warnings), 1)
+        warning = warnings[0]
+        self.assertEqual(
+            source[warning.range.start : warning.range.end], "SELECTED"
+        )
+        self.assertIn("operation selection", warning.message.lower())
+        self.assertTrue(
+            any(
+                "Second" in item.text and item.relative_path.endswith(".pyi")
+                for item in artifacts.files
+            )
+        )
