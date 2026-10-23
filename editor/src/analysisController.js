@@ -222,7 +222,17 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   async function capture(state) {
     const found = await vscode.workspace.findFiles(new vscode.RelativePattern(state.folder, "**/*.py"), null);
     const documents = vscode.workspace.textDocuments.filter(document => localPath(document));
-    const candidates = new Set(found.filter(uri => uri.scheme === "file").map(uri => canonical(uri.fsPath)));
+    const configuredStubPath = vscode.workspace.getConfiguration("python", state.folder.uri)
+      .get("analysis.stubPath", ".graphql-desk/typings");
+    const selectedStubRoot = path.resolve(state.root,
+      typeof configuredStubPath === "string" && configuredStubPath ? configuredStubPath : ".graphql-desk/typings");
+    let generatedRoot = inside(state.root, selectedStubRoot) ? selectedStubRoot : null;
+    if (generatedRoot && path.basename(path.dirname(generatedRoot)) === "generations") {
+      generatedRoot = path.resolve(generatedRoot, "..", "..");
+    }
+    // Managed runtime companions are Python files, but are generated typing inputs, not project sources.
+    const candidates = new Set(found.filter(uri => uri.scheme === "file").map(uri => canonical(uri.fsPath))
+      .filter(filename => !generatedRoot || !inside(generatedRoot, filename)));
     for (const document of documents) {
       const filename = localPath(document);
       // VS Code can retain a clean document after its backing file was renamed or deleted.
