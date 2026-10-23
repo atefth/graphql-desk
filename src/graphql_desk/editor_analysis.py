@@ -81,7 +81,7 @@ def _span(span: Span) -> dict[str, int]:
     return {"start": span.start, "end": span.end}
 
 
-def _utf16_points(text: str, points: set[int]) -> dict[int, int]:
+def utf16_points(text: str, points: set[int]) -> dict[int, int]:
     result: dict[int, int] = {}
     previous = converted = 0
     for point in sorted(points):
@@ -304,8 +304,7 @@ def analyze_editor_snapshot_details(
         for fact in document.definitions:
             require(fact.document.module, fact.document.call_range)
     offsets = {
-        module: _utf16_points(text, points[module])
-        for module, text in snapshots.items()
+        module: utf16_points(text, points[module]) for module, text in snapshots.items()
     }
 
     def range_(module: ModuleDependency, span: Span) -> dict[str, object]:
@@ -339,7 +338,7 @@ def analyze_editor_snapshot_details(
     calls: list[dict[str, object]] = []
     for call, mapping in mappings:
         call_identity = DocumentIdentity(call.module, call.range)
-        decoded_offsets = _utf16_points(
+        decoded_offsets = utf16_points(
             call.source,
             {
                 point

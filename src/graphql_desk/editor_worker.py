@@ -17,6 +17,7 @@ from .editor_analysis import (
     EditorAnalysis,
     analyze_editor_snapshot_details,
     editor_diagnostic,
+    utf16_points,
 )
 from .editor_snapshot import (
     EditorPreparation,
@@ -30,7 +31,7 @@ from .editor_snapshot import (
 from .factory_generation import FactoryArtifacts, generate_project_factory_artifacts
 from .fragments import FragmentIndex
 from .schema_url import load_from_url
-from .source_graph import IncrementalResolver, ModuleDependency
+from .source_graph import DocumentIdentity, IncrementalResolver, ModuleDependency
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
 _CAPTURE_KEYS = {"workspace", "candidates", "buffers", "documents", "editor_fallback"}
@@ -178,6 +179,91 @@ def _saved_source_fingerprint(snapshot: EditorSnapshot) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf8")).hexdigest()
+
+
+def _validated_provenance_identity(value: object) -> DocumentIdentity:
+    if not isinstance(value, DocumentIdentity):
+        raise ValueError("Invalid operation provenance identity")
+    return value
+
+
+def _provenance_identity(
+    value: object, utf16_positions: dict[ModuleDependency, dict[int, int]]
+) -> dict[str, object]:
+    value = _validated_provenance_identity(value)
+    positions = utf16_positions[value.module]
+    return {
+        "module": {
+            "project": value.module.project,
+            "module": value.module.module,
+            "uri": value.module.uri,
+            "version": value.module.version,
+        },
+        "codepoint": {"start": value.call_range.start, "end": value.call_range.end},
+        "utf16": {
+            "start": positions[value.call_range.start],
+            "end": positions[value.call_range.end],
+        },
+    }
+
+
+def _operation_provenance(
+    records: tuple[object, ...], snapshots: dict[ModuleDependency, str]
+) -> list[dict[str, object]]:
+    from dataclasses import asdict
+
+    from .factory_generation import OperationProvenance
+
+    points: dict[ModuleDependency, set[int]] = {}
+    for record in records:
+        if not isinstance(record, OperationProvenance):
+            raise ValueError("Invalid operation provenance")
+        identities = (
+            record.owner,
+            *(record.direct_fragments or ()),
+            *(record.definition_owners or ()),
+            record.canonical_owner,
+        )
+        for identity in identities:
+            if identity is not None:
+                identity = _validated_provenance_identity(identity)
+                points.setdefault(identity.module, set()).update(
+                    (identity.call_range.start, identity.call_range.end)
+                )
+    utf16_positions = {
+        module: utf16_points(snapshots[module], offsets)
+        for module, offsets in points.items()
+    }
+    result: list[dict[str, object]] = []
+    for record in records:
+        if not isinstance(record, OperationProvenance):
+            raise ValueError("Invalid operation provenance")
+        serialized = asdict(record)
+        serialized["owner"] = _provenance_identity(record.owner, utf16_positions)
+        for field_name in ("direct_fragments", "definition_owners"):
+            values = getattr(record, field_name)
+            serialized[field_name] = (
+                None
+                if values is None
+                else [_provenance_identity(value, utf16_positions) for value in values]
+            )
+        serialized["canonical_owner"] = (
+            None
+            if record.canonical_owner is None
+            else _provenance_identity(record.canonical_owner, utf16_positions)
+        )
+        serialized["dependencies"] = [
+            {
+                "project": item.project,
+                "module": item.module,
+                "uri": item.uri,
+                "version": item.version,
+            }
+            for item in record.dependencies
+        ]
+        serialized["source_exports"] = [asdict(item) for item in record.source_exports]
+        result.append(serialized)
+    return result
 
 
 @dataclass(frozen=True)
@@ -556,6 +642,9 @@ class EditorWorker:
                             editor_diagnostic(diagnostic, snapshots)
                             for diagnostic in artifacts.diagnostics
                         ],
+                        "provenance": _operation_provenance(
+                            artifacts.provenance, snapshots
+                        ),
                     }
                 )
             return {

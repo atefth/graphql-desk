@@ -126,7 +126,8 @@ function activate(context) {
         const key = `${folderRoot}\0${managed.root}`;
         let publisher = generations.get(key);
         if (!publisher) { publisher = createAnalysisGenerations(vscode, folderRoot, managed.root); generations.set(key, publisher); }
-        changedArtifacts = await publisher.recover(managed);
+        changedArtifacts = await publisher.recover(managed, result.isCurrent,
+          result.input_fingerprint, result.saved_source_fingerprint);
         if (disposed || ticket !== generation || !result.isCurrent()) return;
         changedArtifacts = (await publisher.publish(groups, result.id, result.isCurrent, managed,
           result.input_fingerprint, result.saved_source_fingerprint)) || changedArtifacts;

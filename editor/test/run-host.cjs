@@ -42,6 +42,22 @@ function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix) {
   return { initial, nullable };
 }
 
+async function readStubFiles(root) {
+  const files = [];
+  async function visit(directory, relative = "") {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const child = path.join(directory, entry.name);
+      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await visit(child, childRelative);
+      else if (entry.isFile() && entry.name.endsWith(".pyi")) {
+        files.push([childRelative, await fs.readFile(child, "utf8")]);
+      }
+    }
+  }
+  await visit(root);
+  return files.sort(([left], [right]) => left.localeCompare(right));
+}
+
 async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
@@ -228,7 +244,23 @@ async function main() {
     assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
     const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
     const persistedStubPath = settings["python.analysis.stubPath"];
-    if (suite === "typingMatrix" && persistedStubPath !== observed.lifecycle.configuredStubPath) {
+    if (suite === "lifecycle") {
+      assert.match(persistedStubPath.replaceAll("\\", "/"), /^\.graphql-desk\/typings\/generations\/g-\d+-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i,
+        "The persisted path remains a GraphQL Desk managed generation");
+      const persistedRoot = path.resolve(workspace, persistedStubPath);
+      await fs.access(path.join(persistedRoot, "complete.json"));
+      const persistedFiles = await readStubFiles(persistedRoot);
+      assert.deepEqual(persistedFiles, observed.lifecycle.activeStubFiles,
+        "A later selected lifecycle generation keeps the exact generated typing observed after deletion");
+      const persistedText = persistedFiles.map(([, text]) => text).join("\n");
+      assert.equal(persistedText.includes("query Extra { user { id } }"), false,
+        "The persisted generation does not restore the deleted source operation");
+      assert.equal(persistedText.includes("'selected': 'String'"), false,
+        "The persisted generation does not restore the removed operation field");
+      if (persistedStubPath !== observed.lifecycle.configuredStubPath) {
+        observed.lifecycle.persistedStubPath = persistedStubPath;
+      }
+    } else if (suite === "typingMatrix" && persistedStubPath !== observed.lifecycle.configuredStubPath) {
       assert.match(persistedStubPath.replaceAll("\\", "/"), /^\.graphql-desk\/typings\/generations\/g-\d+-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i,
         "A later typing refresh may select another managed generation before shutdown");
       const persistedRoot = path.resolve(workspace, persistedStubPath);

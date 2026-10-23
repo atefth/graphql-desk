@@ -4,7 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1614,6 +1614,236 @@ asyncio.run(async_build())
                 [sys.executable, "main.py"], cwd=root, capture_output=True, text=True
             )
             self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+
+    def test_provenance_keeps_selected_operations_and_actual_coalesced_owner(
+        self,
+    ) -> None:
+        source = """from generated.main import graphql
+first=graphql('query A {greeting} query B {book(id:"1"){title}}',operation='A')
+second=graphql('query A {greeting} query B {book(id:"1"){title}}',operation='B')
+again=graphql('query A {greeting} query B {book(id:"1"){title}}',operation='B')
+implicit=graphql('query Single {greeting}')
+invalid=graphql('query Invalid {missing}')
+invalid_again=graphql('query Invalid {missing}')
+"""
+        modules = (ModuleSnapshot("p", "main", "file:///main.py", 7, source),)
+        result = self.generate(modules)
+        self.assertTrue(result.files, result.diagnostics)
+        records = {record.binding: record for record in result.provenance}
+        self.assertEqual(len(records), 6)
+        self.assertEqual(records["first"].selector, "A")
+        self.assertEqual(records["first"].operation_name, "A")
+        self.assertEqual(records["first"].operation_kind, "query")
+        self.assertEqual(records["second"].operation_name, "B")
+        self.assertEqual(records["again"].canonical_owner, records["second"].owner)
+        self.assertNotEqual(records["again"].owner, records["second"].owner)
+        self.assertNotEqual(
+            records["again"].declaration_path, records["second"].declaration_path
+        )
+        self.assertEqual(records["implicit"].selector, None)
+        self.assertEqual(records["implicit"].operation_name, "Single")
+        self.assertEqual(records["invalid"].status, "unavailable")
+        self.assertEqual(
+            records["invalid"].declaration_symbol, "GraphqlDeskUnavailable"
+        )
+        self.assertEqual(
+            records["invalid_again"].canonical_owner, records["invalid"].owner
+        )
+        self.assertEqual(
+            records["invalid_again"].declaration_path,
+            records["invalid"].declaration_path,
+        )
+        paths = {file.relative_path for file in result.files}
+        for record in result.provenance:
+            self.assertEqual(record.owner.module.version, 7)
+            self.assertEqual(record.owner.module.uri, "file:///main.py")
+            call_text = source[
+                record.owner.call_range.start : record.owner.call_range.end
+            ]
+            self.assertTrue(call_text.startswith("graphql("))
+            self.assertIn(record.declaration_path, paths)
+            self.assertEqual(record.schema_identity, ("p", "main"))
+            self.assertEqual(record.context_token, "generation-1")
+            self.assertEqual(record.schema_dependencies, "unknown")
+            self.assertEqual(record.config_dependencies, "unknown")
+            self.assertTrue(record.source_dependencies_known)
+            for export in record.source_exports:
+                self.assertEqual(export.relative_path, "generated/sources/main.pyi")
+                text = next(
+                    file.text
+                    for file in result.files
+                    if file.relative_path == export.relative_path
+                )
+                self.assertIn(f" import {export.symbol} as {export.alias}\n", text)
+        serialized = json.dumps([asdict(record) for record in result.provenance])
+        self.assertNotIn("query A", serialized)
+        self.assertNotIn("query Invalid", serialized)
+
+    def test_provenance_captures_direct_fragments_and_full_owner_dependency_closure(
+        self,
+    ) -> None:
+        modules = (
+            ModuleSnapshot(
+                "p",
+                "leaf",
+                "file:///leaf.py",
+                3,
+                "from generated.main import graphql\n"
+                "leaf=graphql('fragment Leaf on Book {title}')",
+            ),
+            ModuleSnapshot(
+                "p",
+                "outer",
+                "file:///outer.py",
+                4,
+                "from generated.main import graphql\nfrom leaf import leaf\n"
+                "outer=graphql('fragment Outer on Book {...Leaf}',(leaf,))",
+            ),
+            ModuleSnapshot(
+                "p",
+                "main",
+                "file:///main/__init__.py",
+                5,
+                "from generated.main import graphql\nfrom outer import outer\n"
+                "query=graphql('query Read {book(id:\"1\"){...Outer}}',(outer,))",
+                is_package=True,
+            ),
+        )
+        result = self.generate(modules)
+        self.assertEqual(result.diagnostics, ())
+        records = {record.binding: record for record in result.provenance}
+        query, outer, leaf = (records[name] for name in ("query", "outer", "leaf"))
+        self.assertEqual(query.direct_fragments, (outer.owner,))
+        self.assertEqual(
+            query.definition_owners, (query.owner, outer.owner, leaf.owner)
+        )
+        self.assertEqual(outer.direct_fragments, (leaf.owner,))
+        self.assertEqual(leaf.direct_fragments, ())
+        self.assertEqual(leaf.operation_kind, "fragment")
+        self.assertEqual(leaf.operation_name, "Leaf")
+        self.assertEqual(
+            {item.module for item in query.dependencies}, {"leaf", "outer", "main"}
+        )
+        self.assertTrue(query.source_exports)
+        self.assertTrue(
+            all(
+                export.relative_path == "generated/sources/main/__init__.pyi"
+                for export in query.source_exports
+            )
+        )
+
+    def test_project_provenance_retains_failed_index_owners_without_declarations(
+        self,
+    ) -> None:
+        config, contexts, modules, _ = self.multi_schema()
+        main = replace(
+            modules[0],
+            source=modules[0].source + "\nsyntax=alpha('query Broken {item {')\n"
+            "selector=beta('query Existing {item{id}}',operation='Missing')\n"
+            "dynamic=alpha(f'query Dynamic {{ {unknown} }}')\n",
+        )
+        modules = (main, *modules[1:])
+        index = index_fragments(
+            resolve_project(
+                modules, bindings=(project_bindings(config, project_id="p"),)
+            ),
+            schemas={("p", context.schema_name): context for context in contexts},
+        )
+        self.assertEqual(len(index.unavailable), 2)
+        self.assertEqual(len(index.rejected_calls), 1)
+        result = generate_project_factory_artifacts(
+            config, contexts, index, modules=modules, project_id="p"
+        )
+        self.assertTrue(result.files, result.diagnostics)
+        self.assertEqual(len(result.provenance), len(index.documents) + 3)
+        records = {
+            record.binding: record
+            for record in result.provenance
+            if record.owner.module.module == "main"
+        }
+        self.assertEqual(records["alpha_query"].status, "precise")
+        self.assertEqual(records["syntax"].schema_identity, ("p", "alpha"))
+        self.assertEqual(records["selector"].schema_identity, ("p", "beta"))
+        self.assertEqual(records["selector"].selector, "Missing")
+        self.assertTrue(records["selector"].selector_known)
+        self.assertEqual(records["dynamic"].status, "rejected")
+        self.assertIsNone(records["dynamic"].schema_identity)
+        self.assertFalse(records["dynamic"].selector_known)
+        for name in ("syntax", "selector", "dynamic"):
+            record = records[name]
+            self.assertIsNone(record.declaration_path)
+            self.assertIsNone(record.declaration_symbol)
+            self.assertIsNone(record.canonical_owner)
+            self.assertIsNone(record.definition_owners)
+            self.assertEqual(record.source_exports, ())
+            self.assertFalse(record.source_dependencies_known)
+
+    def test_provenance_includes_captured_scalar_mapping_dependencies(self) -> None:
+        config, contexts, modules, index = self.multi_schema()
+        modules = (
+            *modules,
+            ModuleSnapshot(
+                "p",
+                "local_types",
+                "file:///local_types.py",
+                8,
+                "class Token(str): pass",
+            ),
+        )
+        config = replace(
+            config,
+            schemas=(
+                replace(
+                    config.schemas[0],
+                    scalars=(
+                        ScalarMapping(
+                            "Token", "local_types.Token", "local_types.Token"
+                        ),
+                    ),
+                ),
+                config.schemas[1],
+            ),
+        )
+        result = generate_project_factory_artifacts(
+            config, contexts, index, modules=modules, project_id="p"
+        )
+        self.assertEqual(result.diagnostics, ())
+        self.assertTrue(result.provenance)
+        for record in result.provenance:
+            if record.schema_identity == ("p", "alpha"):
+                self.assertIn(
+                    ("local_types", 8),
+                    {
+                        (dependency.module, dependency.version)
+                        for dependency in record.dependencies
+                    },
+                )
+
+    def test_failed_generation_and_assembly_never_return_provenance(self) -> None:
+        source = (
+            "from generated.main import graphql\n"
+            "first=graphql('fragment F on Book {title}')\n"
+            "second=graphql('fragment F on Book {title}')\n"
+        )
+        result = self.generate(
+            (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+        )
+        self.assertEqual(result.files, ())
+        self.assertEqual(result.provenance, ())
+        modules = tuple(
+            ModuleSnapshot(
+                "p",
+                name,
+                f"file:///{name}.py",
+                1,
+                "from generated.main import graphql\nq=graphql('{greeting}')",
+            )
+            for name in ("Case", "case")
+        )
+        result = self.generate(modules)
+        self.assertEqual(result.files, ())
+        self.assertTrue(result.diagnostics)
+        self.assertEqual(result.provenance, ())
 
     def generate(self, modules: tuple[ModuleSnapshot, ...]) -> FactoryArtifacts:
         context = self.context()

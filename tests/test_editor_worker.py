@@ -659,7 +659,8 @@ class EditorWorkerTests(unittest.TestCase):
             self.config.read_text(encoding="utf8")
             + 'scalars={Token={input="builtins.str",output="builtins.int"}}\n'
         )
-        source = """from typing import TYPE_CHECKING,TypeVar
+        source = """# 😀 source offsets must retain editor UTF-16 positions
+from typing import TYPE_CHECKING,TypeVar
 from typing_extensions import assert_type
 from graphql_desk import TypedDocument
 from graphql_desk_generated.default import graphql
@@ -714,6 +715,18 @@ if TYPE_CHECKING:
         self.assertEqual(len(projects), 1)
         self.assertEqual(projects[0]["project"], self.config.as_uri())
         self.assertEqual(projects[0]["diagnostics"], [])
+        provenance = cast(list[dict[str, object]], projects[0]["provenance"])
+        self.assertEqual(len(provenance), 1)
+        self.assertEqual(provenance[0]["status"], "precise")
+        owner = cast(dict[str, object], provenance[0]["owner"])
+        owner_module = cast(dict[str, object], owner["module"])
+        self.assertEqual(owner_module["module"], "main")
+        codepoint = cast(dict[str, int], owner["codepoint"])
+        utf16 = cast(dict[str, int], owner["utf16"])
+        self.assertEqual(codepoint["start"], source.index("graphql("))
+        self.assertEqual(utf16, {key: value + 1 for key, value in codepoint.items()})
+        dependencies = cast(list[dict[str, object]], provenance[0]["dependencies"])
+        self.assertIn("main", [item["module"] for item in dependencies])
         files = cast(list[dict[str, str]], projects[0]["files"])
         self.assertIn(
             "graphql_desk_generated/default.pyi",

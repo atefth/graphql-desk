@@ -38,8 +38,11 @@ const files = text => new Map([["graphql_desk_generated", [
 const fingerprint = packages => createHash("sha256").update(JSON.stringify(
   [...packages].flatMap(([, values]) => values.map(({ relative_path, text }) => [relative_path, text])).sort(([a], [b]) => a.localeCompare(b)),
 )).digest("hex");
+const savedSourceFingerprint = createHash("sha256").update("saved sources").digest("hex");
 const publish = (f, packages, id, isCurrent = () => true, inputFingerprint = fingerprint(packages)) =>
-  f.publisher.publish(packages, id, isCurrent, f.managed, inputFingerprint, createHash("sha256").update("saved sources").digest("hex"));
+  f.publisher.publish(packages, id, isCurrent, f.managed, inputFingerprint, savedSourceFingerprint);
+const recover = (publisher, managed, packages, isCurrent = () => true) =>
+  publisher.recover(managed, isCurrent, fingerprint(packages), savedSourceFingerprint);
 
 test("publishes immutable complete generations and recovers the latest verified one", async t => {
   const f = fixture(t);
@@ -57,7 +60,7 @@ test("publishes immutable complete generations and recovers the latest verified 
 
   const restarted = { ...f.managed, selectedSetting: ".graphql-desk/typings" };
   const afterRestart = createAnalysisGenerations(f.vscode, f.workspace, f.root);
-  assert.equal(await afterRestart.recover(restarted), true);
+  assert.equal(await recover(afterRestart, restarted, files("int")), true);
   assert.equal(path.resolve(f.workspace, restarted.selectedSetting), second);
   assert.equal(fs.readFileSync(path.join(f.root, "user.txt"), "utf8"), "keep");
 });
@@ -83,6 +86,14 @@ test("deduplicates only when both captured inputs and generated stubs match", as
   assert.equal(latest.manifest.inputFingerprint, input2);
   assert.match(latest.manifest.savedSourceFingerprint, /^[a-f0-9]{64}$/);
   assert.equal(latest.manifest.files[0].path, "graphql_desk_generated/_documents/default/d0.pyi");
+});
+
+test("recovery does not select a complete generation from older captured inputs", async t => {
+  const f = fixture(t);
+  await publish(f, files("str"), "analysis-1");
+  f.managed.selectedSetting = ".graphql-desk/typings";
+  assert.equal(await recover(f.publisher, f.managed, files("int")), false);
+  assert.equal(f.managed.selectedSetting, ".graphql-desk/typings");
 });
 
 test("serializes overlapping publication so stale output cannot win recovery ordering", async t => {
@@ -116,7 +127,7 @@ test("serializes overlapping publication so stale output cannot win recovery ord
   assert.equal(current[0].manifest.analysisId, "new-analysis");
 
   f.managed.selectedSetting = ".graphql-desk/typings";
-  assert.equal(await f.publisher.recover(f.managed), true);
+  assert.equal(await recover(f.publisher, f.managed, files("int")), true);
   assert.equal(path.resolve(f.workspace, f.managed.selectedSetting), current[0].directory);
 });
 
@@ -137,7 +148,7 @@ test("incomplete publication leaves the active complete generation selected", as
   assert.ok(fs.existsSync(path.join(f.root, "generations", generations[0], "complete.json")));
 });
 
-test("recovery falls back from a changed newest generation and preserves it", async t => {
+test("recovery never restores an older generation when the newest is changed", async t => {
   const f = fixture(t);
   await publish(f, files("str"), "analysis-1");
   const first = path.resolve(f.workspace, f.managed.selectedSetting);
@@ -147,8 +158,9 @@ test("recovery falls back from a changed newest generation and preserves it", as
   fs.writeFileSync(artifact, "user bytes");
   const restarted = { ...f.managed, selectedSetting: path.relative(f.workspace, second).split(path.sep).join("/") };
   const recovery = createAnalysisGenerations(f.vscode, f.workspace, f.root);
-  assert.equal(await recovery.recover(restarted), true);
-  assert.equal(path.resolve(f.workspace, restarted.selectedSetting), first);
+  assert.equal(await recover(recovery, restarted, files("int")), false);
+  assert.equal(path.resolve(f.workspace, restarted.selectedSetting), second);
+  assert.ok(fs.existsSync(first), "the older generation remains available but is not selected");
   assert.equal(fs.readFileSync(artifact, "utf8"), "user bytes");
 });
 

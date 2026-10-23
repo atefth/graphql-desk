@@ -311,8 +311,12 @@ exports.run = async () => {
     assert.equal(await fs.readFile(keep, "utf8"), "preserve this user file");
     assert.equal(await fs.readFile(sourcePath, "utf8"), savedChangedText);
     assert.equal(savedGeneration.files.length > 0, true);
-    results.lifecycle.activeStubRoot = path.resolve(workspace, stubPath());
-    results.lifecycle.configuredStubPath = stubPath();
+    const finalGeneration = await readGeneration();
+    results.lifecycle.activeStubRoot = path.resolve(workspace, finalGeneration.stubPath);
+    results.lifecycle.configuredStubPath = finalGeneration.stubPath;
+    results.lifecycle.activeStubFiles = finalGeneration.files.map(([file, text]) => [
+      path.relative(results.lifecycle.activeStubRoot, file).replaceAll("\\", "/"), text,
+    ]).sort(([left], [right]) => left.localeCompare(right));
     results.lifecycle.userSourceAndNeighborFilePreserved = true;
     results.outcome = "managed-output-lifecycle-observed";
   } catch (error) {
