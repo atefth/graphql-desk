@@ -16,6 +16,8 @@ Definitions cover schema fields, arguments, directives, named types, enum/input 
 
 Native Node tests run the real Python snapshot analyzer with isolated UTF-8 JSON transport (`-I -X utf8`), covering exact Unicode inside GraphQL string values, CRLF and Python-escape ranges, incomplete source recovery, imported fragments, rich hover/navigation, trust/cancellation, stale results and read-only registration. Disposal during the final freshness await cannot publish a late result.
 
+The lexer regression matrix also covers query, mutation and subscription definitions; variable and nested input types; negative exponent numbers; object/list defaults; block-string values; directives, fragment spreads and incomplete fragment headers. Separate fixtures cover Unicode/enum scopes and decoded Python escape ranges.
+
 Field hover includes schema argument names, complete types and GraphQL-printed defaults, preserving the language service's descriptions and deprecation text. Focused analyzer fixtures cover aliased and incomplete fields, SDL and introspection schemas, introspection fields, and null/boolean/numeric/string/list/input-object defaults. No-argument fields keep their existing signature. Custom scalar defaults that GraphQL cannot print retain the original language-service hover; custom scalar serialization is not supplied by this adapter.
 
 The isolated host suite passed on VS Code 1.141.0 and 1.142.0 with official Python
