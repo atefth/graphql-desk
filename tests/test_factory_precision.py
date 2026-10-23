@@ -257,7 +257,8 @@ b=graphql(B)
                     (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
                 )
                 try:
-                    ast.parse(source)
+                    tree = ast.parse(source)
+                    compile(tree, "<test>", "exec")
                 except SyntaxError:
                     expected = ["invalid-python"]
                 else:
