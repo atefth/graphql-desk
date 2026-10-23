@@ -251,23 +251,23 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     return { request, texts };
   }
   // One wire job and one latest pending capture; edit storms never build a promise queue.
-  function enqueue(state, action, kind = "analyze") {
+  function enqueue(state, action, kind = "analyze", ticket = epoch) {
     if (state.running) {
       if (state.pending?.kind === "refresh" && kind !== "refresh") return Promise.resolve(null);
-      if (state.pending?.kind === kind) { state.pending.action = action; return state.pending.promise; }
+      if (state.pending?.kind === kind) { state.pending.action = action; state.pending.ticket = ticket; return state.pending.promise; }
       if (state.pending) state.pending.resolve(null);
       let resolve;
       let reject;
       const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-      state.pending = { action, kind, promise, resolve, reject };
+      state.pending = { action, kind, ticket, promise, resolve, reject };
       return promise;
     }
     state.running = true;
-    return Promise.resolve().then(action).finally(() => {
+    return Promise.resolve().then(() => ticket === epoch && trusted() && states.get(state.root) === state ? action() : null).finally(() => {
       state.running = false;
       const pending = state.pending;
       state.pending = null;
-      if (pending) enqueue(state, pending.action, pending.kind).then(pending.resolve, pending.reject);
+      if (pending) enqueue(state, pending.action, pending.kind, pending.ticket).then(pending.resolve, pending.reject);
       schedulePolling(state);
     });
   }
@@ -475,7 +475,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const ticket = epoch;
     stopPolling(state);
     try {
-      await enqueue(state, () => build(state));
+      if (!await enqueue(state, () => build(state))) return;
       stopPolling(state);
       const choices = state.targets.map(target => ({ label: target.schema_name, description: target.project, target }));
       const choice = choices.length === 1 ? choices[0] : await vscode.window.showQuickPick(choices, { placeHolder: "Select a remote GraphQL schema to refresh" });

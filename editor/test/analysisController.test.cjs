@@ -475,6 +475,42 @@ test("explicit remote refresh survives typing without HTTP, but changed credenti
   assert.equal((await controller.analyze(snapshot)).request.schemas.length, 0);
 });
 
+test("refresh does not offer stale remote targets when its queued capture is invalidated", async t => {
+  const fixture = await setup(t, 'schema={url="http://127.0.0.1:1/graphql"}\n');
+  let release;
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  let holdNextPrepare = false;
+  let choices = 0;
+  fixture.vscode.window.showQuickPick = async values => { choices += 1; return values[0]; };
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, settings) {
+      const reply = await worker.request(message, settings);
+      if (message.op === "prepare" && holdNextPrepare) { holdNextPrepare = false; started(); await held; }
+      return reply;
+    } };
+  } }); t.after(() => controller.dispose());
+
+  const snapshot = controller.snapshot(fixture.main);
+  assert.ok(await controller.analyze(snapshot));
+  controller.invalidate();
+  holdNextPrepare = true;
+  const active = controller.analyze(snapshot);
+  await ready;
+  const refresh = controller.refresh();
+  await new Promise(resolve => setImmediate(resolve));
+  const config = fixture.document("pyproject.toml", '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n');
+  config.isDirty = true;
+  fixture.events.onDidChangeTextDocument.fire({ document: config });
+  release();
+
+  assert.equal(await active, null);
+  await refresh;
+  assert.equal(choices, 0, "refresh must stop when its queued capture is stale");
+});
+
 
 
 test("opt-in polling reuses authenticated refresh, retains source-edit deadlines and stops on config disable", async t => {
@@ -772,6 +808,42 @@ test("edit storms coalesce into one latest capture and cancelling one provider p
   const two = controller.analyze(controller.snapshot(fixture.main));
   token.isCancellationRequested = true;
   assert.equal(await one, null); assert.equal(await two, results[0]);
+});
+
+test("an invalidated queued analysis is skipped before worker dispatch", async t => {
+  const fixture = await setup(t);
+  let release;
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  let prepares = 0;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, settings) {
+      const reply = await worker.request(message, settings);
+      if (message.op === "prepare" && ++prepares === 1) { started(); await held; }
+      return reply;
+    } };
+  } }); t.after(() => controller.dispose());
+
+  const snapshot = controller.snapshot(fixture.main);
+  const active = controller.analyze(snapshot);
+  await ready;
+  const queued = controller.analyze(snapshot);
+  await new Promise(resolve => setImmediate(resolve));
+  fixture.main.version += 1;
+  fixture.main.text += "# newer source\n";
+  fixture.main.isDirty = true;
+  fixture.events.onDidChangeTextDocument.fire({ document: fixture.main });
+  release();
+
+  assert.equal(await active, null, "the in-flight capture cannot survive source invalidation");
+  assert.equal(await queued, null, "queued work captured before invalidation is discarded");
+  assert.equal(prepares, 1, "the stale queued job never reaches the worker");
+  const current = await controller.analyze(controller.snapshot(fixture.main));
+  assert.ok(current);
+  assert.equal(current.request.modules[0].version, fixture.main.version);
+  assert.equal(prepares, 2, "a fresh request still dispatches normally");
 });
 
 test("explicit refresh cancellation aborts the worker and cannot admit a late remote schema", async t => {
