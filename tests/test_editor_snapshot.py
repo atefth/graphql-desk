@@ -602,8 +602,7 @@ class EditorSnapshotTests(unittest.TestCase):
         ) -> None:
             captured = tuple(observations)
             if any(
-                observation.path == source
-                and observation.origin == "saved-missing"
+                observation.path == source and observation.origin == "saved-missing"
                 for observation in captured
             ):
                 source.write_bytes(_QUERY.encode())
