@@ -67,7 +67,14 @@ dirty state. Root migration, external-root refusal and shutdown cleanup also
 remain covered. Selected observations are recorded in
 [`artifact-lifecycle-1.141.0.json`](../../editor/test/observations/artifact-lifecycle-1.141.0.json)
 and [`artifact-lifecycle-1.142.0.json`](../../editor/test/observations/artifact-lifecycle-1.142.0.json).
-Native editor checks pass 86/86; the Python worker suite passes 28/28.
+Both hosts now also verify that a Pylance analysis-server restart and reopening
+the saved consumer retain current nullability hover and diagnostics. The test
+closes the visible editor tab, but VS Code did not emit
+`onDidCloseTextDocument`; the public extension API offers no command to close a
+`TextDocument` directly. Therefore this is saved-tab reopen evidence, not proof
+that GraphQL Desk's document-close handler ran or that a user can close a dirty
+source document without a prompt.
+Native editor checks pass 88/88; the Python worker suite passes 28/28.
 One concurrent host rerun passed the new source lifecycle assertions on 1.141.0
 but exceeded the existing 30-second schema-nullability convergence check. The
 unchanged assertions passed when rerun in isolation. This evidence does not

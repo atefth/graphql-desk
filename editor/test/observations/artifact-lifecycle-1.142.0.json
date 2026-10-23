@@ -7,6 +7,8 @@
     "ms-python.vscode-pylance": "2026.4.1"
   },
   "lifecycle": {
+    "checkerRestartAndSavedConsumerReopen": true,
+    "documentCloseEventObserved": false,
     "sourceUndoRedoCloseRenameDelete": true,
     "foreignDirtyGeneratedBufferPreserved": true,
     "runtimeStubPathChange": true,
@@ -15,6 +17,10 @@
     "settingsPreserved": true,
     "userConfigurationPreserved": true,
     "userFilesUntouched": true
+  },
+  "pylance": {
+    "checkerRestart": true,
+    "version": "2026.4.1"
   },
   "unaffectedConsumerExpectedHover": "String",
   "outcome": "generated-factory-artifacts-observed"

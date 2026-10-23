@@ -188,6 +188,28 @@ exports.run = async () => {
     };
     assert.ok(results.pylance.nullableRefresh);
     results.lifecycle.nullableArtifactsPublished = true;
+    await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
+    results.pylance.checkerRestart = await until(async () =>
+      (await hover(8, 2)).includes("None") && diagnostics().some(item => item.range.start.line === 10),
+    "Pylance retains current managed types after an explicit analysis-server restart");
+    assert.ok(results.pylance.checkerRestart);
+    assert.equal(consumer.getText(), await fs.readFile(consumerUri.fsPath, "utf8"), "The saved consumer must remain unchanged before close/reopen");
+    assert.equal(await consumer.save(), true);
+    assert.equal(consumer.isDirty, false, "Close/reopen coverage must not discard an unsaved consumer edit");
+    let consumerClosed = false;
+    const closedListener = vscode.workspace.onDidCloseTextDocument(document => {
+      if (document.uri.toString() === consumerUri.toString()) consumerClosed = true;
+    });
+    await vscode.window.showTextDocument(consumer, { preview: false });
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    assert.ok(await until(async () => !vscode.window.visibleTextEditors.some(editor => editor.document.uri.toString() === consumerUri.toString()), "saved consumer editor closes"));
+    results.lifecycle.documentCloseEventObserved = consumerClosed;
+    closedListener.dispose();
+    const reopenedConsumer = vscode.workspace.textDocuments.find(document => document.uri.toString() === consumerUri.toString()) ?? await vscode.workspace.openTextDocument(consumerUri);
+    await vscode.window.showTextDocument(reopenedConsumer, { preview: false });
+    assert.ok(await until(async () => (await hover(8, 2)).includes("None") && diagnostics().some(item => item.range.start.line === 10), "saved consumer reopens with current Pylance types"));
+    assert.equal(reopenedConsumer.isDirty, false);
+    results.lifecycle.checkerRestartAndSavedConsumerReopen = true;
     const dirtyFiles = [{ relative_path: "dirty_fixture/default.pyi", text: "value: str\n" }];
     const dirtyHandle = createOwnedAnalysisArtifacts(vscode, workspace, stubRoot, "dirty_fixture", dirtyFiles);
     const dirtyUri = vscode.Uri.file(path.join(stubRoot, "dirty_fixture", "default.pyi"));
