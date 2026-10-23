@@ -247,6 +247,21 @@ test("schema argument/value errors and client directive filtering retain schema 
   assert.equal(diagnostics.some((item) => /Unknown directive/.test(item.message)), false);
 });
 
+test("configured client directives complete only in directive-name context", async () => {
+  const source = "from graphql_desk import gql\nq=gql('{ user @loc { name } }')";
+  const value = bundle(source);
+  const snapshot = document(value);
+  const service = createLanguageFeatures(options(value, { clientDirectives: () => ["local"] }));
+  const directive = await service.complete(snapshot, source.indexOf("@loc") + 4);
+  const local = directive.find((item) => item.label === "local");
+  assert.ok(local);
+  assert.equal(local.detail, "Configured client directive");
+  assert.equal(snapshot.text.slice(local.range.start, local.range.end), "loc");
+  assert.equal(local.insertText, "local");
+  const field = await service.complete(snapshot, source.indexOf("name") + 2);
+  assert.equal(field.some((item) => item.label === "local"), false);
+});
+
 test("configured client directives suppress only unknown-directive errors and deduplicate shared origins", async () => {
   const source = "from graphql_desk import gql\nTEXT='{ user @local { missing old } }'\nfirst=gql(TEXT)\nsecond=gql(TEXT)";
   const value = bundle(source);
