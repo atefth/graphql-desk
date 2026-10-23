@@ -985,7 +985,7 @@ if TYPE_CHECKING:
             "main",
             build_schema(
                 "scalar Date enum Color { RED BLUE } "
-                "type Query { date: Date! color: Color! }"
+                "type Query { date(input: Date!): Date! color: Color! }"
             ),
             "external-mapping-stubs",
         )
@@ -993,17 +993,20 @@ if TYPE_CHECKING:
 from typing_extensions import assert_type
 from external_types import Color, DateInput, DateOutput
 from generated.main import graphql
-from generated.sources.main import QueryResult
-query=graphql('query Read { date color }')
+from generated.sources.main import QueryResult,QueryVariables
+query=graphql('query Read($date:Date!) { date(input:$date) color }')
 date=DateInput()
 color=Color.RED
 assert graphql.scalar('Date',date) is date
 assert graphql.scalar('Color',color) is color
 assert graphql.scalar('Date',None) is None
+variables:QueryVariables={'date':date}
+assert_type(variables['date'],DateInput)
 if TYPE_CHECKING:
  result:QueryResult={'date':DateOutput(),'color':Color.RED}
  assert_type(result['date'],DateOutput)
  assert_type(result['color'],Color)
+ bad_variables:QueryVariables={'date':DateOutput()} # error
  graphql.scalar('Date',DateOutput()) # error
  graphql.scalar('Color','RED') # error
 """
