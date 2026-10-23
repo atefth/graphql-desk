@@ -27,3 +27,24 @@ test("a stubPath conflict retires only its workspace and reconfigures the remain
   assert.equal(roots.has(firstPath), false, "conflicting workspace is disabled");
   assert.equal(await roots.get(secondPath), nextSecond, "other workspace still receives its new root");
 });
+
+test("removing a workspace retires its managed root and leaves other roots active", async () => {
+  const removedPath = path.resolve("removed-workspace");
+  const activePath = path.resolve("active-workspace");
+  const removed = { root: path.join(removedPath, "typings"), cleanup() {} };
+  const active = { root: path.join(activePath, "typings"), cleanup() {} };
+  const replacement = { root: path.join(activePath, "custom"), cleanup() {} };
+  const roots = new Map([[removedPath, Promise.resolve(removed)], [activePath, Promise.resolve(active)]]);
+  const retired = [];
+
+  await reconfigureWorkspaceRoots({
+    roots,
+    folders: [{ uri: { fsPath: activePath } }],
+    create: async () => replacement,
+    retire: async (root, managed) => retired.push([root, managed]),
+  });
+
+  assert.deepEqual(retired, [[removedPath, removed], [activePath, active]]);
+  assert.equal(roots.has(removedPath), false);
+  assert.equal(await roots.get(activePath), replacement);
+});

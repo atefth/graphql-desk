@@ -14,7 +14,11 @@ async function reconfigureWorkspaceRoots({ roots, folders, create, retire }) {
     try { current = await promise; }
     catch (error) { if (roots.get(folderRoot) === promise) roots.delete(folderRoot); errors.push(error); continue; }
     const folder = folders.find(item => path.resolve(item.uri.fsPath) === folderRoot);
-    if (!folder) continue;
+    if (!folder) {
+      if (roots.get(folderRoot) === promise) roots.delete(folderRoot);
+      try { await retire(folderRoot, current); } catch (error) { errors.push(error); }
+      continue;
+    }
     let next;
     try { next = await create(folder); }
     catch (error) {
@@ -143,10 +147,18 @@ function activate(context) {
       void reconfigureRoots().then(refreshVisible, () => { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(); });
     } else if (event.affectsConfiguration("graphqlDesk")) refreshVisible();
   });
+  const foldersChanged = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    generation += 1;
+    void reconfigureRoots().then(refreshVisible, () => {
+      status.text = "GraphQL Desk: managed typing unavailable";
+      status.show();
+      refreshVisible();
+    });
+  });
   const command = vscode.commands.registerCommand("graphqlDesk.refreshSchema", () => controller.refresh());
   const lifecycle = { async dispose() {
     if (disposed) return;
-    disposed = true; generation += 1; clearTimeout(timer); command.dispose(); status.dispose(); visible.dispose();
+    disposed = true; generation += 1; clearTimeout(timer); command.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
     textChanged.dispose(); configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose();
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
     outputs.clear();
