@@ -217,6 +217,7 @@ class SourceGraphTests(unittest.TestCase):
                 "experimental_fragment_arguments=True)\n"
                 "f=parse(*unknown)\n"
                 "g=parse('query Q { id }',other=True)\n"
+                "without_locations=parse('query Q { id }',no_location=True)\n"
                 "def nested():\n"
                 " return parse('query Q { id }')\n"
                 "def shadow(parse):\n"
@@ -228,8 +229,12 @@ class SourceGraphTests(unittest.TestCase):
         self.assertEqual(len(documents.calls), 1)
         self.assertEqual(documents.diagnostics, ())
         facts = resolve_parse_sources(snapshots)
-        self.assertEqual(len(facts.calls), 1)
-        self.assertEqual(len(facts.diagnostics), 7)
+        self.assertEqual(len(facts.calls), 3)
+        self.assertEqual(
+            [item.binding for item in facts.calls],
+            ["c", "without_locations", None],
+        )
+        self.assertEqual(len(facts.diagnostics), 6)
         self.assertEqual({item.code for item in facts.diagnostics}, {"parse-fallback"})
         self.assertEqual(resolve_project(snapshots), documents)
 

@@ -1745,7 +1745,7 @@ class _CallScopes(ast.NodeVisitor):
 
 
 def resolve_parse_sources(modules: tuple[ModuleSnapshot, ...]) -> ParseSources:
-    """Resolve default-mode static parser strings, without schema facts.
+    """Resolve static parser strings with supported options, without schema facts.
 
     Other recognized calls retain the ordinary parser fallback with a local
     diagnostic. Normal document resolution and its diagnostics are unchanged.
@@ -1795,9 +1795,17 @@ def resolve_parse_sources(modules: tuple[ModuleSnapshot, ...]) -> ParseSources:
                             raise _Unresolved("A parser source is required")
                         for name, default in zip(names[1:], (False, None, False)):
                             option = arguments.get(name)
+                            supports_no_location = (
+                                name == "no_location"
+                                and isinstance(option, ast.Constant)
+                                and option.value is True
+                            )
                             if option is not None and not (
-                                isinstance(option, ast.Constant)
-                                and option.value is default
+                                (
+                                    isinstance(option, ast.Constant)
+                                    and option.value is default
+                                )
+                                or supports_no_location
                             ):
                                 raise _Unresolved(
                                     "Nondefault parser options retain the "

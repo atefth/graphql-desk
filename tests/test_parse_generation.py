@@ -357,6 +357,39 @@ if TYPE_CHECKING:
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_captured_no_location_only_call_keeps_its_literal_ast_type(self) -> None:
+        fixture = """from typing import Literal
+from typing_extensions import assert_type
+from parser_companion import parse
+value=parse('query Q { id }', no_location=True)
+assert_type(value.loc, None)
+assert_type(value.definitions[0].name.value, Literal["Q"])
+assert_type(value.definitions[0].selection_set.selections[0].name.value, Literal["id"])
+"""
+        modules = (
+            ModuleSnapshot(
+                "p",
+                "parser_companion",
+                "file:///parser_companion.py",
+                1,
+                render_parse_companion(()).runtime,
+            ),
+            ModuleSnapshot("p", "main", "file:///main.py", 1, fixture),
+        )
+        output = render_captured_parse_companion(modules, project_id="p", module="main")
+        self.assertEqual(output.diagnostics, ())
+        self.assertIn("Parse0NoLocationDocument", output.companion.stub)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "main.py").write_text(fixture, encoding="utf8")
+            (root / "parser_companion.py").write_text(
+                output.companion.runtime, encoding="utf8"
+            )
+            (root / "parser_companion.pyi").write_text(
+                output.companion.stub, encoding="utf8"
+            )
+            factory_tests.FactoryGenerationTests().check(root, {})
+
     def test_original_source_exact_literals_fallbacks_and_runtime_identity(
         self,
     ) -> None:
