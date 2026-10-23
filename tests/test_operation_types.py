@@ -1636,6 +1636,126 @@ optional:OptionalResultInput={}
                 {item["range"]["start"]["line"] for item in diagnostics}, {3, 4, 5, 9}
             )
 
+    def test_conditional_fragment_gates_preserve_absence_and_nullability_overrides(
+        self,
+    ) -> None:
+        from graphql import graphql_sync  # pyright: ignore[reportUnknownVariableType]
+
+        schema = build_schema(
+            "directive @required on FIELD "
+            "directive @optional on FIELD "
+            "type Query { fixed: String! loose: String }"
+        )
+        source = """query($show:Boolean!) {
+            ...Included @include(if:$show)
+            ...Skipped @skip(if:false)
+            ...Deferred @defer(if:false)
+            ...Defined
+        }
+        fragment Included on Query {
+            required:fixed @required @optional
+        }
+        fragment Skipped on Query { strict:loose @required }
+        fragment Deferred on Query { loose:loose @optional }
+        fragment Defined on Query @defer(if:false) {
+            definition:fixed @required @optional
+        }"""
+
+        output = render_operation_types(
+            schema,
+            source,
+            name="Read",
+            disable_masking=True,
+            client_directives=("defer",),
+        )
+        self.assertIn("ReadResult = __graphql_desk_variant_", output)
+        self.assertIn("'required': 'String'", output)
+        self.assertIn("'strict': 'String'", output)
+        self.assertIn("'loose': 'String | None'", output)
+        self.assertIn("'definition': 'String'", output)
+        self.assertIn("closed=True", output)
+
+        # Standard include/skip behavior is executable; defer stays a typing
+        # presence gate and does not add runtime transformation.
+        runtime_source = (
+            "query($show:Boolean!){ required:fixed @include(if:$show) "
+            "strict:loose @skip(if:$show) }"
+        )
+        runtime_schema = build_schema(
+            "type Query { fixed: String! loose: String }"
+        )
+        for show, expected in (
+            (False, {"strict": None}),
+            (True, {"required": "x"}),
+        ):
+            result = graphql_sync(
+                runtime_schema,
+                runtime_source,
+                root_value={"fixed": "x", "loose": None},
+                variable_values={"show": show},
+            )
+            self.assertIsNone(result.errors)
+            self.assertEqual(result.data, expected)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "generated.py").write_text(output, encoding="utf-8")
+            (root / "fixture.py").write_text(
+                "from generated import ReadResult\n"
+                "absent: ReadResult = {}\n"
+                "all_present: ReadResult = {'required':'x','strict':'x',"
+                "'loose':None,'definition':'x'}\n"
+                "optional_null: ReadResult = {'required':None}\n"
+                "required_null: ReadResult = {'strict':None}\n"
+                "precedence_null: ReadResult = {'definition':None}\n"
+                "extra: ReadResult = {'unknown':'x'}\n",
+                encoding="utf-8",
+            )
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    str(root),
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+            self.assertIn("Found 4 errors in 1 file", mypy.stdout)
+
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["fixture.py", "generated.py"],
+                        "typeCheckingMode": "strict",
+                        "pythonVersion": "3.10",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(pyright.returncode, 1, pyright.stdout + pyright.stderr)
+            diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
+            self.assertEqual(len(diagnostics), 4, diagnostics)
+
     def test_abstract_variants_preserve_selection_scope_and_discriminators(
         self,
     ) -> None:
