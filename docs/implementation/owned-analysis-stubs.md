@@ -74,7 +74,7 @@ closes the visible editor tab, but VS Code did not emit
 `TextDocument` directly. Therefore this is saved-tab reopen evidence, not proof
 that GraphQL Desk's document-close handler ran or that a user can close a dirty
 source document without a prompt.
-Native editor checks pass 88/88; the Python worker suite passes 28/28.
+Native editor checks pass 89/89; the Python worker suite passes 28/28.
 One concurrent host rerun passed the new source lifecycle assertions on 1.141.0
 but exceeded the existing 30-second schema-nullability convergence check. The
 unchanged assertions passed when rerun in isolation. This evidence does not
