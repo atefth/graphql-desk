@@ -45,7 +45,7 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "discovery", "activation", "ownedAnalysis", "factoryArtifacts", "workspaceRemoval", "restartRecovery"].includes(suite), "Choose a known isolated suite");
+  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "workspaceRemoval", "restartRecovery"].includes(suite), "Choose a known isolated suite");
   const factorySuite = ["factoryArtifacts", "workspaceRemoval", "restartRecovery"].includes(suite);
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
   const workspace = path.join(temporary, "workspace");
@@ -144,7 +144,7 @@ async function main() {
   const options = {
     version,
     extensionDevelopmentPath: path.resolve(__dirname, ".."),
-    extensionTestsPath: path.join(__dirname, `${suite}.host.cjs`),
+    extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite}.host.cjs`),
     extensionTestsEnv: {
       GRAPHQL_DESK_TEST_WORKSPACE: workspace,
       GRAPHQL_DESK_RESULT_PATH: result,
@@ -152,6 +152,7 @@ async function main() {
       GRAPHQL_DESK_HOST_VERSION: version,
       GRAPHQL_DESK_STUB_ROOT: stubRoot,
       GRAPHQL_DESK_ARTIFACTS_PATH: artifacts,
+      GRAPHQL_DESK_SYMBOLS_ONLY: suite === "symbols" ? "1" : "",
     },
     launchArgs: [launchTarget, ...isolation, "--disable-updates", "--disable-telemetry", "--skip-welcome", "--skip-release-notes", "--disable-workspace-trust"],
   };

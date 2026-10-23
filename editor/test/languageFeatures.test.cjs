@@ -190,6 +190,28 @@ test("external fragment completion and definitions use real imported source, nev
   assert.ok(completion.some((item) => item.label === "Card"));
 });
 
+test("document symbols expose named operations and fragments at their embedded Python locations", async () => {
+  const source = "# 😀\r\nfrom graphql_desk import gql\r\nquery = gql('query ReadUser { user { id } }')\r\ncard = gql('fragment UserCard on User { id name }')";
+  const value = bundle(source);
+  const symbols = await createLanguageFeatures(options(value)).symbols(document(value));
+  assert.deepEqual(symbols.map(item => [item.name, item.detail, item.kind]), [
+    ["ReadUser", "query", "operation"], ["UserCard", "fragment on User", "fragment"],
+  ]);
+  for (const item of symbols) {
+    assert.equal(source.slice(item.selectionRange.start, item.selectionRange.end), item.name);
+    assert.equal(source.slice(item.range.start, item.range.end),
+      item.name === "ReadUser" ? "gql('query ReadUser { user { id } }')" : "gql('fragment UserCard on User { id name }')");
+    assert.ok(item.range.start <= item.selectionRange.start && item.selectionRange.end <= item.range.end);
+  }
+});
+
+test("document symbols skip invalid GraphQL and source names outside their containing call", async () => {
+  const source = "from graphql_desk import gql\nTEXT='query Read { user { id } }'\nfirst=gql(TEXT)\nsecond=gql(TEXT)\nbad=gql('query Broken {')";
+  const value = bundle(source);
+  const symbols = await createLanguageFeatures(options(value)).symbols(document(value));
+  assert.deepEqual(symbols, []);
+});
+
 test("fragment definitions reject ambiguous authored targets and recover after repair", async () => {
   const modules = ["left", "right"].map((module) => ({ project: "p", module,
     uri: `file:///workspace/${module}.py`, version: 4, is_package: false,
@@ -281,6 +303,7 @@ test("untrusted, cancelled, stale, wrong-schema and failed analysis yield no pre
   assert.deepEqual(await noTrust.diagnostics(snapshot), []);
   assert.equal(await noTrust.hover(snapshot, 0), null);
   assert.deepEqual(await noTrust.definition(snapshot, 0), []);
+  assert.deepEqual(await noTrust.symbols(snapshot), []);
   assert.equal(calls, 0);
   const cancelled = { isCancellationRequested: true };
   assert.deepEqual(await createLanguageFeatures(options(value)).complete(snapshot, 0, cancelled), []);
@@ -312,7 +335,7 @@ test("cancellation during the final freshness await cannot publish", async () =>
 });
 
 test("VS Code registration supplements Python services and ignores old diagnostic refreshes", async () => {
-  const value = bundle("from graphql_desk import gql\nq=gql('{user{missing}}')");
+  const value = bundle("from graphql_desk import gql\nq=gql('query Check {user{missing}}')");
   const publications = [];
   const providers = {};
   let disposed = 0;
@@ -326,7 +349,10 @@ test("VS Code registration supplements Python services and ignores old diagnosti
       registerCompletionItemProvider(selector, provider) { providers.complete = provider; assert.equal(selector[0].language, "python"); return handle(); },
       registerHoverProvider(_selector, provider) { providers.hover = provider; return handle(); },
       registerDefinitionProvider(_selector, provider) { providers.definition = provider; return handle(); },
+      registerDocumentSymbolProvider(_selector, provider) { providers.symbols = provider; return handle(); },
     },
+    DocumentSymbol: class { constructor(name, detail, kind, range, selectionRange) { Object.assign(this, { name, detail, kind, range, selectionRange }); } },
+    SymbolKind: { Function: 11, Struct: 22 },
   };
   let release;
   let invocation = 0;
@@ -344,9 +370,11 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   await old;
   assert.equal(publications.length, 1);
   assert.equal(publications[0][0].code, "graphql.validation");
-  assert.deepEqual(Object.keys(providers).sort(), ["complete", "definition", "hover"]);
+  assert.deepEqual(Object.keys(providers).sort(), ["complete", "definition", "hover", "symbols"]);
+  const documentSymbols = await providers.symbols.provideDocumentSymbols(doc);
+  assert.deepEqual(documentSymbols.map(item => [item.name, item.detail, item.kind]), [["Check", "query", 11]]);
   registered.dispose();
-  assert.equal(disposed, 4);
+  assert.equal(disposed, 5);
   let releaseFinal;
   let enteredFinal;
   const reachedFinal = new Promise((resolve) => { enteredFinal = resolve; });

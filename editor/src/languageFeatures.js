@@ -300,6 +300,42 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
           });
       }, []);
     },
+    async symbols(snapshot, token) {
+      try {
+        const bundle = await load(snapshot, token);
+        if (!bundle) return [];
+        snapshot = mapSnapshot(snapshot, bundle);
+        const result = [];
+        const seen = new Set();
+        for (const call of bundle.response.calls) {
+          const owner = moduleSource(bundle, call.identity.module);
+          if (!owner || owner.uri !== snapshot.uri || owner.version !== snapshot.version) continue;
+          let ast;
+          try { ast = gql.parse(new gql.Source(call.source, documentKey(call.identity))); }
+          catch (error) { if (error instanceof gql.GraphQLError) continue; throw error; }
+          const callRange = call.identity.call_range.utf16;
+          for (const node of ast.definitions) {
+            if (!node.name?.loc || ![gql.Kind.OPERATION_DEFINITION, gql.Kind.FRAGMENT_DEFINITION].includes(node.kind)) continue;
+            const origins = toHost(bundle, call, node.name.loc);
+            if (origins.length !== 1 || origins[0].module.uri !== snapshot.uri || origins[0].module.version !== snapshot.version) continue;
+            const selectionRange = origins[0].range;
+            if (selectionRange.start < callRange.start || selectionRange.end > callRange.end) continue;
+            const kind = node.kind === gql.Kind.FRAGMENT_DEFINITION ? "fragment" : "operation";
+            const symbolKey = key([node.name.value, kind, origins[0].module.uri, origins[0].module.version, selectionRange]);
+            if (seen.has(symbolKey)) continue;
+            seen.add(symbolKey);
+            result.push({
+              name: node.name.value,
+              detail: kind === "fragment" ? `fragment on ${node.typeCondition.name.value}` : node.operation,
+              kind,
+              range: callRange,
+              selectionRange,
+            });
+          }
+        }
+        return await finish(bundle, snapshot, token, unique(result), []);
+      } catch { return []; }
+    },
     async diagnostics(snapshot, token) {
       try {
         const bundle = await load(snapshot, token);
@@ -398,6 +434,14 @@ function registerLanguageFeatures(vscode, options) {
         const items = await service.definition(snapshot(document), document.offsetAt(position), token);
         return items.map((item) => new vscode.Location(options.resolveUri ? options.resolveUri(item.module.uri) : vscode.Uri.parse(item.module.uri),
           new vscode.Range(item.positionRange.start, item.positionRange.end)));
+      },
+    }),
+    vscode.languages.registerDocumentSymbolProvider(selector, {
+      async provideDocumentSymbols(document, token) {
+        return (await service.symbols(snapshot(document), token)).map(item => new vscode.DocumentSymbol(
+          item.name, item.detail,
+          item.kind === "fragment" ? vscode.SymbolKind.Struct : vscode.SymbolKind.Function,
+          range(document, item.range), range(document, item.selectionRange)));
       },
     }),
   ];
