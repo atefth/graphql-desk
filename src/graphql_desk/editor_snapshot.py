@@ -314,6 +314,14 @@ def _check_observations(observations: Iterable[_Observation]) -> None:
             digest = _read(observation.path)[1] if observation.path.is_file() else None
             if digest != observation.digest:
                 raise ValueError("Inputs changed during snapshot acquisition")
+        elif observation.origin == "saved-disk":
+            if not observation.path.is_file():
+                raise ValueError("Inputs changed during snapshot acquisition")
+            if _read(observation.path)[1] != observation.digest:
+                raise ValueError("Inputs changed during snapshot acquisition")
+        elif observation.origin == "saved-missing":
+            if observation.path.exists() or observation.path.is_symlink():
+                raise ValueError("Inputs changed during snapshot acquisition")
         elif (
             observation.origin == "disk"
             and _read(observation.path)[1] != observation.digest
