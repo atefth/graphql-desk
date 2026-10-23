@@ -154,6 +154,23 @@ function hoverInformation(schema, text, offset) {
   const info = context?.typeInfo;
   if (typeof contents !== "string" || !contents || !info) return contents;
   const kind = context.token.state.kind;
+  if ((kind === "Field" || kind === "AliasedField") && info.fieldDef?.args.length) {
+    // GLS 5.7 omits field arguments from its hover signature.
+    const field = info.fieldDef;
+    const name = field.name.startsWith("__") ? field.name : `${info.parentType.name}.${field.name}`;
+    const prefix = `\`\`\`graphql\n${name}: ${field.type}\n\`\`\``;
+    let args;
+    try {
+      args = field.args.map((arg) => {
+        const value = arg.defaultValue === undefined ? null : gql.astFromValue(arg.defaultValue, arg.type);
+        return `${arg.name}: ${arg.type}${value ? ` = ${gql.print(value)}` : ""}`;
+      }).join(", ");
+    } catch {
+      // shortcut: unprintable custom scalar defaults keep GLS hover until scalar serializers are available.
+      return contents;
+    }
+    if (contents.startsWith(prefix)) contents = `\`\`\`graphql\n${name}(${args}): ${field.type}\n\`\`\`` + contents.slice(prefix.length);
+  }
   if (kind === "ObjectField" && info.inputObjectType && info.fieldDef) {
     // GLS 5.7 qualifies input members with the enclosing output type.
     const field = `${info.fieldDef.name}: ${info.type}`;

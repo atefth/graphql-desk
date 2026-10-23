@@ -108,6 +108,14 @@ async function run() {
     const hover = await vscode.commands.executeCommand("vscode.executeHoverProvider", selected.uri, position);
     assert.match(hoverText(hover), /Display name/);
     assert.match(hoverText(hover), /native-python-fixture/);
+    const fieldHover = await vscode.commands.executeCommand("vscode.executeHoverProvider", selected.uri,
+      selected.positionAt(selected.getText().indexOf("user") + 1));
+    const signature = 'Query.user(id: ID = 1, color: Color, filter: Filter): User';
+    const graphqlHover = fieldHover.find(item => hoverText([item]).includes(signature));
+    assert.ok(graphqlHover);
+    assert.equal(selected.getText(graphqlHover.range), "user");
+    assert.match(hoverText([graphqlHover]), /Current user/);
+    assert.match(hoverText(fieldHover), /native-python-fixture/);
     observations.hover = true;
     const outside = await vscode.commands.executeCommand("vscode.executeHoverProvider", selected.uri, new vscode.Position(0, 1));
     assert.match(hoverText(outside), /native-python-fixture/);
