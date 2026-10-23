@@ -51,12 +51,18 @@ without changing the mutable result view. Generated bound helpers provide litera
 context and typename narrowing; the root reader uses checker-only callable facts.
 Neither function reads the phantom property at runtime.
 
+`read_fragment` keeps exact matching-reference inference. The separate
+`read_fragment_passthrough` accepts references of any identity and returns
+`Result | FragmentRef[Identity]`, including in one outer sequence with nullable
+elements. Python typing cannot express that an identity type differs from the
+document identity, so the wider return keeps fragment-only fields inaccessible.
+Both root helpers return the original value unchanged.
+
 This is bounded reader support. Nullable arrays retain the full result union;
 bound readers exclude the absent alternative when their input elements are
 matching references, compatible result shapes or nulls. Inputs that also admit
 an absent shape retain that alternative. Generic raw literals and contextual fallback
-inputs can retain a wider result/absence union. Upstream unmatched-reference
-passthrough is not yet exposed by these typed Python helpers. Required conditional
+inputs can retain a wider result/absence union. Required conditional
 empty branches remain absent rather than inventing selected fields. These limits,
 mask/result helpers and the full parity matrix keep the broad gate open. Mutable
 output aliasing intentionally follows the pinned runtime identity behavior.

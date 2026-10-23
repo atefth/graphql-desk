@@ -13,6 +13,7 @@ from typing import cast
 
 from graphql import build_schema
 
+from graphql_desk import read_fragment_passthrough
 from graphql_desk.fragment_helpers import read_fragment, render_fragment_helpers
 from graphql_desk.fragment_refs import fragment_identity_key
 from graphql_desk.fragments import SchemaContext, index_fragments
@@ -144,6 +145,9 @@ class FragmentHelpersTests(unittest.TestCase):
                 raise AssertionError(name)
 
         call = cast(Callable[[object, object], object], read_fragment)
+        passthrough = cast(
+            Callable[[object, object], object], read_fragment_passthrough
+        )
         files, rendered = self.fixtures()
         self.assertTrue(files)
         declarations = render_fragment_helpers(
@@ -162,6 +166,7 @@ class FragmentHelpersTests(unittest.TestCase):
         )
         for value in values:
             self.assertIs(call(NoReads(), value), value)
+            self.assertIs(passthrough(NoReads(), value), value)
             self.assertIs(bound(value), value)
 
     def test_names_and_branch_metadata_are_closed(self) -> None:
@@ -213,8 +218,10 @@ class FragmentHelpersTests(unittest.TestCase):
     def test_actual_rendered_bound_and_generic_helpers_both_checkers(self) -> None:
         files, _ = self.fixtures()
         positive = """from collections.abc import Sequence
+from typing import Literal
 from typing_extensions import Never, assert_type
 from graphql_desk.fragment_helpers import read_fragment, FragmentAbsent
+from graphql_desk import read_fragment_passthrough as passthrough
 from query import QueryResult, Absent
 from required import RequiredReadFragment as read_required, RequiredResult
 from required import document as required
@@ -230,7 +237,7 @@ from correlated import CorrelatedReadFragment as read_correlated, CorrelatedResu
 from vacant import VacantReadFragment as read_vacant
 from vacant import document as vacant
 from required import RequiredIdentity, RequiredVariables
-from graphql_desk.fragment_refs import FragmentDocument, FragmentRef
+from graphql_desk.fragment_refs import FragmentDocument, FragmentIdentity, FragmentRef
 base:FragmentDocument[RequiredIdentity,RequiredResult,RequiredVariables]=required
 
 def check(query:QueryResult, absent:Absent)->None:
@@ -285,10 +292,27 @@ def nullable_absent(
 
 def absent_only(values:list[FragmentRef[RequiredIdentity]|FragmentAbsent])->None:
  assert_type(read_required(values),Sequence[RequiredResult|FragmentAbsent])
+
+OtherIdentity=FragmentIdentity[Literal['other']]
+def passthrough_refs(
+ ref:FragmentRef[OtherIdentity],
+ matching:FragmentRef[RequiredIdentity],
+ values:list[FragmentRef[OtherIdentity]|None]|None,
+)->None:
+ assert_type(passthrough(required,None),None)
+ assert_type(passthrough(required,[]),Sequence[Never])
+ assert_type(passthrough(required,[None]),Sequence[None])
+ assert_type(read_fragment(required,matching),RequiredResult)
+ assert_type(passthrough(required,ref),RequiredResult|FragmentRef[OtherIdentity])
+ assert_type(passthrough(required,[ref]),Sequence[RequiredResult|FragmentRef[OtherIdentity]])
+ assert_type(passthrough(required,values),Sequence[RequiredResult|FragmentRef[OtherIdentity]|None]|None)
+ passthrough(required,ref)['title'] # error
+ passthrough(required,[ref])[0]['title'] # error
 """
         negative = """from typing import Literal
 from graphql_desk.fragment_refs import FragmentIdentity, FragmentRef
 from graphql_desk.fragment_helpers import read_fragment
+from graphql_desk import read_fragment_passthrough as passthrough
 from graphql_desk import TypedDocument
 from optional import OptionalReadFragment as optional, document
 from query import Absent
@@ -305,6 +329,7 @@ Other=FragmentIdentity[Literal['other']]
 def wrong(ref:FragmentRef[Other])->None:
  optional(ref) # error
  read_fragment(document,ref) # error
+ passthrough(document,ref)['title'] # error
  required([ref,None]) # error
  required([{'title':1},None]) # error
 def operation(doc:TypedDocument[dict[str,str],dict[str,str]])->None:

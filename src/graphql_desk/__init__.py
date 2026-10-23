@@ -5,7 +5,7 @@ from typing import Generic, TypeVar
 
 from graphql import DocumentNode, parse
 
-from .fragment_helpers import read_fragment
+from .fragment_helpers import read_fragment, read_fragment_passthrough
 from .runtime import gql, graphql, init_graphql
 from .testing import unsafe_read_result
 
@@ -16,6 +16,7 @@ __all__ = [
     "init_graphql",
     "parse",
     "read_fragment",
+    "read_fragment_passthrough",
     "unsafe_read_result",
 ]
 

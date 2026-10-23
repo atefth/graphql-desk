@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from .operation_types import FragmentReaderTypes
 
 _Identity = TypeVar("_Identity")
+_OtherIdentity = TypeVar("_OtherIdentity")
 _Result = TypeVar("_Result")
 _Variables = TypeVar("_Variables")
 _ReadInput = TypeVar("_ReadInput", bound=Mapping[str, object])
@@ -129,6 +130,60 @@ def read_fragment(document: object, data: object) -> object:
     and generic raw literals can retain wider result unions than bound helpers;
     contextual fallback inputs also retain the closed absent alternative.
     """
+    return data
+
+
+@overload
+def read_fragment_passthrough(
+    document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
+    data: None,
+) -> None: ...
+
+
+@overload
+def read_fragment_passthrough(
+    document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
+    data: Sequence[Never],
+) -> Sequence[Never]: ...
+
+
+@overload
+def read_fragment_passthrough(
+    document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
+    data: Sequence[None],
+) -> Sequence[None]: ...
+
+
+@overload
+def read_fragment_passthrough(
+    document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
+    data: FragmentRef[_OtherIdentity],
+) -> _Result | FragmentRef[_OtherIdentity]: ...
+
+
+@overload
+def read_fragment_passthrough(
+    document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
+    data: Sequence[FragmentRef[_OtherIdentity]],
+) -> Sequence[_Result | FragmentRef[_OtherIdentity]]: ...
+
+
+@overload
+def read_fragment_passthrough(
+    document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
+    data: Sequence[FragmentRef[_OtherIdentity] | None],
+) -> Sequence[_Result | FragmentRef[_OtherIdentity] | None]: ...
+
+
+@overload
+def read_fragment_passthrough(
+    document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
+    data: Sequence[FragmentRef[_OtherIdentity] | None] | None,
+) -> Sequence[_Result | FragmentRef[_OtherIdentity] | None] | None: ...
+
+
+def read_fragment_passthrough(document: object, data: object) -> object:
+    """Return fragment references unchanged when their identity is not known."""
     return data
 
 
