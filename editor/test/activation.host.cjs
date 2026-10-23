@@ -68,6 +68,12 @@ async function run() {
   const fragments = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", selected.uri, selected.positionAt(selected.getText().indexOf("...Card") + 4));
   assert.ok(fragments.map(target).some(value => value.uri.toString() === documents.get("fragments.py").uri.toString()));
   await until(() => diagnostics(selected), values => !values.some(item => /Unknown directive/.test(item.message)), "Configured client directive must survive production capture");
+  const directiveCompletion = await until(() => vscode.commands.executeCommand("vscode.executeCompletionItemProvider", selected.uri,
+    selected.positionAt(selected.getText().indexOf("@local") + 3)), value => value.items.some(item => item.label === "local"),
+  "Configured client directive completion");
+  const localDirective = directiveCompletion.items.find(item => item.label === "local");
+  assert.equal(selected.getText(localDirective.range), "local");
+  assert.equal(localDirective.insertText, "local");
   const configDoc = documents.get("pyproject.toml");
   await replace(configDoc, fixtures["pyproject.toml"].replace('client_directives=["local"]', 'client_directives=[]'));
   await until(() => diagnostics(selected), values => values.some(item => /Unknown directive.*local/.test(item.message)), "Dirty config updates client directives");

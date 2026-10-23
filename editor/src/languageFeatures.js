@@ -254,8 +254,21 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         const span = wordRange(call.source, decoded);
         const range = editableRange(bundle, call, span, snapshot);
         if (!range) return [];
-        return gls.getAutocompleteSuggestions(schema, call.source,
-          gls.offsetToPosition(call.source, decoded), undefined, fragmentRegistry(bundle, call))
+        const position = gls.offsetToPosition(call.source, decoded);
+        const suggestions = gls.getAutocompleteSuggestions(schema, call.source,
+          position, undefined, fragmentRegistry(bundle, call));
+        if (gls.getContextAtPosition(call.source, position, schema)?.token.state.kind === "Directive") {
+          const prefix = call.source.slice(span.start, decoded);
+          const existing = new Set(suggestions.map((item) => item.label));
+          for (const name of clientDirectives(bundle, call)) {
+            if (/^[_A-Za-z][_0-9A-Za-z]*$/.test(name) && name.startsWith(prefix) &&
+                !schema.getDirective(name) && !existing.has(name)) {
+              suggestions.push({ label: name, detail: "Configured client directive", kind: gls.CompletionItemKind.Function });
+              existing.add(name);
+            }
+          }
+        }
+        return suggestions
           .filter((item) => /^[$@]?[_A-Za-z][_0-9A-Za-z]*$/.test(item.label))
           .map((item) => ({ label: item.label, detail: item.detail, documentation: item.documentation,
             deprecated: Boolean(item.isDeprecated), kind: item.kind,
