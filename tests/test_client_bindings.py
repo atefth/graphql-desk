@@ -57,7 +57,8 @@ class NoVariables(TypedDict):
 def schema() -> GraphQLSchema:
     result = build_schema(
         'type Query { hello(name: String = "Ada"): String fail: String } '
-        "type Mutation { increment: Int! } type Subscription { tick: Int! }"
+        "type Mutation { increment: Int! incrementBy(delta: Int!): Int! } "
+        "type Subscription { tick: Int! }"
     )
     assert result.query_type is not None
 
@@ -109,35 +110,56 @@ class ClientBindingsTests(unittest.TestCase):
     ) -> None:
         source = """from typing import TYPE_CHECKING
 from typing_extensions import assert_type
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from gql.client import SyncClientSession, AsyncClientSession
 from graphql import GraphQLSchema
 from generated.main import graphql
 from generated.sources.authored import (
  DocResult as ReadResult, DocVariables as ReadVariables,
+ UpdateResult, UpdateVariables, EventsResult, EventsVariables,
 )
 from client_bindings import (
  TypedResponse, execute_core_sync, execute_core, execute_gql_sync,
  execute_gql, subscribe_gql,
 )
 doc=graphql(
- "query Other { __typename } query Read($name:String!){hello(name:$name)}",
+ "query Other { __typename } query Read($name:String){hello(name:$name)}",
  operation="Read",
 )
+update=graphql(
+ "mutation Update($delta:Int!){incrementBy(delta:$delta)}", operation="Update"
+)
+events=graphql("subscription Events { tick }", operation="Events")
 variables=ReadVariables(name="Grace")
+update_variables=UpdateVariables(delta=2)
+events_variables=EventsVariables()
 def sync(schema:GraphQLSchema,session:SyncClientSession)->TypedResponse[ReadResult]:
  assert_type(execute_core_sync(schema,doc,variables),TypedResponse[ReadResult])
  response=execute_gql_sync(session,doc,variables)
  assert_type(response.data,ReadResult|None)
+ assert_type(execute_core_sync(schema,update,update_variables),TypedResponse[UpdateResult])
+ assert_type(execute_gql_sync(session,update,update_variables),TypedResponse[UpdateResult])
  return response
 async def asynchronous(schema:GraphQLSchema,session:AsyncClientSession)->None:
  assert_type(await execute_core(schema,doc,variables),TypedResponse[ReadResult])
  assert_type(await execute_gql(session,doc,variables),TypedResponse[ReadResult])
- assert_type(subscribe_gql(session,doc,variables),AsyncGenerator[TypedResponse[ReadResult],None])
+ assert_type(
+  await execute_core(schema,update,update_variables),TypedResponse[UpdateResult]
+ )
+ assert_type(
+  await execute_gql(session,update,update_variables),TypedResponse[UpdateResult]
+ )
+ _event_stream: AsyncIterator[TypedResponse[EventsResult]] = subscribe_gql(
+  session,events,events_variables
+ )
+ assert_type(
+  subscribe_gql(session,events,events_variables),
+  AsyncGenerator[TypedResponse[EventsResult],None],
+ )
 if TYPE_CHECKING:
  def wrong(schema:GraphQLSchema,session:SyncClientSession)->None:
   execute_core_sync(schema,doc,ReadVariables(name=1)) # error
-  execute_gql_sync(session,doc,{}) # error
+  execute_gql_sync(session,doc,{"name":1}) # error
 """
         module = ModuleSnapshot("p", "authored", "file:///authored.py", 1, source)
         context = SchemaContext("main", schema(), "client-fixture")
@@ -173,21 +195,66 @@ if TYPE_CHECKING:
             }
             helper.check(root, {"authored.py": errors})
             runtime = f"""import sys
+import asyncio
 sys.path.insert(0,{str(repository)!r})
 sys.path.insert(0,{str(root)!r})
 from tests.test_client_bindings import schema,SyncSchemaTransport
 from gql import Client
-from authored import doc,variables,sync
+from authored import doc,variables,sync,update,update_variables,events,events_variables
+from generated.sources.authored import DocVariables as ReadVariables
+from client_bindings import (
+ execute_core_sync,execute_core,execute_gql_sync,execute_gql,subscribe_gql
+)
 transport=SyncSchemaTransport(schema())
+transport.schema.mutation_type.fields["incrementBy"].resolve = (
+ lambda _root,info,delta: delta+1
+)
 with Client(schema=transport.schema,transport=transport) as session:
  response=sync(transport.schema,session)
- assert response is transport.responses[-1]
+ assert response is transport.responses[-2]
  assert response.data=={{"hello":"Grace"}}
  assert response.extensions=={{"unchanged":True}}
- request=transport.requests[-1]
+ request=transport.requests[-2]
  assert request.document is doc.ast
  assert request.operation_name==doc.operation_name=="Read"
  assert request.variable_values is variables
+ assert execute_gql_sync(session,doc,ReadVariables()).data=={{"hello":"Ada"}}
+ assert execute_gql_sync(session,doc,ReadVariables(name=None)).data=={{"hello":"NULL"}}
+ assert execute_core_sync(transport.schema,doc,variables).data=={{"hello":"Grace"}}
+ assert execute_core_sync(transport.schema,doc,ReadVariables()).data=={{"hello":"Ada"}}
+ assert execute_core_sync(
+  transport.schema,doc,ReadVariables(name=None)
+ ).data=={{"hello":"NULL"}}
+ assert execute_core_sync(
+  transport.schema,update,update_variables
+ ).data=={{"incrementBy":3}}
+async def verify_async():
+ schema_=schema()
+ assert schema_.mutation_type is not None
+ schema_.mutation_type.fields["incrementBy"].resolve = (
+  lambda _root,info,delta: delta+1
+ )
+ async with Client(schema=schema_,execute_timeout=None) as session:
+  assert (await execute_core(schema_,doc,variables)).data=={{"hello":"Grace"}}
+  assert (await execute_core(schema_,doc,ReadVariables())).data=={{"hello":"Ada"}}
+  assert (
+   await execute_core(schema_,doc,ReadVariables(name=None))
+  ).data=={{"hello":"NULL"}}
+  assert (await execute_core(schema_,update,update_variables)).data=={{"incrementBy":3}}
+  assert (await execute_gql(session,doc,variables)).data=={{"hello":"Grace"}}
+  assert (await execute_gql(session,doc,ReadVariables())).data=={{"hello":"Ada"}}
+  assert (
+   await execute_gql(session,doc,ReadVariables(name=None))
+  ).data=={{"hello":"NULL"}}
+  assert (await execute_gql(session,update,update_variables)).data=={{"incrementBy":3}}
+  assert schema_.subscription_type is not None
+  async def ticks(*_args):
+   yield {{"tick":7}}
+  schema_.subscription_type.fields["tick"].subscribe=ticks
+  stream=subscribe_gql(session,events,events_variables)
+  assert (await stream.__anext__()).data=={{"tick":7}}
+  await stream.aclose()
+asyncio.run(verify_async())
 """
             result = subprocess.run(
                 [sys.executable, "-c", runtime],
