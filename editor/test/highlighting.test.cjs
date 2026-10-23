@@ -67,6 +67,20 @@ test("incomplete Python uses a lexical candidate, then recovers to resolved maps
   assert.ok(resolved.every((item) => item.mode === "resolved"));
 });
 
+test("incomplete Python highlights only valid non-interpolated string prefixes", async () => {
+  for (const prefix of ["ur", "ru", "rr", "br", "rb", "fr", "rf", "b", "f"]) {
+    const value = bundle(`from graphql_desk import gql\nq=gql(${prefix}'''query { field`);
+    assert.ok(value.response.diagnostics.some(item => item.code === "invalid-python"), prefix);
+    assert.deepEqual(await createHighlighting(options(value)).highlight(document(value)), [], prefix);
+  }
+  for (const prefix of ["", "r", "u"]) {
+    const value = bundle(`from graphql_desk import gql\nq=gql(${prefix}'''query { field`);
+    const highlights = await createHighlighting(options(value)).highlight(document(value));
+    assert.ok(highlights.length, prefix);
+    assert.ok(highlights.every(item => item.mode === "lexical"), prefix);
+  }
+});
+
 test("lexical candidates exclude lookalikes, strings/comments as imports, interpolation and shadowed aliases", () => {
   const unrelated = [
     "gql('query { field }')",
