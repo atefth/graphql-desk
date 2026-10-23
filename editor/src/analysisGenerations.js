@@ -3,7 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
-const { createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
+const { createOwnedAnalysisArtifacts, renderOwnedAnalysisArtifact } = require("./ownedAnalysisArtifacts");
 
 const MANIFEST = "complete.json";
 const FORMAT = 1;
@@ -184,13 +184,15 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
     return managed.selectGeneration(newest.directory, () => true, newest);
   }
 
-  async function publishNow(packages, analysisId, isCurrent, managed) {
-    if (!managed.ownsSetting || typeof isCurrent !== "function" || isCurrent() !== true) return false;
+  async function publishNow(packages, analysisId, isCurrent, managed, inputFingerprint) {
+    if (!managed.ownsSetting || typeof isCurrent !== "function" || isCurrent() !== true ||
+        typeof inputFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(inputFingerprint)) return false;
     verifyRoot();
     const existing = currentGenerations(managed);
     const groups = [...packages].filter(([, files]) => files.length).sort(([a], [b]) => a.localeCompare(b));
     let totalInputBytes = 0;
     const paths = new Set();
+    const outputFiles = [];
     for (const [packageName, files] of groups) {
       if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(packageName)) throw new Error("Invalid generated package name");
       const prefix = `${packageName.replaceAll(".", "/")}/`;
@@ -201,11 +203,13 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
             !file.relative_path.endsWith(".pyi") || bytes > MAX_FILE_BYTES || totalInputBytes + bytes > MAX_TOTAL_BYTES) throw new Error("Invalid or oversized generation artifact");
         paths.add(file.relative_path);
         totalInputBytes += bytes;
+        outputFiles.push({ path: file.relative_path, sha256: digest(renderOwnedAnalysisArtifact(packageName, file.relative_path.slice(prefix.length), file.text)) });
       }
     }
-    const preparedText = groups.flatMap(([, files]) => files.map(file => [file.relative_path, file.text])).sort(([a], [b]) => a.localeCompare(b));
-    const inputFingerprint = digest(Buffer.from(JSON.stringify(preparedText)));
+    outputFiles.sort((a, b) => a.path.localeCompare(b.path));
+    const outputFingerprint = digest(Buffer.from(JSON.stringify(outputFiles)));
     if (existing[0]?.manifest.inputFingerprint === inputFingerprint &&
+        existing[0]?.manifest.artifactFingerprint === outputFingerprint &&
         path.resolve(workspace, managed.selectedSetting) === existing[0].directory) return false;
     let sequence = Math.max(0, ...existing.map(item => item.manifest.sequence)) + 1;
     const id = `g-${sequence}-${randomUUID()}`;

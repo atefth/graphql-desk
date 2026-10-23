@@ -266,6 +266,9 @@ test("explicit remote refresh reaches real HTTP and analysis; aborted refresh ca
   assert.equal(analyzed.request.schemas.length, 1);
   assert.equal(analyzed.response.schemas.length, 1);
   assert.equal(analyzed.response.calls.length, 1);
+  const artifacts = await worker.request({ ...analyzedRequest, op: "artifacts" });
+  assert.match(artifacts.input_fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify(artifacts).includes("PRIVATE_MARKER"), false);
   assert.deepEqual(await worker.request({ ...analyzedRequest, op: "current" }), { ok: true, current: true });
   assert.equal(hits, 2);
   slow = true;
@@ -322,5 +325,16 @@ test("extended preparation validates redacted preferences, environment names and
     const pending = worker.request({ ...message(workspace), remote_revisions: [] });
     if (malformed === null) assert.deepEqual(await pending, extended);
     else await assert.rejects(pending, generic);
+  }
+});
+
+test("analysis artifacts require a captured-input fingerprint", async t => {
+  const valid = { ok: true, id: "job", input_fingerprint: "a".repeat(64), projects: [], unavailable_schemas: [] };
+  for (const reply of [valid, { ...valid, input_fingerprint: "private" }]) {
+    const fake = fakeSpawn(child => child.stdout.write(JSON.stringify(reply) + "\n"));
+    const { worker, workspace } = setup(t, fake);
+    const request = { ...message(workspace), op: "artifacts", id: "job", schema_buffers: [] };
+    if (reply.input_fingerprint === "private") await assert.rejects(worker.request(request), generic);
+    else assert.deepEqual(await worker.request(request), valid);
   }
 });

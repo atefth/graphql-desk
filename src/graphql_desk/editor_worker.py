@@ -80,6 +80,92 @@ def _canonical(path: Path) -> Path:
     return Path(os.path.normcase(str(path.resolve())))
 
 
+def _analysis_input_fingerprint(snapshot: EditorSnapshot) -> str:
+    """Hash the exact semantic inputs without serializing schema credentials."""
+    request = snapshot.request
+    modules = cast(list[dict[str, object]], request["modules"])
+    bindings = cast(list[dict[str, object]], request["bindings"])
+    schemas = cast(list[dict[str, object]], request["schemas"])
+    projects: list[dict[str, object]] = []
+    for config in snapshot.project_configs:
+        project = config.path.as_uri()
+        projects.append(
+            {
+                "project": project,
+                "config": {
+                    "root": str(config.root),
+                    "generated_package": config.generated_package,
+                    "schemas": sorted(
+                        [
+                            {
+                                "name": item.name,
+                                "origin": (
+                                    "local"
+                                    if item.origin.local_path is not None
+                                    else "remote"
+                                ),
+                                "local_path": str(item.origin.local_path)
+                                if item.origin.local_path is not None
+                                else None,
+                                "schema_output": str(item.schema_output),
+                                "persisted_output": str(item.persisted_output)
+                                if item.persisted_output is not None
+                                else None,
+                                "cache_output": str(item.cache_output)
+                                if item.cache_output is not None
+                                else None,
+                                "scalars": sorted(
+                                    (scalar.name, scalar.input, scalar.output)
+                                    for scalar in item.scalars
+                                ),
+                                "enums": sorted(item.enums),
+                                "disable_masking": item.disable_masking,
+                            }
+                            for item in config.schemas
+                        ],
+                        key=lambda item: str(item["name"]),
+                    ),
+                    "template": config.template,
+                    "track_field_usage": config.track_field_usage,
+                    "check_colocated_fragments": config.check_colocated_fragments,
+                    "client_directives": config.client_directives,
+                    "schema_refresh_interval": config.schema_refresh_interval,
+                    "disable_preprocessing": config.disable_preprocessing,
+                    "cache_enabled": config.cache_enabled,
+                    "source_roots": [str(item) for item in config.source_roots],
+                    "include": config.include,
+                    "exclude": config.exclude,
+                    "entrypoints": config.entrypoints,
+                    "authoring_roots": [str(item) for item in config.authoring_roots],
+                },
+                "modules": sorted(
+                    (item["module"], item["uri"], item["is_package"], item["source"])
+                    for item in modules
+                    if item["project"] == project
+                ),
+                "bindings": sorted(
+                    json.dumps(
+                        item, sort_keys=True, ensure_ascii=True, separators=(",", ":")
+                    )
+                    for item in bindings
+                    if item["project"] == project
+                ),
+                "schemas": sorted(
+                    (item["schema_name"], item["format"], item["text"])
+                    for item in schemas
+                    if item["project"] == project
+                ),
+            }
+        )
+    payload = json.dumps(
+        {"format": 1, "projects": projects},
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class _Document:
     identity: str
@@ -461,6 +547,7 @@ class EditorWorker:
             return {
                 "ok": True,
                 "id": self._identity,
+                "input_fingerprint": _analysis_input_fingerprint(self._snapshot),
                 "projects": projects,
                 "unavailable_schemas": self._snapshot.unavailable_schemas,
             }
