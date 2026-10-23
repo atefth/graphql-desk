@@ -121,6 +121,22 @@ test("abort and timeout kill active workers; subsequent request starts fresh", a
   }
 });
 
+test("Windows teardown kills the interpreter process tree and falls back to the direct process", {
+  skip: process.platform !== "win32",
+}, async t => {
+  for (const exitCode of [0, 1]) {
+    const fake = fakeSpawn();
+    const { worker, workspace } = setup(t, fake);
+    const active = worker.request(message(workspace));
+    fake.children[0].pid = 4321;
+    worker.dispose();
+    await assert.rejects(active, generic);
+    assert.deepEqual(fake.calls[1].slice(0, 2), [path.join(process.env.SystemRoot, "System32", "taskkill.exe"), ["/PID", "4321", "/T", "/F"]]);
+    fake.children[1].emit("exit", exitCode);
+    assert.equal(fake.children[0].killed, exitCode !== 0, "failed tree termination falls back to killing the worker directly");
+  }
+});
+
 test("final await rejects trust loss, disposal and abort after response arrival", async t => {
   for (const kind of ["trust", "dispose", "abort"]) {
     let trusted = true;

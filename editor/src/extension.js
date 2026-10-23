@@ -49,6 +49,7 @@ function activate(context) {
   let timer;
   let disposed = false;
   let generation = 0;
+  let refreshCancellation;
   let lastSkipReason;
   const outputs = new Map();
   const generations = new Map();
@@ -92,10 +93,10 @@ function activate(context) {
     }
     return true;
   }
-  async function publishTypes(editor, ticket) {
+  async function publishTypes(editor, ticket, token) {
     const document = editor.document;
     const snapshot = controller.snapshot(document);
-    const result = await controller.artifacts(snapshot, undefined, traceSkip);
+    const result = await controller.artifacts(snapshot, token, traceSkip);
     if (!result) return;
     if (result.unavailable_schemas.length) { traceSkip("schema-unavailable"); return; }
     if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
@@ -157,6 +158,10 @@ function activate(context) {
   const refreshVisible = () => {
     generation += 1;
     const ticket = generation;
+    refreshCancellation?.cancel();
+    refreshCancellation?.dispose();
+    refreshCancellation = new vscode.CancellationTokenSource();
+    const token = refreshCancellation.token;
     clearTimeout(timer);
     // Drop published semantic diagnostics immediately; rebuild after the edit settles.
     for (const document of vscode.workspace.textDocuments) language?.close(document.uri);
@@ -165,7 +170,7 @@ function activate(context) {
       for (const editor of vscode.window.visibleTextEditors) {
         if (editor.document.languageId !== "python") continue;
         void Promise.allSettled([language.refresh(editor.document), highlighting.refresh(editor)]).then(() => {
-          if (!disposed && ticket === generation) return publishTypes(editor, ticket);
+          if (!disposed && ticket === generation) return publishTypes(editor, ticket, token);
         });
       }
     }, 100);
@@ -207,7 +212,7 @@ function activate(context) {
   const command = vscode.commands.registerCommand("graphqlDesk.refreshSchema", () => controller.refresh());
   const lifecycle = { async dispose() {
     if (disposed) return;
-    disposed = true; generation += 1; clearTimeout(timer); command.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
+    disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); command.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
     textChanged.dispose(); configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose(); output.dispose();
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
     outputs.clear();

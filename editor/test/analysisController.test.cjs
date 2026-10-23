@@ -186,10 +186,88 @@ test("stale artifact reply is a no-publish result and the worker remains usable"
   } });
   t.after(() => controller.dispose());
   const snapshot = controller.snapshot(fixture.main);
-  assert.equal(await controller.artifacts(snapshot), null);
+  const skipped = [];
+  assert.equal(await controller.artifacts(snapshot, undefined, reason => skipped.push(reason)), null);
+  assert.deepEqual(skipped, ["worker-artifacts-stale"]);
   assert.ok(await controller.analyze(snapshot), "a stale artifact response must not kill the worker");
   assert.equal(requests.filter(operation => operation === "artifacts").length, 1);
   assert.ok(requests.filter(operation => operation === "analyze").length >= 2, "cleared stale analysis is rebuilt");
+});
+
+test("source invalidation aborts active artifact work and discards its late generation", async t => {
+  const fixture = await setup(t);
+  let release;
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  let artifactCalls = 0;
+  let artifactSignal;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, requestOptions) {
+      const reply = await worker.request(message, requestOptions);
+      if (message.op === "artifacts" && ++artifactCalls === 1) {
+        artifactSignal = requestOptions?.signal;
+        started();
+        await held;
+      }
+      return reply;
+    } };
+  } });
+  t.after(() => controller.dispose());
+
+  const snapshot = controller.snapshot(fixture.main);
+  const active = controller.artifacts(snapshot);
+  await ready;
+  fixture.main.version += 1;
+  fixture.main.text += "# invalidating edit\n";
+  fixture.main.isDirty = true;
+  fixture.events.onDidChangeTextDocument.fire({ document: fixture.main });
+  assert.equal(artifactSignal.aborted, true, "invalidation reaches the worker request's cancellation signal");
+  release();
+
+  assert.equal(await active, null, "a worker result returned after cancellation cannot be published");
+  const current = await controller.artifacts(controller.snapshot(fixture.main));
+  assert.ok(current, "the latest source can publish a fresh generation");
+  assert.equal(artifactCalls, 2);
+  controller.dispose();
+});
+
+test("caller cancellation and controller disposal abort active artifacts and reject late generations", async t => {
+  for (const transition of ["caller-cancellation", "disposal"]) {
+    const fixture = await setup(t);
+    let release;
+    let started;
+    const ready = new Promise(resolve => { started = resolve; });
+    const held = new Promise(resolve => { release = resolve; });
+    let artifactSignal;
+    const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+      const worker = createAnalysisWorker(options);
+      let artifactCalls = 0;
+      return { ...worker, async request(message, requestOptions) {
+        const reply = await worker.request(message, requestOptions);
+        if (message.op === "artifacts" && artifactCalls++ === 0) {
+          artifactSignal = requestOptions?.signal;
+          started();
+          await held;
+        }
+        return reply;
+      } };
+    } });
+    const cancellation = event();
+    const token = { isCancellationRequested: false, onCancellationRequested: cancellation.subscribe };
+    const active = controller.artifacts(controller.snapshot(fixture.main), token);
+    await ready;
+    if (transition === "caller-cancellation") {
+      token.isCancellationRequested = true;
+      cancellation.fire();
+    } else controller.dispose();
+    assert.equal(artifactSignal.aborted, true, transition);
+    release();
+    assert.equal(await active, null, `${transition} cannot publish the worker's late result`);
+    if (transition === "caller-cancellation") assert.ok(await controller.artifacts(controller.snapshot(fixture.main)));
+    controller.dispose();
+  }
 });
 
 test("unrelated host documents do not stale artifacts, but required schema edits do", async t => {

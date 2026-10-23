@@ -90,6 +90,10 @@ exports.run = async () => {
       const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", consumerUri, new vscode.Position(line, character)) || [];
       return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
     };
+    const hoverAt = async position => {
+      const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", consumerUri, position) || [];
+      return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
+    };
     const diagnostics = () => vscode.languages.getDiagnostics(consumerUri);
     const observed = { result: "", selected: "", count: "", diagnostics: [] };
     const ready = await until(async () => {
@@ -128,6 +132,44 @@ exports.run = async () => {
     results.lifecycle.publishedRealWorkerArtifacts = generated.initial.length;
     const consumerOnDisk = await fs.readFile(consumerUri.fsPath, "utf8");
     const originalSource = consumer.getText();
+    const selectedPosition = consumer.positionAt(originalSource.indexOf("selected = ") + 2);
+    const otherIdPosition = consumer.positionAt(originalSource.indexOf("other_id = ") + 2);
+    const invalidSource = originalSource.replace("query Pick($limit: Int!) { selected count", "query Pick($limit: Int!) { missing count");
+    assert.notEqual(invalidSource, originalSource);
+    const invalidEdit = new vscode.WorkspaceEdit();
+    invalidEdit.replace(consumer.uri, new vscode.Range(consumer.positionAt(0), consumer.positionAt(consumer.getText().length)), invalidSource);
+    assert.equal(await vscode.workspace.applyEdit(invalidEdit), true);
+    results.lifecycle.invalidOperationIsolation = await until(async () => {
+      const root = selectedStubRoot();
+      const affected = await fs.readFile(path.join(root, "graphql_desk_generated", "_documents", "default", "d0.pyi"), "utf8").catch(() => "");
+      const unaffected = await fs.readFile(path.join(root, "graphql_desk_generated", "_documents", "default", "d1.pyi"), "utf8").catch(() => "");
+      const diagnostic = diagnostics().some(item => /Cannot query field.*missing/.test(item.message));
+      const affectedHover = await hoverAt(selectedPosition);
+      const unaffectedHover = await hoverAt(otherIdPosition);
+      results.lifecycle.invalidOperationProbe = { diagnostic, diagnosticMessages: diagnostics().map(item => `${item.source}:${item.message}`), affectedUnavailable: /GraphqlDeskUnavailable/.test(affected),
+        affectedHover, unaffectedHover, unaffectedPrecise: /\bID\b|\bstr\b/.test(unaffectedHover) && !/\bAny\b/.test(unaffectedHover),
+        unaffectedDocumentTyped: /GraphqlDeskDocument/.test(unaffected) };
+      return diagnostic && results.lifecycle.invalidOperationProbe.affectedUnavailable &&
+        /Unknown/i.test(affectedHover) && !/String|\bstr\b/i.test(affectedHover) &&
+        results.lifecycle.invalidOperationProbe.unaffectedPrecise && results.lifecycle.invalidOperationProbe.unaffectedDocumentTyped;
+    }, "invalid operation is unavailable with a diagnostic while the independent operation stays precisely typed", 45000);
+    assert.ok(results.lifecycle.invalidOperationIsolation, JSON.stringify(results.lifecycle.invalidOperationProbe));
+    const repair = new vscode.WorkspaceEdit();
+    repair.replace(consumer.uri, new vscode.Range(consumer.positionAt(0), consumer.positionAt(consumer.getText().length)), originalSource);
+    assert.equal(await vscode.workspace.applyEdit(repair), true);
+    results.lifecycle.invalidOperationRepair = await until(async () => {
+      const root = selectedStubRoot();
+      const affected = await fs.readFile(path.join(root, "graphql_desk_generated", "_documents", "default", "d0.pyi"), "utf8").catch(() => "");
+      const affectedHover = await hoverAt(selectedPosition);
+      const unaffectedHover = await hoverAt(otherIdPosition);
+      const invalidDiagnostic = diagnostics().some(item => /Cannot query field.*missing/.test(item.message));
+      results.lifecycle.repairedOperationProbe = { affectedDocumentTyped: /GraphqlDeskDocument/.test(affected),
+        affectedHover, unaffectedHover, invalidDiagnostic };
+      return results.lifecycle.repairedOperationProbe.affectedDocumentTyped && /String|str/.test(affectedHover) &&
+        /\bID\b|\bstr\b/.test(unaffectedHover) && !invalidDiagnostic;
+    }, "repair restores affected typing and removes its validation diagnostic", 45000);
+    assert.ok(results.lifecycle.invalidOperationRepair, JSON.stringify(results.lifecycle.repairedOperationProbe));
+    results.lifecycle.unaffectedOperationPreserved = true;
     const documentStubBefore = await fs.readFile(documentStubPath(), "utf8");
     results.lifecycle.unsavedEditBefore = {
       bufferVersion: consumer.version,
