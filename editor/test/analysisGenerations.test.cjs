@@ -60,13 +60,14 @@ test("publishes immutable complete generations and recovers the latest verified 
   assert.equal(fs.readFileSync(path.join(f.root, "user.txt"), "utf8"), "keep");
 });
 
-test("binds identical stubs to distinct source and schema snapshots", async t => {
+test("deduplicates only when both captured inputs and generated stubs match", async t => {
   const f = fixture(t);
   const input1 = createHash("sha256").update("source/schema/config 1").digest("hex");
   const input2 = createHash("sha256").update("source/schema/config 2").digest("hex");
   assert.equal(await publish(f, files("str"), "analysis-1", () => true, input1), true);
   assert.equal(await publish(f, files("str"), "analysis-2", () => true, input1), false);
-  assert.equal(await publish(f, files("str"), "analysis-3", () => true, input2), true);
+  assert.equal(await publish(f, files("int"), "analysis-3", () => true, input1), true);
+  assert.equal(await publish(f, files("int"), "analysis-4", () => true, input2), true);
   const latest = f.publisher.current(f.managed)[0];
   assert.equal(latest.manifest.inputFingerprint, input2);
   assert.equal(latest.manifest.files[0].path, "graphql_desk_generated/_documents/default/d0.pyi");
