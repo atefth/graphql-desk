@@ -26,6 +26,7 @@ async function run() {
     "schema.graphql": schema,
     "pyproject.toml": '[tool.graphql-desk]\nschema="schema.graphql"\nclient_directives=["local"]\nschema_output="graphql_desk_generated/default.pyi"\n',
     "main.py": 'raise RuntimeError("PROJECT_MUST_NOT_EXECUTE")\nfrom graphql_desk import gql\nq=gql("{ user { missing old } }")\n',
+    "outline.py": "from graphql_desk import gql\nq=gql('query Main { user { id } }')\n",
     "partial.py": 'from graphql_desk import gql\nq=gql("{ user { na")\n',
     "selected.py": 'outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql("{ user { name @local ...Card } }",[card])\n',
     "fragments.py": 'from graphql_desk import gql\ncard=gql("fragment Card on User { id }")\n',
@@ -39,6 +40,16 @@ async function run() {
   }
   const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
   assert.ok(extension); await extension.activate(); assert.equal(extension.isActive, true);
+  const symbolText = (document, range) => document.getText().slice(document.offsetAt(range.start), document.offsetAt(range.end));
+  const documentSymbols = async document => await vscode.commands.executeCommand("vscode.executeDocumentSymbolProvider", document.uri) || [];
+  const mainSymbols = await until(() => documentSymbols(documents.get("outline.py")), values => values.some(item => item.name === "Main"), "Native operation Outline symbol");
+  const fragmentSymbols = await until(() => documentSymbols(documents.get("fragments.py")), values => values.some(item => item.name === "Card"), "Native fragment Outline symbol");
+  const operationSymbol = mainSymbols.find(item => item.name === "Main");
+  const fragmentSymbol = fragmentSymbols.find(item => item.name === "Card");
+  assert.equal(symbolText(documents.get("outline.py"), operationSymbol.selectionRange), "Main");
+  assert.equal(symbolText(documents.get("fragments.py"), fragmentSymbol.selectionRange), "Card");
+  assert.equal(symbolText(documents.get("outline.py"), operationSymbol.range), "gql('query Main { user { id } }')");
+  assert.equal(symbolText(documents.get("fragments.py"), fragmentSymbol.range), 'gql("fragment Card on User { id }")');
   for (const [id, version] of [["ms-python.python", "2026.10.0"], ["ms-python.vscode-pylance", "2026.4.1"]]) {
     const native = vscode.extensions.getExtension(id); assert.ok(native); assert.equal(native.packageJSON.version, version); await native.activate();
   }
