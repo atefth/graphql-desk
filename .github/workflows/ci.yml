@@ -94,6 +94,11 @@ jobs:
         with:
           node-version: "22"
       - run: uv sync --locked
+      - if: runner.os == 'Windows'
+        run: |
+          uv python install 3.12
+          uv venv --python 3.12 .venv-alt
+          uv pip install --python .venv-alt/Scripts/python.exe -e .
       - run: npm ci --ignore-scripts
         working-directory: editor
       - run: npm test
@@ -111,6 +116,8 @@ jobs:
       - run: node --check test/lifecycle.host.cjs
         working-directory: editor
       - if: runner.os == 'Windows'
+        env:
+          GRAPHQL_DESK_ALTERNATE_PYTHON: ${{ github.workspace }}/.venv-alt/Scripts/python.exe
         run: node test/run-host.cjs 1.142.0 typingMatrix
         working-directory: editor
       - if: runner.os == 'Windows'
