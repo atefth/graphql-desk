@@ -723,9 +723,7 @@ if TYPE_CHECKING:
         self.assertEqual(owner_module["module"], "main")
         self.assertNotEqual(owner["codepoint"], owner["utf16"])
         dependencies = cast(list[dict[str, object]], provenance[0]["dependencies"])
-        self.assertIn(
-            "main", [item["module"] for item in dependencies]
-        )
+        self.assertIn("main", [item["module"] for item in dependencies])
         files = cast(list[dict[str, str]], projects[0]["files"])
         self.assertIn(
             "graphql_desk_generated/default.pyi",
