@@ -24,6 +24,34 @@ const original = [
   { relative_path: "graphql_desk_generated/default_ast.pyi", text: "class Exact: ...\n" },
 ];
 
+test("a removed workspace rejects publication but cleans up its verified session files", async t => {
+  const f = fixture(t);
+  const handle = f.make(original);
+  f.vscode.workspace.getWorkspaceFolder = () => undefined;
+  await assert.rejects(handle.publish(original, () => true), /ownership changed/);
+  await handle.cleanup();
+  assert.deepEqual(fs.readdirSync(f.root), ["preexisting.txt"]);
+  assert.equal(fs.readFileSync(path.join(f.root, "preexisting.txt"), "utf8"), "keep");
+  assert.throws(() => f.make(original), /ownership changed/);
+});
+
+test("detached cleanup preserves dirty files, changed owners and untrusted workspaces", async t => {
+  for (const conflict of ["dirty", "owner", "trust", "foreign"]) {
+    const f = fixture(t);
+    const handle = f.make(original);
+    const file = path.join(f.root, "graphql_desk_generated", "default.pyi");
+    f.vscode.workspace.getWorkspaceFolder = () => undefined;
+    if (conflict === "dirty") f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(file), isDirty: true });
+    if (conflict === "owner") f.vscode.workspace.getWorkspaceFolder = () => ({ uri: { fsPath: path.dirname(f.workspace) } });
+    if (conflict === "trust") f.vscode.workspace.isTrusted = false;
+    if (conflict === "foreign") fs.writeFileSync(file, "user contents\n");
+    const before = fs.readFileSync(file);
+    await assert.rejects(handle.cleanup(), /user edits|ownership changed|not trusted|changed externally/);
+    assert.deepEqual(fs.readFileSync(file), before);
+    assert.equal(await handle.publish(original, () => true), false);
+  }
+});
+
 test("publishes a multi-file stub generation, removes only obsolete owned files, and cleans up", async t => {
   const f = fixture(t);
   const handle = f.make(original);

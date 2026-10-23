@@ -45,14 +45,15 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "discovery", "activation", "ownedAnalysis", "factoryArtifacts"].includes(suite), "Choose a known isolated suite");
+  assert.ok(["features", "discovery", "activation", "ownedAnalysis", "factoryArtifacts", "workspaceRemoval"].includes(suite), "Choose a known isolated suite");
+  const factorySuite = ["factoryArtifacts", "workspaceRemoval"].includes(suite);
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
   const extensions = path.resolve(__dirname, "..", ".vscode-test", `features-${version}`, "extensions");
   const result = path.join(temporary, "result.json");
   const artifacts = path.join(temporary, "artifacts.json");
-  const stubRoot = suite === "factoryArtifacts" ? path.join(workspace, ".graphql-desk", "typings") : path.join(workspace, "owned_analysis_stubs");
+  const stubRoot = factorySuite ? path.join(workspace, ".graphql-desk", "typings") : path.join(workspace, "owned_analysis_stubs");
   const python = process.env.GRAPHQL_DESK_PYTHON || path.resolve(__dirname, "..", "..", ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
   assert.ok(path.isAbsolute(python), "Choose an absolute trusted Python interpreter");
   await fs.mkdir(path.join(workspace, ".vscode"), { recursive: true });
@@ -62,11 +63,12 @@ async function main() {
     "telemetry.telemetryLevel": "off",
     "files.autoSave": "off",
     "python.defaultInterpreterPath": python,
-    "graphqlDesk.pythonPath": suite === "factoryArtifacts" ? python : "",
+    "graphqlDesk.pythonPath": factorySuite ? python : "",
     "python.experiments.enabled": false,
     "python.analysis.aiHoverSummaries": false,
     ...(suite === "ownedAnalysis" ? { "python.analysis.typeCheckingMode": "strict", "python.analysis.stubPath": stubRoot } : {}),
-    ...(suite === "factoryArtifacts" ? { "python.analysis.typeCheckingMode": "strict" } : {}),
+    ...(factorySuite ? { "python.analysis.typeCheckingMode": "strict" } : {}),
+    ...(suite === "workspaceRemoval" ? { "python.analysis.stubPath": ".graphql-desk/typings" } : {}),
   }));
   if (suite === "ownedAnalysis") {
     await fs.mkdir(stubRoot);
@@ -79,7 +81,7 @@ async function main() {
     };
     await Promise.all(Object.entries(files).map(([name, text]) => fs.writeFile(path.join(workspace, name), text)));
   }
-  if (suite === "factoryArtifacts") {
+  if (factorySuite) {
     await fs.mkdir(path.join(workspace, ".graphql-desk"));
     await fs.writeFile(path.join(workspace, ".graphql-desk", "keep.txt"), "preserve this user file");
     const sourcePath = path.join(workspace, "consumer.py");
@@ -122,6 +124,16 @@ async function main() {
     console.log(`Captured ${generated.initial.length} initial and ${generated.nullable.length} nullable factory stub files.`);
   }
   const isolation = [`--user-data-dir=${profile}`, `--extensions-dir=${extensions}`];
+  let launchTarget = workspace;
+  if (suite === "workspaceRemoval") {
+    const removedWorkspace = path.join(temporary, "removed-workspace");
+    await fs.mkdir(removedWorkspace);
+    launchTarget = path.join(temporary, "lifecycle.code-workspace");
+    await fs.writeFile(launchTarget, JSON.stringify({
+      folders: [{ path: workspace }, { path: removedWorkspace }],
+      settings: JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")),
+    }));
+  }
   for (const extension of ["ms-python.python@2026.10.0", "ms-python.vscode-pylance@2026.4.1"]) {
     await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], { version });
   }
@@ -137,10 +149,10 @@ async function main() {
       GRAPHQL_DESK_STUB_ROOT: stubRoot,
       GRAPHQL_DESK_ARTIFACTS_PATH: artifacts,
     },
-    launchArgs: [workspace, ...isolation, "--disable-updates", "--disable-telemetry", "--skip-welcome", "--skip-release-notes", "--disable-workspace-trust"],
+    launchArgs: [launchTarget, ...isolation, "--disable-updates", "--disable-telemetry", "--skip-welcome", "--skip-release-notes", "--disable-workspace-trust"],
   });
   const observed = JSON.parse(await fs.readFile(result, "utf8"));
-  if (suite === "factoryArtifacts") {
+  if (factorySuite) {
     await assert.rejects(fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated")), { code: "ENOENT" }, "Extension shutdown must remove only its owned generated package");
     await assert.rejects(fs.access(path.join(workspace, ".graphql-desk", "typings", "graphql_desk_generated")), { code: "ENOENT" }, "Reconfiguring stubPath must remove only the old owned package");
     assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
@@ -151,7 +163,7 @@ async function main() {
     observed.lifecycle.userConfigurationPreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   }
-  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : `read-only-${suite}-observed`);
+  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : `read-only-${suite}-observed`);
   console.log(`${suite} evidence: ${result}`);
 }
 
