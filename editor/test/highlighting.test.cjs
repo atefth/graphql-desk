@@ -85,6 +85,7 @@ test("lexical candidates exclude lookalikes, strings/comments as imports, interp
   const unrelated = [
     "gql('query { field }')",
     "from other import gql\nq=gql('query { field }')",
+    "def helper():\n    from graphql_desk import gql\nq=gql('''query { field",
     "# from graphql_desk import gql\nq=gql('query { field }')",
     "'''from graphql_desk import gql'''\nq=gql('query { field }')",
     "from graphql_desk import gql\nq=gql(f'query { field }')",
