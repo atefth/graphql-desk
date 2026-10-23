@@ -664,6 +664,84 @@ if TYPE_CHECKING:
                 else [],
             )
 
+    def test_syntax_error_keeps_sibling_types_and_repair_restores_them(self) -> None:
+        self.schema.write_text("type Query {value:String!}", encoding="utf8")
+        source = """from typing import TYPE_CHECKING, TypeVar
+from typing_extensions import assert_type
+from graphql_desk import TypedDocument
+from graphql_desk_generated.default import graphql
+from graphql_desk_generated.sources.main import GoodResult, GoodVariables
+broken=graphql("query Broken { value")
+good=graphql("query Good { value }")
+if TYPE_CHECKING:
+ R=TypeVar("R")
+ V=TypeVar("V")
+ def execute(document:TypedDocument[R,V],variables:V)->R: raise RuntimeError
+ assert_type(execute(good,GoodVariables()),GoodResult)
+ execute(broken,GoodVariables()) # error
+"""
+
+        def typecheck(text: str, *, expect_broken_error: bool) -> None:
+            version = 2 if expect_broken_error else 3
+            self.source.write_text(text, encoding="utf8")
+            capture = self.capture()
+            capture["documents"] = [self.document(self.source, version)]
+            capture["buffers"] = [self.buffer(self.source, text, version)]
+            identity = self.prepare(capture)
+            analyzed = self.analyze(capture, identity)
+            self.assertTrue(analyzed["ok"], analyzed)
+            result = self.worker.handle(
+                {"op": "artifacts", **capture, "id": identity, "schema_buffers": []}
+            )
+            self.assertTrue(result["ok"], result)
+            project = cast(list[dict[str, object]], result["projects"])[0]
+            diagnostics = cast(list[dict[str, object]], project["diagnostics"])
+            self.assertEqual(
+                [item["code"] for item in diagnostics],
+                ["invalid-fragments"] if expect_broken_error else [],
+            )
+            files = cast(list[dict[str, str]], project["files"])
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                for file in files:
+                    path = root / file["relative_path"]
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(file["text"], encoding="utf8")
+                (root / "main.py").write_text(text, encoding="utf8")
+                errors = (
+                    {
+                        "main.py": {
+                            next(
+                                number
+                                for number, line in enumerate(text.splitlines(), 1)
+                                if "execute(broken" in line
+                            )
+                        }
+                    }
+                    if expect_broken_error
+                    else None
+                )
+                factory_tests.FactoryGenerationTests().check(root, errors)
+
+        typecheck(source, expect_broken_error=True)
+        repaired = (
+            source.replace(
+                'broken=graphql("query Broken { value")',
+                'broken=graphql("query Broken { value }")',
+            )
+            .replace(
+                "from graphql_desk_generated.sources.main import "
+                "GoodResult, GoodVariables\n",
+                "from graphql_desk_generated.sources.main import "
+                "GoodResult, GoodVariables, BrokenResult\n",
+            )
+            .replace(
+                " execute(broken,GoodVariables()) # error",
+                " assert_type(execute(broken,GoodVariables()),BrokenResult)",
+            )
+        )
+        typecheck(repaired, expect_broken_error=False)
+
     def test_factory_artifacts_require_exact_current_analyzed_capture(self) -> None:
         capture = self.capture()
         identity = self.prepare(capture)
