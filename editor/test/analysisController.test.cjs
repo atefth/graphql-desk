@@ -134,15 +134,17 @@ test("managed runtime companions are excluded from project source candidates", a
   assert.ok(await controller.analyze(controller.snapshot(fixture.main)), JSON.stringify(requests));
   const prepare = requests.find(message => message.op === "prepare");
   assert.ok(prepare);
-  assert.deepEqual(prepare.candidates.map(value => value.toLowerCase()), [path.join(fixture.root, "main.py").toLowerCase()]);
+  const canonicalMain = await fs.realpath(fixture.main.uri.fsPath);
+  assert.deepEqual(prepare.candidates.map(value => value.toLowerCase()), [canonicalMain.toLowerCase()]);
 });
 
 test("a custom stubPath excludes only generated artifacts, not user source modules", async t => {
   const fixture = await setup(t);
-  const userSource = path.join(fixture.root, "src", "main.py");
-  const generatedSource = path.join(fixture.root, "src", "graphql_desk_generated", "generated.py");
-  const largeGeneratedSource = path.join(fixture.root, "src", "graphql_desk_generated", "large.py");
-  const forgedSource = path.join(fixture.root, "src", "forged.py");
+  const canonicalRoot = await fs.realpath(fixture.root);
+  const userSource = path.join(canonicalRoot, "src", "main.py");
+  const generatedSource = path.join(canonicalRoot, "src", "graphql_desk_generated", "generated.py");
+  const largeGeneratedSource = path.join(canonicalRoot, "src", "graphql_desk_generated", "large.py");
+  const forgedSource = path.join(canonicalRoot, "src", "forged.py");
   await fs.mkdir(path.dirname(userSource), { recursive: true });
   await fs.writeFile(userSource, "value = 1\n");
   await fs.mkdir(path.dirname(generatedSource), { recursive: true });
@@ -165,7 +167,7 @@ test("a custom stubPath excludes only generated artifacts, not user source modul
   assert.ok(prepare);
   const candidates = prepare.candidates.map(value => value.toLowerCase());
   assert.ok(candidates.includes(userSource.toLowerCase()), "a user module under stubPath remains a source candidate");
-  assert.ok(candidates.includes(path.join(fixture.root, "src", "unsaved.py").toLowerCase()), "a dirty user module under stubPath remains a source candidate");
+  assert.ok(candidates.includes(path.join(canonicalRoot, "src", "unsaved.py").toLowerCase()), "a dirty user module under stubPath remains a source candidate");
   assert.ok(candidates.includes(forgedSource.toLowerCase()), "a forged or copied marker with the wrong digest remains a source candidate");
   assert.ok(!candidates.includes(generatedSource.toLowerCase()), "a generated runtime artifact is excluded");
   assert.ok(!candidates.includes(largeGeneratedSource.toLowerCase()), "a valid generated artifact with the maximum permitted source body is excluded");
