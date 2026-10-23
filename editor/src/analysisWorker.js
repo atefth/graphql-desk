@@ -68,6 +68,37 @@ function validReply(reply, request) {
     const identifier = value => typeof value === "string" && /^[\p{ID_Start}_][\p{ID_Continue}_]*$/u.test(value);
     const span = value => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 && Number.isSafeInteger(value.end) && value.end >= value.start;
     const module = value => keys(value, ["project", "module", "uri", "version"]) && [value.project, value.module, value.uri].every(string) && Number.isSafeInteger(value.version) && value.version >= 0;
+    const provenanceIdentity = value => keys(value, ["module", "codepoint", "utf16"]) && module(value.module) && span(value.codepoint) && span(value.utf16);
+    const provenance = value => keys(value, ["owner", "selector", "operation_name", "operation_kind", "schema_identity", "context_token", "binding", "status", "declaration_path", "declaration_symbol", "source_exports", "dependencies", "direct_fragments", "definition_owners", "canonical_owner", "selector_known", "source_dependencies_known", "schema_dependencies", "config_dependencies"]) &&
+      provenanceIdentity(value.owner) && (value.selector === null || string(value.selector)) && (value.operation_name === null || string(value.operation_name)) &&
+      (value.operation_kind === null || ["query", "mutation", "subscription", "fragment"].includes(value.operation_kind)) &&
+      (value.schema_identity === null || (Array.isArray(value.schema_identity) && value.schema_identity.length === 2 && value.schema_identity.every(string))) &&
+      (value.context_token === null || string(value.context_token)) && (value.binding === null || string(value.binding)) &&
+      ["precise", "unavailable", "rejected"].includes(value.status) &&
+      (value.declaration_path === null || (string(value.declaration_path) && !value.declaration_path.includes("\\") && !path.posix.isAbsolute(value.declaration_path) && value.declaration_path.split("/").every(part => part && part !== "." && part !== ".."))) &&
+      (value.declaration_symbol === null || identifier(value.declaration_symbol)) &&
+      Array.isArray(value.source_exports) && value.source_exports.every(item => keys(item, ["relative_path", "symbol", "alias"]) && string(item.relative_path) && !item.relative_path.includes("\\") && !path.posix.isAbsolute(item.relative_path) && item.relative_path.split("/").every(part => part && part !== "." && part !== "..") && identifier(item.symbol) && identifier(item.alias)) &&
+      Array.isArray(value.dependencies) && value.dependencies.every(module) && new Set(value.dependencies.map(item => `${item.project}\0${item.module}\0${item.uri}\0${item.version}`)).size === value.dependencies.length &&
+      (value.direct_fragments === null || (Array.isArray(value.direct_fragments) && value.direct_fragments.every(provenanceIdentity))) &&
+      (value.definition_owners === null || (Array.isArray(value.definition_owners) && value.definition_owners.every(provenanceIdentity))) &&
+      (value.canonical_owner === null || provenanceIdentity(value.canonical_owner)) &&
+      typeof value.selector_known === "boolean" && typeof value.source_dependencies_known === "boolean" &&
+      value.schema_dependencies === "unknown" && value.config_dependencies === "unknown";
+    const validProvenance = project => {
+      if (!Array.isArray(project.provenance) || !project.provenance.every(provenance)) return false;
+      const prefix = `${project.generated_package.replaceAll(".", "/")}/`;
+      const files = new Set(project.files.map(file => file.relative_path));
+      const owners = new Set(project.provenance.map(value => JSON.stringify(value.owner)));
+      return new Set(project.provenance.map(value => JSON.stringify(value.owner))).size === project.provenance.length &&
+        project.provenance.every(value => {
+          const references = [...(value.direct_fragments ?? []), ...(value.definition_owners ?? []), ...(value.canonical_owner ? [value.canonical_owner] : [])];
+          return value.owner.module.project === project.project &&
+            value.dependencies.every(item => item.project === project.project) &&
+            references.every(item => item.module.project === project.project && owners.has(JSON.stringify(item))) &&
+            (value.declaration_path === null || (value.declaration_path.startsWith(prefix) && value.declaration_path.endsWith(".pyi") && files.has(value.declaration_path))) &&
+            value.source_exports.every(item => item.relative_path.startsWith(`${prefix}sources/`) && files.has(item.relative_path));
+        });
+    };
     const diagnostic = value => keys(value, ["module", "code", "message", "range"]) && module(value.module) && string(value.code) && string(value.message) &&
       keys(value.range, ["codepoint", "utf16"]) && span(value.range.codepoint) && span(value.range.utf16);
     const file = value => keys(value, ["relative_path", "text"]) && typeof value.text === "string" && string(value.relative_path) &&
@@ -79,9 +110,10 @@ function validReply(reply, request) {
       Array.isArray(reply.unavailable_schemas) && reply.unavailable_schemas.every(value => Array.isArray(value) && value.length === 2 && value.every(string) && reply.projects.some(project => project?.project === value[0])) &&
       new Set(reply.unavailable_schemas.map(value => JSON.stringify(value))).size === reply.unavailable_schemas.length &&
       new Set(reply.projects.map(project => project?.project)).size === reply.projects.length && reply.projects.every(project =>
-        keys(project, ["project", "generated_package", "files", "diagnostics"]) && string(project.project) && string(project.generated_package) && project.generated_package.split(".").every(identifier) &&
+        keys(project, ["project", "generated_package", "files", "diagnostics", "provenance"]) && string(project.project) && string(project.generated_package) && project.generated_package.split(".").every(identifier) &&
         Array.isArray(project.files) && project.files.every(value => file(value) && value.relative_path.startsWith(project.generated_package.replaceAll(".", "/") + "/")) && new Set(project.files.map(file => file.relative_path.toLowerCase())).size === project.files.length &&
-        Array.isArray(project.diagnostics) && project.diagnostics.every(value => diagnostic(value) && value.module.project === project.project));
+        Array.isArray(project.diagnostics) && project.diagnostics.every(value => diagnostic(value) && value.module.project === project.project) &&
+        validProvenance(project));
   }
   return keys(reply, ["ok", "id", "request", "response", "unavailable_schemas", "remote_schemas"]) && reply.id === request.id &&
     Array.isArray(reply.remote_schemas) && reply.remote_schemas.every(item =>

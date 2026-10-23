@@ -31,6 +31,7 @@ from .factory_generation import FactoryArtifacts, generate_project_factory_artif
 from .fragments import FragmentIndex
 from .schema_url import load_from_url
 from .source_graph import IncrementalResolver, ModuleDependency
+from .source_maps import convert_offset
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
 _CAPTURE_KEYS = {"workspace", "candidates", "buffers", "documents", "editor_fallback"}
@@ -178,6 +179,68 @@ def _saved_source_fingerprint(snapshot: EditorSnapshot) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf8")).hexdigest()
+
+
+def _provenance_identity(
+    value: object, snapshots: dict[ModuleDependency, str]
+) -> dict[str, object]:
+    from .source_graph import DocumentIdentity
+
+    if not isinstance(value, DocumentIdentity):
+        raise ValueError("Invalid operation provenance identity")
+    source = snapshots[value.module]
+    return {
+        "module": {
+            "project": value.module.project,
+            "module": value.module.module,
+            "uri": value.module.uri,
+            "version": value.module.version,
+        },
+        "codepoint": {"start": value.call_range.start, "end": value.call_range.end},
+        "utf16": {
+            "start": convert_offset(source, value.call_range.start),
+            "end": convert_offset(source, value.call_range.end),
+        },
+    }
+
+
+def _operation_provenance(
+    records: tuple[object, ...], snapshots: dict[ModuleDependency, str]
+) -> list[dict[str, object]]:
+    from dataclasses import asdict
+
+    from .factory_generation import OperationProvenance
+
+    result: list[dict[str, object]] = []
+    for record in records:
+        if not isinstance(record, OperationProvenance):
+            raise ValueError("Invalid operation provenance")
+        serialized = asdict(record)
+        serialized["owner"] = _provenance_identity(record.owner, snapshots)
+        for field_name in ("direct_fragments", "definition_owners"):
+            values = getattr(record, field_name)
+            serialized[field_name] = (
+                None
+                if values is None
+                else [_provenance_identity(value, snapshots) for value in values]
+            )
+        serialized["canonical_owner"] = (
+            None
+            if record.canonical_owner is None
+            else _provenance_identity(record.canonical_owner, snapshots)
+        )
+        serialized["dependencies"] = [
+            {
+                "project": item.project,
+                "module": item.module,
+                "uri": item.uri,
+                "version": item.version,
+            }
+            for item in record.dependencies
+        ]
+        serialized["source_exports"] = [asdict(item) for item in record.source_exports]
+        result.append(serialized)
+    return result
 
 
 @dataclass(frozen=True)
@@ -556,6 +619,9 @@ class EditorWorker:
                             editor_diagnostic(diagnostic, snapshots)
                             for diagnostic in artifacts.diagnostics
                         ],
+                        "provenance": _operation_provenance(
+                            artifacts.provenance, snapshots
+                        ),
                     }
                 )
             return {

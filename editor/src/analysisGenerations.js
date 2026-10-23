@@ -179,13 +179,17 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
     return true;
   }
 
-  async function recoverNow(managed) {
-    if (!managed.ownsSetting) return false;
+  async function recoverNow(managed, isCurrent, inputFingerprint, savedSourceFingerprint) {
+    if (!managed.ownsSetting || typeof isCurrent !== "function" || isCurrent() !== true ||
+        typeof inputFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(inputFingerprint) ||
+        typeof savedSourceFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(savedSourceFingerprint)) return false;
     verifyRoot();
-    const newest = currentGenerations(managed)[0];
+    const newest = currentGenerations(managed).find(item => item.manifest.inputFingerprint === inputFingerprint &&
+      item.manifest.savedSourceFingerprint === savedSourceFingerprint);
     if (!newest || path.resolve(managed.selectedSetting ? path.resolve(workspace, managed.selectedSetting) : "") === newest.directory) return false;
+    if (isCurrent() !== true) return false;
     verifyRoot();
-    return managed.selectGeneration(newest.directory, () => true, newest);
+    return managed.selectGeneration(newest.directory, isCurrent, newest);
   }
 
   async function publishNow(packages, analysisId, isCurrent, managed, inputFingerprint, savedSourceFingerprint) {

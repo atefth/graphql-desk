@@ -354,3 +354,36 @@ test("analysis artifacts require captured live and saved-source fingerprints", a
     else assert.deepEqual(await worker.request(request), valid);
   }
 });
+
+test("analysis artifacts validate operation provenance at the worker boundary", async t => {
+  const module = { project: "p", module: "main", uri: "file:///main.py", version: 1 };
+  const identity = { module, codepoint: { start: 0, end: 8 }, utf16: { start: 0, end: 8 } };
+  const record = { owner: identity, selector: "query Q { x }", operation_name: "Q", operation_kind: "query",
+    schema_identity: ["p", "default"], context_token: "schema-token", binding: "graphql", status: "precise",
+    declaration_path: "graphql_desk_generated/_documents/default/d0.pyi", declaration_symbol: "Operation_Q", source_exports: [],
+    dependencies: [module], direct_fragments: [], definition_owners: [identity], canonical_owner: identity,
+    selector_known: true, source_dependencies_known: true, schema_dependencies: "unknown", config_dependencies: "unknown" };
+  const project = { project: "p", generated_package: "graphql_desk_generated", files: [
+    { relative_path: "graphql_desk_generated/_documents/default/d0.pyi", text: "" },
+  ], diagnostics: [], provenance: [record] };
+  const valid = { ok: true, id: "job", input_fingerprint: "a".repeat(64), saved_source_fingerprint: "b".repeat(64), projects: [project], unavailable_schemas: [] };
+  const malformed = [
+    { ...record, owner: { ...identity, utf16: { start: 9, end: 8 } } },
+    { ...record, declaration_path: "../outside.pyi" },
+    { ...record, dependencies: [{ ...module, version: -1 }] },
+    { ...record, dependencies: [{ ...module, project: "q" }] },
+    { ...record, direct_fragments: [{ ...identity, module: { ...module, project: "q" } }] },
+    { ...record, definition_owners: [{ ...identity, codepoint: { start: 9, end: 10 }, utf16: { start: 9, end: 10 } }] },
+    { ...record, declaration_path: "graphql_desk_generated/_documents/missing.pyi" },
+    { ...record, source_exports: [{ relative_path: "graphql_desk_generated/sources/main.pyi", symbol: "Doc", alias: "Doc" }] },
+    { ...record, unexpected: true },
+  ];
+  for (const reply of [valid, ...malformed.map(provenance => ({ ...valid,
+    projects: [{ ...project, provenance: [provenance] }] }))]) {
+    const fake = fakeSpawn(child => child.stdout.write(JSON.stringify(reply) + "\n"));
+    const { worker, workspace } = setup(t, fake);
+    const request = { ...message(workspace), op: "artifacts", id: "job", schema_buffers: [] };
+    if (reply === valid) assert.deepEqual(await worker.request(request), valid);
+    else await assert.rejects(worker.request(request), generic);
+  }
+});
