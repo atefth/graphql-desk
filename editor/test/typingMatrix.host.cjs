@@ -176,7 +176,9 @@ exports.run = async () => {
       results.pylance.abstractAliasName = await semanticHover("aliased_user_name");
       results.pylance.abstractAliasNegative = semanticErrors("aliased_wrong_title");
       results.pylance.abstractNoFabricatedKeyErrors = semanticErrors("without_implicit_typename");
-      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      let settings;
+      try { settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")); }
+      catch { return false; }
       const root = path.resolve(workspace, settings["python.analysis.stubPath"]);
       const sourceStub = path.join(root, "graphql_desk_generated", "sources", "operation_semantics.pyi");
       let sourceDeclarations = "";
@@ -184,7 +186,8 @@ exports.run = async () => {
       const resultModule = sourceDeclarations.match(/^from ([\w.]+) import GraphqlDeskResult as AbstractResult$/m)?.[1];
       if (!resultModule) return false;
       const generated = path.join(root, ...resultModule.split(".")) + ".pyi";
-      const stub = await fs.readFile(generated, "utf8");
+      let stub;
+      try { stub = await fs.readFile(generated, "utf8"); } catch { return false; }
       results.pylance.abstractGenerated = stub.includes("Literal['User']") && stub.includes("Literal['Org']") &&
         stub.includes("'kind': \"Literal['User']\"") && stub.includes("'__typename': NotRequired");
       return /: str\b|: String\b/.test(results.pylance.abstractName) &&
@@ -266,7 +269,9 @@ exports.run = async () => {
     await fs.unlink(semanticPath);
     await vscode.window.showTextDocument(document, { preview: false });
     const temporaryCompanionRemoved = await until(async () => {
-      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      let settings;
+      try { settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")); }
+      catch { return false; }
       const root = path.resolve(workspace, settings["python.analysis.stubPath"]);
       return fs.access(path.join(root, "graphql_desk_generated", "sources", "operation_semantics.pyi"))
         .then(() => false, () => true);
