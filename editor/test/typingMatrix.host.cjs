@@ -39,6 +39,7 @@ function pythonVersion(python) {
 exports.run = async () => {
   const results = { host: vscode.version, pylance: {}, lifecycle: { invalidationAndRepair: {} } };
   let settingChanges;
+  let diagnosticChanges;
   try {
     for (const id of ["ms-python.python", "ms-python.vscode-pylance"]) {
       const extension = vscode.extensions.getExtension(id);
@@ -100,9 +101,15 @@ exports.run = async () => {
       return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
     };
     const selectedStubPaths = [];
+    const typingDiagnostics = [];
     settingChanges = vscode.workspace.onDidChangeConfiguration(event => {
       if (event.affectsConfiguration("python.analysis.stubPath", consumerUri)) {
         selectedStubPaths.push(vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""));
+      }
+    });
+    diagnosticChanges = vscode.languages.onDidChangeDiagnostics(event => {
+      if (event.uris.some(changed => changed.toString() === uri.toString())) {
+        typingDiagnostics.push(vscode.languages.getDiagnostics(uri).map(item => ({ source: item.source, message: item.message })));
       }
     });
     const observeQuarantine = async (label, after, selectionOffset) => {
@@ -185,6 +192,7 @@ exports.run = async () => {
     const invalidConsumer = originalConsumer.replace("{ selected count(limit: $limit) }", "{ missing count(limit: $limit) }");
     assert.notEqual(invalidConsumer, originalConsumer, "Consumer fixture must contain the selected operation field");
     const sourceSelectionOffset = selectedStubPaths.length;
+    const sourceDiagnosticOffset = typingDiagnostics.length;
     const sourceQuarantineStarted = Date.now();
     await replaceText(document, "{ selected count(limit: $limit) }", "{ missing count(limit: $limit) }");
     results.lifecycle.invalidationAndRepair.immediateQuarantine = await observeQuarantine("Invalid source edit", sourceQuarantineStarted, sourceSelectionOffset);
@@ -192,6 +200,8 @@ exports.run = async () => {
       const selectedType = await selectedHover();
       const unaffectedType = await otherIdHover();
       const diagnostics = vscode.languages.getDiagnostics(uri).map(item => ({ source: item.source, message: item.message }));
+      const suspendedTypingObserved = typingDiagnostics.slice(sourceDiagnosticOffset).some(items => items.some(item =>
+        item.source === "GraphQL Desk" && /suspended typing/i.test(item.message)));
       let manifestStatus;
       try {
         const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
@@ -201,12 +211,12 @@ exports.run = async () => {
         manifestStatus = Object.fromEntries(operations.map(item => [item.binding, item.status]));
       } catch { /* Wait for the complete generation selected by GraphQL Desk. */ }
       results.lifecycle.invalidationAndRepair.invalidEditProbe = {
-        selectedType, unaffectedType, dirty: document.isDirty,
+        selectedType, unaffectedType, dirty: document.isDirty, suspendedTypingObserved,
         diskUnchanged: (await fs.readFile(consumerUri.fsPath, "utf8")) === originalConsumer, diagnostics, manifestStatus,
       };
       return /Never|NoReturn|Unknown/.test(selectedType) && /\bID\b/.test(unaffectedType) &&
         manifestStatus?.doc === "unavailable" && manifestStatus?.other_doc === "precise" &&
-        diagnostics.some(item => item.source === "GraphQL Desk" && /suspended typing/i.test(item.message)) &&
+        suspendedTypingObserved &&
         diagnostics.some(item => /GraphQL/i.test(item.source || "") && /missing/i.test(item.message));
     }, "invalid GraphQL edit makes only its operation unavailable, reports a diagnostic, and preserves its dirty source and sibling typing", 60000);
     assert.ok(results.lifecycle.invalidationAndRepair.invalidEditQuarantine,
@@ -278,6 +288,7 @@ exports.run = async () => {
     throw error;
   } finally {
     settingChanges?.dispose();
+    diagnosticChanges?.dispose();
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
     console.log(`GRAPHQL_DESK_TYPING_MATRIX ${JSON.stringify(results)}`);
   }
