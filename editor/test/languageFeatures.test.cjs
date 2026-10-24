@@ -39,6 +39,39 @@ bad = gql(query_source())`;
   assert.deepEqual(invalid.range, { start, end: start + call.length });
 });
 
+test("imported GraphQL constants map editor navigation, completion and diagnostics to each origin", async () => {
+  const main = "from graphql_desk import gql\nfrom first import FIRST\nfrom second import SECOND\nquery = gql(FIRST + SECOND)";
+  const first = 'FIRST = "{ user { "';
+  const second = '# 😀\r\nSECOND = "name missing } }"';
+  const value = bundle(main, { modules: [
+    { project: "p", module: "first", uri: "file:///workspace/first.py", version: 1, source: first, is_package: false },
+    { project: "p", module: "second", uri: "file:///workspace/second.py", version: 1, source: second, is_package: false },
+  ] });
+  const features = createLanguageFeatures(options(value));
+  const firstDocument = { uri: "file:///workspace/first.py", version: 1, text: first };
+  const secondDocument = { uri: "file:///workspace/second.py", version: 1, text: second };
+
+  const userDefinition = await features.definition(firstDocument, first.indexOf("user") + 1);
+  assert.equal(userDefinition.length, 1);
+  assert.equal(userDefinition[0].module.uri, "file:///workspace/schema.graphql");
+  assert.equal(value.request.schemas[0].text.slice(userDefinition[0].range.start, userDefinition[0].range.end), "user");
+
+  const nameStart = second.indexOf("name");
+  const completion = await features.complete(secondDocument, nameStart + 2);
+  const name = completion.find(item => item.label === "name");
+  assert.ok(name);
+  assert.deepEqual(name.range, { start: nameStart, end: nameStart + 4 });
+  assert.equal(second.slice(name.range.start, name.range.end), "name");
+
+  const missingStart = second.indexOf("missing");
+  const diagnostics = await features.diagnostics(secondDocument);
+  const missing = diagnostics.find(item => item.code === "graphql.validation");
+  assert.ok(missing);
+  assert.deepEqual(missing.range, { start: missingStart, end: missingStart + "missing".length });
+  assert.equal(second.slice(missing.range.start, missing.range.end), "missing");
+  assert.deepEqual(await features.diagnostics(firstDocument), []);
+});
+
 test("syntax diagnostics highlight escaped and literal errors while retaining EOF points", async () => {
   for (const [source, expected] of [
     ["from graphql_desk import gql\nq=gql('{ user{ \\u0060 } }')", "\\u0060"],
