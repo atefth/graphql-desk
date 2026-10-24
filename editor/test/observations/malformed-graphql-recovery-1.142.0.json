@@ -1,0 +1,25 @@
+{
+  "host": "VS Code 1.142.0",
+  "suite": "malformedRecovery",
+  "scope": "Pinned Pylance host evidence for malformed GraphQL quarantine and repair.",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "malformedEdit": {
+    "affectedOperationHover": "Unknown",
+    "affectedOperationStatus": "unavailable",
+    "diagnostic": "Syntax Error: Expected Name, found \"}\".",
+    "siblingOperationHover": "ID",
+    "siblingOperationStatus": "precise",
+    "dirtySourcePreserved": true,
+    "sourceFileOnDiskUnchanged": true
+  },
+  "repair": {
+    "affectedOperationHover": "String",
+    "siblingOperationHover": "ID",
+    "graphqlDeskDiagnosticsCleared": true
+  },
+  "outcome": "passed",
+  "parityGate": "partial evidence only; does not pass issue #38 or the complete live-typing or gql.tada parity gate"
+}

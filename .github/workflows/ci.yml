@@ -172,12 +172,17 @@ jobs:
         working-directory: editor
       - run: node --check test/typingMatrix.host.cjs
         working-directory: editor
+      - run: node --check test/malformedRecovery.host.cjs
+        working-directory: editor
       - run: node --check test/lifecycle.host.cjs
         working-directory: editor
       - if: runner.os == 'Windows'
         env:
           GRAPHQL_DESK_ALTERNATE_PYTHON: ${{ github.workspace }}/.venv-alt/Scripts/python.exe
         run: node test/run-host.cjs 1.142.0 typingMatrix
+        working-directory: editor
+      - if: runner.os == 'Windows'
+        run: node test/run-host.cjs 1.142.0 malformedRecovery
         working-directory: editor
       - if: runner.os == 'Windows'
         run: node test/run-host.cjs 1.142.0 lifecycle
