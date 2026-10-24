@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const vscode = require("vscode");
@@ -94,6 +95,11 @@ exports.run = async () => {
   const results = { host: vscode.version, lifecycle: {} };
   const sourcePath = path.join(workspace, "consumer.py");
   const sourceUri = vscode.Uri.file(sourcePath);
+  const initialManagedStubRoot = path.resolve(workspace, ".graphql-desk/typings");
+  const initialStubRoots = new Set([
+    path.resolve(workspace, "typings"),
+    initialManagedStubRoot,
+  ]);
   const source = await fs.readFile(sourcePath, "utf8");
   let sourceChanges = 0;
   const outputMessages = [];
@@ -124,18 +130,74 @@ exports.run = async () => {
   const newQuery = "query Pick($limit: Int!) { user { id } count(limit: $limit) }";
   const stubPath = () => vscode.workspace.getConfiguration("python", sourceUri)
     .get("analysis.stubPath", ".graphql-desk/typings");
+  let generationObserved = false;
   const readGeneration = async () => {
-    const root = path.resolve(workspace, stubPath());
-    const found = [];
-    async function visit(directory) {
-      for (const entry of await fs.readdir(directory, { withFileTypes: true }).catch(() => [])) {
-        const file = path.join(directory, entry.name);
-        if (entry.isDirectory()) await visit(file);
-        else if (entry.name.endsWith(".pyi")) found.push([file, await fs.readFile(file, "utf8")]);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const selected = stubPath();
+      const root = path.resolve(workspace, selected);
+      const found = [];
+      let stale = false;
+      let rootMissing = false;
+      let manifestMissing = false;
+      async function visit(directory) {
+        let entries;
+        try {
+          entries = await fs.readdir(directory, { withFileTypes: true });
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+          if (directory === root) rootMissing = true;
+          else stale = true;
+          return;
+        }
+        for (const entry of entries) {
+          const file = path.join(directory, entry.name);
+          if (entry.isDirectory()) await visit(file);
+          else if (entry.name.endsWith(".pyi")) {
+            try {
+              found.push([file, await fs.readFile(file, "utf8")]);
+            } catch (error) {
+              if (error.code !== "ENOENT") throw error;
+              stale = true;
+              return;
+            }
+          }
+        }
       }
+      await visit(root);
+      let manifest;
+      if (!rootMissing && !stale) {
+        try {
+          manifest = JSON.parse(await fs.readFile(path.join(root, "complete.json"), "utf8"));
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+          manifestMissing = true;
+          stale = true;
+        }
+      }
+      if (stubPath() !== selected) continue;
+      if (rootMissing) {
+        assert.ok(initialStubRoots.has(root), "A selected generated typing directory is missing");
+        assert.equal(generationObserved, false, "The selected generated typing directory disappeared");
+        return { stubPath: selected, files: found };
+      }
+      if (manifestMissing && !generationObserved && root === initialManagedStubRoot && found.length === 0) {
+        return { stubPath: selected, files: found };
+      }
+      assert.equal(stale, false, "The selected generated typing directory is incomplete");
+      assert.equal(manifest?.owner, "graphql-desk-analysis-generation", "The selected generation has no valid manifest");
+      const expected = manifest.files.filter(item => item.path.endsWith(".pyi")).map(item => item.path).sort();
+      const actual = found.map(([file]) => path.relative(root, file).replaceAll("\\", "/")).sort();
+      assert.deepEqual(actual, expected, "The selected generation has missing or unexpected stubs");
+      for (const [file, text] of found) {
+        const relative = path.relative(root, file).replaceAll("\\", "/");
+        const record = manifest.files.find(item => item.path === relative);
+        assert.equal(createHash("sha256").update(text).digest("hex"), record.sha256,
+          `Generated stub ${relative} does not match its manifest`);
+      }
+      if (found.length) generationObserved = true;
+      return { stubPath: selected, files: found };
     }
-    await visit(root);
-    return { stubPath: stubPath(), files: found };
+    throw new Error("The selected generated typing directory changed repeatedly while being read");
   };
   const hasSelected = generation => generation.files.some(([file, text]) =>
     file.includes(`${path.sep}_documents${path.sep}`) && text.includes("'selected': 'String'"));
@@ -321,8 +383,12 @@ exports.run = async () => {
     results.outcome = "managed-output-lifecycle-observed";
   } catch (error) {
     results.error = String(error.stack || error);
-    const current = await readGeneration();
+    let current = { stubPath: stubPath(), files: [] };
+    try { current = await readGeneration(); } catch (readError) {
+      current.readError = String(readError.stack || readError);
+    }
     results.lifecycle.debug = { sourceChanges, stubPath: current.stubPath,
+      ...(current.readError ? { readError: current.readError } : {}),
       types: current.files.map(([file, text]) => ({ file: path.relative(workspace, file), hasSelected: text.includes("'selected': 'String'"), hasChangedQuery: text.includes(newQuery) })),
       text: vscode.workspace.textDocuments.find(document => document.uri.toString() === sourceUri.toString())?.getText(), outputMessages,
       requests: workerRequests, publications, freshnessChecks, documentEvents: documentEvents.slice(-80),

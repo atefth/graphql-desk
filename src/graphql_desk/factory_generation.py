@@ -194,6 +194,135 @@ def _precision_diagnostics(
                     for alias in node.names
                 )
             pending.extend(ast.iter_child_nodes(node))
+
+        class ModuleStores(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.names: dict[str, list[ast.Name]] = {}
+
+            def visit_Name(self, node: ast.Name) -> None:
+                if isinstance(node.ctx, (ast.Store, ast.Del)):
+                    self.names.setdefault(node.id, []).append(node)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self._visit_definition(node.name, self._function_expressions(node))
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                self._visit_definition(node.name, self._function_expressions(node))
+
+            @staticmethod
+            def _function_expressions(
+                node: ast.FunctionDef | ast.AsyncFunctionDef,
+            ) -> tuple[ast.expr, ...]:
+                arguments = (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                )
+                return (
+                    *node.decorator_list,
+                    *node.args.defaults,
+                    *(value for value in node.args.kw_defaults if value is not None),
+                    *(
+                        arg.annotation
+                        for arg in arguments
+                        if arg.annotation is not None
+                    ),
+                    *((node.returns,) if node.returns is not None else ()),
+                )
+
+            def _visit_definition(
+                self, name: str, expressions: tuple[ast.expr, ...]
+            ) -> None:
+                self.visit_Name(ast.Name(id=name, ctx=ast.Store()))
+                for expression in expressions:
+                    self.visit(expression)
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                self.visit_Name(ast.Name(id=node.name, ctx=ast.Store()))
+                for expression in (
+                    *node.decorator_list,
+                    *node.bases,
+                    *(keyword.value for keyword in node.keywords),
+                ):
+                    self.visit(expression)
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                for expression in node.args.defaults:
+                    self.visit(expression)
+
+            def visit_Import(self, node: ast.Import) -> None:
+                for alias in node.names:
+                    name = alias.asname or alias.name.split(".")[0]
+                    self.visit_Name(ast.Name(id=name, ctx=ast.Store()))
+
+            def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+                for alias in node.names:
+                    if alias.name != "*":
+                        name = alias.asname or alias.name
+                        self.visit_Name(ast.Name(id=name, ctx=ast.Store()))
+
+            def _visit_comprehension(
+                self, node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp
+            ) -> None:
+                for generator in node.generators:
+                    self.visit(generator.iter)
+                    for condition in generator.ifs:
+                        self.visit(condition)
+                if isinstance(node, ast.DictComp):
+                    self.visit(node.key)
+                    self.visit(node.value)
+                else:
+                    self.visit(node.elt)
+
+            def visit_ListComp(self, node: ast.ListComp) -> None:
+                self._visit_comprehension(node)
+
+            def visit_SetComp(self, node: ast.SetComp) -> None:
+                self._visit_comprehension(node)
+
+            def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+                self._visit_comprehension(node)
+
+            def visit_DictComp(self, node: ast.DictComp) -> None:
+                self._visit_comprehension(node)
+
+        stores = ModuleStores()
+        stores.visit(tree)
+
+        class ScopeGlobals(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.names: set[str] = set()
+                self.globals: set[str] = set()
+
+            def visit_Name(self, node: ast.Name) -> None:
+                if isinstance(node.ctx, (ast.Store, ast.Del)):
+                    self.names.add(node.id)
+
+            def visit_Global(self, node: ast.Global) -> None:
+                self.globals.update(node.names)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                return
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                return
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                return
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                return
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                writes = ScopeGlobals()
+                for statement in node.body:
+                    writes.visit(statement)
+                for name in writes.names & writes.globals:
+                    stores.names.setdefault(name, []).append(
+                        ast.Name(name, ast.Store())
+                    )
+        exact_literals: dict[str, str] = {}
         for statement in tree.body:
             if statement.lineno >= call.lineno:
                 break
@@ -215,11 +344,12 @@ def _precision_diagnostics(
                             if imported.count(alias.asname or alias.name) == 1
                         }
                     )
-            if (
-                not isinstance(statement, ast.AnnAssign)
-                or not isinstance(statement.target, ast.Name)
-                or statement.target.id != source.id
+            if not isinstance(statement, ast.AnnAssign) or not isinstance(
+                statement.target, ast.Name
             ):
+                continue
+            target = statement.target.id
+            if len(stores.names.get(target, ())) != 1 or statement.value is None:
                 continue
             annotation = statement.annotation
             marker = (
@@ -239,28 +369,48 @@ def _precision_diagnostics(
                 symbol = f"{namespace}.{marker.attr}" if namespace else None
             else:
                 symbol = None
-            literal_source = symbol in annotation_symbols and (
-                (
-                    symbol in {"typing.Final", "typing_extensions.Final"}
-                    and not isinstance(annotation, ast.Subscript)
-                    and isinstance(statement.value, ast.Constant)
-                    and statement.value.value == document.call.source
-                )
-                or (
-                    symbol in {"typing.Literal", "typing_extensions.Literal"}
-                    and isinstance(annotation, ast.Subscript)
-                    and isinstance(annotation.slice, ast.Constant)
-                    and annotation.slice.value == document.call.source
-                )
+            if symbol not in annotation_symbols:
+                continue
+            final = symbol in {
+                "typing.Final",
+                "typing_extensions.Final",
+            } and not isinstance(annotation, ast.Subscript)
+            literal_value = (
+                annotation.slice.value
+                if isinstance(annotation, ast.Subscript)
+                and isinstance(annotation.slice, ast.Constant)
+                and isinstance(annotation.slice.value, str)
+                else None
             )
+            literal = (
+                symbol in {"typing.Literal", "typing_extensions.Literal"}
+                and literal_value is not None
+            )
+            if not (final or literal):
+                continue
+            value = statement.value
+            exact = (
+                value.value
+                if isinstance(value, ast.Constant) and isinstance(value.value, str)
+                else exact_literals.get(value.id)
+                if isinstance(value, ast.Name)
+                else None
+            )
+            if exact is None:
+                continue
+            if literal and literal_value != exact:
+                continue
+            exact_literals[target] = exact
+        literal_source = exact_literals.get(source.id) == document.call.source
     messages: list[tuple[ast.expr, str]] = []
     if not literal_source:
         assert source is not None
         messages.append(
             (
                 source,
-                "Exact overload inference requires an inline string literal; "
-                "resolved aliases and concatenations may widen to str in a checker",
+                "Exact overload inference requires an inline string literal or a "
+                "stable module-level Final/Literal alias chain; widened or dynamic "
+                "sources may become str in a checker",
             )
         )
     if fragments is not None and not isinstance(fragments, ast.Tuple):
