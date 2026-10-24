@@ -9,7 +9,42 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      code_changed: ${{ steps.paths.outputs.code_changed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - id: paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+          if not base or not head or set(base) == {"0"}:
+              changed = [b"unknown"]
+          else:
+              result = subprocess.run(
+                  ["git", "diff", "--name-only", "-z", f"{base}...{head}"],
+                  check=True,
+                  capture_output=True,
+              )
+              changed = [path for path in result.stdout.split(b"\0") if path]
+          docs_only = bool(changed) and all(path.lower().endswith(b".md") for path in changed)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"code_changed={str(not docs_only).lower()}\n")
+          PY
+
   quality:
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -24,6 +59,8 @@ jobs:
       - run: uv run mypy
 
   dependencies:
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -57,6 +94,8 @@ jobs:
       - run: uv run python scripts/check_runtime_licenses.py
 
   smoke:
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     name: smoke (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -91,6 +130,8 @@ jobs:
       - run: uv run python scripts/check_distributions.py
 
   editor:
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -141,13 +182,24 @@ jobs:
   required:
     name: CI
     if: always()
-    needs: [quality, dependencies, smoke, editor]
+    needs: [changes, quality, dependencies, smoke, editor]
     runs-on: ubuntu-24.04
     steps:
       - name: Require all checks
         env:
+          CHANGES: ${{ needs.changes.result }}
+          CODE_CHANGED: ${{ needs.changes.outputs.code_changed }}
           QUALITY: ${{ needs.quality.result }}
           DEPENDENCIES: ${{ needs.dependencies.result }}
           SMOKE: ${{ needs.smoke.result }}
           EDITOR: ${{ needs.editor.result }}
-        run: test "$QUALITY" = success && test "$DEPENDENCIES" = success && test "$SMOKE" = success && test "$EDITOR" = success
+        run: |
+          if [ "$CHANGES" != "success" ]; then
+            echo "Could not classify changed files."
+            exit 1
+          fi
+          if [ "$CODE_CHANGED" = "false" ]; then
+            echo "Markdown-only change: full CI checks skipped."
+            exit 0
+          fi
+          test "$QUALITY" = success && test "$DEPENDENCIES" = success && test "$SMOKE" = success && test "$EDITOR" = success
