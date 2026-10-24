@@ -79,8 +79,8 @@ class ScalarTypesTests(unittest.TestCase):
         )
         models = (
             "from enum import Enum\n"
-            "class DateInput: pass\nclass DateOutput: pass\n"
-            "class State(Enum):\n    ON=1\n    OFF=2\n"
+            "class DateInput: ...\nclass DateOutput: ...\n"
+            "class State(Enum):\n    ON = ...\n    OFF = ...\n"
         )
         positive = """from typing import Literal
 from typing_extensions import assert_type
@@ -157,7 +157,7 @@ def dynamic(name:str)->None:
                 + "\nfactory: Factory\n",
                 encoding="utf8",
             )
-            (root / "models.py").write_text(models, encoding="utf8")
+            (root / "models.pyi").write_text(models, encoding="utf8")
             for filename, source in (
                 ("positive.py", positive),
                 ("negative.py", negative),

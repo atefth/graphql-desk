@@ -53,9 +53,11 @@ HTTP during typing. #144 preflights captured-local mapping symbols without impor
 external and richer type facts remain unverified. #145 adds bounded unsafe fixture
 input typing and identity helpers. #146 adds read-only doctor entrypoints that
 report degraded health rather than invent editor/bridge/ownership evidence. #249
-adds bounded, import-free resolution of configured local mapping names from `.py`
-and `.pyi` source and reports the results from doctor. External installed-package
-symbol verification and checker-level type compatibility remain open.
+adds import-free resolution of configured local mapping names from `.py` and `.pyi`
+files reachable under configured source roots, and reports the results from doctor.
+It does not scan unrelated files or impose a numeric file cap; unusually large
+reachable import closures can make doctor slow. External installed-package symbol
+verification and checker-level type compatibility remain open.
 These foundations do not complete the dependency-gated later-stage stories.
 
 Merged #150 adds simple captured PEP613 mapping aliases. #151 generates opt-in
