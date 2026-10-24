@@ -23,6 +23,22 @@ test("actual Python source maps give exact schema/deprecation diagnostics and cl
   assert.deepEqual(await createLanguageFeatures(options(fixed)).diagnostics(document(fixed)), []);
 });
 
+test("dynamic factory source is diagnosed while valid sibling operations remain indexed", async () => {
+  const source = `from graphql_desk import gql
+def query_source() -> str: return "{ user { name } }"
+good = gql("{ user { id } }")
+bad = gql(query_source())`;
+  const value = bundle(source);
+  assert.equal(value.response.calls.length, 1);
+  assert.match(value.response.calls[0].source, /user \{ id \}/);
+  const call = "gql(query_source())";
+  const start = source.lastIndexOf(call);
+  const diagnostics = await createLanguageFeatures(options(value)).diagnostics(document(value));
+  const invalid = diagnostics.find(item => item.code === "graphql-desk.source-not-static");
+  assert.ok(invalid);
+  assert.deepEqual(invalid.range, { start, end: start + call.length });
+});
+
 test("syntax diagnostics highlight escaped and literal errors while retaining EOF points", async () => {
   for (const [source, expected] of [
     ["from graphql_desk import gql\nq=gql('{ user{ \\u0060 } }')", "\\u0060"],

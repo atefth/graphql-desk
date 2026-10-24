@@ -2925,6 +2925,58 @@ if TYPE_CHECKING:
             artifacts.diagnostics,
         )
 
+    def test_dynamic_call_is_diagnosed_without_losing_valid_sibling_types(self) -> None:
+        modules = (
+            ModuleSnapshot(
+                "p",
+                "main",
+                "file:///main.py",
+                1,
+                "from generated.main import graphql\n"
+                "def query_source() -> str: return '{ greeting }'\n"
+                "good=graphql('{ greeting }')\n"
+                "bad=graphql(query_source())\n",
+            ),
+        )
+        artifacts = self.generate(modules)
+        self.assertTrue(
+            any(item.code == "source-not-static" for item in artifacts.diagnostics),
+            artifacts.diagnostics,
+        )
+        files = {item.relative_path: item.text for item in artifacts.files}
+        self.assertIn("GoodResult", files["generated/sources/main.pyi"])
+        self.assertIn("Literal['{ greeting }']", files["generated/main.pyi"])
+        self.assertIn("__graphql_desk_UnresolvedDocument", files["generated/main.pyi"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            source = """from graphql import DocumentNode
+from graphql_desk import TypedDocument
+from generated.main import graphql
+from generated.sources.main import GoodResult, GoodVariables
+
+def query_source() -> str: return '{ greeting }'
+good = graphql('{ greeting }')
+bad = graphql(query_source())
+good_typed: TypedDocument[GoodResult, GoodVariables] = good
+bad_ast: DocumentNode = bad.ast
+bad_typed: TypedDocument[GoodResult, GoodVariables] = bad # error
+"""
+            (root / "consumer.py").write_text(source, encoding="utf8")
+            self.check(
+                root,
+                {
+                    "consumer.py": {
+                        next(
+                            number
+                            for number, line in enumerate(source.splitlines(), 1)
+                            if "# error" in line
+                        )
+                    }
+                },
+            )
+
     def test_generated_factory_exports_only_graphql_with_import_alias_supported(
         self,
     ) -> None:
