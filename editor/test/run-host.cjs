@@ -62,8 +62,8 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
-  const factorySuite = ["factoryArtifacts", "typingMatrix", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
+  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
+  const factorySuite = ["factoryArtifacts", "typingMatrix", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
@@ -244,7 +244,7 @@ async function main() {
     observed.lifecycle.userFilePreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (factorySuite) {
-    if (suite === "typingMatrix") {
+    if (suite === "typingMatrix" || suite === "malformedRecovery") {
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "complete.json"));
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated", "default.pyi"));
     } else if (suite === "lifecycle") {
@@ -278,7 +278,7 @@ async function main() {
       if (persistedStubPath !== observed.lifecycle.configuredStubPath) {
         observed.lifecycle.persistedStubPath = persistedStubPath;
       }
-    } else if (suite === "typingMatrix" && persistedStubPath !== observed.lifecycle.configuredStubPath) {
+    } else if ((suite === "typingMatrix" || suite === "malformedRecovery") && persistedStubPath !== observed.lifecycle.configuredStubPath) {
       assert.match(persistedStubPath.replaceAll("\\", "/"), /^\.graphql-desk\/typings\/generations\/g-\d+-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i,
         "A later typing refresh may select another managed generation before shutdown");
       const persistedRoot = path.resolve(workspace, persistedStubPath);
@@ -297,7 +297,7 @@ async function main() {
     observed.lifecycle.userConfigurationPreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   }
-  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : `read-only-${suite}-observed`);
+  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : `read-only-${suite}-observed`);
   console.log(`${suite} evidence: ${result}`);
 }
 
