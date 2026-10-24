@@ -38,6 +38,7 @@ function pythonVersion(python) {
 
 exports.run = async () => {
   const results = { host: vscode.version, pylance: {}, lifecycle: { invalidationAndRepair: {} } };
+  let settingChanges;
   try {
     for (const id of ["ms-python.python", "ms-python.vscode-pylance"]) {
       const extension = vscode.extensions.getExtension(id);
@@ -98,14 +99,20 @@ exports.run = async () => {
       const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", uri, selectedPosition) || [];
       return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
     };
-    const observeQuarantine = async (label, after) => {
+    const selectedStubPaths = [];
+    settingChanges = vscode.workspace.onDidChangeConfiguration(event => {
+      if (event.affectsConfiguration("python.analysis.stubPath", consumerUri)) {
+        selectedStubPaths.push(vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""));
+      }
+    });
+    const observeQuarantine = async (label, after, selectionOffset) => {
       const deadline = Date.now() + 30000;
       let observed;
       while (Date.now() < deadline) {
-        try {
-          const generations = path.join(workspace, ".graphql-desk", "typings", "generations");
-          for (const name of await fs.readdir(generations)) {
-            const selectedGeneration = path.join(generations, name);
+        for (const setting of selectedStubPaths.slice(selectionOffset)) {
+          try {
+            if (typeof setting !== "string" || !setting) continue;
+            const selectedGeneration = path.resolve(workspace, setting);
             const manifest = JSON.parse(await fs.readFile(path.join(selectedGeneration, "complete.json"), "utf8"));
             const quarantinedAt = Number(manifest.analysisId?.slice("quarantine-".length));
             if (!Number.isFinite(quarantinedAt) || quarantinedAt < after) continue;
@@ -115,8 +122,8 @@ exports.run = async () => {
             observed = { selectedGeneration, analysisId: manifest.analysisId, targetStatus: operations.doc?.status,
               siblingStatus: operations.other_doc?.status, targetHasNoReturn: /NoReturn/.test(stub) };
             if (observed.targetStatus === "unavailable" && observed.siblingStatus === "precise" && observed.targetHasNoReturn) return observed;
-          }
-        } catch { /* Wait for the complete quarantine generation to be written. */ }
+          } catch { /* Wait for the complete selected quarantine generation. */ }
+        }
         await new Promise(resolve => setTimeout(resolve, 10));
       }
       assert.fail(`${label} did not select a targeted quarantine generation: ${JSON.stringify(observed)}`);
@@ -125,9 +132,10 @@ exports.run = async () => {
     const originalSchema = schemaDocument.getText();
     const schemaBoolean = originalSchema.replace("selected: String!", "selected: Boolean!");
     assert.notEqual(schemaBoolean, originalSchema, "Schema fixture must contain the selected String field");
+    const schemaSelectionOffset = selectedStubPaths.length;
     const schemaQuarantineStarted = Date.now();
     await replace(schemaDocument, schemaBoolean);
-    results.lifecycle.invalidationAndRepair.schemaQuarantine = await observeQuarantine("Schema edit", schemaQuarantineStarted);
+    results.lifecycle.invalidationAndRepair.schemaQuarantine = await observeQuarantine("Schema edit", schemaQuarantineStarted, schemaSelectionOffset);
     results.lifecycle.invalidationAndRepair.schemaInvalidation = await until(async () => {
       const selectedType = await selectedHover();
       const unaffectedType = await otherIdHover();
@@ -151,9 +159,10 @@ exports.run = async () => {
     const mappedConfig = originalConfig.replace("[tool.graphql-desk]\n",
       '[tool.graphql-desk]\nscalars = { String = { input = "builtins.str", output = "builtins.int" } }\n');
     assert.notEqual(mappedConfig, originalConfig, "Config fixture must have the GraphQL Desk table");
+    const configSelectionOffset = selectedStubPaths.length;
     const configQuarantineStarted = Date.now();
     await replace(configDocument, mappedConfig);
-    results.lifecycle.invalidationAndRepair.configQuarantine = await observeQuarantine("Scalar mapping edit", configQuarantineStarted);
+    results.lifecycle.invalidationAndRepair.configQuarantine = await observeQuarantine("Scalar mapping edit", configQuarantineStarted, configSelectionOffset);
     results.lifecycle.invalidationAndRepair.configInvalidation = await until(async () => {
       const selectedType = await selectedHover();
       const unaffectedType = await otherIdHover();
@@ -175,9 +184,10 @@ exports.run = async () => {
     const originalConsumer = document.getText();
     const invalidConsumer = originalConsumer.replace("{ selected count(limit: $limit) }", "{ missing count(limit: $limit) }");
     assert.notEqual(invalidConsumer, originalConsumer, "Consumer fixture must contain the selected operation field");
+    const sourceSelectionOffset = selectedStubPaths.length;
     const sourceQuarantineStarted = Date.now();
     await replaceText(document, "{ selected count(limit: $limit) }", "{ missing count(limit: $limit) }");
-    results.lifecycle.invalidationAndRepair.immediateQuarantine = await observeQuarantine("Invalid source edit", sourceQuarantineStarted);
+    results.lifecycle.invalidationAndRepair.immediateQuarantine = await observeQuarantine("Invalid source edit", sourceQuarantineStarted, sourceSelectionOffset);
     results.lifecycle.invalidationAndRepair.invalidEditQuarantine = await until(async () => {
       const selectedType = await selectedHover();
       const unaffectedType = await otherIdHover();
@@ -267,6 +277,7 @@ exports.run = async () => {
     results.outcome = "live-typing-matrix-failed";
     throw error;
   } finally {
+    settingChanges?.dispose();
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
     console.log(`GRAPHQL_DESK_TYPING_MATRIX ${JSON.stringify(results)}`);
   }
