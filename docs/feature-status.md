@@ -1,6 +1,6 @@
 # Feature status and remaining work
 
-Implementation baseline: **92 foundation slices** are merged, with 446 Python tests and 175 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
+Implementation baseline: **92 foundation slices** are merged, with 447 Python tests and 175 Node tests. **0 of 12 broad parity gates have passed**. Counts below refer to the 12 requirements-ledger areas, not equally sized individual features or a percentage. Research proofs are evidence, not production features.
 
 Merged #134–#137 preserve original-source validation and rejected resolver/index
 ownership, and type introspection selections. #138 assembles captured multi-schema
@@ -58,6 +58,10 @@ files reachable under configured source roots, and reports the results from doct
 It does not scan unrelated files or impose a numeric file cap; unusually large
 reachable import closures can make doctor slow. External installed-package symbol
 verification and checker-level type compatibility remain open.
+One checker fixture now verifies mapped input/output/enum compatibility against an
+external stub-only package with both mypy and Pyright. This is bounded evidence;
+doctor still reports external symbols as unverified and runtime exports are not
+validated.
 These foundations do not complete the dependency-gated later-stage stories.
 
 Merged #150 adds simple captured PEP613 mapping aliases. #151 generates opt-in
