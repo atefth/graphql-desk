@@ -17,7 +17,7 @@
 
 ## Changes and pull requests
 
-- Use small, coherent, issue-linked pull requests with clear acceptance criteria and user-visible behavior.
+- Use issue-linked pull requests sized as coherent, reviewable slices. Bundle related foundation work when it can be reviewed together; split unrelated work or changes with conflicting ownership.
 - Run the focused checks for changed behavior and report what was and was not verified. Do not claim a feature or parity gate passed without evidence for its acceptance criteria.
 - Use Ponytail for implementation and review. Fix review findings before publishing a pull request; keep CI green and follow repository branch protections.
 - Update the linked issue when a pull request completes. Close an issue only when all of its acceptance criteria are met; otherwise record the partial progress and leave it open.
