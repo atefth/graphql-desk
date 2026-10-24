@@ -37,7 +37,13 @@ jobs:
                   capture_output=True,
               )
               changed = [path for path in result.stdout.split(b"\0") if path]
-          docs_only = bool(changed) and all(path.lower().endswith(b".md") for path in changed)
+          def markdown_only(paths):
+              return bool(paths) and all(path.lower().endswith(b".md") for path in paths)
+
+          assert markdown_only([b"AGENTS.md", b"docs/parity-plan.md"])
+          assert not markdown_only([b".github/workflows/ci.yml"])
+          assert not markdown_only([])
+          docs_only = markdown_only(changed)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"code_changed={str(not docs_only).lower()}\n")
           PY
