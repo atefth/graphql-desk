@@ -99,7 +99,7 @@ The private project uses matching **Stage**, **Scope** and **Status** fields and
 
 ## Observed platform blocker
 
-#23/#24 remain Blocked after isolated VS Code1.141.0 and1.142.0 tests: restoring original text leaves the stub dirty. Publication, stale rejection and disk isolation work, and the1.142 host preserves foreign dirty edits. There is no safe production overlay adapter merged. Pylance was not exercised in the new harness without a prepared isolated extension environment; the earlier narrow research proof remains separately bounded. Do not use resource-unbound revert commands or force saves to manufacture a cleanup pass.
+Historical blocker, resolved for bounded acceptance: early isolated VS Code1.141.0 and1.142.0 tests left the restored stub dirty, and the in-memory overlay path was rejected. Later owned-disk adapter tests verify Pylance inference, settings migration and owned-artifact cleanup while preserving foreign edits; #23/#24 are closed on that evidence. Broader lifecycle and inference acceptance remains open in #38 and gate #42. The earlier research proof remains separately bounded. Do not use resource-unbound revert commands or force saves to manufacture a cleanup pass.
 
 ## Verified reconciliation
 
