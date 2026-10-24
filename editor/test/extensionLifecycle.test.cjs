@@ -41,9 +41,18 @@ test("schema and config deltas target only operations with changed provenance fa
   ] }];
   assert.deepEqual(operationDependencyImpact(sourceBefore, sourceAfter), [sourceBefore[0].operations[0].owner],
     "a source dependency change during broad invalidation must keep its old declaration quarantined");
-  assert.equal(operationDependencyImpact(before, [{ ...after[0], operations: [
+  assert.deepEqual(operationDependencyImpact(before, [{ ...after[0], operations: [
     { ...after[0].operations[0], schema_dependencies: "unknown" }, after[0].operations[1],
-  ] }]), null, "unknown authoritative facts require fail-closed project handling");
+  ] }]), [before[0].operations[0].owner],
+  "unknown facts quarantine only their operation when the sibling has complete unchanged provenance");
+  assert.equal(operationDependencyImpact(before, [{ ...after[0], operations: "unknown" }]), null,
+    "a malformed project manifest keeps the whole project fail-closed");
+  assert.deepEqual(operationDependencyImpact(before, [{ ...after[0], operations: [after[0].operations[1]] }]),
+    [before[0].operations[0].owner], "a disappeared operation does not quarantine a proven unaffected sibling");
+  assert.deepEqual(operationDependencyImpact(before, [{ ...after[0], operations: [
+    after[0].operations[0], after[0].operations[0], after[0].operations[1],
+  ] }]), [before[0].operations[0].owner],
+  "ambiguous matches quarantine their owner without widening to a proven sibling");
 });
 
 test("operation impact matches Windows paths that differ only by case", t => {

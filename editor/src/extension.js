@@ -12,6 +12,7 @@ const { createAnalysisGenerations } = require("./analysisGenerations");
 
 function operationDependencyImpact(previous, current) {
   if (!Array.isArray(previous) || !Array.isArray(current)) return null;
+  if ([...previous, ...current].some(group => !group || !Array.isArray(group.operations))) return null;
   const location = value => {
     if (typeof value !== "string") return value;
     let filename = value;
@@ -37,13 +38,29 @@ function operationDependencyImpact(previous, current) {
   const flatten = manifest => manifest.flatMap(group => group.operations);
   const before = flatten(previous);
   const after = flatten(current);
+  const previousKeyCounts = new Map();
+  for (const item of before) {
+    const identity = key(item);
+    if (!identity) return null;
+    previousKeyCounts.set(identity, (previousKeyCounts.get(identity) ?? 0) + 1);
+  }
   const byKey = new Map();
   for (const item of after) {
     const identity = key(item);
-    if (!identity || byKey.has(identity)) return null;
-    byKey.set(identity, item);
+    if (!identity) return null;
+    const matches = byKey.get(identity) ?? [];
+    matches.push(item);
+    byKey.set(identity, matches);
   }
   const impacted = [];
+  const impactedKeys = new Set();
+  const markImpacted = owner => {
+    const encoded = JSON.stringify(owner);
+    if (!impactedKeys.has(encoded)) {
+      impactedKeys.add(encoded);
+      impacted.push(owner);
+    }
+  };
   const factsChanged = (left, right, name) => {
     const a = left[name];
     const b = right[name];
@@ -57,25 +74,39 @@ function operationDependencyImpact(previous, current) {
   };
   for (const old of before) {
     const identity = key(old);
-    const next = identity && byKey.get(identity);
-    if (!next || old.status !== "precise" || next.status !== "precise" ||
+    if (!identity) return null;
+    if (previousKeyCounts.get(identity) !== 1) {
+      markImpacted(old.owner);
+      continue;
+    }
+    const matches = byKey.get(identity) ?? [];
+    const next = matches.length === 1 ? matches[0] : null;
+    if (!next) {
+      markImpacted(old.owner);
+      continue;
+    }
+    byKey.delete(identity);
+    if (old.status !== "precise" || next.status !== "precise" ||
         !old.source_dependencies_known || !next.source_dependencies_known ||
         old.mapping_dependencies === "unknown" || next.mapping_dependencies === "unknown" ||
         old.schema_dependencies === "unknown" || next.schema_dependencies === "unknown" ||
-        old.config_dependencies === "unknown" || next.config_dependencies === "unknown") return null;
+        old.config_dependencies === "unknown" || next.config_dependencies === "unknown" ||
+        !Array.isArray(old.schema_identity) || old.schema_identity.length !== 2 ||
+        !Array.isArray(next.schema_identity) || next.schema_identity.length !== 2) {
+      markImpacted(old.owner);
+      continue;
+    }
     const schemaChanged = factsChanged(old, next, "schema_dependencies");
     const configChanged = factsChanged(old, next, "config_dependencies");
-    if (schemaChanged === null || configChanged === null) return null;
-    if (schemaChanged || configChanged ||
+    if (schemaChanged === null || configChanged === null ||
+        schemaChanged || configChanged ||
         !same(old.mapping_dependencies, next.mapping_dependencies) ||
         !same(old.owner, next.owner) || !same(old.canonical_owner, next.canonical_owner) ||
         !same(old.definition_owners, next.definition_owners) || !same(old.direct_fragments, next.direct_fragments) ||
         !same(old.dependencies, next.dependencies) || !same(old.source_exports, next.source_exports) ||
         old.selector_known !== next.selector_known ||
-        !sameSchemaIdentity(old.schema_identity, next.schema_identity)) impacted.push(old.owner);
-    byKey.delete(identity);
+        !sameSchemaIdentity(old.schema_identity, next.schema_identity)) markImpacted(old.owner);
   }
-  if (byKey.size) return null;
   return impacted;
 }
 
