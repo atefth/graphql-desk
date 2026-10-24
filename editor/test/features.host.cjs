@@ -29,6 +29,7 @@ async function run() {
     "partial.py": "from graphql_desk import gql\nq=gql('{ user { na')\n",
     "blank.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''\r\n\r\n''')\r\n",
     "lexical.py": "from graphql_desk import gql\nq=gql('''query Read { user { name",
+    "lexicalEscaped.py": ["# 😀", "from graphql_desk import gql", String.raw`q=gql("query Q { user(name: \"m\u0061😀\") { name`].join("\r\n"),
     "selected.py": "outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql('{ user { name ...Card } }',[card])\n",
     "fragments.py": "from graphql_desk import gql\ncard=gql('fragment Card on User { id }')\n",
     "other.py": "# 😀\r\nfrom graphql_desk import gql\r\ncard=gql('fragment Card on User { name }')\r\n",
@@ -77,7 +78,8 @@ async function run() {
   });
   const observations = { outcome: "read-only-features-observed", vscode: vscode.version, diagnostics: false, completion: false, boundaryCompletion: false, hover: false,
     schemaDefinition: false, fragmentDefinition: false, ambiguousFragmentDefinition: false, nativeCoexistence: false,
-    highlighting: false, lexicalHighlighting: false, nativePythonHover: false, untrustedNoAnalysis: false, diskUnchanged: false, cleanBuffers: false };
+    highlighting: false, lexicalHighlighting: false, escapedLexicalHighlighting: false,
+    nativePythonHover: false, untrustedNoAnalysis: false, diskUnchanged: false, cleanBuffers: false };
   try {
     const invalid = documents.get("main.py");
     await registration.refresh(invalid);
@@ -172,6 +174,24 @@ async function run() {
     } });
     assert.ok(lexicalTokens.includes("query"));
     observations.lexicalHighlighting = true;
+    const escapedLexical = documents.get("lexicalEscaped.py");
+    await registration.refresh(escapedLexical);
+    assert.equal(vscode.languages.getDiagnostics(escapedLexical.uri).some(item => item.code === "graphql.validation"), false,
+      "Lexical candidates from escaped incomplete Python must not become typed GraphQL operations");
+    const escapedEditor = await vscode.window.showTextDocument(escapedLexical);
+    const escapedRanges = [];
+    await highlighting.refresh({ document: escapedLexical, setDecorations(_type, ranges) {
+      escapedRanges.push(...ranges);
+      escapedEditor.setDecorations(_type, ranges);
+    } });
+    const escapedQueryStart = escapedLexical.getText().indexOf("query");
+    const escapedStringStart = escapedLexical.getText().indexOf(String.raw`\"m`);
+    const escapedStringEnd = escapedLexical.getText().indexOf(String.raw`\"`, escapedStringStart + 2) + 2;
+    const expectedQueryRange = new vscode.Range(escapedLexical.positionAt(escapedQueryStart), escapedLexical.positionAt(escapedQueryStart + 5));
+    const expectedStringRange = new vscode.Range(escapedLexical.positionAt(escapedStringStart), escapedLexical.positionAt(escapedStringEnd));
+    assert.ok(escapedRanges.some(range => range.isEqual(expectedQueryRange)), "Lexical keyword decoration must use the exact UTF-16 host range");
+    assert.ok(escapedRanges.some(range => range.isEqual(expectedStringRange)), "Escaped GraphQL string decoration must cover the exact Python source escape span");
+    observations.escapedLexicalHighlighting = true;
     trusted = false;
     const before = analyses;
     await registration.refresh(invalid);
