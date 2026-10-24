@@ -212,12 +212,16 @@ exports.run = async () => {
   };
   const hasSelected = generation => generation.files.some(([file, text]) =>
     file.includes(`${path.sep}_documents${path.sep}`) && text.split("\n").some(line =>
-      line.startsWith("class GraphqlDeskDocument(") && line.includes("FixtureDocument[") && !line.includes("QuarantineTyping.NoReturn")));
+      line.startsWith("class GraphqlDeskDocument(") && line.includes("FixtureDocument[") && !line.includes("FixtureDocument[object,")));
   const hasUnavailable = (generation, operationName) => generation.manifest?.operationManifest
     ?.some(group => group.operations.some(operation => operation.operation_name === operationName && operation.status === "unavailable")) ?? false;
   const hasExtra = generation => generation.files.some(([, text]) => text.includes("query Extra { user { id } }"));
   const selectedHover = async () => {
     const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", sourceUri, new vscode.Position(8, 2)) || [];
+    return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
+  };
+  const otherIdHover = async () => {
+    const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", sourceUri, new vscode.Position(14, 2)) || [];
     return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
   };
   const selectedDiagnostic = () => vscode.languages.getDiagnostics(sourceUri)
@@ -307,14 +311,19 @@ exports.run = async () => {
       "The active generation does not retain the stale selected-field type");
     await fs.access(path.join(path.resolve(workspace, failedQuarantineGeneration.stubPath), "complete.json"));
     let failedRefreshHover;
+    let failedSiblingHover;
     await until(async () => {
       failedRefreshHover = await selectedHover();
-      return failedGeneration.files.length === 0
-        ? /\bAny\b/.test(failedRefreshHover)
-        : /Never|NoReturn|Unknown/.test(failedRefreshHover);
+      failedSiblingHover = await otherIdHover();
+      return /Never|NoReturn|Unknown|object|\bAny\b/.test(failedRefreshHover);
     },
       "Pylance consumes the unavailable type after worker failure");
-    assert.match(failedRefreshHover, failedGeneration.files.length === 0 ? /\bAny\b/ : /Never|NoReturn|Unknown/);
+    results.lifecycle.workerFailureQuarantineRequests = workerRequests.filter(request => request.op === "quarantine")
+      .map(({ ok, error }) => ({ ok: Boolean(ok), ...(error ? { error } : {}) }));
+    assert.match(failedRefreshHover, /Never|NoReturn|Unknown|object/,
+      "Worker failure must leave the affected operation unavailable, never untyped Any");
+    assert.match(failedSiblingHover, /\bID\b/,
+      "An operation with unchanged schema dependencies must keep its precise sibling type");
     results.lifecycle.workerFailureKeepsAffectedTypingUnavailable = true;
 
     await replaceSelectedSchemaType("Boolean", "Int");
@@ -322,10 +331,6 @@ exports.run = async () => {
       const current = await readGeneration();
       return current.stubPath !== savedGeneration.stubPath && /selected:\s*(?:int|Int)\b/i.test(await selectedHover());
     }, "a fresh schema edit restarts analysis and publishes the current selected type");
-    const otherIdHover = async () => {
-      const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", sourceUri, new vscode.Position(14, 2)) || [];
-      return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
-    };
     await until(async () => /other_id:\s*ID\b/.test(await otherIdHover()),
       "the independent ID sibling remains precisely typed after recovery");
     assert.match(await otherIdHover(), /other_id:\s*ID\b/,
