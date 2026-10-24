@@ -238,6 +238,12 @@ exports.run = async () => {
       "user_id = read_card(result['user'])['id']",
       "needs_str: str = user_id",
       "wrong: int = user_id",
+      "conditional_doc = graphql('query Conditional($show: Boolean!) { user { ...Card @include(if: $show) } }', (card,))",
+      "conditional_result = execute(conditional_doc, {'show': True})",
+      "conditional_user = read_card(conditional_result['user'])",
+      "conditional_bad: str = conditional_user['id']",
+      "if 'id' in conditional_user:",
+      "    conditional_good: str = conditional_user['id']",
       "",
     ].join("\n");
     const fragmentConsumerEdit = new vscode.WorkspaceEdit();
@@ -258,17 +264,31 @@ exports.run = async () => {
         const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", consumerUri, valuePosition) || [];
         return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
       };
+      const conditionalOffset = fragmentConsumerSource.indexOf("conditional_user =") + 1;
+      const conditionalPosition = consumer.positionAt(conditionalOffset);
+      const conditionalHover = async () => {
+        const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", consumerUri, conditionalPosition) || [];
+        return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
+      };
       const fragmentDiagnostics = () => diagnostics().map(item => ({
         code: item.code?.value ?? item.code ?? "", source: item.source, severity: item.severity, message: item.message,
       }));
+      const sourceLine = marker => fragmentConsumerSource.slice(0, fragmentConsumerSource.indexOf(marker)).split("\n").length - 1;
+      const lineDiagnostics = marker => diagnostics().filter(item => item.range.start.line === sourceLine(marker));
       results.lifecycle.crossFileFragmentRefresh = await until(async () => {
         const fragmentStubs = path.join(selectedStubRoot(), "graphql_desk_generated");
         const defaultStub = await fs.readFile(path.join(fragmentStubs, "default.pyi"), "utf8").catch(() => "");
         const fragmentStub = await fs.readFile(path.join(fragmentStubs, "sources", "fragments.pyi"), "utf8").catch(() => "");
         const hoverText = await fragmentHover();
+        const conditionalText = await conditionalHover();
         const items = fragmentDiagnostics();
+        const badReadDiagnostics = lineDiagnostics("conditional_bad:");
+        const guardedReadDiagnostics = lineDiagnostics("conditional_good:");
         results.lifecycle.crossFileFragmentProbe = {
           hover: hoverText,
+          conditionalHover: conditionalText,
+          badReadDiagnostics: badReadDiagnostics.map(item => item.message),
+          guardedReadDiagnostics: guardedReadDiagnostics.map(item => item.message),
           diagnostics: items.map(item => ({ code: item.code, severity: item.severity, message: item.message })),
           restartCount: restartCalls.length,
           generatedOperation: defaultStub.includes("query WithCard { user { ...Card } }"),
@@ -277,8 +297,10 @@ exports.run = async () => {
         return results.lifecycle.crossFileFragmentProbe.generatedOperation &&
           results.lifecycle.crossFileFragmentProbe.generatedFragmentReader &&
           /\bID\b/.test(hoverText) &&
+          /FragmentAbsent/.test(conditionalText) &&
           !items.some(item => /reportMissingImports|reportMissingModuleSource|could not be resolved|No overload/i.test(`${JSON.stringify(item.code)} ${item.message}`)) &&
-          items.some(item => /reportAssignmentType|Incompatible/i.test(`${item.code} ${item.message}`));
+          items.some(item => /reportAssignmentType|Incompatible/i.test(`${item.code} ${item.message}`)) &&
+          badReadDiagnostics.length > 0 && guardedReadDiagnostics.length === 0;
       }, "cross-file fragment mutation converges in generated stubs, Pylance hover, and diagnostics", 45000);
       assert.ok(results.lifecycle.crossFileFragmentRefresh, JSON.stringify(results.lifecycle.crossFileFragmentProbe));
       await new Promise(resolve => setTimeout(resolve, 2000));
