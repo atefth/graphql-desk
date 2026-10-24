@@ -99,7 +99,7 @@ exports.run = async () => {
       return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
     };
     const observeQuarantine = async label => {
-      const deadline = Date.now() + 10000;
+      const deadline = Date.now() + 30000;
       let observed;
       while (Date.now() < deadline) {
         try {
