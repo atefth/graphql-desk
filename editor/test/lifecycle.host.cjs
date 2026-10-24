@@ -23,6 +23,8 @@ workerModule.createAnalysisWorker = options => {
       const record = { op: message.op, id: message.id, buffers: message.buffers?.map(item => ({
         path: item.path, dirty: item.is_dirty, hasSelected: item.text?.includes("{ selected count(limit: $limit) }"),
         hasChangedQuery: item.text?.includes("{ user { id } count(limit: $limit) }")
+      })), configs: message.buffers?.filter(item => /(?:^|[\\/])pyproject\.toml$/i.test(item.path)).map(item => ({
+        dirty: item.is_dirty, mapsStringToInt: item.text?.includes('String = { input = "builtins.str", output = "builtins.int" }'),
       })), schemas: message.schema_buffers?.map(item => ({ path: item.path, hasBoolean: item.text?.includes("selected: Boolean!") })) };
       try {
         if (message.op === "artifacts" && crashNextArtifacts) {
@@ -354,6 +356,17 @@ exports.run = async () => {
       delayedArtifactStarted = resolve;
       rejectDelayedArtifact = reject;
     });
+    const settingsPath = path.join(workspace, ".vscode", "settings.json");
+    const settingsBeforeRace = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+    const preservedSettings = { ...settingsBeforeRace };
+    delete preservedSettings["python.analysis.stubPath"];
+    const preservedSourcePath = path.join(workspace, "preserved_user.py");
+    const preservedSourceBefore = await fs.readFile(preservedSourcePath);
+    const preservedSource = await vscode.workspace.openTextDocument(vscode.Uri.file(preservedSourcePath));
+    const configPath = path.join(workspace, "pyproject.toml");
+    const configUri = vscode.Uri.file(configPath);
+    const configDocument = await vscode.workspace.openTextDocument(configUri);
+    const originalConfig = configDocument.getText();
     delayedArtifactTimer = setTimeout(() => rejectDelayedArtifact(
       new Error("The host never produced a result for the delayed schema snapshot"),
     ), 45000);
@@ -366,30 +379,80 @@ exports.run = async () => {
     const delayedRequest = workerRequests.find(request => request.op === "artifacts" && request.id === delayed.id);
     assert.ok(delayedRequest?.schemas?.some(schema => schema.hasBoolean),
       "The held worker result captured the first schema edit");
-    await replaceSelectedSchemaType("Boolean", "Int");
+    const preservedBufferEdit = new vscode.WorkspaceEdit();
+    preservedBufferEdit.replace(preservedSource.uri,
+      new vscode.Range(preservedSource.positionAt(0), preservedSource.positionAt(preservedSource.getText().length)),
+      "value = 'unsaved'\n");
+    assert.equal(await vscode.workspace.applyEdit(preservedBufferEdit), true);
+    assert.equal(preservedSource.isDirty, true, "The preservation fixture remains an unsaved user buffer");
+
+    const mappedConfig = originalConfig.replace("[tool.graphql-desk]\n",
+      '[tool.graphql-desk]\nscalars = { String = { input = "builtins.str", output = "builtins.int" } }\n');
+    assert.notEqual(mappedConfig, originalConfig, "The fixture config has a GraphQL Desk table");
+    const configEdit = new vscode.WorkspaceEdit();
+    configEdit.replace(configUri,
+      new vscode.Range(configDocument.positionAt(0), configDocument.positionAt(configDocument.getText().length)),
+      mappedConfig);
+    assert.equal(await vscode.workspace.applyEdit(configEdit), true);
+    assert.equal(configDocument.isDirty, true, "The config invalidation uses the unsaved config buffer");
+    await replaceSelectedSchemaType("Boolean", "String");
     await until(async () => {
       const generation = await readGeneration();
-      return generation.files.some(([, text]) => /'selected': 'Int'/.test(text)) &&
-        /selected:\s*Int\b/.test(await selectedHover());
-    }, "the newer schema result publishes while the earlier worker callback is held");
+      const generatedText = generation.files.map(([, text]) => text).join("\n");
+      return generation.files.some(([, text]) => /'selected': 'StringOutput'/.test(text)) &&
+        generatedText.includes("StringOutput") && /selected:\s*StringOutput\b/.test(await selectedHover());
+    }, "the current schema and unsaved scalar config publish while the earlier worker callback is held");
+    assert.ok(workerRequests.some(request => request.op === "artifacts" &&
+      request.configs?.some(config => config.dirty && config.mapsStringToInt)),
+    "The current worker request consumes the unsaved scalar config, not only the old schema snapshot");
+    const currentBeforeStaleRelease = await readGeneration();
     const publicationsBeforeStaleRelease = publications.length;
     releaseDelayedArtifact();
     await new Promise(resolve => setTimeout(resolve, 500));
     const afterStaleRelease = await readGeneration();
-    assert.ok(afterStaleRelease.files.some(([, text]) => /'selected': 'Int'/.test(text)),
+    assert.equal(afterStaleRelease.stubPath, currentBeforeStaleRelease.stubPath,
+      "The stale callback cannot rotate the selected managed generation");
+    assert.ok(afterStaleRelease.files.some(([, text]) => /'selected': 'StringOutput'/.test(text)),
       "A delayed earlier callback cannot replace the newer generated type");
-    assert.match(await selectedHover(), /selected:\s*Int\b/);
+    assert.match(await selectedHover(), /selected:\s*StringOutput\b/);
     assert.equal(publications.length, publicationsBeforeStaleRelease,
       "The stale callback is rejected before managed artifacts are published");
+    assert.equal(await fs.readFile(preservedSourcePath, "utf8"), preservedSourceBefore.toString(),
+      "Invalidation preserves the pre-existing user file on disk");
+    assert.equal(preservedSource.getText(), "value = 'unsaved'\n");
+    assert.equal(preservedSource.isDirty, true, "Invalidation preserves the user's dirty buffer");
+    assert.equal(await fs.readFile(configPath, "utf8"), originalConfig,
+      "The unsaved config edit does not write the user's config file");
+    const configRestore = new vscode.WorkspaceEdit();
+    configRestore.replace(configUri,
+      new vscode.Range(configDocument.positionAt(0), configDocument.positionAt(configDocument.getText().length)),
+      originalConfig);
+    assert.equal(await vscode.workspace.applyEdit(configRestore), true);
+    assert.equal(configDocument.getText(), originalConfig, "Restoring the config edit restores the saved config text");
+    assert.equal(await configDocument.save(), true);
+    assert.equal(configDocument.isDirty, false, "Saving the restored config clears only the test's own temporary edit");
+    assert.equal(await fs.readFile(configPath, "utf8"), originalConfig,
+      "Saving the restored config leaves the user's on-disk config unchanged");
+    await until(async () => /selected:\s*(?:str|String)\b/.test(await selectedHover()),
+      "restoring the original config restores the schema's original typing");
+    const settingsAfterRace = JSON.parse(await fs.readFile(settingsPath, "utf8"));
+    const settingsWithoutManagedPath = { ...settingsAfterRace };
+    const managedStubPath = settingsWithoutManagedPath["python.analysis.stubPath"];
+    delete settingsWithoutManagedPath["python.analysis.stubPath"];
+    assert.deepEqual(settingsWithoutManagedPath, preservedSettings,
+      "Config invalidation preserves every unrelated workspace setting");
+    assert.match(managedStubPath.replaceAll("\\", "/"),
+      /^\.graphql-desk\/typings\/generations\/g-/,
+      "Only GraphQL Desk's authorized managed stubPath may rotate");
     results.lifecycle.delayedStaleCallbackRejected = {
       staleRequestId: delayed.id,
       newerTypeRemainedSelected: true,
       stalePublicationCount: 0,
+      configChangedWhilePublicationInFlight: true,
+      dirtyUserBufferPreserved: true,
+      preExistingUserFilePreserved: true,
+      unrelatedWorkspaceSettingsPreserved: true,
     };
-
-    await replaceSelectedSchemaType("Int", "String");
-    await until(async () => /selected:\s*(?:str|String)\b/.test(await selectedHover()),
-      "restore the lifecycle fixture schema after the recovery proof");
 
     await replaceQuery(editor, oldQuery, "user { id } count(limit: $limit)");
     await until(async () => {
