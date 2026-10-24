@@ -1,7 +1,10 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { operationDependencyImpact, reconfigureWorkspaceRoots } = require("../src/extension");
 
 test("schema and config deltas target only operations with changed provenance facts", () => {
@@ -41,6 +44,27 @@ test("schema and config deltas target only operations with changed provenance fa
   assert.equal(operationDependencyImpact(before, [{ ...after[0], operations: [
     { ...after[0].operations[0], schema_dependencies: "unknown" }, after[0].operations[1],
   ] }]), null, "unknown authoritative facts require fail-closed project handling");
+});
+
+test("operation impact matches Windows paths that differ only by case", t => {
+  if (process.platform !== "win32") return t.skip("Windows canonical path behavior");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "graphql-desk-path-key-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "Consumer.py");
+  const project = path.join(root, "pyproject.toml");
+  fs.writeFileSync(source, "");
+  fs.writeFileSync(project, "");
+  const differentlyCased = value => value.replace(/[a-z]/g, letter => letter.toUpperCase());
+  const operation = (sourcePath, projectPath) => ({
+    owner: { module: { project: pathToFileURL(projectPath).href, module: "consumer", uri: pathToFileURL(sourcePath).href } },
+    binding: "doc", selector: "doc", operation_name: "Pick", operation_kind: "query", status: "precise",
+    source_dependencies_known: true, mapping_dependencies: [], schema_identity: [pathToFileURL(projectPath).href, "default"],
+    context_token: "same", schema_dependencies: [], config_dependencies: [],
+  });
+  const before = [{ project: "project", generated_package: "generated", operations: [operation(source, project)] }];
+  const after = [{ ...before[0], operations: [operation(differentlyCased(source), differentlyCased(project))] }];
+  assert.deepEqual(operationDependencyImpact(before, after), [],
+    "path aliases for the same source and project must not force broad quarantine");
 });
 
 test("a stubPath conflict retires only its workspace and reconfigures the remaining roots", async () => {

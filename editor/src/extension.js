@@ -2,6 +2,7 @@
 
 const path = require("node:path");
 const fs = require("node:fs");
+const { fileURLToPath } = require("node:url");
 const { createAnalysisController } = require("./analysisController");
 const { registerLanguageFeatures } = require("./languageFeatures");
 const { registerHighlighting } = require("./highlighting");
@@ -11,10 +12,26 @@ const { createAnalysisGenerations } = require("./analysisGenerations");
 
 function operationDependencyImpact(previous, current) {
   if (!Array.isArray(previous) || !Array.isArray(current)) return null;
+  const location = value => {
+    if (typeof value !== "string") return value;
+    let filename = value;
+    try { if (value.startsWith("file:")) filename = fileURLToPath(value); }
+    catch { return value; }
+    if (!path.isAbsolute(filename)) return value;
+    try { filename = fs.realpathSync.native(filename); } catch { filename = path.resolve(filename); }
+    return process.platform === "win32" ? filename.toLowerCase() : filename;
+  };
+  const canonicalPaths = value => Array.isArray(value) ? value.map(canonicalPaths)
+    : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([name, item]) =>
+      [name, name === "uri" || name === "project" ? location(item) : canonicalPaths(item)])) : value;
+  const same = (left, right) => JSON.stringify(canonicalPaths(left)) === JSON.stringify(canonicalPaths(right));
+  const sameSchemaIdentity = (left, right) => left === null || right === null ? left === right
+    : Array.isArray(left) && Array.isArray(right) && left.length === 2 && right.length === 2
+      ? location(left[0]) === location(right[0]) && left[1] === right[1] : same(left, right);
   const key = item => {
     const module = item?.owner?.module;
     return module && typeof item.binding === "string"
-      ? JSON.stringify([module.project, module.module, module.uri, item.binding, item.selector, item.operation_name, item.operation_kind])
+      ? JSON.stringify([location(module.project), module.module, location(module.uri), item.binding, item.selector, item.operation_name, item.operation_kind])
       : null;
   };
   const flatten = manifest => manifest.flatMap(group => group.operations);
@@ -31,7 +48,7 @@ function operationDependencyImpact(previous, current) {
     const a = left[name];
     const b = right[name];
     if (!Array.isArray(a) || !Array.isArray(b)) return null;
-    const encode = value => JSON.stringify(value);
+    const encode = value => JSON.stringify(canonicalPaths(value));
     const leftMap = new Map(a.map(item => [name === "schema_dependencies" ? item.coordinate : `${item.kind}\0${item.name}`, name === "schema_dependencies" ? item.fingerprint : item.value]));
     const rightMap = new Map(b.map(item => [name === "schema_dependencies" ? item.coordinate : `${item.kind}\0${item.name}`, name === "schema_dependencies" ? item.fingerprint : item.value]));
     if (leftMap.size !== a.length || rightMap.size !== b.length) return null;
@@ -50,15 +67,12 @@ function operationDependencyImpact(previous, current) {
     const configChanged = factsChanged(old, next, "config_dependencies");
     if (schemaChanged === null || configChanged === null) return null;
     if (schemaChanged || configChanged ||
-        JSON.stringify(old.mapping_dependencies) !== JSON.stringify(next.mapping_dependencies) ||
-        JSON.stringify(old.owner) !== JSON.stringify(next.owner) ||
-        JSON.stringify(old.canonical_owner) !== JSON.stringify(next.canonical_owner) ||
-        JSON.stringify(old.definition_owners) !== JSON.stringify(next.definition_owners) ||
-        JSON.stringify(old.direct_fragments) !== JSON.stringify(next.direct_fragments) ||
-        JSON.stringify(old.dependencies) !== JSON.stringify(next.dependencies) ||
-        JSON.stringify(old.source_exports) !== JSON.stringify(next.source_exports) ||
+        !same(old.mapping_dependencies, next.mapping_dependencies) ||
+        !same(old.owner, next.owner) || !same(old.canonical_owner, next.canonical_owner) ||
+        !same(old.definition_owners, next.definition_owners) || !same(old.direct_fragments, next.direct_fragments) ||
+        !same(old.dependencies, next.dependencies) || !same(old.source_exports, next.source_exports) ||
         old.selector_known !== next.selector_known ||
-        JSON.stringify(old.schema_identity) !== JSON.stringify(next.schema_identity) ||
+        !sameSchemaIdentity(old.schema_identity, next.schema_identity) ||
         old.context_token !== next.context_token) impacted.push(old.owner);
     byKey.delete(identity);
   }
