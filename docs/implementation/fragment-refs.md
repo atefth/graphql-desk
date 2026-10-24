@@ -26,8 +26,9 @@ runtime operations. They are intended for generated result and reader signatures
 
 Tests run positive and negative fixtures through both pinned checkers, including
 wrong identities, raw closed dictionaries, combined capabilities, exact fragment
-tuples, and changed transitive dependencies. Issue #35 remains open for the complete
-helper acceptance matrix.
+tuples, and changed transitive dependencies. Issue #35's alias/reference and basic
+identity-reader criteria are covered; the complete helper acceptance matrix remains
+under #52.
 
 Reader research remains incomplete. A pinned TypeScript comparison corrected an
 initially stronger expectation: a different fragment reference with directly
@@ -58,14 +59,18 @@ elements. Python typing cannot express that an identity type differs from the
 document identity, so the wider return keeps fragment-only fields inaccessible.
 Both root helpers return the original value unchanged.
 
-This is bounded reader support. Nullable arrays retain the full result union;
-bound readers exclude the absent alternative when their input elements are
-matching references, compatible result shapes or nulls. Inputs that also admit
+This is bounded reader support. The canonical two-argument reader narrows nullable
+abstract item lists when their input type identifies one concrete branch. The
+generated one-argument convenience helper can retain the full abstract result union
+for that shape: branch-specific nullable overloads overlap in both Pyright and
+mypy. Bound readers exclude the absent alternative when their input elements are
+matching references, compatible result shapes or nulls; inputs that also admit
 an absent shape retain that alternative. Generic raw literals and contextual fallback
-inputs can retain a wider result/absence union. Required conditional
-empty branches remain absent rather than inventing selected fields. These limits,
-mask/result helpers and the full parity matrix keep the broad gate open. Mutable
-output aliasing intentionally follows the pinned runtime identity behavior.
+inputs can retain a wider result/absence union. Required conditional empty branches
+remain absent rather than inventing selected fields. The convenience-helper limit,
+mask/result helpers and full acceptance matrix remain under #52 and keep the broad
+gate open. Mutable output aliasing intentionally follows the pinned runtime identity
+behavior.
 
 `unsafe_read_result(document, fixture)` is exported from the package root and
 `graphql_desk.testing` as the same identity function. Generated documents carry a
