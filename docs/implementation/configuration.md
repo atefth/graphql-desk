@@ -46,6 +46,9 @@ reachable import closure can make doctor slow. External installed-package symbol
 and checker-level type compatibility remain unverified. Its status remains degraded
 (exit 1) because full mapping compatibility, generated ownership, active editor and
 live bridge health do not yet have authoritative CLI inputs.
+An isolated checker fixture verifies a generated schema/factory against a
+stub-only external package with mypy and Pyright. It does not establish runtime
+exports or make doctor resolve external packages.
 `--help` and `--version` exit 0; invalid arguments exit 2 without echoing supplied
 values. This command is a diagnostic foundation, not full doctor acceptance.
 
