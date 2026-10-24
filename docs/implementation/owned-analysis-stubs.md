@@ -108,6 +108,23 @@ ignores unrelated open documents and clean documents, whose text matches disk;
 the worker still verifies disk-backed sources before publication. A focused
 regression confirms that opening a clean source document during publication
 does not stale the result, while editing a required dirty schema does.
+
+If extension workspace state is missing but `python.analysis.stubPath` still
+selects a complete generation under GraphQL Desk's reserved
+`.graphql-desk/typings/generations/` path at workspace or workspace-folder
+scope, startup recovers ownership of the managed root and rotates to a newly
+verified generation. It does not adopt or delete the prior generation. Global
+settings, malformed manifests, and linked generation paths remain unowned.
+Publication reserves sequence numbers used by all directory names, including
+unowned leftovers, so it cannot collide with preserved data.
+The Windows VS Code 1.142.0 host test changes the saved schema while the editor
+is closed: after restart, the removed field becomes `Unknown` with a GraphQL
+Desk diagnostic, the independent sibling remains `ID`, and schema repair
+restores `String` and clears the diagnostic. See
+[`restart-recovery-stale-input-1.142.0.json`](../../editor/test/observations/restart-recovery-stale-input-1.142.0.json).
+This is bounded restart evidence; it does not complete issue #38 or live-typing
+gate #42.
+
 The full `factoryArtifacts` scenario now passes on VS Code 1.141.0 and 1.142.0
 with pinned Python 2026.10.0 / Pylance 2026.4.1. It verifies operation result
 and variable inference, unsaved operation and nullable refresh, cross-file

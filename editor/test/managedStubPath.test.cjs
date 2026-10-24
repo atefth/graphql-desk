@@ -98,6 +98,64 @@ test("rotates only the extension-owned setting and restores ownership across act
   assert.equal(custom.values["analysis.stubPath"], customPath);
 });
 
+test("recovers the reserved managed root after workspace state is lost", async t => {
+  const f = await fixture(t, undefined);
+  const first = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const generations = path.join(first.root, "generations");
+  await fs.mkdir(generations);
+  const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
+  await fs.mkdir(generation);
+  await fs.writeFile(path.join(generation, "complete.json"), JSON.stringify({
+    owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(generation), sequence: 1,
+    files: [], operationManifest: [], inputFingerprint: "b".repeat(64), artifactFingerprint: "a".repeat(64),
+  }));
+  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(generation) }, verify() { return this; } };
+  await ownGeneration(first, verified);
+  assert.equal(await first.selectGeneration(generation, () => true, { ...verified, manifestFingerprint: "a".repeat(64) }), true);
+  f.stored.clear();
+
+  const restarted = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  assert.equal(restarted.ownsSetting, true);
+  assert.equal(restarted.root, first.root);
+  assert.equal(restarted.selectedSetting, f.values["analysis.stubPath"]);
+  assert.equal(restarted.stillOwnsSetting(), true);
+});
+
+test("does not claim a global stubPath that resembles a GraphQL Desk generation", async t => {
+  const setting = ".graphql-desk/typings/generations/g-1-00000000-0000-0000-0000-000000000000";
+  const f = await fixture(t, setting, false, "globalValue");
+  const directory = path.resolve(f.workspace, setting);
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(path.join(directory, "complete.json"), JSON.stringify({
+    owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(directory), sequence: 1,
+    files: [], operationManifest: [], inputFingerprint: "b".repeat(64), artifactFingerprint: "a".repeat(64),
+  }));
+
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  assert.equal(managed.ownsSetting, false);
+  assert.equal(f.values["analysis.stubPath"], setting);
+});
+
+test("does not infer GraphQL Desk ownership from an incomplete or linked generation", async t => {
+  for (const linked of [false, true]) {
+    const f = await fixture(t, ".graphql-desk/typings/generations/g-1-00000000-0000-0000-0000-000000000000");
+    const directory = path.resolve(f.workspace, f.values["analysis.stubPath"]);
+    await fs.mkdir(path.dirname(directory), { recursive: true });
+    if (linked) {
+      const target = path.join(f.workspace, "foreign");
+      await fs.mkdir(target);
+      await fs.symlink(target, directory, "junction");
+    }
+    else await fs.mkdir(directory);
+    if (linked) await assert.rejects(createManagedStubPath(f.vscode, f.folder, f.workspaceState), /not a safe directory/);
+    else {
+      const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+      assert.equal(managed.ownsSetting, false);
+    }
+    assert.equal(f.values["analysis.stubPath"], ".graphql-desk/typings/generations/g-1-00000000-0000-0000-0000-000000000000");
+  }
+});
+
 test("recovers ownership when activation interrupts a managed stubPath rotation", async t => {
   const f = await fixture(t, undefined);
   const first = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);

@@ -77,6 +77,20 @@ test("publishes immutable complete generations and recovers the latest verified 
   assert.equal(fs.readFileSync(path.join(f.root, "user.txt"), "utf8"), "keep");
 });
 
+test("publication skips unowned generation directories without adopting or changing them", async t => {
+  const f = fixture(t);
+  assert.equal(await publish(f, files("str"), "analysis-1"), true);
+  const leftover = path.join(f.root, "generations", "g-2-00000000-0000-0000-0000-000000000000");
+  fs.mkdirSync(leftover);
+  fs.writeFileSync(path.join(leftover, "keep.txt"), "foreign data");
+
+  assert.equal(await publish(f, files("int"), "analysis-2"), true);
+  const selected = path.resolve(f.workspace, f.managed.selectedSetting);
+  assert.equal(path.basename(selected).split("-")[1], "3");
+  assert.equal(fs.readFileSync(path.join(leftover, "keep.txt"), "utf8"), "foreign data");
+  assert.equal(f.publisher.current(f.managed).some(item => item.directory === leftover), false);
+});
+
 test("rejects a runtime artifact without its stub before selecting a generation", async t => {
   const f = fixture(t);
   const unpaired = files("str");
