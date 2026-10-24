@@ -607,6 +607,91 @@ test("fresh enumeration and document inventory reject stale success even without
   assert.equal(await controller.isCurrent(third, snapshot), false);
 });
 
+test("late analysis results are rejected after any captured input changes", async t => {
+  for (const input of ["source", "dependency", "schema", "project-config", "interpreter"]) {
+    await t.test(input, async t => {
+      const fixture = await setup(t);
+      const dependencyPath = path.join(fixture.root, "dependency.py");
+      const schema = fixture.document("schema.graphql", "type Query { title: String }");
+      schema.isDirty = true;
+      if (input === "dependency") {
+        await fs.writeFile(dependencyPath, 'from graphql_desk import gql\nq=gql("{title}")\n');
+        fixture.candidates(["main.py", "dependency.py"]);
+      }
+      if (input === "interpreter") fixture.interpreter("");
+      const python = input === "interpreter" ? pythonApi(fixture) : null;
+      let release;
+      let started;
+      const ready = new Promise(resolve => { started = resolve; });
+      const held = new Promise(resolve => { release = resolve; });
+      t.after(() => release());
+      let workerCreates = 0;
+      const controller = createAnalysisController(fixture.vscode, {
+        workerFactory: options => {
+          workerCreates += 1;
+          const worker = createAnalysisWorker(options);
+          let delayed = false;
+          return { ...worker, async request(message, requestOptions) {
+            const reply = await worker.request(message, requestOptions);
+            if (message.op === "analyze" && !delayed) {
+              delayed = true;
+              started();
+              await held;
+            }
+            return reply;
+          } };
+        },
+      });
+      t.after(() => controller.dispose());
+
+      const snapshot = controller.snapshot(fixture.main);
+      const pending = controller.analyze(snapshot);
+      await ready;
+
+      if (input === "source") {
+        fixture.main.text += "# changed during analysis\n";
+        fixture.main.version += 1;
+        fixture.main.isDirty = true;
+        fixture.events.onDidChangeTextDocument.fire({ document: fixture.main });
+      } else if (input === "dependency") {
+        const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+        assert.ok(watcher, "the dependency watcher is installed before analysis");
+        await fs.writeFile(dependencyPath, 'from graphql_desk import gql\nq=gql("{missing}")\n');
+        watcher.fire(Uri.file(dependencyPath));
+      } else if (input === "schema") {
+        schema.text = "type Query { title: Int }";
+        schema.version += 1;
+        const watcher = fixture.watchers.find(item => item.pattern.pattern.endsWith(".graphql"));
+        assert.ok(watcher, "the required schema watcher is installed before analysis");
+        watcher.fire(schema.uri);
+      } else if (input === "project-config") {
+        const configPath = path.join(fixture.root, "pyproject.toml");
+        await fs.appendFile(configPath, 'client_directives=["local"]\n');
+        fixture.watchers.find(item => item.pattern.pattern === "**/*").fire(Uri.file(configPath));
+      } else {
+        python.select({ id: "changed", path: "changed-environment" });
+      }
+      release();
+
+      assert.equal(await pending, null, "the old worker response cannot become current after invalidation");
+      const fresh = await controller.analyze(controller.snapshot(fixture.main));
+      assert.ok(fresh, "a later analysis can publish under the changed inputs");
+      if (input === "source") {
+        assert.match(fresh.request.modules.find(module => module.module === "main").source, /changed during analysis/);
+      } else if (input === "dependency") {
+        assert.equal(fresh.request.modules.find(module => module.module === "dependency").source,
+          'from graphql_desk import gql\nq=gql("{missing}")\n');
+      } else if (input === "schema") {
+        assert.equal(fresh.request.schemas[0].text, "type Query { title: Int }");
+      } else if (input === "project-config") {
+        assert.deepEqual(controller.clientDirectives(fresh, fresh.response.calls[0]), ["local"]);
+      } else if (input === "interpreter") {
+        assert.equal(workerCreates, 2, "a changed interpreter gets a fresh worker");
+      }
+    });
+  }
+});
+
 test("untrusted, cancelled, superseded and disposed captures cannot publish or launch unauthorized workers", async t => {
   const fixture = await setup(t);
   let launches = 0;
