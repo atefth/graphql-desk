@@ -104,9 +104,14 @@ async function main() {
   assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
   const factorySuite = ["factoryArtifacts", "typingMatrix", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
+  assert.deepEqual(await fs.readdir(temporary), [], "Every host run starts from a new temporary root");
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
-  const extensions = path.resolve(__dirname, "..", ".vscode-test", `features-${version}`, "extensions");
+  assert.equal(fsSync.existsSync(workspace), false, "The host workspace must not be reused");
+  assert.equal(fsSync.existsSync(profile), false, "The host user-data directory must not be reused");
+  const extensions = path.join(temporary, `extensions-${version}`);
+  await fs.mkdir(extensions);
+  assert.deepEqual(await fs.readdir(extensions), [], "Every host run starts with an empty extensions directory");
   const result = path.join(temporary, "result.json");
   const artifacts = path.join(temporary, "artifacts.json");
   const stubRoot = factorySuite ? path.join(workspace, ".graphql-desk", "typings") : path.join(workspace, "owned_analysis_stubs");
@@ -239,6 +244,7 @@ async function main() {
   let interruptedPublication;
   let selectedGenerationBeforeRestart;
   let selectedGenerationFilesBeforeRestart;
+  let userFilesBeforeInterruption;
   for (const phase of sessions) {
     const sessionEnv = phase ? { ...options.extensionTestsEnv, GRAPHQL_DESK_RESTART_PHASE: phase } : options.extensionTestsEnv;
     await runTests({ ...options, extensionTestsEnv: sessionEnv });
@@ -250,6 +256,15 @@ async function main() {
       selectedGenerationBeforeRestart = path.resolve(workspace, oldStubPath);
       await fs.access(path.join(selectedGenerationBeforeRestart, "complete.json"));
       selectedGenerationFilesBeforeRestart = await readStubFiles(selectedGenerationBeforeRestart);
+      if (suite === "restartRecovery") {
+        userFilesBeforeInterruption = new Map(await Promise.all([
+          ".vscode/settings.json", "pyproject.toml", "schema.graphql", "consumer.py",
+          "graphql_desk_generated/default.py", "graphql_desk_generated/sources/fragments.py", ".graphql-desk/keep.txt",
+        ].map(async name => [name, await fs.readFile(path.join(workspace, name))])));
+        const settings = JSON.parse(userFilesBeforeInterruption.get(".vscode/settings.json"));
+        delete settings["python.analysis.stubPath"];
+        userFilesBeforeInterruption.set(".vscode/settings.json", Buffer.from(JSON.stringify(settings)));
+      }
       interruptedPublication = await crashDuringPublication(workspace, stubRoot, temporary);
       interruptedGenerationFile = interruptedPublication.file;
       if (suite === "restartRecoveryChangedInputs") {
@@ -259,6 +274,8 @@ async function main() {
     }
   }
   const observed = JSON.parse(await fs.readFile(result, "utf8"));
+  if (observed.lifecycle) observed.lifecycle.freshWorkspaceUserDataAndExtensions = true;
+  else observed.isolatedHostDirectoriesFresh = true;
   if (suite === "restartRecovery") {
     observed.lifecycle.beforeRestartHost = beforeRestart.host;
     observed.lifecycle.afterRestartHost = observed.host;
@@ -277,6 +294,19 @@ async function main() {
     observed.lifecycle.abandonedGenerationIgnoredAndPreserved = true;
     assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
     observed.lifecycle.userFilePreserved = true;
+    for (const [name, bytes] of userFilesBeforeInterruption) {
+      let actual = await fs.readFile(path.join(workspace, name));
+      if (name === ".vscode/settings.json") {
+        const settings = JSON.parse(actual);
+        assert.match(settings["python.analysis.stubPath"].replaceAll("\\", "/"),
+          /^\.graphql-desk\/typings\/generations\/g-/,
+          "Only GraphQL Desk's managed stubPath may rotate during restart recovery");
+        delete settings["python.analysis.stubPath"];
+        actual = Buffer.from(JSON.stringify(settings));
+      }
+      assert.deepEqual(actual, bytes, `${name} must survive interrupted publication and restart`);
+    }
+    observed.lifecycle.preExistingFilesPreserved = [...userFilesBeforeInterruption.keys()];
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (suite === "restartRecoveryChangedInputs") {
     assert.equal(observed.outcome, "owned-output-restart-observed");

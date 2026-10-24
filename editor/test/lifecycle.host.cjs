@@ -14,6 +14,9 @@ const refreshCallbacks = [];
 const artifactCalls = [];
 const skipReasons = [];
 let crashNextArtifacts = false;
+let delayedArtifact = null;
+let releaseDelayedArtifact = null;
+let delayedArtifactTimer = null;
 const createWorker = workerModule.createAnalysisWorker;
 workerModule.createAnalysisWorker = options => {
   const worker = createWorker(options);
@@ -58,6 +61,12 @@ controllerModule.createAnalysisController = (...args) => {
     const result = await artifacts(...artifactArgs);
     artifactCalls.push({ result: Boolean(result), id: result?.id, cancelled: artifactArgs[1]?.isCancellationRequested });
     if (result) {
+      if (delayedArtifact) {
+        const delay = delayedArtifact;
+        delayedArtifact = null;
+        delay.started({ id: result.id });
+        await delay.release;
+      }
       const isCurrent = result.isCurrent;
       result.isCurrent = () => {
         const current = isCurrent();
@@ -338,6 +347,47 @@ exports.run = async () => {
     results.lifecycle.workerFailureRequests = workerRequests.filter(request => request.op === "artifacts").slice(-3);
     results.lifecycle.workerRecoveryOperations = recoveryRequests.filter(request => ["prepare", "analyze", "artifacts"].includes(request.op))
       .map(({ op, ok, error }) => ({ op, ok: Boolean(ok), ...(error ? { error } : {}) }));
+
+    let releaseDelayedArtifact;
+    let delayedArtifactStarted;
+    let rejectDelayedArtifact;
+    const delayedArtifactReady = new Promise((resolve, reject) => {
+      delayedArtifactStarted = resolve;
+      rejectDelayedArtifact = reject;
+    });
+    delayedArtifactTimer = setTimeout(() => rejectDelayedArtifact(
+      new Error("The host never produced a result for the delayed schema snapshot"),
+    ), 45000);
+    const delayedArtifactRelease = new Promise(resolve => { releaseDelayedArtifact = resolve; });
+    delayedArtifact = { started: delayedArtifactStarted, release: delayedArtifactRelease };
+    await replaceSelectedSchemaType("Int", "Boolean");
+    let delayed;
+    try { delayed = await delayedArtifactReady; }
+    finally { clearTimeout(delayedArtifactTimer); delayedArtifactTimer = null; }
+    const delayedRequest = workerRequests.find(request => request.op === "artifacts" && request.id === delayed.id);
+    assert.ok(delayedRequest?.schemas?.some(schema => schema.hasBoolean),
+      "The held worker result captured the first schema edit");
+    await replaceSelectedSchemaType("Boolean", "Int");
+    await until(async () => {
+      const generation = await readGeneration();
+      return generation.files.some(([, text]) => /'selected': 'Int'/.test(text)) &&
+        /selected:\s*Int\b/.test(await selectedHover());
+    }, "the newer schema result publishes while the earlier worker callback is held");
+    const publicationsBeforeStaleRelease = publications.length;
+    releaseDelayedArtifact();
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const afterStaleRelease = await readGeneration();
+    assert.ok(afterStaleRelease.files.some(([, text]) => /'selected': 'Int'/.test(text)),
+      "A delayed earlier callback cannot replace the newer generated type");
+    assert.match(await selectedHover(), /selected:\s*Int\b/);
+    assert.equal(publications.length, publicationsBeforeStaleRelease,
+      "The stale callback is rejected before managed artifacts are published");
+    results.lifecycle.delayedStaleCallbackRejected = {
+      staleRequestId: delayed.id,
+      newerTypeRemainedSelected: true,
+      stalePublicationCount: 0,
+    };
+
     await replaceSelectedSchemaType("Int", "String");
     await until(async () => /selected:\s*(?:str|String)\b/.test(await selectedHover()),
       "restore the lifecycle fixture schema after the recovery proof");
@@ -431,6 +481,8 @@ exports.run = async () => {
     results.outcome = "managed-output-lifecycle-failed";
     throw error;
   } finally {
+    if (delayedArtifactTimer) clearTimeout(delayedArtifactTimer);
+    releaseDelayedArtifact?.();
     changedSubscription.dispose();
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
   }
