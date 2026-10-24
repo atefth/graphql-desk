@@ -4,7 +4,8 @@ const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
+const { once } = require("node:events");
 const { runTests, runVSCodeCommand } = require("@vscode/test-electron");
 
 function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix) {
@@ -58,6 +59,44 @@ async function readStubFiles(root) {
   return files.sort(([left], [right]) => left.localeCompare(right));
 }
 
+async function crashDuringPublication(workspace, stubRoot, temporary) {
+  const marker = path.join(temporary, "interrupted-publication.json");
+  const child = spawn(process.execPath, [path.join(__dirname, "crashDuringGeneration.cjs"), workspace, stubRoot, marker], {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let stderr = "";
+  let spawnError;
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", value => { stderr += value; });
+  child.on("error", error => { spawnError = error; });
+  const stopChild = async () => {
+    if (spawnError) return child.exitCode;
+    if (child.exitCode !== null || child.signalCode !== null) return child.exitCode;
+    const exited = once(child, "exit");
+    child.kill("SIGKILL");
+    const [code] = await exited;
+    return code;
+  };
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline && child.exitCode === null && !fsSync.existsSync(marker)) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  if (!fsSync.existsSync(marker)) {
+    await stopChild();
+    assert.fail(`The real generation writer did not reach the crash point: ${spawnError ?? stderr}`);
+  }
+  const interrupted = JSON.parse(await fs.readFile(marker, "utf8"));
+  const generations = path.resolve(stubRoot, "generations");
+  const relative = path.relative(generations, interrupted.directory);
+  assert.ok(relative && !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`),
+    "The interrupted generation must stay under GraphQL Desk's managed directory");
+  const code = await stopChild();
+  assert.notEqual(code, 0, "The writer process must end before it can finish the manifest");
+  assert.equal(fsSync.existsSync(path.join(interrupted.directory, "complete.json")), false,
+    "The hard-stopped writer must leave an uncommitted generation");
+  return { ...interrupted, bytes: await fs.readFile(interrupted.file) };
+}
+
 async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
@@ -65,9 +104,14 @@ async function main() {
   assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
   const factorySuite = ["factoryArtifacts", "typingMatrix", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
+  assert.deepEqual(await fs.readdir(temporary), [], "Every host run starts from a new temporary root");
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
-  const extensions = path.resolve(__dirname, "..", ".vscode-test", `features-${version}`, "extensions");
+  assert.equal(fsSync.existsSync(workspace), false, "The host workspace must not be reused");
+  assert.equal(fsSync.existsSync(profile), false, "The host user-data directory must not be reused");
+  const extensions = path.join(temporary, `extensions-${version}`);
+  await fs.mkdir(extensions);
+  assert.deepEqual(await fs.readdir(extensions), [], "Every host run starts with an empty extensions directory");
   const result = path.join(temporary, "result.json");
   const artifacts = path.join(temporary, "artifacts.json");
   const stubRoot = factorySuite ? path.join(workspace, ".graphql-desk", "typings") : path.join(workspace, "owned_analysis_stubs");
@@ -172,8 +216,10 @@ async function main() {
       settings: JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")),
     }));
   }
-  for (const extension of ["ms-python.python@2026.10.0", "ms-python.vscode-pylance@2026.4.1"]) {
-    await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], { version });
+  if (suite !== "discovery") {
+    for (const extension of ["ms-python.python@2026.10.0", "ms-python.vscode-pylance@2026.4.1"]) {
+      await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], { version });
+    }
   }
   const options = {
     version,
@@ -195,6 +241,10 @@ async function main() {
     : suite === "restartRecoveryChangedInputs" ? ["before-restart", "after-input-change"] : [null];
   let beforeRestart;
   let interruptedGenerationFile;
+  let interruptedPublication;
+  let selectedGenerationBeforeRestart;
+  let selectedGenerationFilesBeforeRestart;
+  let userFilesBeforeInterruption;
   for (const phase of sessions) {
     const sessionEnv = phase ? { ...options.extensionTestsEnv, GRAPHQL_DESK_RESTART_PHASE: phase } : options.extensionTestsEnv;
     await runTests({ ...options, extensionTestsEnv: sessionEnv });
@@ -203,12 +253,20 @@ async function main() {
       assert.equal(beforeRestart.outcome, "owned-output-restart-observed");
       const oldStubPath = beforeRestart.lifecycle.stubPath;
       assert.ok(oldStubPath.includes("generations"), "The first host must select a complete owned generation");
-      await fs.access(path.join(workspace, oldStubPath, "complete.json"));
-      const generationsRoot = path.join(workspace, ".graphql-desk", "typings", "generations");
-      const interruptedGeneration = path.join(generationsRoot, "g-999-00000000-0000-0000-0000-000000000000");
-      interruptedGenerationFile = path.join(interruptedGeneration, "graphql_desk_generated", "default.pyi");
-      await fs.mkdir(path.dirname(interruptedGenerationFile), { recursive: true });
-      await fs.writeFile(interruptedGenerationFile, "# Generated by GraphQL Desk; interrupted publication\nselected: partial\n");
+      selectedGenerationBeforeRestart = path.resolve(workspace, oldStubPath);
+      await fs.access(path.join(selectedGenerationBeforeRestart, "complete.json"));
+      selectedGenerationFilesBeforeRestart = await readStubFiles(selectedGenerationBeforeRestart);
+      if (suite === "restartRecovery") {
+        userFilesBeforeInterruption = new Map(await Promise.all([
+          ".vscode/settings.json", "pyproject.toml", "schema.graphql", "consumer.py",
+          "graphql_desk_generated/default.py", "graphql_desk_generated/sources/fragments.py", ".graphql-desk/keep.txt",
+        ].map(async name => [name, await fs.readFile(path.join(workspace, name))])));
+        const settings = JSON.parse(userFilesBeforeInterruption.get(".vscode/settings.json"));
+        delete settings["python.analysis.stubPath"];
+        userFilesBeforeInterruption.set(".vscode/settings.json", Buffer.from(JSON.stringify(settings)));
+      }
+      interruptedPublication = await crashDuringPublication(workspace, stubRoot, temporary);
+      interruptedGenerationFile = interruptedPublication.file;
       if (suite === "restartRecoveryChangedInputs") {
         await fs.writeFile(path.join(workspace, "schema.graphql"),
           "type User { id: ID! name: String! }\ntype Query { count(limit: Int!): Int! user: User! }\n");
@@ -216,29 +274,57 @@ async function main() {
     }
   }
   const observed = JSON.parse(await fs.readFile(result, "utf8"));
+  if (observed.lifecycle) observed.lifecycle.freshWorkspaceUserDataAndExtensions = true;
+  else observed.isolatedHostDirectoriesFresh = true;
   if (suite === "restartRecovery") {
-    observed.lifecycle.processRestartReusedCompleteGeneration = beforeRestart.lifecycle.stubPath === observed.lifecycle.stubPath;
     observed.lifecycle.beforeRestartHost = beforeRestart.host;
     observed.lifecycle.afterRestartHost = observed.host;
     observed.lifecycle.beforeRestartStubPath = beforeRestart.lifecycle.stubPath;
-    assert.ok(observed.lifecycle.processRestartReusedCompleteGeneration, "Restart must recover the persisted complete generation");
-    await fs.access(path.join(workspace, observed.lifecycle.stubPath, "complete.json"));
-    assert.equal(await fs.readFile(interruptedGenerationFile, "utf8"),
-      "# Generated by GraphQL Desk; interrupted publication\nselected: partial\n",
-      "Recovery must ignore and preserve an abandoned incomplete generation");
+    observed.lifecycle.writerProcessKilledDuringPublication = true;
+    const selectedAfterRestart = path.resolve(workspace, observed.lifecycle.stubPath);
+    assert.notEqual(selectedAfterRestart, interruptedPublication.directory, "Restart cannot select an incomplete generation");
+    await fs.access(path.join(selectedAfterRestart, "complete.json"));
+    assert.deepEqual(await readStubFiles(selectedGenerationBeforeRestart), selectedGenerationFilesBeforeRestart,
+      "The previous complete generation remains unchanged across the interrupted publication");
+    observed.lifecycle.processRestartSelectedCompleteGeneration = true;
+    observed.lifecycle.previousCompleteGenerationUnchanged = true;
+    assert.deepEqual(await fs.readFile(interruptedGenerationFile), interruptedPublication.bytes,
+      "Recovery must ignore and preserve the artifact written before the publisher process was killed");
+    await assert.rejects(fs.access(path.join(interruptedPublication.directory, "complete.json")), { code: "ENOENT" });
     observed.lifecycle.abandonedGenerationIgnoredAndPreserved = true;
     assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
     observed.lifecycle.userFilePreserved = true;
+    for (const [name, bytes] of userFilesBeforeInterruption) {
+      let actual = await fs.readFile(path.join(workspace, name));
+      if (name === ".vscode/settings.json") {
+        const settings = JSON.parse(actual);
+        assert.match(settings["python.analysis.stubPath"].replaceAll("\\", "/"),
+          /^\.graphql-desk\/typings\/generations\/g-/,
+          "Only GraphQL Desk's managed stubPath may rotate during restart recovery");
+        delete settings["python.analysis.stubPath"];
+        actual = Buffer.from(JSON.stringify(settings));
+      }
+      assert.deepEqual(actual, bytes, `${name} must survive interrupted publication and restart`);
+    }
+    observed.lifecycle.preExistingFilesPreserved = [...userFilesBeforeInterruption.keys()];
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (suite === "restartRecoveryChangedInputs") {
     assert.equal(observed.outcome, "owned-output-restart-observed");
     observed.lifecycle.beforeRestartHost = beforeRestart.host;
     observed.lifecycle.afterRestartHost = observed.host;
+    observed.lifecycle.writerProcessKilledDuringPublication = true;
+    const selectedAfterRestart = path.resolve(workspace, observed.lifecycle.stubPath);
+    assert.notEqual(selectedAfterRestart, interruptedPublication.directory, "Restart cannot select an incomplete generation");
+    await fs.access(path.join(selectedAfterRestart, "complete.json"));
+    observed.lifecycle.processRestartSelectedCompleteGeneration = true;
+    assert.deepEqual(await readStubFiles(selectedGenerationBeforeRestart), selectedGenerationFilesBeforeRestart,
+      "The previous complete generation remains unchanged across the interrupted publication");
+    observed.lifecycle.previousCompleteGenerationUnchanged = true;
     assert.ok(observed.lifecycle.staleInputQuarantined && observed.lifecycle.changedInputRepair,
       "Changed-input restart must quarantine stale output and recover after repair");
-    assert.equal(await fs.readFile(interruptedGenerationFile, "utf8"),
-      "# Generated by GraphQL Desk; interrupted publication\nselected: partial\n",
-      "Recovery must ignore and preserve an abandoned incomplete generation");
+    assert.deepEqual(await fs.readFile(interruptedGenerationFile), interruptedPublication.bytes,
+      "Recovery must ignore and preserve the artifact written before the publisher process was killed");
+    await assert.rejects(fs.access(path.join(interruptedPublication.directory, "complete.json")), { code: "ENOENT" });
     observed.lifecycle.abandonedGenerationIgnoredAndPreserved = true;
     assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
     observed.lifecycle.userFilePreserved = true;

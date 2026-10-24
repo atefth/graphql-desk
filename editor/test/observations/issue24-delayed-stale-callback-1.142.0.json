@@ -1,0 +1,24 @@
+{
+  "host": "1.142.0",
+  "suite": "lifecycle",
+  "platform": "Windows x64",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "scope": "A real worker result captured from the first schema edit was held at the extension-host callback boundary while a second schema edit generated and published a newer result.",
+  "lifecycle": {
+    "delayedStaleCallbackRejected": true,
+    "firstCapturedSchemaType": "Boolean",
+    "newerPublishedSchemaType": "Int",
+    "staleCallbackReleasedAfterNewerPublication": true,
+    "stalePublicationCount": 0,
+    "newerTypeRemainedSelected": true,
+    "pylanceHoverAfterRelease": "selected: Int"
+  },
+  "outcome": "managed-output-lifecycle-observed",
+  "limits": [
+    "This proves one delayed schema-result race in the VS Code 1.142.0 host only.",
+    "This bounded observation does not complete issue #24 or the full live-typing gate."
+  ]
+}
