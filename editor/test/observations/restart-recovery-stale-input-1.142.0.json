@@ -1,0 +1,32 @@
+{
+  "host": "1.142.0",
+  "suite": "restartRecoveryChangedInputs",
+  "platform": "Windows",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "scope": "A saved schema changed while VS Code was closed. The restarted host quarantined the stale generated type, preserved an unaffected operation, then restored typing after schema repair.",
+  "lifecycle": {
+    "staleInputQuarantined": true,
+    "staleInputProbe": {
+      "diagnostic": true,
+      "selectedHover": "selected: Unknown",
+      "siblingHover": "other_id: ID",
+      "unavailable": true
+    },
+    "changedInputRepair": true,
+    "repairProbe": {
+      "diagnostic": false,
+      "selectedHover": "selected: String",
+      "siblingHover": "other_id: ID"
+    },
+    "abandonedGenerationIgnoredAndPreserved": true,
+    "userFilePreserved": true
+  },
+  "outcome": "passed",
+  "limits": [
+    "One schema-change restart case on VS Code 1.142.0 only.",
+    "This bounded evidence does not complete issue #38 or broad live-typing gate #42."
+  ]
+}

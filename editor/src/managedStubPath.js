@@ -10,6 +10,30 @@ const inside = (root, value) => {
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 };
 
+function isManagedGeneration(workspace, setting) {
+  const relative = setting.replaceAll("\\", "/");
+  const match = /^\.graphql-desk\/typings\/generations\/(g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/.exec(relative);
+  if (!match) return false;
+  const directory = path.resolve(workspace, ...relative.split("/"));
+  if (!inside(path.join(workspace, ".graphql-desk", "typings", "generations"), directory)) return false;
+  let current = workspace;
+  try {
+    for (const part of path.relative(workspace, directory).split(path.sep)) {
+      current = path.join(current, part);
+      const stat = fs.lstatSync(current);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+    }
+    const manifestPath = path.join(directory, "complete.json");
+    const stat = fs.lstatSync(manifestPath);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 18 * 1024 * 1024) return false;
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    return manifest?.owner === "graphql-desk-analysis-generation" && manifest.format === 2 &&
+      manifest.id === match[1] && Number.isSafeInteger(manifest.sequence) && Array.isArray(manifest.files) &&
+      Array.isArray(manifest.operationManifest) && /^[a-f0-9]{64}$/.test(manifest.inputFingerprint) &&
+      /^[a-f0-9]{64}$/.test(manifest.artifactFingerprint);
+  } catch { return false; }
+}
+
 async function createManagedStubPath(vscode, folder, workspaceState) {
   if (!folder || folder.uri.scheme !== "file" || !path.isAbsolute(folder.uri.fsPath) || !vscode.workspace.isTrusted) throw new Error("Trusted file workspace required");
   const workspace = path.resolve(folder.uri.fsPath);
@@ -22,10 +46,15 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
   const stateKey = `managed-analysis-stub:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
   const generationStateKey = `managed-analysis-generations:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
   const previousOwner = workspaceState?.get?.(stateKey);
+  const inspectedSettings = [inspection?.globalValue, inspection?.workspaceValue, inspection?.workspaceFolderValue]
+    .filter(value => value !== undefined);
+  const selectedWorkspaceSetting = (inspection?.workspaceValue === setting || inspection?.workspaceFolderValue === setting) &&
+    inspectedSettings.every(value => value === setting);
   const owned = Boolean(previousOwner?.base === ".graphql-desk/typings" &&
-    (previousOwner.current === setting || (previousOwner.pending === true && previousOwner.previous === setting)));
+    (previousOwner.current === setting || (previousOwner.pending === true && previousOwner.previous === setting)) ||
+    !previousOwner && selectedWorkspaceSetting && isManagedGeneration(workspace, setting));
   let ownsSetting = owned;
-  let baseSetting = owned ? previousOwner.base : setting;
+  let baseSetting = owned ? previousOwner?.base ?? ".graphql-desk/typings" : setting;
   const ownsCurrentValue = expected => {
     const current = config.inspect?.("analysis.stubPath");
     if (current) {

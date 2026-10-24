@@ -308,7 +308,14 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
         existing[0]?.manifest.artifactFingerprint === outputFingerprint &&
         JSON.stringify(existing[0]?.manifest.operationManifest) === JSON.stringify(operationManifest) &&
         path.resolve(workspace, managed.selectedSetting) === existing[0].directory) return false;
-    let sequence = Math.max(0, ...existing.map(item => item.manifest.sequence)) + 1;
+    // Leftover directories are never adopted, but their names still reserve their sequence.
+    const diskSequences = fs.readdirSync(generationsRoot).map(name => {
+      const match = /^g-(\d+)-[0-9a-f-]{36}$/.exec(name);
+      const value = match ? Number(match[1]) : NaN;
+      return Number.isSafeInteger(value) ? value : 0;
+    });
+    const sequence = Math.max(0, ...existing.map(item => item.manifest.sequence), ...diskSequences) + 1;
+    if (!Number.isSafeInteger(sequence)) throw new Error("Analysis generation sequence is exhausted");
     const id = `g-${sequence}-${randomUUID()}`;
     const directory = path.join(generationsRoot, id);
     if (isCurrent() !== true) return false;
