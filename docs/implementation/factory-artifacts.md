@@ -87,8 +87,10 @@ checker-known Literal even when the resolver could not resolve the source.
 Known indistinguishable constructor signatures and normalized companion-binding
 collisions remain fatal. Resource, unknown-binding, unclassified dependency,
 unattributed, structural, stale-snapshot and schema/context failures remain fatal.
-This bounded recovery does not complete inference or invalid-buffer acceptance;
-#36 remains open.
+This bounded recovery does not complete live inference or invalid-buffer
+acceptance. Together with the precision and recovery fixtures, the factory
+artifact criteria in #36 are complete; broad live typing and invalid-buffer
+acceptance remain under #42.
 
 Source maps verify decoded contributions against supplied snapshots before
 emission. Schema/context/dependency mismatches, unsafe names, normalized alias or
