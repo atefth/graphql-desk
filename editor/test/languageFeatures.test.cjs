@@ -23,6 +23,24 @@ test("actual Python source maps give exact schema/deprecation diagnostics and cl
   assert.deepEqual(await createLanguageFeatures(options(fixed)).diagnostics(document(fixed)), []);
 });
 
+test("syntax diagnostics highlight escaped and literal errors while retaining EOF points", async () => {
+  for (const [source, expected] of [
+    ["from graphql_desk import gql\nq=gql('{ user{ \\u0060 } }')", "\\u0060"],
+    ["from graphql_desk import gql\nq=gql('{ user{ ` } }')", "`"],
+    ["from graphql_desk import gql\nq=gql('{ user{ 😀 } }')", "😀"],
+    ["from graphql_desk import gql\nq=gql('{ user{ \\U0001F600 } }')", "\\U0001F600"],
+    ["from graphql_desk import gql\nq=gql('{')", ""],
+  ]) {
+    const value = bundle(source);
+    const diagnostics = await createLanguageFeatures(options(value)).diagnostics(document(value));
+    const syntax = diagnostics.find((item) => item.code === "graphql.syntax");
+    assert.ok(syntax, source);
+    assert.equal(source.slice(syntax.range.start, syntax.range.end), expected, source);
+    assert.equal(syntax.range.end - syntax.range.start, expected.length, source);
+    if (!expected) assert.deepEqual(syntax.range, { start: source.indexOf("')"), end: source.indexOf("')") });
+  }
+});
+
 test("incomplete GraphQL inside valid Python still completes with a unique mapped name edit", async () => {
   const value = bundle("from graphql_desk import gql\nq=gql('{ user { na')");
   const snapshot = document(value);

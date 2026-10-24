@@ -354,7 +354,10 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
           catch (error) {
             if (!(error instanceof gql.GraphQLError)) throw error;
             for (const position of error.positions ?? []) {
-              for (const origin of toHost(bundle, call, { start: position, end: position })) {
+              const end = position < call.source.length
+                ? position + (boundary(call.source, position + 1) ? 1 : 2)
+                : position;
+              for (const origin of toHost(bundle, call, { start: position, end })) {
                 if (origin.module.uri === snapshot.uri && origin.module.version === snapshot.version) result.push({
                   range: origin.range, message: error.message, severity: 1, code: "graphql.syntax", source: "GraphQL Desk",
                 });
