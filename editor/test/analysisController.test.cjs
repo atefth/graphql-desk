@@ -705,23 +705,31 @@ test("in-flight artifacts abort and cannot publish after dependency, schema, con
       }
       if (input === "interpreter") fixture.interpreter("");
       const api = input === "interpreter" ? pythonApi(fixture) : null;
-      let release;
       let started;
       const ready = new Promise(resolve => { started = resolve; });
-      const held = new Promise(resolve => { release = resolve; });
-      t.after(() => release());
       let artifactCalls = 0;
       let signal;
+      let requestObservedAbort = false;
       const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
         const worker = createAnalysisWorker(options);
         return { ...worker, async request(message, requestOptions) {
-          const reply = await worker.request(message, requestOptions);
           if (message.op === "artifacts" && artifactCalls++ === 0) {
             signal = requestOptions?.signal;
             started();
-            await held;
+            let timeout;
+            try {
+              await Promise.race([
+                new Promise(resolve => {
+                  if (signal.aborted) resolve();
+                  else signal.addEventListener("abort", resolve, { once: true });
+                }),
+                new Promise((_, reject) => { timeout = realTimeout(() => reject(new Error("Artifact request was not cancelled")), 2000); }),
+              ]);
+            } finally { clearTimeout(timeout); }
           }
-          return reply;
+          const response = worker.request(message, requestOptions);
+          if (message.op === "artifacts" && artifactCalls === 1) requestObservedAbort = signal.aborted;
+          return response;
         } };
       } });
       t.after(() => controller.dispose());
@@ -745,7 +753,8 @@ test("in-flight artifacts abort and cannot publish after dependency, schema, con
         api.select({ id: "changed", path: "changed-environment" });
       }
       assert.equal(signal.aborted, true, `${input} invalidation reaches active artifact generation`);
-      release();
+      await eventually(() => requestObservedAbort);
+      assert.equal(requestObservedAbort, true, "the pending worker-side request observes cancellation before resolving");
       assert.equal(await pending, null, "a late result from the invalidated artifact request cannot publish");
 
       const fresh = await controller.artifacts(controller.snapshot(fixture.main));
