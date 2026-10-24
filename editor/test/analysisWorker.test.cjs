@@ -362,7 +362,9 @@ test("analysis artifacts validate operation provenance at the worker boundary", 
     schema_identity: ["p", "default"], context_token: "schema-token", binding: "graphql", status: "precise",
     declaration_path: "graphql_desk_generated/_documents/default/d0.pyi", declaration_symbol: "Operation_Q", source_exports: [],
     dependencies: [module], direct_fragments: [], definition_owners: [identity], canonical_owner: identity,
-    selector_known: true, source_dependencies_known: true, schema_dependencies: "unknown", config_dependencies: "unknown" };
+    selector_known: true, source_dependencies_known: true, mapping_dependencies: [],
+    schema_dependencies: [{ coordinate: "field:Query.id", fingerprint: "a".repeat(64) }],
+    config_dependencies: [{ kind: "scalar-input", name: "ID", value: null }] };
   const project = { project: "p", generated_package: "graphql_desk_generated", files: [
     { relative_path: "graphql_desk_generated/_documents/default/d0.pyi", text: "" },
   ], diagnostics: [], provenance: [record] };
@@ -376,6 +378,11 @@ test("analysis artifacts validate operation provenance at the worker boundary", 
     { ...record, definition_owners: [{ ...identity, codepoint: { start: 9, end: 10 }, utf16: { start: 9, end: 10 } }] },
     { ...record, declaration_path: "graphql_desk_generated/_documents/missing.pyi" },
     { ...record, source_exports: [{ relative_path: "graphql_desk_generated/sources/main.pyi", symbol: "Doc", alias: "Doc" }] },
+    { ...record, schema_dependencies: [{ coordinate: "User.name", fingerprint: "unknown" }] },
+    { ...record, schema_dependencies: [{ coordinate: "User.name", fingerprint: "a".repeat(64) }, { coordinate: "User.name", fingerprint: "b".repeat(64) }] },
+    { ...record, schema_dependencies: [{ coordinate: "User.name", fingerprint: "b".repeat(64) }, { coordinate: "User.id", fingerprint: "a".repeat(64) }] },
+    { ...record, config_dependencies: [{ kind: "scalar-input", name: "Date", value: 1 }] },
+    { ...record, config_dependencies: [{ kind: "enum", name: "Color", value: "app.Color" }, { kind: "enum", name: "Color", value: "app.OtherColor" }] },
     { ...record, unexpected: true },
   ];
   for (const reply of [valid, ...malformed.map(provenance => ({ ...valid,

@@ -4,6 +4,7 @@ const { spawn: spawnProcess } = require("node:child_process");
 const os = require("node:os");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
+const { validOperationManifest } = require("./analysisGenerations");
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const failure = () => new Error("GraphQL Desk worker request failed");
@@ -62,6 +63,23 @@ function validReply(reply, request) {
     string(reply.id) && reply.id !== request.id && reply.project === request.project && reply.schema_name === request.schema_name &&
     ["ready", "stale", "unavailable"].includes(reply.status) && reply.last_good === (reply.status === "stale") &&
     reply.error === (reply.status === "ready" ? null : "schema-refresh-failed");
+  if (request.op === "quarantine") {
+    if (!keys(reply, ["ok", "id", "projects"]) || reply.id !== request.id || !Array.isArray(reply.projects) ||
+        reply.projects.length !== request.projects.length) return false;
+    const byProject = new Map(request.projects.map(project => [project.project, project]));
+    const seenProjects = new Set();
+    return reply.projects.every(project => {
+      if (!keys(project, ["project", "generated_package", "files"]) || !string(project.project) ||
+          !Array.isArray(project.files) || !byProject.has(project.project) || seenProjects.has(project.project)) return false;
+      seenProjects.add(project.project);
+      const source = byProject.get(project.project);
+      return project.generated_package === source.generated_package && project.files.length === source.files.length &&
+        new Set(project.files.map(file => file?.relative_path)).size === project.files.length &&
+        project.files.every(file => keys(file, ["relative_path", "text"]) &&
+          source.files.some(original => original.relative_path === file.relative_path) &&
+          typeof file.text === "string" && Buffer.byteLength(file.text, "utf8") <= 1024 * 1024);
+    });
+  }
   if (request.op === "current") return keys(reply, ["ok", "current"]) && typeof reply.current === "boolean";
   if (request.op === "artifacts") {
     if (keys(reply, ["ok", "id", "current"])) return string(reply.id) && reply.id === request.id && reply.current === false;
@@ -69,7 +87,12 @@ function validReply(reply, request) {
     const span = value => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 && Number.isSafeInteger(value.end) && value.end >= value.start;
     const module = value => keys(value, ["project", "module", "uri", "version"]) && [value.project, value.module, value.uri].every(string) && Number.isSafeInteger(value.version) && value.version >= 0;
     const provenanceIdentity = value => keys(value, ["module", "codepoint", "utf16"]) && module(value.module) && span(value.codepoint) && span(value.utf16);
-    const provenance = value => keys(value, ["owner", "selector", "operation_name", "operation_kind", "schema_identity", "context_token", "binding", "status", "declaration_path", "declaration_symbol", "source_exports", "dependencies", "direct_fragments", "definition_owners", "canonical_owner", "selector_known", "source_dependencies_known", "schema_dependencies", "config_dependencies"]) &&
+    const schemaDependency = item => keys(item, ["coordinate", "fingerprint"]) && string(item.coordinate) && item.coordinate.length <= 2048 && /^[a-f0-9]{64}$/.test(item.fingerprint);
+    const configDependency = item => keys(item, ["kind", "name", "value"]) &&
+      string(item.name) && item.name.length <= 512 && ((["scalar-input", "scalar-output", "enum-mapping"].includes(item.kind) &&
+        (item.value === null || typeof item.value === "string" && item.value.length <= 4096)) ||
+        (["disable-masking", "client-directive"].includes(item.kind) && typeof item.value === "boolean"));
+    const provenance = value => keys(value, ["owner", "selector", "operation_name", "operation_kind", "schema_identity", "context_token", "binding", "status", "declaration_path", "declaration_symbol", "source_exports", "dependencies", "direct_fragments", "definition_owners", "canonical_owner", "selector_known", "source_dependencies_known", "mapping_dependencies", "schema_dependencies", "config_dependencies"]) &&
       provenanceIdentity(value.owner) && (value.selector === null || string(value.selector)) && (value.operation_name === null || string(value.operation_name)) &&
       (value.operation_kind === null || ["query", "mutation", "subscription", "fragment"].includes(value.operation_kind)) &&
       (value.schema_identity === null || (Array.isArray(value.schema_identity) && value.schema_identity.length === 2 && value.schema_identity.every(string))) &&
@@ -83,7 +106,17 @@ function validReply(reply, request) {
       (value.definition_owners === null || (Array.isArray(value.definition_owners) && value.definition_owners.every(provenanceIdentity))) &&
       (value.canonical_owner === null || provenanceIdentity(value.canonical_owner)) &&
       typeof value.selector_known === "boolean" && typeof value.source_dependencies_known === "boolean" &&
-      value.schema_dependencies === "unknown" && value.config_dependencies === "unknown";
+      (value.mapping_dependencies === "unknown" || Array.isArray(value.mapping_dependencies) && value.mapping_dependencies.length <= 16384 && value.mapping_dependencies.every(module)) &&
+      (value.schema_dependencies === "unknown" || Array.isArray(value.schema_dependencies) && value.schema_dependencies.length <= 16384 && value.schema_dependencies.every(schemaDependency) &&
+        new Set(value.schema_dependencies.map(item => item.coordinate)).size === value.schema_dependencies.length &&
+        value.schema_dependencies.every((item, index) => index === 0 || value.schema_dependencies[index - 1].coordinate < item.coordinate)) &&
+      (value.config_dependencies === "unknown" || Array.isArray(value.config_dependencies) && value.config_dependencies.length <= 4096 && value.config_dependencies.every(configDependency) &&
+        new Set(value.config_dependencies.map(item => `${item.kind}\0${item.name}`)).size === value.config_dependencies.length &&
+        value.config_dependencies.every((item, index) => {
+          if (index === 0) return true;
+          const previous = value.config_dependencies[index - 1];
+          return previous.kind < item.kind || previous.kind === item.kind && previous.name < item.name;
+        }));
     const validProvenance = project => {
       if (!Array.isArray(project.provenance) || !project.provenance.every(provenance)) return false;
       const prefix = `${project.generated_package.replaceAll(".", "/")}/`;
@@ -94,6 +127,7 @@ function validReply(reply, request) {
           const references = [...(value.direct_fragments ?? []), ...(value.definition_owners ?? []), ...(value.canonical_owner ? [value.canonical_owner] : [])];
           return value.owner.module.project === project.project &&
             value.dependencies.every(item => item.project === project.project) &&
+            (value.mapping_dependencies === "unknown" || value.mapping_dependencies.every(item => item.project === project.project)) &&
             references.every(item => item.module.project === project.project && owners.has(JSON.stringify(item))) &&
             (value.declaration_path === null || (value.declaration_path.startsWith(prefix) && value.declaration_path.endsWith(".pyi") && files.has(value.declaration_path))) &&
             value.source_exports.every(item => item.relative_path.startsWith(`${prefix}sources/`) && files.has(item.relative_path));
@@ -236,8 +270,31 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
       if (disposed || !trusted() || signal?.aborted) { stop(); throw failure(); }
       let encoded;
       try {
-        if (!object(message) || !["prepare", "analyze", "current", "refresh", "artifacts"].includes(message.op) ||
+        if (!object(message) || !["prepare", "analyze", "current", "refresh", "artifacts", "quarantine"].includes(message.op) ||
             message.workspace !== workspace) throw failure();
+        if (message.op === "quarantine") {
+          const projects = message.projects;
+          const operations = Array.isArray(projects) ? projects.map(project => ({
+            project: project?.project, generated_package: project?.generated_package, operations: project?.provenance,
+          })) : [];
+          const validOwners = new Set(operations.flatMap(group => Array.isArray(group.operations) ? group.operations.map(item => JSON.stringify(item?.owner)) : []));
+          if (!keys(message, ["op", "id", "workspace", "projects", "invalidated_owners"]) || !string(message.id) ||
+              !Array.isArray(projects) || projects.length > 4096 || !validOperationManifest(operations) ||
+              !Array.isArray(message.invalidated_owners) || message.invalidated_owners.length > 8192 ||
+              !message.invalidated_owners.every(owner => object(owner) && validOwners.has(JSON.stringify(owner)))) throw failure();
+          let total = 0;
+          for (const project of projects) {
+            if (!keys(project, ["project", "generated_package", "files", "provenance"]) || !Array.isArray(project.files) || project.files.length > 4096) throw failure();
+            const prefix = `${project.generated_package.replaceAll(".", "/")}/`;
+            for (const file of project.files) {
+              if (!keys(file, ["relative_path", "text"]) || typeof file.relative_path !== "string" || !file.relative_path.startsWith(prefix) ||
+                  !file.relative_path.endsWith(".pyi") || file.relative_path.includes("\\") || file.relative_path.includes("\0") ||
+                  file.relative_path.split("/").some(part => !part || part === "." || part === "..") || typeof file.text !== "string") throw failure();
+              total += Buffer.byteLength(file.text, "utf8");
+              if (total > 4 * 1024 * 1024) throw failure();
+            }
+          }
+        }
         encoded = Buffer.from(JSON.stringify(message) + "\n", "utf8");
         if (encoded.length > MAX_FRAME_BYTES) throw failure();
       } catch { stop(); throw failure(); }

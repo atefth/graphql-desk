@@ -202,11 +202,12 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     return state;
   }
-  function invalidate() {
+  function invalidate(source, ranges) {
     if (disposed) return;
     epoch += 1;
     for (const state of states.values()) { stopPolling(state); state.artifactsAbort?.abort(); state.cached = null; if (!trusted()) state.worker.invalidate(); }
-    changed();
+    const uri = typeof source === "string" ? source : source?.toString?.();
+    changed(typeof uri === "string" && uri ? uri : null, Array.isArray(ranges) ? ranges : null);
   }
   function snapshot(document) {
     const filename = localPath(document);
@@ -228,14 +229,19 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     return matches.length === 1 ? matches[0].uri : parsed;
   }
   function captureSignature(captured, schemaPaths = []) {
-    // Clean documents match disk; unrelated host documents are not analysis inputs.
+    // Dirty status is irrelevant when the buffer still matches its on-disk input.
+    const matchesDisk = buffer => {
+      try { return fs.readFileSync(buffer.path, "utf8") === buffer.text; }
+      catch { return false; }
+    };
     const relevantPaths = new Set(captured.request.buffers.map(buffer => canonical(buffer.path)));
     const schemaPathSet = new Set(schemaPaths.map(canonical));
-    const buffers = captured.request.buffers.filter(buffer => buffer.is_dirty);
+    const buffers = captured.request.buffers.filter(buffer => buffer.is_dirty && !matchesDisk(buffer));
     const documents = captured.request.documents.filter(document => document.is_dirty &&
-      (relevantPaths.has(canonical(document.path)) || schemaPathSet.has(canonical(document.path))));
-    const schemaBuffers = [...captured.texts].filter(([, buffer]) => buffer.is_dirty && schemaPathSet.has(canonical(buffer.path)))
-      .sort(([left], [right]) => left.localeCompare(right));
+      (relevantPaths.has(canonical(document.path)) || schemaPathSet.has(canonical(document.path))) &&
+      !matchesDisk(captured.texts.get(document.id)));
+    const schemaBuffers = [...captured.texts].filter(([, buffer]) => buffer.is_dirty && schemaPathSet.has(canonical(buffer.path)) &&
+      !matchesDisk(buffer)).sort(([left], [right]) => left.localeCompare(right));
     return JSON.stringify([captured.request.workspace, captured.request.candidates, buffers,
       documents, captured.request.editor_fallback, [...schemaPathSet].sort(), schemaBuffers]);
   }
@@ -526,12 +532,32 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           skip("analysis-snapshot-stale"); return null;
         }
         return { ...reply, isCurrent: () => trusted() && !token?.isCancellationRequested &&
-          epoch === cached.ticket && states.get(state.root) === state && state.cached === cached };
+          epoch === cached.ticket && states.get(state.root) === state &&
+          state.cached?.signature === cached.signature && state.cached?.revisionSignature === cached.revisionSignature };
       }, "artifacts").finally(() => {
         cancellation?.dispose();
         if (state.artifactsAbort === abort) state.artifactsAbort = null;
       });
     } catch { state.cached = null; skip(failureReason); return null; }
+  }
+  async function quarantine({ workspace, projects, invalidated_owners, preserve_current = false } = {}) {
+    if (!trusted() || typeof workspace !== "string" || !path.isAbsolute(workspace) ||
+        !Array.isArray(projects) || !Array.isArray(invalidated_owners)) return null;
+    const root = canonical(workspace);
+    const state = states.get(root);
+    if (!state) return null;
+    if (!preserve_current) {
+      state.artifactsAbort?.abort();
+      state.cached = null;
+      state.worker.invalidate();
+    }
+    const ticket = epoch;
+    try {
+      const reply = await enqueue(state, () => state.worker.request({
+        op: "quarantine", id: randomUUID(), workspace: state.root, projects, invalidated_owners,
+      }), "quarantine", ticket);
+      return ticket === epoch && trusted() && states.get(root) === state ? reply : null;
+    } catch { return null; }
   }
   async function refresh() {
     if (!trusted()) { report("Trust this workspace before refreshing a schema."); return; }
@@ -651,7 +677,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           if (missing && filename && ownedAnalysisPaths.delete(filename)) return;
           if (filename) ownedAnalysisPaths.delete(filename);
         }
-        invalidate();
+        invalidate(resource?.scheme === "file" ? resource : null);
       };
       const handles = [watcher, watcher.onDidChange(sourceChanged), watcher.onDidCreate(sourceChanged), watcher.onDidDelete(sourceChanged)];
       folderWatches.set(uri, handles);
@@ -683,11 +709,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         interpreters.clear();
         reconcileFolderWatches();
       }
-      invalidate();
+    if (event === "onDidChangeTextDocument" && Array.isArray(change?.contentChanges) && !change.contentChanges.length) return;
+      const ranges = event === "onDidChangeTextDocument" && Array.isArray(change?.contentChanges)
+        ? change.contentChanges.map(item => ({ start: item.rangeOffset, end: item.rangeOffset + item.rangeLength })) : null;
+      invalidate(document?.uri ?? (change?.scheme === "file" ? change : null), ranges);
     }));
   }
   reconcileFolderWatches();
-  return { analyze, isCurrent, artifacts, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
+  return { analyze, isCurrent, artifacts, quarantine, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
     dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); folderWatchRoots.clear(); ownedAnalysisPaths.clear(); ownedAnalysisDirectories.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
 module.exports = { createAnalysisController };

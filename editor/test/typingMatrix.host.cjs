@@ -21,6 +21,15 @@ async function replace(document, text) {
   assert.equal(await vscode.workspace.applyEdit(edit), true);
 }
 
+async function replaceText(document, before, after) {
+  const source = document.getText();
+  const start = source.indexOf(before);
+  assert.ok(start >= 0, `Expected source text ${before}`);
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(document.uri, new vscode.Range(document.positionAt(start), document.positionAt(start + before.length)), after);
+  assert.equal(await vscode.workspace.applyEdit(edit), true);
+}
+
 function pythonVersion(python) {
   const result = spawnSync(python, ["-I", "-X", "utf8", "-c", "import sys; print(sys.version.split()[0])"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
@@ -29,7 +38,6 @@ function pythonVersion(python) {
 
 exports.run = async () => {
   const results = { host: vscode.version, pylance: {}, lifecycle: { invalidationAndRepair: {} } };
-  const workerRequests = [];
   try {
     for (const id of ["ms-python.python", "ms-python.vscode-pylance"]) {
       const extension = vscode.extensions.getExtension(id);
@@ -44,19 +52,9 @@ exports.run = async () => {
     const consumerUri = vscode.Uri.file(path.join(workspace, "consumer.py"));
     const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
     assert.ok(extension, "GraphQL Desk extension must be loaded in the host");
-    const workerModule = require("../src/analysisWorker");
-    const createWorker = workerModule.createAnalysisWorker;
-    workerModule.createAnalysisWorker = options => {
-      const worker = createWorker(options);
-      return { ...worker, async request(message, settings) {
-        const reply = await worker.request(message, settings);
-        workerRequests.push({ python: options.python, op: message.op });
-        return reply;
-      } };
-    };
+    await extension.activate();
     const consumer = await vscode.workspace.openTextDocument(consumerUri);
     await vscode.window.showTextDocument(consumer, { preview: false });
-    await extension.activate();
 
     const uri = consumerUri;
     const document = consumer;
@@ -100,11 +98,32 @@ exports.run = async () => {
       const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", uri, selectedPosition) || [];
       return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
     };
+    const observeQuarantine = async label => {
+      const deadline = Date.now() + 10000;
+      let observed;
+      while (Date.now() < deadline) {
+        try {
+          const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+          const selectedGeneration = path.resolve(workspace, settings["python.analysis.stubPath"]);
+          const manifest = JSON.parse(await fs.readFile(path.join(selectedGeneration, "complete.json"), "utf8"));
+          const operations = Object.fromEntries(manifest.operationManifest.flatMap(group => group.operations.map(item => [item.binding, item])));
+          const declaration = operations.doc?.declaration_path;
+          const stub = declaration ? await fs.readFile(path.join(selectedGeneration, ...declaration.split("/")), "utf8") : "";
+          observed = { selectedGeneration, analysisId: manifest.analysisId, targetStatus: operations.doc?.status,
+            siblingStatus: operations.other_doc?.status, targetHasNoReturn: /NoReturn/.test(stub) };
+          if (/^quarantine-\d+$/.test(manifest.analysisId ?? "") && observed.targetStatus === "unavailable" &&
+              observed.siblingStatus === "precise" && observed.targetHasNoReturn) return observed;
+        } catch { /* Wait for the atomic quarantine generation to be selected. */ }
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.fail(`${label} did not select a targeted quarantine generation: ${JSON.stringify(observed)}`);
+    };
     const schemaDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(workspace, "schema.graphql")));
     const originalSchema = schemaDocument.getText();
     const schemaBoolean = originalSchema.replace("selected: String!", "selected: Boolean!");
     assert.notEqual(schemaBoolean, originalSchema, "Schema fixture must contain the selected String field");
     await replace(schemaDocument, schemaBoolean);
+    results.lifecycle.invalidationAndRepair.schemaQuarantine = await observeQuarantine("Schema edit");
     results.lifecycle.invalidationAndRepair.schemaInvalidation = await until(async () => {
       const selectedType = await selectedHover();
       const unaffectedType = await otherIdHover();
@@ -129,6 +148,7 @@ exports.run = async () => {
       '[tool.graphql-desk]\nscalars = { String = { input = "builtins.str", output = "builtins.int" } }\n');
     assert.notEqual(mappedConfig, originalConfig, "Config fixture must have the GraphQL Desk table");
     await replace(configDocument, mappedConfig);
+    results.lifecycle.invalidationAndRepair.configQuarantine = await observeQuarantine("Scalar mapping edit");
     results.lifecycle.invalidationAndRepair.configInvalidation = await until(async () => {
       const selectedType = await selectedHover();
       const unaffectedType = await otherIdHover();
@@ -147,12 +167,55 @@ exports.run = async () => {
     assert.ok(results.lifecycle.invalidationAndRepair.configRepair,
       JSON.stringify(results.lifecycle.invalidationAndRepair.configRepairProbe));
 
+    const originalConsumer = document.getText();
+    const invalidConsumer = originalConsumer.replace("{ selected count(limit: $limit) }", "{ missing count(limit: $limit) }");
+    assert.notEqual(invalidConsumer, originalConsumer, "Consumer fixture must contain the selected operation field");
+    await replaceText(document, "{ selected count(limit: $limit) }", "{ missing count(limit: $limit) }");
+    results.lifecycle.invalidationAndRepair.immediateQuarantine = await observeQuarantine("Invalid source edit");
+    results.lifecycle.invalidationAndRepair.invalidEditQuarantine = await until(async () => {
+      const selectedType = await selectedHover();
+      const unaffectedType = await otherIdHover();
+      const diagnostics = vscode.languages.getDiagnostics(uri).map(item => ({ source: item.source, message: item.message }));
+      let manifestStatus;
+      try {
+        const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+        const selectedGeneration = path.resolve(workspace, settings["python.analysis.stubPath"]);
+        const manifest = JSON.parse(await fs.readFile(path.join(selectedGeneration, "complete.json"), "utf8"));
+        const operations = manifest.operationManifest.flatMap(group => group.operations);
+        manifestStatus = Object.fromEntries(operations.map(item => [item.binding, item.status]));
+      } catch { /* Wait for the complete generation selected by GraphQL Desk. */ }
+      results.lifecycle.invalidationAndRepair.invalidEditProbe = {
+        selectedType, unaffectedType, dirty: document.isDirty,
+        diskUnchanged: (await fs.readFile(consumerUri.fsPath, "utf8")) === originalConsumer, diagnostics, manifestStatus,
+      };
+      return /Never|NoReturn|Unknown/.test(selectedType) && /\bID\b/.test(unaffectedType) &&
+        manifestStatus?.doc === "unavailable" && manifestStatus?.other_doc === "precise" &&
+        diagnostics.some(item => item.source === "GraphQL Desk" && /suspended typing/i.test(item.message)) &&
+        diagnostics.some(item => /GraphQL/i.test(item.source || "") && /missing/i.test(item.message));
+    }, "invalid GraphQL edit makes only its operation unavailable, reports a diagnostic, and preserves its dirty source and sibling typing", 60000);
+    assert.ok(results.lifecycle.invalidationAndRepair.invalidEditQuarantine,
+      JSON.stringify(results.lifecycle.invalidationAndRepair.invalidEditProbe));
+    assert.equal(document.getText(), invalidConsumer, "GraphQL Desk must preserve the user's dirty source buffer");
+    assert.equal((await fs.readFile(consumerUri.fsPath, "utf8")), originalConsumer,
+      "GraphQL Desk must not write the user's source file while quarantining typing");
+    await replaceText(document, "{ missing count(limit: $limit) }", "{ selected count(limit: $limit) }");
+    results.lifecycle.invalidationAndRepair.invalidEditRepair = await until(async () => {
+      const selectedType = await selectedHover();
+      const unaffectedType = await otherIdHover();
+      const suspendedDiagnostics = vscode.languages.getDiagnostics(uri)
+        .filter(item => item.source === "GraphQL Desk" && /suspended typing/i.test(item.message));
+      results.lifecycle.invalidationAndRepair.invalidEditRepairProbe = { selectedType, unaffectedType,
+        suspendedDiagnostics: suspendedDiagnostics.map(item => item.message) };
+      return /\bString\b/.test(selectedType) && /\bID\b/.test(unaffectedType) && suspendedDiagnostics.length === 0;
+    }, "a successful generation restores precise typing after quarantine", 60000);
+    assert.ok(results.lifecycle.invalidationAndRepair.invalidEditRepair,
+      JSON.stringify(results.lifecycle.invalidationAndRepair.invalidEditRepairProbe));
+
     const alternatePython = process.env.GRAPHQL_DESK_ALTERNATE_PYTHON;
     assert.ok(path.isAbsolute(alternatePython ?? ""), "Set a second absolute Python environment for the interpreter-switch host proof");
     await fs.access(alternatePython);
     const deskConfiguration = vscode.workspace.getConfiguration("graphqlDesk", uri);
-    const originalPython = deskConfiguration.get("pythonPath", "");
-    const originalRequestCount = workerRequests.length;
+    const originalPython = vscode.workspace.getConfiguration("graphqlDesk", uri).get("pythonPath", "");
     await deskConfiguration.update("pythonPath", alternatePython, vscode.ConfigurationTarget.Workspace);
     results.lifecycle.interpreterChange = {
       from: originalPython,
@@ -168,24 +231,23 @@ exports.run = async () => {
     results.lifecycle.interpreterChange.refreshed = await until(async () => {
       const selectedType = await selectedHover();
       const unaffectedType = await otherIdHover();
-      const requests = workerRequests.slice(originalRequestCount);
-      const usedAlternate = requests.some(value => value.op === "artifacts" && path.resolve(value.python).toLowerCase() === path.resolve(alternatePython).toLowerCase());
-      results.lifecycle.interpreterChange.probe = { selectedType, unaffectedType, usedAlternate, requests };
-      return usedAlternate && /Boolean|bool/.test(selectedType) && /\bID\b/.test(unaffectedType);
+      const selectedPython = vscode.workspace.getConfiguration("graphqlDesk", uri).get("pythonPath", "");
+      results.lifecycle.interpreterChange.probe = { selectedType, unaffectedType, selectedPython };
+      return path.resolve(selectedPython).toLowerCase() === path.resolve(alternatePython).toLowerCase() &&
+        /Boolean|bool/.test(selectedType) && /\bID\b/.test(unaffectedType);
     }, "Pylance typing recovers after switching the configured worker interpreter", 60000);
     assert.ok(results.lifecycle.interpreterChange.refreshed,
       JSON.stringify(results.lifecycle.interpreterChange.probe));
-    const alternateRequestCount = workerRequests.length;
     await deskConfiguration.update("pythonPath", originalPython, vscode.ConfigurationTarget.Workspace);
     await replace(interpreterSchema, interpreterOriginalSchema);
     results.lifecycle.interpreterChange.restored = await until(async () => {
-      const requests = workerRequests.slice(alternateRequestCount);
       const selectedType = await selectedHover();
       const unaffectedType = await otherIdHover();
-      const usedOriginal = requests.some(value => value.op === "artifacts" && path.resolve(value.python).toLowerCase() ===
-        path.resolve(originalPython || process.env.GRAPHQL_DESK_PYTHON).toLowerCase());
-      results.lifecycle.interpreterChange.restoreProbe = { selectedType, unaffectedType, usedOriginal, requests };
-      return usedOriginal && /String/.test(selectedType) && /\bID\b/.test(unaffectedType);
+      const selectedPython = vscode.workspace.getConfiguration("graphqlDesk", uri).get("pythonPath", "");
+      results.lifecycle.interpreterChange.restoreProbe = { selectedType, unaffectedType, selectedPython };
+      return path.resolve(selectedPython || process.env.GRAPHQL_DESK_PYTHON).toLowerCase() ===
+        path.resolve(originalPython || process.env.GRAPHQL_DESK_PYTHON).toLowerCase() &&
+        /String/.test(selectedType) && /\bID\b/.test(unaffectedType);
     }, "Pylance typing recovers after restoring the original worker interpreter", 60000);
     assert.ok(results.lifecycle.interpreterChange.restored);
 

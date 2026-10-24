@@ -1664,8 +1664,20 @@ invalid_again=graphql('query Invalid {missing}')
             self.assertIn(record.declaration_path, paths)
             self.assertEqual(record.schema_identity, ("p", "main"))
             self.assertEqual(record.context_token, "generation-1")
-            self.assertEqual(record.schema_dependencies, "unknown")
-            self.assertEqual(record.config_dependencies, "unknown")
+            if record.status == "unavailable":
+                self.assertEqual(record.schema_dependencies, "unknown")
+                self.assertEqual(record.config_dependencies, "unknown")
+            else:
+                self.assertIsInstance(record.schema_dependencies, tuple)
+                self.assertTrue(record.schema_dependencies)
+                self.assertTrue(
+                    all(
+                        re.fullmatch(r"[a-f0-9]{64}", item.fingerprint)
+                        for item in record.schema_dependencies
+                    )
+                )
+                self.assertIsInstance(record.config_dependencies, tuple)
+            self.assertIsInstance(record.mapping_dependencies, tuple)
             self.assertTrue(record.source_dependencies_known)
             for export in record.source_exports:
                 self.assertEqual(export.relative_path, "generated/sources/main.pyi")
@@ -1818,6 +1830,116 @@ invalid_again=graphql('query Invalid {missing}')
                         for dependency in record.dependencies
                     },
                 )
+
+    def test_provenance_records_precise_schema_and_used_config_facts(self) -> None:
+        sdl = (
+            "scalar Token enum Color { RED BLUE } scalar Other "
+            "type Query { token: Token first: String second: ID "
+            "search(filter: Filter!): Color } input Filter { token: Token }"
+        )
+        schema = build_schema(sdl)
+        context = SchemaContext("main", schema, "schema-1")
+        source = """from generated.main import graphql
+token=graphql('{token}')
+first=graphql('{first}')
+second=graphql('{second}')
+name=graphql('{__typename}')
+fragment=graphql('fragment F on Query {first}')
+with_fragment=graphql('query WithFragment {...F}',(fragment,))
+search=graphql('query Search($filter:Filter!){search(filter:$filter)}')
+"""
+        modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+        scalars = (
+            ScalarMapping("Token", "builtins.str", "builtins.bytes"),
+            ScalarMapping("Other", "builtins.int", "builtins.int"),
+        )
+        resolved = resolve_project(
+            modules,
+            bindings=(
+                ProjectBindings(
+                    "p",
+                    ("main",),
+                    factories=(FactoryBinding("generated.main", "graphql", "main"),),
+                ),
+            ),
+        )
+        index = index_fragments(resolved, schemas={("p", "main"): context})
+        result = generate_factory_artifacts(
+            context,
+            index,
+            modules=modules,
+            project_id="p",
+            generated_package="generated",
+            scalars=scalars,
+            enums=(("Color", "builtins.str"),),
+        )
+        self.assertEqual(result.diagnostics, ())
+        records = {record.binding: record for record in result.provenance}
+        token_config = {
+            (item.kind, item.name, item.value)
+            for item in records["token"].config_dependencies
+        }
+        self.assertIn(("scalar-output", "Token", "builtins.bytes"), token_config)
+        self.assertNotIn(("scalar-input", "Token", "builtins.str"), token_config)
+        self.assertNotIn(("scalar-input", "Other", "builtins.int"), token_config)
+        self.assertEqual(records["name"].config_dependencies, ())
+        self.assertIn(
+            ("disable-masking", "disable_masking", False),
+            {
+                (item.kind, item.name, item.value)
+                for item in records["with_fragment"].config_dependencies
+            },
+        )
+        search_coordinates = {
+            item.coordinate for item in records["search"].schema_dependencies
+        }
+        self.assertIn("field:Query.search", search_coordinates)
+        self.assertIn("input:Filter.token", search_coordinates)
+        self.assertIn("scalar:Token", search_coordinates)
+        search_config = {
+            (item.kind, item.name, item.value)
+            for item in records["search"].config_dependencies
+        }
+        self.assertIn(("scalar-input", "Token", "builtins.str"), search_config)
+        self.assertNotIn(("scalar-output", "Token", "builtins.bytes"), search_config)
+
+        changed_context = SchemaContext(
+            "main", build_schema(sdl.replace("first: String", "first: Int")), "schema-2"
+        )
+        changed_index = index_fragments(
+            resolved, schemas={("p", "main"): changed_context}
+        )
+        changed = generate_factory_artifacts(
+            changed_context,
+            changed_index,
+            modules=modules,
+            project_id="p",
+            generated_package="generated",
+            scalars=scalars,
+            enums=(("Color", "builtins.str"),),
+        )
+        old = {record.binding: record for record in result.provenance}
+        new = {record.binding: record for record in changed.provenance}
+        old_facts = {
+            item.coordinate: item.fingerprint
+            for item in old["first"].schema_dependencies
+        }
+        new_facts = {
+            item.coordinate: item.fingerprint
+            for item in new["first"].schema_dependencies
+        }
+        self.assertNotEqual(
+            old_facts["field:Query.first"], new_facts["field:Query.first"]
+        )
+        old_sibling = {
+            item.coordinate: item.fingerprint
+            for item in old["second"].schema_dependencies
+        }
+        new_sibling = {
+            item.coordinate: item.fingerprint
+            for item in new["second"].schema_dependencies
+        }
+        self.assertEqual(old_sibling, new_sibling)
 
     def test_failed_generation_and_assembly_never_return_provenance(self) -> None:
         source = (
