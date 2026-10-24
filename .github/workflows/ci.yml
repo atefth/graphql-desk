@@ -179,7 +179,7 @@ jobs:
       - run: node --check test/lifecycle.host.cjs
         working-directory: editor
       - if: runner.os == 'Linux'
-        run: xvfb-run -a node test/run-host.cjs 1.142.0 restartRecovery
+        run: xvfb-run -a node test/run-host.cjs 1.142.0 discovery
         working-directory: editor
       - if: runner.os == 'Windows'
         env:

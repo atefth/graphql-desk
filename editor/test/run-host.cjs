@@ -211,8 +211,10 @@ async function main() {
       settings: JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")),
     }));
   }
-  for (const extension of ["ms-python.python@2026.10.0", "ms-python.vscode-pylance@2026.4.1"]) {
-    await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], { version });
+  if (suite !== "discovery") {
+    for (const extension of ["ms-python.python@2026.10.0", "ms-python.vscode-pylance@2026.4.1"]) {
+      await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], { version });
+    }
   }
   const options = {
     version,
