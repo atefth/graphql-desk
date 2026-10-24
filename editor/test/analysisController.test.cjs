@@ -1114,6 +1114,7 @@ test("quarantine aborts active artifact work and sends the owned manifest to the
   assert.ok(await controller.analyze(snapshot));
   const artifacts = controller.artifacts(snapshot);
   await started;
+  const expectedWorkspace = await fs.realpath(fixture.root);
   const projects = [{ project: "p", generated_package: "generated", files: [], provenance: [] }];
   const invalidatedOwners = [{ module: { project: "p", module: "main", uri: "file:///main.py", version: 1 },
     codepoint: { start: 0, end: 8 }, utf16: { start: 0, end: 8 } }];
@@ -1121,7 +1122,6 @@ test("quarantine aborts active artifact work and sends the owned manifest to the
 
   assert.equal(await artifacts, null, "aborted artifact work cannot return a late generation");
   assert.ok(reply?.ok);
-  const expectedWorkspace = path.resolve(fixture.root);
   assert.equal(quarantineRequest.workspace, process.platform === "win32" ? expectedWorkspace.toLowerCase() : expectedWorkspace);
   assert.equal(quarantineRequest.op, "quarantine");
   assert.deepEqual(quarantineRequest.projects, projects);
