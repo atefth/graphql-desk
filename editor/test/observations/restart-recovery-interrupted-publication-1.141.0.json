@@ -1,0 +1,25 @@
+{
+  "host": "1.141.0",
+  "suite": "restartRecovery",
+  "platform": "Windows x64",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "scope": "The production generation publisher ran in an isolated child process. The process was hard-terminated after a generated stub was linked into a new generation and before its completion manifest was written. A fresh official VS Code host then reopened the disposable workspace.",
+  "lifecycle": {
+    "writerProcessKilledDuringPublication": true,
+    "processRestartSelectedCompleteGeneration": true,
+    "previousCompleteGenerationUnchanged": true,
+    "generatedStubAvailableAfterRestart": true,
+    "pylanceHover": "selected: String",
+    "invalidVariableDiagnostic": true,
+    "abandonedGenerationIgnoredAndPreserved": true,
+    "userFilePreserved": true
+  },
+  "outcome": "owned-output-restart-observed",
+  "limits": [
+    "The killed child used a small VS Code API double around the production publisher; the recovery and Pylance checks ran in the pinned official host.",
+    "This bounded crash-recovery case does not complete issue #24 or the broad live-typing gate."
+  ]
+}
