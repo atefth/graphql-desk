@@ -692,6 +692,70 @@ test("late analysis results are rejected after any captured input changes", asyn
   }
 });
 
+test("in-flight artifacts abort and cannot publish after dependency, schema, config or interpreter changes", async t => {
+  for (const input of ["dependency", "schema", "project-config", "interpreter"]) {
+    await t.test(input, async t => {
+      const fixture = await setup(t);
+      const dependencyPath = path.join(fixture.root, "dependency.py");
+      const schema = fixture.document("schema.graphql", "type Query { title: String }");
+      schema.isDirty = true;
+      if (input === "dependency") {
+        await fs.writeFile(dependencyPath, 'from graphql_desk import gql\nq=gql("{title}")\n');
+        fixture.candidates(["main.py", "dependency.py"]);
+      }
+      if (input === "interpreter") fixture.interpreter("");
+      const api = input === "interpreter" ? pythonApi(fixture) : null;
+      let release;
+      let started;
+      const ready = new Promise(resolve => { started = resolve; });
+      const held = new Promise(resolve => { release = resolve; });
+      t.after(() => release());
+      let artifactCalls = 0;
+      let signal;
+      const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+        const worker = createAnalysisWorker(options);
+        return { ...worker, async request(message, requestOptions) {
+          const reply = await worker.request(message, requestOptions);
+          if (message.op === "artifacts" && artifactCalls++ === 0) {
+            signal = requestOptions?.signal;
+            started();
+            await held;
+          }
+          return reply;
+        } };
+      } });
+      t.after(() => controller.dispose());
+
+      const snapshot = controller.snapshot(fixture.main);
+      assert.ok(await controller.analyze(snapshot));
+      const pending = controller.artifacts(snapshot);
+      await ready;
+      if (input === "dependency") {
+        await fs.writeFile(dependencyPath, 'from graphql_desk import gql\nq=gql("{missing}")\n');
+        fixture.watchers.find(item => item.pattern.pattern === "**/*").fire(Uri.file(dependencyPath));
+      } else if (input === "schema") {
+        schema.text = "type Query { title: Int }";
+        schema.version += 1;
+        fixture.watchers.find(item => item.pattern.pattern.endsWith(".graphql")).fire(schema.uri);
+      } else if (input === "project-config") {
+        const configPath = path.join(fixture.root, "pyproject.toml");
+        await fs.appendFile(configPath, 'client_directives=["local"]\n');
+        fixture.watchers.find(item => item.pattern.pattern === "**/*").fire(Uri.file(configPath));
+      } else {
+        api.select({ id: "changed", path: "changed-environment" });
+      }
+      assert.equal(signal.aborted, true, `${input} invalidation reaches active artifact generation`);
+      release();
+      assert.equal(await pending, null, "a late result from the invalidated artifact request cannot publish");
+
+      const fresh = await controller.artifacts(controller.snapshot(fixture.main));
+      assert.ok(fresh, "the current inputs can publish a fresh artifact generation");
+      assert.equal(fresh.isCurrent(), true);
+      if (input === "interpreter") assert.equal(artifactCalls, 2, "the changed interpreter receives a new artifact request");
+    });
+  }
+});
+
 test("untrusted, cancelled, superseded and disposed captures cannot publish or launch unauthorized workers", async t => {
   const fixture = await setup(t);
   let launches = 0;
