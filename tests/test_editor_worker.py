@@ -1368,6 +1368,76 @@ if TYPE_CHECKING:
         result = self.analyze(capture, self.prepare(capture))
         self.assertEqual(result, {"ok": False, "error": "editor-request-failed"})
 
+    def test_configuration_diagnostics_are_captured_redacted_and_recover(self) -> None:
+        malformed = "# 😀\r\n[tool.graphql-desk]\r\nschema = ]\r\n"
+        valid_text = self.config.read_text(encoding="utf8")
+        self.config.write_bytes(malformed.encode("utf-8"))
+        capture = self.capture()
+        prepared = self.worker.handle({"op": "prepare", **capture})
+        self.assertTrue(prepared["ok"], prepared)
+        diagnostics = cast(
+            list[dict[str, object]], prepared["configuration_diagnostics"]
+        )
+        self.assertEqual(len(diagnostics), 1)
+        diagnostic = diagnostics[0]
+        self.assertEqual(
+            set(diagnostic), {"uri", "version", "code", "message", "range"}
+        )
+        self.assertEqual(diagnostic["uri"], self.config.as_uri())
+        self.assertIsNone(diagnostic["version"])
+        self.assertEqual(diagnostic["code"], "graphql-desk.configuration")
+        self.assertEqual(diagnostic["message"], "Invalid pyproject TOML")
+        self.assertNotIn("]", cast(str, diagnostic["message"]))
+        self.assertEqual(
+            diagnostic["range"],
+            {
+                "start": {"line": 2, "character": len("schema = ")},
+                "end": {"line": 2, "character": len("schema = ") + 1},
+            },
+        )
+        invalid_analysis = self.analyze(capture, cast(str, prepared["id"]))
+        self.assertTrue(invalid_analysis["ok"], invalid_analysis)
+        invalid_request = cast(dict[str, object], invalid_analysis["request"])
+        self.assertEqual(invalid_request["modules"], [])
+
+        semantic = valid_text + 'unknown_option="PRIVATE_MARKER"\n'
+        capture["documents"] = [self.document(self.config, 7)]
+        capture["buffers"] = [self.buffer(self.config, semantic, 7)]
+        buffered = self.worker.handle({"op": "prepare", **capture})
+        self.assertTrue(buffered["ok"], buffered)
+        semantic_diagnostic = cast(
+            list[dict[str, object]], buffered["configuration_diagnostics"]
+        )[0]
+        self.assertEqual(semantic_diagnostic["uri"], self.config.as_uri())
+        self.assertEqual(semantic_diagnostic["version"], 7)
+        self.assertEqual(
+            semantic_diagnostic["message"],
+            "Invalid GraphQL Desk project configuration",
+        )
+        self.assertNotIn("PRIVATE_MARKER", json.dumps(semantic_diagnostic))
+        invalid_buffer_analysis = self.analyze(capture, cast(str, buffered["id"]))
+        self.assertTrue(invalid_buffer_analysis["ok"], invalid_buffer_analysis)
+        invalid_buffer_request = cast(
+            dict[str, object], invalid_buffer_analysis["request"]
+        )
+        self.assertEqual(invalid_buffer_request["modules"], [])
+
+        capture["buffers"] = [self.buffer(self.config, valid_text, 8)]
+        capture["documents"] = [self.document(self.config, 8)]
+        recovered = self.worker.handle({"op": "prepare", **capture})
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["configuration_diagnostics"], [])
+        analysis = self.analyze(capture, cast(str, recovered["id"]))
+        self.assertTrue(analysis["ok"], analysis)
+        recovered_request = cast(dict[str, object], analysis["request"])
+        self.assertEqual(
+            [
+                item["uri"]
+                for item in cast(list[dict[str, object]], recovered_request["modules"])
+            ],
+            [self.source.as_uri()],
+        )
+
     def test_bounded_json_protocol_redacts_and_recovers(self) -> None:
         prepare = json.dumps({"op": "prepare", **self.capture()}).encode()
         inputs = [

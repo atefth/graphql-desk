@@ -584,6 +584,10 @@ class EditorWorker:
             reply: dict[str, object] = {
                 "ok": True,
                 "id": self._identity,
+                "configuration_diagnostics": [
+                    diagnostic.as_json()
+                    for diagnostic in preparation.configuration_diagnostics
+                ],
                 "local_schemas": [
                     {
                         "project": path.project,

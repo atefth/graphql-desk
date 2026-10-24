@@ -305,10 +305,10 @@ class EditorSnapshotTests(unittest.TestCase):
         )
         self.write("child/pyproject.toml", "[tool.graphql-desk]\nunknown=true")
         self.assertFalse(is_editor_snapshot_current(snapshot, candidates=(source,)))
-        with self.assertRaises(ValueError):
-            acquire_editor_snapshot(
-                workspace=self.root, candidates=(source,), generation=2
-            )
+        invalid = acquire_editor_snapshot(
+            workspace=self.root, candidates=(source,), generation=2
+        )
+        self.assertEqual(invalid.request["modules"], [])
         self.project("child/")
         self.assertFalse(is_editor_snapshot_current(snapshot, candidates=(source,)))
 
@@ -672,13 +672,13 @@ class EditorSnapshotTests(unittest.TestCase):
         self.assertEqual(modules[0]["module"], "child.q")
         self.assertEqual(modules[0]["project"], (self.root / "pyproject.toml").as_uri())
         invalid = replace(buffer, text="[tool.graphql-desk]\nunknown=true")
-        with self.assertRaises(ValueError):
-            acquire_editor_snapshot(
-                workspace=self.root,
-                candidates=(source,),
-                buffers=(invalid,),
-                generation=3,
-            )
+        invalid_snapshot = acquire_editor_snapshot(
+            workspace=self.root,
+            candidates=(source,),
+            buffers=(invalid,),
+            generation=3,
+        )
+        self.assertEqual(invalid_snapshot.request["modules"], [])
 
     def test_buffered_config_cannot_adopt_a_directory_or_broken_symlink(self) -> None:
         source = self.write("q.py", _QUERY)
@@ -1081,9 +1081,60 @@ schema_output="graphql_desk_generated/remote.pyi"
                 preparation=prepared,
                 generation=2,
             )
-        self.write("pyproject.toml", "[tool.graphql-desk]\nunknown=true")
-        with self.assertRaises(ValueError):
-            prepare_editor_snapshot(workspace=self.root, candidates=(source,))
+        config = self.write("pyproject.toml", "[tool.graphql-desk]\nunknown=true")
+        prepared = prepare_editor_snapshot(workspace=self.root, candidates=(source,))
+        diagnostic = prepared.configuration_diagnostics[0]
+        self.assertEqual(diagnostic.uri, config.as_uri())
+        self.assertIsNone(diagnostic.version)
+        self.assertEqual(
+            diagnostic.message, "Invalid GraphQL Desk project configuration"
+        )
+        self.assertEqual(diagnostic.start, (0, 0))
+        self.assertEqual(diagnostic.end, (0, len("[tool.graphql-desk]")))
+
+    def test_configuration_diagnostics_use_toml_location_and_buffer_version(
+        self,
+    ) -> None:
+        source = self.write("q.py", _QUERY)
+        config = self.write("pyproject.toml", _BASE)
+        text = "# 😀\r\n[tool.graphql-desk]\r\nschema = ]\r\n"
+        prepared = prepare_editor_snapshot(
+            workspace=self.root,
+            candidates=(source,),
+            buffers=(OpenBuffer(config, 9, text, True),),
+        )
+        diagnostic = prepared.configuration_diagnostics[0]
+        self.assertEqual(diagnostic.uri, config.as_uri())
+        self.assertEqual(diagnostic.version, 9)
+        self.assertEqual(diagnostic.message, "Invalid pyproject TOML")
+        self.assertEqual(diagnostic.start[0], 2)
+        self.assertEqual(diagnostic.start[1], len("schema = "))
+        self.assertEqual(diagnostic.end, (2, len("schema = ") + 1))
+        self.assertNotIn("xxx", diagnostic.message)
+
+    def test_invalid_project_does_not_hide_an_unrelated_valid_project(self) -> None:
+        bad_source = self.write("bad/q.py", _QUERY)
+        bad_config = self.write(
+            "bad/pyproject.toml", "[tool.graphql-desk]\nunknown=true"
+        )
+        good_source = self.write("good/q.py", _QUERY)
+        self.write(
+            "good/pyproject.toml", _BASE.replace("schema.graphql", "../schema.graphql")
+        )
+        self.write("schema.graphql", _SDL)
+
+        prepared = prepare_editor_snapshot(
+            workspace=self.root, candidates=(bad_source, good_source)
+        )
+        snapshot = acquire_editor_snapshot(
+            workspace=self.root, candidates=(bad_source, good_source), generation=1
+        )
+        self.assertEqual(
+            [item.uri for item in prepared.configuration_diagnostics],
+            [bad_config.as_uri()],
+        )
+        modules = cast(list[dict[str, object]], snapshot.request["modules"])
+        self.assertEqual([item["uri"] for item in modules], [good_source.as_uri()])
 
 
 if __name__ == "__main__":

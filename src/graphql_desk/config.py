@@ -60,6 +60,39 @@ _PROJECT_KEYS = _SCHEMA_KEYS | {
 }
 
 
+class ProjectConfigParseError(ValueError):
+    """Sanitized configuration failure with a source range in the TOML text."""
+
+    def __init__(
+        self, message: str, start: int, end: int, *, original_message: str | None = None
+    ) -> None:
+        super().__init__(original_message or message)
+        self.message = message
+        self.start = start
+        self.end = end
+
+
+def _toml_error_offset(text: str, error: Exception) -> int:
+    match = re.search(r"\(at line (\d+), column (\d+)\)$", str(error))
+    if match is None:
+        return len(text) if "at end of document" in str(error) else 0
+    line, column = (int(part) for part in match.groups())
+    starts = [0]
+    starts.extend(match.end() for match in re.finditer(r"\r\n|\r|\n", text))
+    line_start = starts[min(max(line - 1, 0), len(starts) - 1)]
+    return min(line_start + max(column - 1, 0), len(text))
+
+
+def _project_table_span(text: str) -> tuple[int, int]:
+    match = re.search(
+        r"(?m)^[ \t]*\[+tool\.graphql-desk(?:\.[^\]\r\n]+)?\]+[ \t]*(?:#.*)?$",
+        text,
+    )
+    if match is not None:
+        return match.start(), match.end()
+    return (0, min(len(text), text.find("\n") if "\n" in text else len(text)))
+
+
 @dataclass(frozen=True)
 class SchemaOrigin:
     local_path: Path | None = None
@@ -351,16 +384,28 @@ def parse_project_config(
     """
     try:
         document = cast(dict[str, object], tomllib.loads(text))
-    except (ValueError, RecursionError):
-        raise ValueError("Invalid pyproject TOML") from None
-    tool = _table(document.get("tool", {}), "tool")
-    if "graphql-desk" not in tool:
-        return None
-    return parse_project_settings(
-        _table(tool["graphql-desk"], "tool.graphql-desk"),
-        config_path=config_path.resolve(),
-        source_scope=source_scope,
-    )
+    except (ValueError, RecursionError) as error:
+        offset = _toml_error_offset(text, error)
+        raise ProjectConfigParseError(
+            "Invalid pyproject TOML", offset, min(offset + 1, len(text))
+        ) from None
+    try:
+        tool = _table(document.get("tool", {}), "tool")
+        if "graphql-desk" not in tool:
+            return None
+        return parse_project_settings(
+            _table(tool["graphql-desk"], "tool.graphql-desk"),
+            config_path=config_path.resolve(),
+            source_scope=source_scope,
+        )
+    except (ValueError, RecursionError) as error:
+        start, end = _project_table_span(text)
+        raise ProjectConfigParseError(
+            "Invalid GraphQL Desk project configuration",
+            start,
+            end,
+            original_message=str(error),
+        ) from None
 
 
 def parse_project_settings(

@@ -28,6 +28,7 @@ async function run() {
     "main.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('{ user { missing old } }')\r\n",
     "partial.py": "from graphql_desk import gql\nq=gql('{ user { na')\n",
     "blank.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''\r\n\r\n''')\r\n",
+    "lexical.py": "from graphql_desk import gql\nq=gql('''query Read { user { name",
     "selected.py": "outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql('{ user { name ...Card } }',[card])\n",
     "fragments.py": "from graphql_desk import gql\ncard=gql('fragment Card on User { id }')\n",
     "other.py": "# 😀\r\nfrom graphql_desk import gql\r\ncard=gql('fragment Card on User { name }')\r\n",
@@ -76,7 +77,7 @@ async function run() {
   });
   const observations = { outcome: "read-only-features-observed", vscode: vscode.version, diagnostics: false, completion: false, boundaryCompletion: false, hover: false,
     schemaDefinition: false, fragmentDefinition: false, ambiguousFragmentDefinition: false, nativeCoexistence: false,
-    highlighting: false, nativePythonHover: false, untrustedNoAnalysis: false, diskUnchanged: false, cleanBuffers: false };
+    highlighting: false, lexicalHighlighting: false, nativePythonHover: false, untrustedNoAnalysis: false, diskUnchanged: false, cleanBuffers: false };
   try {
     const invalid = documents.get("main.py");
     await registration.refresh(invalid);
@@ -159,6 +160,18 @@ async function run() {
     } });
     assert.ok(decorations > 0);
     observations.highlighting = true;
+    const lexicalDocument = documents.get("lexical.py");
+    await registration.refresh(lexicalDocument);
+    assert.equal(vscode.languages.getDiagnostics(lexicalDocument.uri).some(item => item.code === "graphql.validation"), false,
+      "Lexical candidates from incomplete Python must not become typed GraphQL operations");
+    const lexicalEditor = await vscode.window.showTextDocument(lexicalDocument);
+    const lexicalTokens = [];
+    await highlighting.refresh({ document: lexicalDocument, setDecorations(_type, ranges) {
+      lexicalTokens.push(...ranges.map(range => lexicalDocument.getText(range)));
+      lexicalEditor.setDecorations(_type, ranges);
+    } });
+    assert.ok(lexicalTokens.includes("query"));
+    observations.lexicalHighlighting = true;
     trusted = false;
     const before = analyses;
     await registration.refresh(invalid);
