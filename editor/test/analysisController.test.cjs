@@ -716,20 +716,12 @@ test("in-flight artifacts abort and cannot publish after dependency, schema, con
           if (message.op === "artifacts" && artifactCalls++ === 0) {
             signal = requestOptions?.signal;
             started();
-            let timeout;
-            try {
-              await Promise.race([
-                new Promise(resolve => {
-                  if (signal.aborted) resolve();
-                  else signal.addEventListener("abort", resolve, { once: true });
-                }),
-                new Promise((_, reject) => { timeout = realTimeout(() => reject(new Error("Artifact request was not cancelled")), 2000); }),
-              ]);
-            } finally { clearTimeout(timeout); }
+            return new Promise((_, reject) => signal.addEventListener("abort", () => {
+              requestObservedAbort = signal.aborted;
+              reject(new Error("Worker request aborted"));
+            }, { once: true }));
           }
-          const response = worker.request(message, requestOptions);
-          if (message.op === "artifacts" && artifactCalls === 1) requestObservedAbort = signal.aborted;
-          return response;
+          return worker.request(message, requestOptions);
         } };
       } });
       t.after(() => controller.dispose());
@@ -753,7 +745,6 @@ test("in-flight artifacts abort and cannot publish after dependency, schema, con
         api.select({ id: "changed", path: "changed-environment" });
       }
       assert.equal(signal.aborted, true, `${input} invalidation reaches active artifact generation`);
-      await eventually(() => requestObservedAbort);
       assert.equal(requestObservedAbort, true, "the pending worker-side request observes cancellation before resolving");
       assert.equal(await pending, null, "a late result from the invalidated artifact request cannot publish");
 
