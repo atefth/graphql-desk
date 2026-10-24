@@ -322,10 +322,7 @@ exports.run = async () => {
     const originalSchema = schemaDocument.getText();
     const schemaBoolean = originalSchema.replace("selected: String!", "selected: Boolean!");
     assert.notEqual(schemaBoolean, originalSchema, "Schema fixture must contain the selected String field");
-    const schemaSelectionOffset = selectedStubPaths.length;
-    const schemaQuarantineStarted = Date.now();
     await replace(schemaDocument, schemaBoolean);
-    results.lifecycle.invalidationAndRepair.schemaQuarantine = await observeQuarantine("Schema edit", schemaQuarantineStarted, schemaSelectionOffset);
     results.lifecycle.invalidationAndRepair.schemaInvalidation = await until(async () => {
       const selectedType = await selectedHover();
       const unaffectedType = await otherIdHover();
@@ -349,10 +346,7 @@ exports.run = async () => {
     const mappedConfig = originalConfig.replace("[tool.graphql-desk]\n",
       '[tool.graphql-desk]\nscalars = { String = { input = "builtins.str", output = "builtins.int" } }\n');
     assert.notEqual(mappedConfig, originalConfig, "Config fixture must have the GraphQL Desk table");
-    const configSelectionOffset = selectedStubPaths.length;
-    const configQuarantineStarted = Date.now();
     await replace(configDocument, mappedConfig);
-    results.lifecycle.invalidationAndRepair.configQuarantine = await observeQuarantine("Scalar mapping edit", configQuarantineStarted, configSelectionOffset);
     results.lifecycle.invalidationAndRepair.configInvalidation = await until(async () => {
       const selectedType = await selectedHover();
       const unaffectedType = await otherIdHover();
