@@ -13,6 +13,9 @@ root and generated fragment readers. #143 adds explicit trusted-worker refresh;
 #146 supplies installed read-only doctor diagnostics with degraded health reporting.
 #248 adds incomplete-buffer escape-aware highlighting and pinned-host source-range
 checks; the broader #40 grammar and resolution-recovery acceptance remains open.
+#251 adds two-host lexical-to-resolved highlighting recovery and an actual activated
+extension edit cycle with GraphQL diagnostic recovery; #40 still has remaining
+grammar and resolution-recovery acceptance.
 #147/#148 retain explicitly refreshed schemas through safe new captures and activate
 the read-only editor controller. Complete workflows, reader precision and live
 generated inference remain open.

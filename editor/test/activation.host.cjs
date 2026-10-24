@@ -26,6 +26,7 @@ async function run() {
     "schema.graphql": schema,
     "pyproject.toml": '[tool.graphql-desk]\nschema="schema.graphql"\nclient_directives=["local"]\nschema_output="graphql_desk_generated/default.pyi"\n',
     "main.py": 'raise RuntimeError("PROJECT_MUST_NOT_EXECUTE")\nfrom graphql_desk import gql\nq=gql("{ user { missing old } }")\n',
+    "recovery.py": ["# 😀", "from graphql_desk import gql", String.raw`q=gql("query Read { user(id: \"m\u0061😀\") { name`].join("\r\n"),
     "outline.py": "from graphql_desk import gql\nq=gql('query Main { user { id } }')\n",
     "partial.py": 'from graphql_desk import gql\nq=gql("{ user { na")\n',
     "selected.py": 'outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql("{ user { name @local ...Card } }",[card])\n',
@@ -73,6 +74,17 @@ async function run() {
   const partial = documents.get("partial.py");
   const completion = await until(() => vscode.commands.executeCommand("vscode.executeCompletionItemProvider", partial.uri, partial.positionAt(partial.getText().indexOf('na"') + 2)), value => value.items.some(item => item.label === "name"), "Real activated completion");
   assert.equal(partial.getText(completion.items.find(item => item.label === "name").range), "na");
+  const recovery = documents.get("recovery.py");
+  await vscode.window.showTextDocument(recovery);
+  assert.equal(diagnostics(recovery).some(item => item.code === "graphql.validation"), false,
+    "Incomplete Python may receive lexical highlighting, but must not become a semantic GraphQL document");
+  await replace(recovery, ["# 😀", "from graphql_desk import gql", String.raw`q=gql("query Read { user(id: \"m\u0061😀\") { missing } }")`].join("\r\n"));
+  const recoveredError = await until(() => diagnostics(recovery), values => values.some(item => item.code === "graphql.validation"),
+    "Repairing Python syntax must restore semantic GraphQL validation through the activated change path");
+  assert.equal(recovery.getText(recoveredError.find(item => item.code === "graphql.validation").range), "missing");
+  await replace(recovery, ["# 😀", "from graphql_desk import gql", String.raw`q=gql("query Read { user(id: \"m\u0061😀\") { name } }")`].join("\r\n"));
+  await until(() => diagnostics(recovery), values => !values.some(item => item.code === "graphql.validation"),
+    "Repairing the GraphQL selection must clear the resolved validation error");
   const selected = documents.get("selected.py");
   await vscode.window.showTextDocument(selected);
   const position = selected.positionAt(selected.getText().indexOf("name") + 1);
@@ -145,9 +157,10 @@ async function run() {
     assert.equal(remoteRequests, fetched, "Source edits retain schema without automatic HTTP");
   } finally { await new Promise(resolve => remote.close(resolve)); }
   assert.equal(main.isDirty, true); assert.equal(schemaDoc.isDirty, true); assert.equal(unsaved.isDirty, true);
+  assert.equal(recovery.isDirty, true, "The edit-cycle fixture must remain unsaved in its original editor buffer");
   for (const [name, text] of Object.entries(fixtures)) assert.equal(await fs.readFile(path.join(workspace, name), "utf8"), text);
   await assert.rejects(fs.stat(unsavedPath), { code: "ENOENT" });
   await assert.rejects(fs.stat(path.join(workspace, "graphql_desk_generated")), { code: "ENOENT" });
-  await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-activation-observed", vscode: vscode.version, actualActivation: true, actualWorker: true, officialSelectedEnvironment: true, blankInterpreterOverride: true, diagnostics: true, configurationDiagnostics: true, completion: true, hover: true, definitions: true, configuredDirectives: true, dirtyConfiguration: true, dirtyFragment: true, sourceRepair: true, dirtySchema: true, associatedUntitled: true, explicitRemoteRefresh: true, remoteTypingRetention: true, noAutomaticHttp: true, nativePylanceCoexistence: true, diskUnchanged: true, dirtyBuffersPreserved: true }, null, 2));
+  await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-activation-observed", vscode: vscode.version, actualActivation: true, actualWorker: true, officialSelectedEnvironment: true, blankInterpreterOverride: true, diagnostics: true, configurationDiagnostics: true, completion: true, hover: true, definitions: true, configuredDirectives: true, dirtyConfiguration: true, dirtyFragment: true, sourceRepair: true, incompleteGraphqlRecovery: true, recoveryDirtyBufferPreserved: true, dirtySchema: true, associatedUntitled: true, explicitRemoteRefresh: true, remoteTypingRetention: true, noAutomaticHttp: true, nativePylanceCoexistence: true, diskUnchanged: true, dirtyBuffersPreserved: true }, null, 2));
 }
 module.exports = { run };
