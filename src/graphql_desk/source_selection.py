@@ -84,6 +84,8 @@ def select_project_sources(
     *,
     workspace: Path | None = None,
     config_texts: Mapping[Path, str | None] | None = None,
+    include_stubs: bool = False,
+    validate_entrypoints: bool = True,
 ) -> tuple[SourceFile, ...]:
     """Select supplied paths; never enumerate directories or read Python text.
 
@@ -123,7 +125,11 @@ def select_project_sources(
     entry_matches: dict[str, set[Path]] = {
         entry: set() for entry in config.entrypoints or ()
     }
-    for candidate in candidates:
+    ordered_candidates = sorted(
+        candidates,
+        key=lambda item: (item.suffix != ".pyi", item.as_posix()),
+    )
+    for candidate in ordered_candidates:
         supplied = root / candidate
         path = _resolved(supplied)
         lexical_roots = [
@@ -140,7 +146,7 @@ def select_project_sources(
             raise ValueError("Source symlink is broken")
         if path.exists() and not path.is_file():
             raise ValueError("Source candidate must be a file")
-        if path.suffix != ".py":
+        if path.suffix != ".py" and not (include_stubs and path.suffix == ".pyi"):
             continue
         identity = _identity(path)
         if (
@@ -149,16 +155,23 @@ def select_project_sources(
             or identity in outputs
         ):
             continue
-        eligible = [
-            base
-            for base in matches
+        eligible: list[Path] = []
+        for base in matches:
+            relative = path.relative_to(base)
+            pattern_paths: tuple[str, ...] = (relative.as_posix(),)
+            if include_stubs and path.suffix == ".pyi":
+                # Default `.py` include/exclude rules also apply to the matching stub.
+                pattern_paths = (relative.with_suffix(".py").as_posix(), *pattern_paths)
             if any(
-                _matches(path.relative_to(base).as_posix(), p) for p in config.include
-            )
-            and not any(
-                _matches(path.relative_to(base).as_posix(), p) for p in config.exclude
-            )
-        ]
+                _matches(candidate_path, pattern)
+                for candidate_path in pattern_paths
+                for pattern in config.include
+            ) and not any(
+                _matches(candidate_path, pattern)
+                for candidate_path in pattern_paths
+                for pattern in config.exclude
+            ):
+                eligible.append(base)
         if not eligible:
             continue
         owner = find_project(
@@ -172,12 +185,22 @@ def select_project_sources(
         base = eligible[0]
         name, is_package = _module(path.relative_to(base))
         if name in names and names[name] != identity:
+            previous = selected[names[name]]
+            if (
+                include_stubs
+                and previous.source_root == base
+                and previous.path.suffix == ".pyi"
+                and path.suffix == ".py"
+            ):
+                continue
             raise ValueError("Distinct sources have the same Python module identity")
         names[name] = identity
         selected.setdefault(identity, SourceFile(path, base, name, is_package))
         for entry in entry_matches:
             if any(path.relative_to(b).as_posix() == entry for b in eligible):
                 entry_matches[entry].add(identity)
-    if any(len(paths) != 1 for paths in entry_matches.values()):
+    if validate_entrypoints and any(
+        len(paths) != 1 for paths in entry_matches.values()
+    ):
         raise ValueError("Entrypoint is unknown, excluded or ambiguous")
     return tuple(sorted(selected.values(), key=lambda source: source.path.as_posix()))
