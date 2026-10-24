@@ -632,21 +632,22 @@ test("untrusted, cancelled, superseded and disposed captures cannot publish or l
 test("explicit remote refresh survives typing without HTTP, but changed credentials/config remove contexts", async t => {
   let requests = 0;
   const payload = JSON.stringify({ data: introspectionFromSchema(buildSchema("type Query { title: String }")) });
-  const server = http.createServer((request, response) => { requests += 1; request.resume(); response.setHeader("Content-Type", "application/json"); response.end(payload); });
+  const server = http.createServer((request, response) => { requests += 1; request.resume(); response.setHeader("Content-Type", "application/json"); response.setHeader("Content-Length", Buffer.byteLength(payload)); response.end(payload); });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const fixture = await setup(t, `schema={url="http://127.0.0.1:${server.address().port}/graphql",headers={"X-Key"="\${env:TOKEN}"}}\n`);
   let environment = { TOKEN: "PRIVATE_SECRET", UNRELATED: "NEVER_SEND" };
   const messages = [];
   const statuses = [];
-  const controller = createAnalysisController(fixture.vscode, { status: value => statuses.push(value), environment: () => environment, workerFactory: options => {
+  const reports = [];
+  const controller = createAnalysisController(fixture.vscode, { status: value => statuses.push(value), report: value => reports.push(value), environment: () => environment, workerFactory: options => {
     const worker = createAnalysisWorker(options);
     return { ...worker, request(message) { messages.push(message); return worker.request(message); } };
   } }); t.after(() => controller.dispose());
   let snapshot = controller.snapshot(fixture.main);
   assert.equal((await controller.analyze(snapshot)).request.schemas.length, 0); assert.equal(requests, 0);
   assert.equal(statuses.at(-1), "Schema unavailable");
-  await controller.refresh(); assert.ok(requests > 0);
+  await controller.refresh(); assert.ok(requests > 0); assert.equal(reports.at(-1), "Schema refreshed.");
   const fetched = requests;
   let bundle = await controller.analyze(snapshot); assert.equal(bundle.request.schemas.length, 1);
   assert.equal(statuses.at(-1), null);
