@@ -99,7 +99,9 @@ exports.run = async () => {
       return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
     };
     await until(async () => {
-      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      let settings;
+      try { settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")); }
+      catch { return false; }
       const root = path.resolve(workspace, settings["python.analysis.stubPath"]);
       return fs.access(path.join(root, "graphql_desk_generated", "parsers", "parser_consumer.pyi")).then(() => true, () => false);
     }, "the worker publishes a schema-independent parser companion");
@@ -213,7 +215,9 @@ exports.run = async () => {
       results.pylance.conditionalUser = await semanticHover("conditional_user");
       results.pylance.conditionalId = await semanticHover("conditional_id");
       results.pylance.conditionalNegative = semanticErrors("conditional_wrong_title");
-      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      let settings;
+      try { settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")); }
+      catch { return false; }
       const root = path.resolve(workspace, settings["python.analysis.stubPath"]);
       const sourceStubPath = path.join(root, "graphql_desk_generated", "sources", "operation_semantics.pyi");
       let sourceDeclarations = "";
