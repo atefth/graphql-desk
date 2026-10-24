@@ -213,11 +213,6 @@ exports.run = async () => {
     ].join("\n");
     await replace(semanticDocument, semanticSource + conditionalSource);
     const conditionalReady = await until(async () => {
-      results.pylance.conditionalSelected = await semanticHover("conditional_selected");
-      results.pylance.conditionalNullable = await semanticHover("conditional_nullable");
-      results.pylance.conditionalUser = await semanticHover("conditional_user");
-      results.pylance.conditionalId = await semanticHover("conditional_id");
-      results.pylance.conditionalNegative = semanticErrors("conditional_wrong_title");
       let settings;
       try { settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")); }
       catch { return false; }
@@ -230,12 +225,20 @@ exports.run = async () => {
       const generated = path.join(root, ...resultModule.split(".")) + ".pyi";
       let stub = "";
       try { stub = await fs.readFile(generated, "utf8"); } catch { return false; }
+      if (!stub.includes("'selected': NotRequired['String']") ||
+          !stub.includes("'nullable': NotRequired['list[String | None] | None']")) return false;
       const userVariants = [...stub.matchAll(/__graphql_desk_variant_\d+ = TypedDict\([\s\S]*?\}, closed=True\)/g)]
         .map(match => match[0]).filter(variant => variant.includes(`Literal['User']`));
       results.pylance.conditionalGenerated = stub.includes("'selected': NotRequired['String']") &&
         stub.includes("'nullable': NotRequired['list[String | None] | None']") &&
         userVariants.some(variant => variant.includes("'name': 'String'")) &&
         userVariants.some(variant => !variant.includes("'name': 'String'"));
+      if (!results.pylance.conditionalGenerated) return false;
+      results.pylance.conditionalSelected = await semanticHover("conditional_selected");
+      results.pylance.conditionalNullable = await semanticHover("conditional_nullable");
+      results.pylance.conditionalUser = await semanticHover("conditional_user");
+      results.pylance.conditionalId = await semanticHover("conditional_id");
+      results.pylance.conditionalNegative = semanticErrors("conditional_wrong_title");
       return /: str\b|: String\b/.test(results.pylance.conditionalSelected) &&
         /list\[String \| None\] \| None/.test(results.pylance.conditionalNullable) &&
         /: str\b|: String\b/.test(results.pylance.conditionalUser) &&
