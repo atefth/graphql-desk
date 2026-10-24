@@ -113,6 +113,37 @@ test("real worker captures unsaved source/config/schema, shares concurrent provi
   await assert.rejects(fs.stat(path.join(root, "new.py")), { code: "ENOENT" });
 });
 
+test("configuration diagnostics follow the current dirty pyproject and clear after repair", async t => {
+  const fixture = await setup(t);
+  const reports = [];
+  const controller = createAnalysisController(fixture.vscode, {
+    configurationDiagnostics: (workspace, diagnostics) => reports.push({ workspace, diagnostics }),
+  });
+  t.after(() => controller.dispose());
+  const invalid = '[tool.graphql-desk]\nschema=\nschema_output="graphql_desk_generated/default.pyi"\n';
+  const config = fixture.document("pyproject.toml", invalid);
+  config.isDirty = true;
+  config.version += 1;
+  fixture.events.onDidChangeTextDocument.fire({ document: config, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
+  await controller.analyze(controller.snapshot(fixture.main));
+  const failure = reports.at(-1);
+  assert.equal(failure.workspace, fixture.vscode.workspace.workspaceFolders[0].uri.toString());
+  assert.equal(failure.diagnostics.length, 1);
+  assert.equal(
+    await fs.realpath(fileURLToPath(failure.diagnostics[0].uri)),
+    await fs.realpath(config.uri.fsPath),
+  );
+  assert.equal(failure.diagnostics[0].version, config.version);
+  assert.equal(failure.diagnostics[0].code, "graphql-desk.configuration");
+  assert.deepEqual(failure.diagnostics[0].range.start, { line: 1, character: 7 });
+
+  config.text = '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n';
+  config.version += 1;
+  fixture.events.onDidChangeTextDocument.fire({ document: config, contentChanges: [{ rangeOffset: 0, rangeLength: invalid.length }] });
+  await controller.analyze(controller.snapshot(fixture.main));
+  assert.deepEqual(reports.at(-1).diagnostics, []);
+});
+
 test("managed runtime companions are excluded from project source candidates", async t => {
   const fixture = await setup(t);
   const generation = path.join(fixture.root, ".graphql-desk", "typings", "generations", "g-1-01234567-89ab-cdef-0123-456789abcdef");
@@ -1657,7 +1688,7 @@ test("local schema watchers retire with their state while live external buffers 
   assert.equal(invalidations, before);
   await fs.writeFile(configPath, "[INVALID");
   projectWatch.fire(Uri.file(configPath));
-  assert.equal(await controller.analyze(snapshot), null);
+  assert.ok(await controller.analyze(snapshot));
   assert.equal(live()[0], replacementWatch, "Failed captures preserve existing repair observation");
   await fs.writeFile(configPath, replacementConfig);
   projectWatch.fire(Uri.file(configPath));

@@ -14,7 +14,7 @@ const { createAnalysisWorker, MAX_FRAME_BYTES } = require("../src/analysisWorker
 const root = path.resolve(__dirname, "../..");
 const python = process.env.GRAPHQL_DESK_PYTHON ?? path.join(root, ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
 const message = workspace => ({ op: "prepare", workspace, candidates: [], buffers: [], documents: [], editor_fallback: null });
-const reply = { ok: true, id: "job", local_schemas: [], remote_schemas: [], required_buffers: [] };
+const reply = { ok: true, id: "job", local_schemas: [], remote_schemas: [], required_buffers: [], configuration_diagnostics: [] };
 const generic = { message: "GraphQL Desk worker request failed" };
 
 test("hung process times out and a fresh worker succeeds", async t => {
@@ -46,6 +46,21 @@ test("hung process times out and a fresh worker succeeds", async t => {
   assert.deepEqual(result.local_schemas, []);
   assert.deepEqual(result.remote_schemas, []);
   assert.deepEqual(result.required_buffers, []);
+  assert.deepEqual(result.configuration_diagnostics, []);
+});
+
+test("prepare accepts only bounded file configuration diagnostics with UTF-16 positions", async t => {
+  const diagnostic = { uri: "file:///workspace/pyproject.toml", version: 3, code: "graphql-desk.configuration",
+    message: "Invalid GraphQL Desk project configuration", range: { start: { line: 1, character: 0 }, end: { line: 2, character: 5 } } };
+  const fake = fakeSpawn(child => child.stdout.write(JSON.stringify({ ...reply, configuration_diagnostics: [diagnostic] }) + "\n"));
+  const { worker, workspace } = setup(t, fake);
+  const prepared = await worker.request(message(workspace));
+  assert.deepEqual(prepared.configuration_diagnostics, [diagnostic]);
+
+  const invalid = { ...diagnostic, code: "graphql-desk.configuration", range: { ...diagnostic.range, end: { line: 0, character: 0 } } };
+  const malformed = fakeSpawn(child => child.stdout.write(JSON.stringify({ ...reply, configuration_diagnostics: [invalid] }) + "\n"));
+  const fixture = setup(t, malformed);
+  await assert.rejects(fixture.worker.request(message(fixture.workspace)), generic);
 });
 
 function fakeSpawn(onWrite = () => {}) {

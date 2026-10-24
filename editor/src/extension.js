@@ -159,6 +159,29 @@ function activate(context) {
   const latestArtifacts = new Map();
   const invalidatedDiagnostics = vscode.languages.createDiagnosticCollection("graphql-desk-typing");
   const invalidatedDiagnosticUris = new Map();
+  const configDiagnosticCollection = vscode.languages.createDiagnosticCollection("graphql-desk-config");
+  const configDiagnosticsByWorkspace = new Map();
+  function updateConfigDiagnostics(workspace, items) {
+    const previous = configDiagnosticsByWorkspace.get(workspace) ?? new Map();
+    const current = new Map();
+    for (const item of items) {
+      const diagnostics = current.get(item.uri) ?? [];
+      const diagnostic = new vscode.Diagnostic(
+        new vscode.Range(new vscode.Position(item.range.start.line, item.range.start.character),
+          new vscode.Position(item.range.end.line, item.range.end.character)),
+        item.message, vscode.DiagnosticSeverity.Error);
+      diagnostic.source = "GraphQL Desk";
+      diagnostic.code = item.code;
+      diagnostics.push(diagnostic);
+      current.set(item.uri, diagnostics);
+    }
+    configDiagnosticsByWorkspace.set(workspace, current);
+    for (const uri of new Set([...previous.keys(), ...current.keys()])) {
+      const merged = [...configDiagnosticsByWorkspace.values()].flatMap(byUri => byUri.get(uri) ?? []);
+      if (merged.length) configDiagnosticCollection.set(vscode.Uri.parse(uri), merged);
+      else configDiagnosticCollection.delete(vscode.Uri.parse(uri));
+    }
+  }
   const output = vscode.window.createOutputChannel("GraphQL Desk");
   function traceSkip(reason) {
     if (reason === lastSkipReason) return;
@@ -502,6 +525,7 @@ function activate(context) {
   status.command = "graphqlDesk.refreshSchema";
   status.tooltip = "GraphQL Desk: refresh a remote schema; positive schema_refresh_interval enables trusted background polling. Check configuration and interpreter settings if unavailable.";
   const controller = createAnalysisController(vscode, { changed: (sourceUri, ranges) => refreshVisible(sourceUri, true, ranges),
+    configurationDiagnostics: updateConfigDiagnostics,
     status: message => {
       if (message) { status.text = `GraphQL Desk: ${message}`; status.show(); }
       else status.hide();
@@ -522,6 +546,10 @@ function activate(context) {
   });
   const foldersChanged = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     generation += 1;
+    const activeWorkspaces = new Set((vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.toString()));
+    for (const workspace of configDiagnosticsByWorkspace.keys()) {
+      if (!activeWorkspaces.has(workspace)) updateConfigDiagnostics(workspace, []);
+    }
     void reconfigureRoots().then(refreshVisible, () => {
       status.text = "GraphQL Desk: managed typing unavailable";
       status.show();
@@ -532,7 +560,7 @@ function activate(context) {
   const lifecycle = { async dispose() {
     if (disposed) return;
     disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); command.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
-    configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose(); output.dispose(); invalidatedDiagnostics.dispose();
+    configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose(); output.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
     outputs.clear();
     const managedRoots = await Promise.all([...roots.values()].map(promise => promise.catch(() => null)));

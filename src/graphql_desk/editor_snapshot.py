@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import cast
 
 from .config import ProjectConfig, SchemaOrigin
-from .project import effective_project, project_bindings, validate_project_ownership
+from .project import (
+    ProjectConfigDiagnosticError,
+    effective_project,
+    project_bindings,
+    validate_project_ownership,
+)
 from .source_graph import ModuleSnapshot
 from .source_selection import SourceFile, select_project_sources
 
@@ -64,6 +69,27 @@ class RemoteSchemaSnapshot:
 
 
 @dataclass(frozen=True)
+class ConfigurationDiagnostic:
+    uri: str
+    version: int | None
+    message: str
+    start: tuple[int, int]
+    end: tuple[int, int]
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "uri": self.uri,
+            "version": self.version,
+            "code": "graphql-desk.configuration",
+            "message": self.message,
+            "range": {
+                "start": {"line": self.start[0], "character": self.start[1]},
+                "end": {"line": self.end[0], "character": self.end[1]},
+            },
+        }
+
+
+@dataclass(frozen=True)
 class EditorPreparation:
     """Schema targets and redacted private origins; no source/schema contents."""
 
@@ -72,6 +98,7 @@ class EditorPreparation:
     _candidates: tuple[Path, ...] = field(repr=False)
     _observations: tuple[_Observation, ...] = field(repr=False)
     _configs: tuple[tuple[str, str, str], ...] = field(repr=False)
+    configuration_diagnostics: tuple[ConfigurationDiagnostic, ...] = ()
     remote_origins: tuple[RemoteSchemaOrigin, ...] = field(default=(), repr=False)
     project_preferences: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
@@ -84,6 +111,7 @@ class _CapturedProjects:
     observations: dict[tuple[Path, str], _Observation]
     projects: tuple[tuple[ProjectConfig, tuple[SourceFile, ...]], ...]
     config_facts: tuple[tuple[str, str, str], ...]
+    configuration_diagnostics: tuple[ConfigurationDiagnostic, ...]
 
 
 @dataclass(frozen=True)
@@ -186,6 +214,18 @@ def _text_digest(text: str) -> str:
     return _digest(text.encode("utf-8", "surrogatepass"))
 
 
+def _utf16_position(text: str, offset: int) -> tuple[int, int]:
+    offset = min(max(offset, 0), len(text))
+    line = 0
+    start = 0
+    for match in re.finditer(r"\r\n|\r|\n", text):
+        if match.start() >= offset:
+            break
+        line += 1
+        start = match.end()
+    return line, len(text[start:offset].encode("utf-16-le")) // 2
+
+
 def _check_version(value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError("Snapshot versions must be nonnegative integers")
@@ -228,6 +268,7 @@ def _capture_projects(
     observations: dict[tuple[Path, str], _Observation] = {}
     configs: dict[Path, ProjectConfig] = {}
     config_facts: dict[str, tuple[str, str, str]] = {}
+    config_errors: dict[Path, ProjectConfigDiagnosticError] = {}
 
     config_texts: dict[Path, str | None] = {}
 
@@ -264,12 +305,16 @@ def _capture_projects(
                 break
             current = current.parent
     for path in paths:
-        selected = effective_project(
-            _path(path).parent,
-            workspace=base,
-            editor_fallback=editor_fallback,
-            config_texts=config_texts,
-        )
+        try:
+            selected = effective_project(
+                _path(path).parent,
+                workspace=base,
+                editor_fallback=editor_fallback,
+                config_texts=config_texts,
+            )
+        except ProjectConfigDiagnosticError as caught_error:
+            config_errors.setdefault(_identity(caught_error.path), caught_error)
+            continue
         if selected is None:
             continue
         config = selected.config
@@ -296,6 +341,32 @@ def _capture_projects(
         )
         for config in sorted(configs.values(), key=lambda item: str(item.path))
     )
+    config_diagnostics: list[ConfigurationDiagnostic] = []
+    for path, diagnostic_error in sorted(
+        config_errors.items(), key=lambda item: str(item[0])
+    ):
+        text = config_texts.get(path)
+        observation = next(
+            (
+                item
+                for item in observations.values()
+                if item.canonical == path and item.origin.startswith("config-")
+            ),
+            None,
+        )
+        if text is None or observation is None:
+            continue
+        start = min(max(diagnostic_error.start, 0), len(text))
+        end = min(max(diagnostic_error.end, start), len(text))
+        config_diagnostics.append(
+            ConfigurationDiagnostic(
+                observation.path.as_uri(),
+                observation.version,
+                diagnostic_error.message,
+                _utf16_position(text, start),
+                _utf16_position(text, end),
+            )
+        )
     return _CapturedProjects(
         base,
         paths,
@@ -303,6 +374,7 @@ def _capture_projects(
         observations,
         projects,
         tuple(sorted(config_facts.values())),
+        tuple(config_diagnostics),
     )
 
 
@@ -352,6 +424,7 @@ def _preparation(captured: _CapturedProjects) -> EditorPreparation:
         tuple(sorted(set(captured.paths), key=str)),
         observations,
         captured.config_facts,
+        captured.configuration_diagnostics,
         tuple(
             RemoteSchemaOrigin(
                 config.path.as_uri(),

@@ -56,7 +56,7 @@ function artifactRootFor(filename, selectedStubRoot) {
 }
 
 /** Captures are finite capabilities; watchers only request earlier invalidation. */
-function createAnalysisController(vscode, { workerFactory = createAnalysisWorker, environment = () => process.env, changed = () => {}, report = () => {}, status = () => {} } = {}) {
+function createAnalysisController(vscode, { workerFactory = createAnalysisWorker, environment = () => process.env, changed = () => {}, report = () => {}, status = () => {}, configurationDiagnostics = () => {} } = {}) {
   let disposed = false;
   let epoch = 0;
   const states = new Map();
@@ -416,7 +416,12 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         if (!captured.texts.has(id)) throw new Error("Missing schema buffer");
         return captured.texts.get(id);
       });
-      reconcileSchemaWatches(state, new Set(prepared.local_schemas.map(schema => schema.path)));
+      const watchPaths = new Set(prepared.local_schemas.map(schema => schema.path));
+      // Keep prior schema repair watches until every invalid project config is fixed.
+      if (prepared.configuration_diagnostics.length) {
+        for (const filename of state.watches.keys()) watchPaths.add(filename);
+      }
+      reconcileSchemaWatches(state, watchPaths);
       let identity = prepared.id;
       let refreshStatus;
       if (refreshTarget) {
@@ -448,6 +453,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       check(ticket, token, state, abort?.signal);
       const schemaPaths = prepared.local_schemas.map(schema => schema.path);
       if (captureSignature(latest, schemaPaths) !== captureSignature(captured, schemaPaths)) throw new Error("Capture changed");
+      configurationDiagnostics(state.folder.uri.toString(), prepared.configuration_diagnostics);
       const latestRevisions = revisions(state);
       if (state.revisions.some(active => !latestRevisions.some(current => key(current) === key(active) && current.revision === active.revision))) throw new Error("Credentials changed during analysis");
       if (refreshStatus && !pollAbort) report(refreshStatus === "ready" ? "Schema refreshed." : "Schema refresh failed; this schema is unavailable for analysis.");

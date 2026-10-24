@@ -8,6 +8,7 @@ from typing import Literal
 
 from .config import (
     ProjectConfig,
+    ProjectConfigParseError,
     SchemaConfig,
     generated_output_paths,
     load_project_config,
@@ -15,6 +16,17 @@ from .config import (
     parse_project_settings,
 )
 from .source_graph import FactoryBinding, ProjectBindings, ResolvedCall
+
+
+class ProjectConfigDiagnosticError(ValueError):
+    """Configuration parse error anchored to its selected pyproject.toml."""
+
+    def __init__(self, path: Path, error: ProjectConfigParseError) -> None:
+        super().__init__(str(error))
+        self.path = path
+        self.message = error.message
+        self.start = error.start
+        self.end = error.end
 
 
 def _canonical(path: Path) -> Path:
@@ -43,17 +55,20 @@ def _load_config(
     scope: Literal["project", "explicit_cli"],
     texts: Mapping[Path, str | None] | None,
 ) -> ProjectConfig | None:
-    if texts is None:
-        return load_project_config(path, source_scope=scope)
-    identity = _canonical(path)
-    if identity not in texts:
-        raise ValueError("Configuration path was not captured")
-    text = texts[identity]
-    return (
-        None
-        if text is None
-        else parse_project_config(text, config_path=identity, source_scope=scope)
-    )
+    try:
+        if texts is None:
+            return load_project_config(path, source_scope=scope)
+        identity = _canonical(path)
+        if identity not in texts:
+            raise ValueError("Configuration path was not captured")
+        text = texts[identity]
+        return (
+            None
+            if text is None
+            else parse_project_config(text, config_path=identity, source_scope=scope)
+        )
+    except ProjectConfigParseError as error:
+        raise ProjectConfigDiagnosticError(path, error) from None
 
 
 def find_project(

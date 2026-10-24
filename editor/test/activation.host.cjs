@@ -91,6 +91,14 @@ async function run() {
   assert.equal(selected.getText(localDirective.range), "local");
   assert.equal(localDirective.insertText, "local");
   const configDoc = documents.get("pyproject.toml");
+  const invalidConfig = fixtures["pyproject.toml"].replace('schema="schema.graphql"', "schema=");
+  await replace(configDoc, invalidConfig);
+  const configDiagnostic = await until(() => diagnostics(configDoc), values => values.some(item => item.code === "graphql-desk.configuration"),
+    "Malformed project configuration must be diagnosed on pyproject.toml");
+  assert.equal(configDiagnostic.find(item => item.code === "graphql-desk.configuration").message, "Invalid pyproject TOML");
+  await replace(configDoc, fixtures["pyproject.toml"]);
+  await until(() => diagnostics(configDoc), values => !values.some(item => item.code === "graphql-desk.configuration"),
+    "Repairing project configuration clears its diagnostic");
   await replace(configDoc, fixtures["pyproject.toml"].replace('client_directives=["local"]', 'client_directives=[]'));
   await until(() => diagnostics(selected), values => values.some(item => /Unknown directive.*local/.test(item.message)), "Dirty config updates client directives");
   await replace(configDoc, fixtures["pyproject.toml"]);
@@ -140,6 +148,6 @@ async function run() {
   for (const [name, text] of Object.entries(fixtures)) assert.equal(await fs.readFile(path.join(workspace, name), "utf8"), text);
   await assert.rejects(fs.stat(unsavedPath), { code: "ENOENT" });
   await assert.rejects(fs.stat(path.join(workspace, "graphql_desk_generated")), { code: "ENOENT" });
-  await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-activation-observed", vscode: vscode.version, actualActivation: true, actualWorker: true, officialSelectedEnvironment: true, blankInterpreterOverride: true, diagnostics: true, completion: true, hover: true, definitions: true, configuredDirectives: true, dirtyConfiguration: true, dirtyFragment: true, sourceRepair: true, dirtySchema: true, associatedUntitled: true, explicitRemoteRefresh: true, remoteTypingRetention: true, noAutomaticHttp: true, nativePylanceCoexistence: true, diskUnchanged: true, dirtyBuffersPreserved: true }, null, 2));
+  await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-activation-observed", vscode: vscode.version, actualActivation: true, actualWorker: true, officialSelectedEnvironment: true, blankInterpreterOverride: true, diagnostics: true, configurationDiagnostics: true, completion: true, hover: true, definitions: true, configuredDirectives: true, dirtyConfiguration: true, dirtyFragment: true, sourceRepair: true, dirtySchema: true, associatedUntitled: true, explicitRemoteRefresh: true, remoteTypingRetention: true, noAutomaticHttp: true, nativePylanceCoexistence: true, diskUnchanged: true, dirtyBuffersPreserved: true }, null, 2));
 }
 module.exports = { run };

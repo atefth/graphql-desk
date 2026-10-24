@@ -43,10 +43,18 @@ function validReply(reply, request) {
   if (!object(reply) || reply.ok !== true) return false;
   if (request.op === "prepare") {
     const extended = Object.hasOwn(request, "remote_revisions");
-    const expected = ["ok", "id", "local_schemas", "remote_schemas", "required_buffers"];
+    const expected = ["ok", "id", "local_schemas", "remote_schemas", "required_buffers", "configuration_diagnostics"];
     if (extended) expected.push("project_preferences", "remote_revisions");
     const names = value => Array.isArray(value) && value.every(string) && new Set(value).size === value.length;
-    return keys(reply, expected) && string(reply.id) &&
+    const position = value => keys(value, ["line", "character"]) && Number.isSafeInteger(value.line) && value.line >= 0 &&
+      Number.isSafeInteger(value.character) && value.character >= 0;
+    const configurationDiagnostic = value => keys(value, ["uri", "version", "code", "message", "range"]) &&
+      string(value.uri) && value.uri.startsWith("file:") && (value.version === null || (Number.isSafeInteger(value.version) && value.version >= 0)) &&
+      value.code === "graphql-desk.configuration" && string(value.message) &&
+      keys(value.range, ["start", "end"]) && position(value.range.start) && position(value.range.end) &&
+      (value.range.start.line < value.range.end.line || (value.range.start.line === value.range.end.line && value.range.start.character <= value.range.end.character));
+    return keys(reply, expected) && string(reply.id) && Array.isArray(reply.configuration_diagnostics) &&
+      reply.configuration_diagnostics.every(configurationDiagnostic) &&
       (!extended || (Array.isArray(reply.project_preferences) && reply.project_preferences.every(item =>
         keys(item, ["project", "client_directives"]) && string(item.project) && names(item.client_directives)) &&
         Array.isArray(reply.remote_revisions) && reply.remote_revisions.every(item =>
