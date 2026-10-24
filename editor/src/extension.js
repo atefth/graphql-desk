@@ -1,12 +1,114 @@
 "use strict";
 
 const path = require("node:path");
+const fs = require("node:fs");
+const { fileURLToPath } = require("node:url");
 const { createAnalysisController } = require("./analysisController");
 const { registerLanguageFeatures } = require("./languageFeatures");
 const { registerHighlighting } = require("./highlighting");
 const { createManagedStubPath } = require("./managedStubPath");
 const { createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
 const { createAnalysisGenerations } = require("./analysisGenerations");
+
+function operationDependencyImpact(previous, current) {
+  if (!Array.isArray(previous) || !Array.isArray(current)) return null;
+  if ([...previous, ...current].some(group => !group || !Array.isArray(group.operations))) return null;
+  const location = value => {
+    if (typeof value !== "string") return value;
+    let filename = value;
+    try { if (value.startsWith("file:")) filename = fileURLToPath(value); }
+    catch { return value; }
+    if (!path.isAbsolute(filename)) return value;
+    try { filename = fs.realpathSync.native(filename); } catch { filename = path.resolve(filename); }
+    return process.platform === "win32" ? filename.toLowerCase() : filename;
+  };
+  const canonicalPaths = value => Array.isArray(value) ? value.map(canonicalPaths)
+    : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([name, item]) =>
+      [name, name === "uri" || name === "project" ? location(item) : canonicalPaths(item)])) : value;
+  const same = (left, right) => JSON.stringify(canonicalPaths(left)) === JSON.stringify(canonicalPaths(right));
+  const sameSchemaIdentity = (left, right) => left === null || right === null ? left === right
+    : Array.isArray(left) && Array.isArray(right) && left.length === 2 && right.length === 2
+      ? location(left[0]) === location(right[0]) && left[1] === right[1] : same(left, right);
+  const key = item => {
+    const module = item?.owner?.module;
+    return module && typeof item.binding === "string"
+      ? JSON.stringify([location(module.project), module.module, location(module.uri), item.binding, item.selector, item.operation_name, item.operation_kind])
+      : null;
+  };
+  const flatten = manifest => manifest.flatMap(group => group.operations);
+  const before = flatten(previous);
+  const after = flatten(current);
+  const previousKeyCounts = new Map();
+  for (const item of before) {
+    const identity = key(item);
+    if (!identity) return null;
+    previousKeyCounts.set(identity, (previousKeyCounts.get(identity) ?? 0) + 1);
+  }
+  const byKey = new Map();
+  for (const item of after) {
+    const identity = key(item);
+    if (!identity) return null;
+    const matches = byKey.get(identity) ?? [];
+    matches.push(item);
+    byKey.set(identity, matches);
+  }
+  const impacted = [];
+  const impactedKeys = new Set();
+  const markImpacted = owner => {
+    const encoded = JSON.stringify(owner);
+    if (!impactedKeys.has(encoded)) {
+      impactedKeys.add(encoded);
+      impacted.push(owner);
+    }
+  };
+  const factsChanged = (left, right, name) => {
+    const a = left[name];
+    const b = right[name];
+    if (!Array.isArray(a) || !Array.isArray(b)) return null;
+    const encode = value => JSON.stringify(canonicalPaths(value));
+    const leftMap = new Map(a.map(item => [name === "schema_dependencies" ? item.coordinate : `${item.kind}\0${item.name}`, name === "schema_dependencies" ? item.fingerprint : item.value]));
+    const rightMap = new Map(b.map(item => [name === "schema_dependencies" ? item.coordinate : `${item.kind}\0${item.name}`, name === "schema_dependencies" ? item.fingerprint : item.value]));
+    if (leftMap.size !== a.length || rightMap.size !== b.length) return null;
+    const keys = new Set([...leftMap.keys(), ...rightMap.keys()]);
+    return [...keys].some(item => encode(leftMap.get(item)) !== encode(rightMap.get(item)));
+  };
+  for (const old of before) {
+    const identity = key(old);
+    if (!identity) return null;
+    if (previousKeyCounts.get(identity) !== 1) {
+      markImpacted(old.owner);
+      continue;
+    }
+    const matches = byKey.get(identity) ?? [];
+    const next = matches.length === 1 ? matches[0] : null;
+    if (!next) {
+      markImpacted(old.owner);
+      continue;
+    }
+    byKey.delete(identity);
+    if (old.status !== "precise" || next.status !== "precise" ||
+        !old.source_dependencies_known || !next.source_dependencies_known ||
+        old.mapping_dependencies === "unknown" || next.mapping_dependencies === "unknown" ||
+        old.schema_dependencies === "unknown" || next.schema_dependencies === "unknown" ||
+        old.config_dependencies === "unknown" || next.config_dependencies === "unknown" ||
+        !Array.isArray(old.schema_identity) || old.schema_identity.length !== 2 ||
+        !Array.isArray(next.schema_identity) || next.schema_identity.length !== 2) {
+      markImpacted(old.owner);
+      continue;
+    }
+    const schemaChanged = factsChanged(old, next, "schema_dependencies");
+    const configChanged = factsChanged(old, next, "config_dependencies");
+    if (schemaChanged === null || configChanged === null ||
+        schemaChanged || configChanged ||
+        !same(old.mapping_dependencies, next.mapping_dependencies) ||
+        !same(old.owner, next.owner) || !same(old.canonical_owner, next.canonical_owner) ||
+        !same(old.definition_owners, next.definition_owners) || !same(old.direct_fragments, next.direct_fragments) ||
+        !same(old.dependencies, next.dependencies) || !same(old.source_exports, next.source_exports) ||
+        old.selector_known !== next.selector_known ||
+        !sameSchemaIdentity(old.schema_identity, next.schema_identity)) markImpacted(old.owner);
+  }
+  return impacted;
+}
 
 async function reconfigureWorkspaceRoots({ roots, folders, create, retire }) {
   const errors = [];
@@ -54,6 +156,9 @@ function activate(context) {
   const outputs = new Map();
   const generations = new Map();
   const roots = new Map();
+  const latestArtifacts = new Map();
+  const invalidatedDiagnostics = vscode.languages.createDiagnosticCollection("graphql-desk-typing");
+  const invalidatedDiagnosticUris = new Map();
   const output = vscode.window.createOutputChannel("GraphQL Desk");
   function traceSkip(reason) {
     if (reason === lastSkipReason) return;
@@ -70,6 +175,7 @@ function activate(context) {
     return promise;
   }
   async function retireRoot(folderRoot, managed) {
+    latestArtifacts.delete(folderRoot);
     const prefix = `${folderRoot}\0${managed.root}\0`;
     for (const [key, handle] of outputs) if (key.startsWith(prefix)) {
       await handle.cleanup();
@@ -93,7 +199,196 @@ function activate(context) {
     }
     return true;
   }
-  async function publishTypes(editor, ticket, token) {
+  function clearInvalidatedDiagnostics(folderRoot) {
+    for (const uri of invalidatedDiagnosticUris.get(folderRoot) ?? []) invalidatedDiagnostics.delete(vscode.Uri.parse(uri));
+    invalidatedDiagnosticUris.delete(folderRoot);
+  }
+  function setInvalidatedDiagnostics(folderRoot, operations) {
+    const byUri = new Map();
+    for (const operation of operations) {
+      const uri = controller.resolveUri(operation.owner.module.uri);
+      const document = vscode.workspace.textDocuments.find(item => item.uri.toString() === uri.toString());
+      const position = document?.positionAt(operation.owner.utf16.start) ?? new vscode.Position(0, 0);
+      const diagnostic = new vscode.Diagnostic(new vscode.Range(position, position),
+        `GraphQL Desk has suspended typing for ${operation.binding ?? operation.operation_name ?? "this GraphQL document"} until analysis succeeds.`,
+        vscode.DiagnosticSeverity.Error);
+      diagnostic.source = "GraphQL Desk";
+      diagnostic.code = "typing-suspended";
+      const key = uri.toString();
+      byUri.set(key, [...(byUri.get(key) ?? []), diagnostic]);
+    }
+    const previous = invalidatedDiagnosticUris.get(folderRoot) ?? new Set();
+    for (const uri of previous) if (!byUri.has(uri)) invalidatedDiagnostics.delete(vscode.Uri.parse(uri));
+    for (const [uri, diagnostics] of byUri) invalidatedDiagnostics.set(vscode.Uri.parse(uri), diagnostics);
+    invalidatedDiagnosticUris.set(folderRoot, new Set(byUri.keys()));
+  }
+  async function quarantinePublishedTyping(sourceUri, ticket, broad = false, sourceRanges = null,
+    previousOverride = null, ownersOverride = null, preserveCurrent = false) {
+    if (!sourceUri && broad) {
+      const results = await Promise.all((vscode.workspace.workspaceFolders ?? []).map(folder =>
+        quarantinePublishedTyping(folder.uri.toString(), ticket, true)));
+      return results.flat().filter(Boolean);
+    }
+    const parsed = sourceUri ? vscode.Uri.parse(sourceUri) : null;
+    if (!parsed || parsed.scheme !== "file") return;
+    const folder = vscode.workspace.getWorkspaceFolder(parsed);
+    if (!folder) return;
+    const folderRoot = path.resolve(folder.uri.fsPath);
+    let managed;
+    try { managed = await managedRoot(folder, folderRoot); } catch { return; }
+    if (disposed || ticket !== generation || !controller.isTrusted()) return;
+    let previous = previousOverride ?? latestArtifacts.get(folderRoot);
+    const key = `${folderRoot}\0${managed.root}`;
+    let publisher = generations.get(key);
+    if (!publisher && managed.ownsSetting) {
+      publisher = createAnalysisGenerations(vscode, folderRoot, managed.root);
+      generations.set(key, publisher);
+    }
+    if (!previous && publisher && managed.selectedSetting) {
+      const selectedDirectory = path.resolve(folderRoot, managed.selectedSetting);
+      const selected = publisher.current(managed).find(item => path.resolve(item.directory) === selectedDirectory);
+      if (selected) {
+        const packageCounts = new Map();
+        for (const group of selected.manifest.operationManifest) {
+          packageCounts.set(group.generated_package, (packageCounts.get(group.generated_package) ?? 0) + 1);
+        }
+        if ([...packageCounts.values()].every(count => count === 1)) {
+          previous = { managedRoot: managed.root, selectedSetting: managed.selectedSetting,
+            operationManifest: selected.manifest.operationManifest,
+            projects: selected.manifest.operationManifest.map(group => {
+              const prefix = `${group.generated_package.replaceAll(".", "/")}/`;
+              return { project: group.project, generated_package: group.generated_package,
+                provenance: group.operations,
+                files: [...selected.files].filter(([relative]) => relative.startsWith(prefix))
+                  .map(([relative, record]) => ({ relative_path: relative, text: record.bytes.toString("utf8") })) };
+            }),
+            inputFingerprint: selected.manifest.inputFingerprint,
+            savedSourceFingerprint: selected.manifest.savedSourceFingerprint,
+            analysisId: selected.manifest.analysisId };
+          latestArtifacts.set(folderRoot, previous);
+        }
+      }
+    }
+    if (!previous || previous.managedRoot !== managed.root ||
+        (!previousOverride && previous.selectedSetting !== managed.selectedSetting)) {
+      if (publisher && managed.ownsSetting) {
+        const isCurrent = () => !disposed && ticket === generation && controller.isTrusted();
+        await publisher.publish(new Map(), `quarantine-startup-${Date.now()}`, isCurrent, managed,
+          "0".repeat(64), "0".repeat(64), []);
+      }
+      return [];
+    }
+    const operationManifest = previous.operationManifest;
+    const normalizePath = value => process.platform === "win32" ? value.toLowerCase() : value;
+    const sourcePath = parsed.scheme === "file"
+      ? (() => { try { return normalizePath(fs.realpathSync.native(parsed.fsPath)); } catch { return normalizePath(path.resolve(parsed.fsPath)); } })() : null;
+    const projectScope = new Set();
+    const workspaceWide = broad && sourcePath === normalizePath(folderRoot);
+    if (workspaceWide) {
+      for (const group of operationManifest) projectScope.add(group.project);
+    } else if (sourcePath) {
+      const candidates = operationManifest.flatMap(group => group.operations.map(operation => operation.owner.module.project))
+        .filter(project => project.startsWith("file:"))
+        .map(project => {
+          try { return { project, config: normalizePath(vscode.Uri.parse(project).fsPath) }; } catch { return null; }
+        }).filter(Boolean);
+      const matching = candidates.filter(({ config }) => {
+        const relative = path.relative(path.dirname(config), sourcePath);
+        return normalizePath(config) === sourcePath || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+      });
+      const deepest = Math.max(0, ...matching.map(({ config }) => path.dirname(config).length));
+      for (const item of matching) if (path.dirname(item.config).length === deepest) projectScope.add(item.project);
+    }
+    const sameSource = uri => {
+      try {
+        const candidate = vscode.Uri.parse(uri);
+        if (candidate.scheme !== "file") return false;
+        let filename;
+        try { filename = fs.realpathSync.native(candidate.fsPath); } catch { filename = path.resolve(candidate.fsPath); }
+        return normalizePath(filename) === sourcePath;
+      } catch { return false; }
+    };
+    const hasRanges = Array.isArray(sourceRanges) && sourceRanges.length > 0 && sourceRanges.every(range =>
+      Number.isSafeInteger(range?.start) && range.start >= 0 && Number.isSafeInteger(range?.end) && range.end >= range.start);
+    const touches = identity => hasRanges && sourceIdentities(identity).some(span => sourceRanges.some(range =>
+      range.start === range.end ? range.start >= span.start && range.start <= span.end : range.start < span.end && range.end > span.start));
+    const sourceIdentities = identity => {
+      const moduleUri = identity?.module?.uri;
+      const span = identity?.utf16;
+      return moduleUri && span && sameSource(moduleUri) ? [span] : [];
+    };
+    const affected = ownersOverride ?? operationManifest.flatMap(group => group.operations).filter(operation => {
+      if (!sourcePath || !projectScope.size) return true;
+      if (broad) return projectScope.has(operation.owner.module.project);
+      if (!operation.source_dependencies_known && projectScope.has(operation.owner.module.project)) return true;
+      if (hasRanges) {
+        const identities = [operation.owner, ...(operation.definition_owners ?? []), ...(operation.direct_fragments ?? [])];
+        if (identities.some(touches)) return true;
+        if (operation.mapping_dependencies === "unknown" ||
+            operation.mapping_dependencies.some(item => sameSource(item.uri))) return true;
+        if (identities.some(identity => sourceIdentities(identity).length)) return false;
+      }
+      return sameSource(operation.owner.module.uri) || operation.dependencies.some(item => sameSource(item.uri));
+    });
+    if (!affected.length) return broad && !previousOverride ? [{ folderRoot, previous }] : [];
+    const projects = previous.projects.map(project => ({ ...project, provenance:
+      operationManifest.find(group => group.project === project.project)?.operations ?? [],
+      files: project.files.filter(file => file.relative_path.endsWith(".pyi")) }));
+    const isCurrent = () => !disposed && ticket === generation && controller.isTrusted();
+    const reply = await controller.quarantine({ workspace: folderRoot, projects,
+      invalidated_owners: affected.map(item => item.owner), preserve_current: preserveCurrent });
+    if (!isCurrent()) return;
+    const selectedKeys = new Set(affected.map(item => JSON.stringify(item.owner)));
+    const canonicalKeys = new Set(operationManifest.flatMap(group => group.operations)
+      .filter(item => selectedKeys.has(JSON.stringify(item.owner)))
+      .map(item => JSON.stringify(item.canonical_owner ?? item.owner)));
+    const quarantinedOwners = operationManifest.flatMap(group => group.operations)
+      .filter(item => canonicalKeys.has(JSON.stringify(item.canonical_owner ?? item.owner)));
+    const quarantinedKeys = new Set(quarantinedOwners.map(item => JSON.stringify(item.owner)));
+    const nextManifest = operationManifest.map(group => ({ ...group, operations: group.operations.map(item =>
+      quarantinedKeys.has(JSON.stringify(item.owner)) ? { ...item, status: "unavailable" } : item) }));
+    const packages = new Map();
+    for (const group of operationManifest) packages.set(group.generated_package, []);
+    let nextProjects;
+    if (reply?.ok) {
+      const quarantinedFiles = new Map(reply.projects.map(project => [project.project, new Map(project.files.map(file => [file.relative_path, file]))]));
+      nextProjects = previous.projects.map(project => ({ ...project, files: project.files.map(file =>
+        file.relative_path.endsWith(".pyi") ? quarantinedFiles.get(project.project)?.get(file.relative_path) ?? file : file) }));
+      for (const project of nextProjects) for (const file of project.files) packages.get(project.generated_package).push(file);
+    } else {
+      // A failed quarantine drops every stub so no prior precise type remains selectable.
+      for (const group of nextManifest) group.operations = group.operations.map(item =>
+        ({ ...item, status: "unavailable", declaration_path: null, declaration_symbol: null }));
+      packages.clear();
+      for (const group of operationManifest) packages.set(group.generated_package, []);
+      nextProjects = previous.projects.map(project => ({ ...project, files: [] }));
+    }
+    try {
+      if (managed.ownsSetting) {
+        await publisher.publish(packages, `quarantine-${Date.now()}`, isCurrent, managed,
+          previous.inputFingerprint, previous.savedSourceFingerprint, nextManifest);
+      } else {
+        for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !packages.has(key.split("\0")[2])) {
+          await handle.publish([], isCurrent);
+        }
+        for (const [packageName, files] of packages) {
+          const key = `${folderRoot}\0${managed.root}\0${packageName}`;
+          const handle = outputs.get(key);
+          if (handle) await handle.publish(files, isCurrent);
+        }
+        await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
+      }
+      if (isCurrent()) {
+        latestArtifacts.set(folderRoot, { ...previous, operationManifest: nextManifest, projects: nextProjects });
+        setInvalidatedDiagnostics(folderRoot, reply?.ok ? quarantinedOwners : operationManifest.flatMap(group => group.operations));
+      }
+    } catch (error) {
+      output.appendLine(`Typing quarantine failed: ${String(error)}`);
+      traceSkip("typing-quarantine-failed");
+    }
+    return broad && !previousOverride ? [{ folderRoot, previous }] : [];
+  }
+  async function publishTypes(editor, ticket, token, quarantineContext) {
     const document = editor.document;
     const snapshot = controller.snapshot(document);
     const result = await controller.artifacts(snapshot, token, traceSkip);
@@ -103,6 +398,16 @@ function activate(context) {
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
     if (!folder) { traceSkip("document-outside-workspace"); return; }
     const folderRoot = path.resolve(folder.uri.fsPath);
+    if (quarantineContext?.previousByFolder.has(folderRoot) && !quarantineContext.refined.has(folderRoot)) {
+      quarantineContext.refined.add(folderRoot);
+      const previous = quarantineContext.previousByFolder.get(folderRoot);
+      const operations = operationDependencyImpact(previous.operationManifest, result.projects.map(
+        ({ project, generated_package, provenance }) => ({ project, generated_package, operations: provenance })));
+      if (operations?.length) {
+        await quarantinePublishedTyping(document.uri.toString(), ticket, true, null, previous,
+          operations.map(owner => ({ owner })), true);
+      }
+    }
     let managed;
     try {
       const managedPromise = managedRoot(folder, folderRoot);
@@ -116,6 +421,8 @@ function activate(context) {
     if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
     try {
       const groups = new Map();
+      const operationManifest = result.projects.map(({ project, generated_package, provenance }) =>
+        ({ project, generated_package, operations: provenance }));
       for (const project of result.projects) {
         const files = project.files;
         if (!groups.has(project.generated_package)) groups.set(project.generated_package, []);
@@ -127,10 +434,10 @@ function activate(context) {
         let publisher = generations.get(key);
         if (!publisher) { publisher = createAnalysisGenerations(vscode, folderRoot, managed.root); generations.set(key, publisher); }
         changedArtifacts = await publisher.recover(managed, result.isCurrent,
-          result.input_fingerprint, result.saved_source_fingerprint);
-        if (disposed || ticket !== generation || !result.isCurrent()) return;
+          result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
+        if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale-after-recovery"); return; }
         changedArtifacts = (await publisher.publish(groups, result.id, result.isCurrent, managed,
-          result.input_fingerprint, result.saved_source_fingerprint)) || changedArtifacts;
+          result.input_fingerprint, result.saved_source_fingerprint, operationManifest)) || changedArtifacts;
       } else {
         for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !groups.has(key.split("\0")[2])) {
           changedArtifacts = (await handle.publish([], result.isCurrent)) || changedArtifacts;
@@ -147,8 +454,16 @@ function activate(context) {
         }
       }
       if (changedArtifacts && !managed.ownsSetting) await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
+      latestArtifacts.set(folderRoot, { managedRoot: managed.root, selectedSetting: managed.selectedSetting,
+        operationManifest, projects: result.projects.map(({ project, generated_package, provenance, files }) =>
+          ({ project, generated_package, provenance, files })),
+        inputFingerprint: result.input_fingerprint, savedSourceFingerprint: result.saved_source_fingerprint, analysisId: result.id });
       if (![...groups.values()].some(files => files.length)) traceSkip("no-generated-stub-files");
       else lastSkipReason = undefined;
+      const unavailable = operationManifest.flatMap(group => group.operations)
+        .filter(operation => operation.status !== "precise");
+      if (unavailable.length) setInvalidatedDiagnostics(folderRoot, unavailable);
+      else clearInvalidatedDiagnostics(folderRoot);
     } catch (error) {
       output.appendLine(`Managed stub publication failed: ${String(error)}`);
       traceSkip("managed-stub-publish-failed");
@@ -156,9 +471,15 @@ function activate(context) {
       status.show();
     }
   }
-  const refreshVisible = () => {
+  const refreshVisible = (sourceUri, invalidateTypes = Boolean(sourceUri), sourceRanges = null) => {
     generation += 1;
     const ticket = generation;
+    const parsed = sourceUri ? vscode.Uri.parse(sourceUri) : null;
+    const targetedSource = parsed?.scheme === "file" && path.extname(parsed.fsPath).toLowerCase() === ".py";
+    const quarantineContext = { previousByFolder: new Map(), refined: new Set() };
+    const quarantine = (invalidateTypes ? quarantinePublishedTyping(sourceUri, ticket, !targetedSource, sourceRanges) : Promise.resolve([]))
+      .then(results => { for (const item of results ?? []) quarantineContext.previousByFolder.set(item.folderRoot, item.previous); })
+      .catch(error => { output.appendLine(`Typing quarantine failed: ${String(error)}`); traceSkip("typing-quarantine-failed"); });
     refreshCancellation?.cancel();
     refreshCancellation?.dispose();
     refreshCancellation = new vscode.CancellationTokenSource();
@@ -171,7 +492,7 @@ function activate(context) {
       for (const editor of vscode.window.visibleTextEditors) {
         if (editor.document.languageId !== "python") continue;
         void Promise.allSettled([language.refresh(editor.document), highlighting.refresh(editor)]).then(() => {
-          if (!disposed && ticket === generation) return publishTypes(editor, ticket, token);
+        if (!disposed && ticket === generation) return quarantine.then(() => publishTypes(editor, ticket, token, quarantineContext));
         });
       }
     }, 100);
@@ -180,17 +501,14 @@ function activate(context) {
   status.name = "GraphQL Desk";
   status.command = "graphqlDesk.refreshSchema";
   status.tooltip = "GraphQL Desk: refresh a remote schema; positive schema_refresh_interval enables trusted background polling. Check configuration and interpreter settings if unavailable.";
-  const controller = createAnalysisController(vscode, { changed: refreshVisible,
+  const controller = createAnalysisController(vscode, { changed: (sourceUri, ranges) => refreshVisible(sourceUri, true, ranges),
     status: message => {
       if (message) { status.text = `GraphQL Desk: ${message}`; status.show(); }
       else status.hide();
     }, report: message => vscode.window.showInformationMessage(message) });
   language = registerLanguageFeatures(vscode, controller);
   highlighting = registerHighlighting(vscode, controller);
-  const visible = vscode.window.onDidChangeVisibleTextEditors(refreshVisible);
-  const textChanged = vscode.workspace.onDidChangeTextDocument(event => {
-    if (event.document.languageId === "python") refreshVisible();
-  });
+  const visible = vscode.window.onDidChangeVisibleTextEditors(() => refreshVisible());
   const configChanged = vscode.workspace.onDidChangeConfiguration(event => {
     if (event.affectsConfiguration("python.analysis.stubPath")) {
       // Our own generation switch selects already complete immutable output. Treat a
@@ -198,9 +516,9 @@ function activate(context) {
       void managedStubPathsAreCurrent().then(ownedSelection => {
         if (ownedSelection) return;
         generation += 1;
-        return reconfigureRoots().then(refreshVisible, () => { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(); });
+        return reconfigureRoots().then(() => refreshVisible(null, true), () => { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(null, true); });
       });
-    } else if (event.affectsConfiguration("graphqlDesk")) refreshVisible();
+    } else if (event.affectsConfiguration("graphqlDesk")) refreshVisible(null, true);
   });
   const foldersChanged = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     generation += 1;
@@ -214,17 +532,18 @@ function activate(context) {
   const lifecycle = { async dispose() {
     if (disposed) return;
     disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); command.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
-    textChanged.dispose(); configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose(); output.dispose();
+    configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose(); output.dispose(); invalidatedDiagnostics.dispose();
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
     outputs.clear();
     const managedRoots = await Promise.all([...roots.values()].map(promise => promise.catch(() => null)));
     for (const managed of managedRoots) managed?.cleanup();
     roots.clear();
+    latestArtifacts.clear();
     try { await vscode.commands.executeCommand("python.analysis.restartLanguageServer"); } catch { /* Pylance may already be deactivating. */ }
   } };
   context.subscriptions.push(lifecycle);
   active = lifecycle;
-  refreshVisible();
+  refreshVisible(null, true);
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate, reconfigureWorkspaceRoots };
+module.exports = { activate, deactivate, operationDependencyImpact, reconfigureWorkspaceRoots };

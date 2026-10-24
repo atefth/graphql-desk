@@ -1,12 +1,42 @@
 """Pure retained-source factory artifacts; publication belongs to the caller."""
 
 import ast
+import hashlib
+import json
 import keyword
 import re
 import symtable
 import unicodedata
 from dataclasses import dataclass, replace
-from typing import Any, Literal
+from typing import Any, Literal, cast
+
+import graphql.utilities as graphql_utilities
+from graphql import (
+    FieldNode,
+    FragmentDefinitionNode,
+    FragmentSpreadNode,
+    GraphQLCompositeType,
+    GraphQLEnumType,
+    GraphQLInputObjectType,
+    GraphQLInterfaceType,
+    GraphQLNonNull,
+    GraphQLObjectType,
+    GraphQLScalarType,
+    GraphQLUnionType,
+    InlineFragmentNode,
+    OperationDefinitionNode,
+    Undefined,
+    get_named_type,
+    parse,
+    print_ast,
+)
+from graphql.language.ast import (
+    DirectiveNode,
+    ListTypeNode,
+    NamedTypeNode,
+    NonNullTypeNode,
+    SelectionSetNode,
+)
 
 from . import TypedDocument
 from .config import ProjectConfig, ScalarMapping
@@ -34,6 +64,8 @@ from .source_graph import (
 from .source_maps import Position, build_source_map, position_to_offset
 from .testing import render_unsafe_result_helper
 
+ast_from_value: Any = getattr(graphql_utilities, "ast_from_value")
+
 
 @dataclass(frozen=True)
 class GeneratedFile:
@@ -46,6 +78,25 @@ class SourceCompanionExport:
     relative_path: str
     symbol: str
     alias: str
+
+
+@dataclass(frozen=True)
+class SchemaCoordinateDependency:
+    coordinate: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class ConfigDependency:
+    kind: Literal[
+        "scalar-input",
+        "scalar-output",
+        "enum-mapping",
+        "client-directive",
+        "disable-masking",
+    ]
+    name: str
+    value: str | bool | None
 
 
 @dataclass(frozen=True)
@@ -74,8 +125,11 @@ class OperationProvenance:
     canonical_owner: DocumentIdentity | None
     selector_known: bool = True
     source_dependencies_known: bool = True
-    schema_dependencies: Literal["unknown"] = "unknown"
-    config_dependencies: Literal["unknown"] = "unknown"
+    mapping_dependencies: tuple[ModuleDependency, ...] | Literal["unknown"] = "unknown"
+    schema_dependencies: tuple[SchemaCoordinateDependency, ...] | Literal["unknown"] = (
+        "unknown"
+    )
+    config_dependencies: tuple[ConfigDependency, ...] | Literal["unknown"] = "unknown"
 
 
 @dataclass(frozen=True)
@@ -1295,6 +1349,32 @@ def _generate_factory_artifacts(
         definition = document.selected_operation or document.primary_fragment
         assert definition is not None
         module, name, _ = declarations[identity]
+        schema_dependencies: tuple[SchemaCoordinateDependency, ...] | Literal["unknown"]
+        config_dependencies: tuple[ConfigDependency, ...] | Literal["unknown"]
+        mapping_dependencies: tuple[ModuleDependency, ...] | Literal["unknown"]
+        if identity in rejected:
+            schema_dependencies, config_dependencies, mapping_dependencies = (
+                "unknown",
+                "unknown",
+                (),
+            )
+        else:
+            schema_dependencies, config_dependencies, mapping_dependencies = (
+                _operation_dependencies(
+                    context,
+                    document,
+                    modules=modules,
+                    project_id=project_id,
+                    scalars=scalars,
+                    enums=enums,
+                    client_directives=client_directives,
+                    disable_masking=disable_masking,
+                )
+            )
+        mapping_dependencies_known = mapping_dependencies != "unknown"
+        mapping_source_dependencies = (
+            () if mapping_dependencies == "unknown" else mapping_dependencies
+        )
         provenance.append(
             OperationProvenance(
                 owner=identity,
@@ -1311,7 +1391,10 @@ def _generate_factory_artifacts(
                 source_exports=(),
                 dependencies=tuple(
                     sorted(
-                        {*document.dependencies, *generation_dependencies},
+                        {
+                            *document.dependencies,
+                            *mapping_source_dependencies,
+                        },
                         key=lambda item: (item.project, item.module),
                     )
                 ),
@@ -1320,6 +1403,10 @@ def _generate_factory_artifacts(
                 ),
                 definition_owners=_definition_owners(identity, owners),
                 canonical_owner=canonical_owners[identity],
+                schema_dependencies=schema_dependencies,
+                config_dependencies=config_dependencies,
+                source_dependencies_known=mapping_dependencies_known,
+                mapping_dependencies=mapping_dependencies,
             )
         )
     return _SchemaArtifacts(
@@ -1346,6 +1433,361 @@ def _definition_owners(
             reference.target for reference in reversed(owners[current].call.fragments)
         )
     return tuple(found)
+
+
+def _operation_dependencies(
+    context: SchemaContext,
+    document: IndexedDocument,
+    *,
+    modules: tuple[ModuleSnapshot, ...],
+    project_id: str,
+    scalars: tuple[ScalarMapping, ...],
+    enums: tuple[tuple[str, str], ...],
+    client_directives: tuple[str, ...],
+    disable_masking: bool,
+) -> tuple[
+    tuple[SchemaCoordinateDependency, ...] | Literal["unknown"],
+    tuple[ConfigDependency, ...] | Literal["unknown"],
+    tuple[ModuleDependency, ...] | Literal["unknown"],
+]:
+    """Describe schema/config inputs actually used by one valid operation.
+
+    A partially understood GraphQL graph is deliberately unknown: callers must
+    fail closed instead of treating an incomplete dependency set as complete.
+    """
+    try:
+        nodes = [parse(fact.printed).definitions[0] for fact in document.definitions]
+        fragments = {
+            node.name.value: node
+            for node in nodes
+            if isinstance(node, FragmentDefinitionNode)
+        }
+        selected: OperationDefinitionNode | FragmentDefinitionNode
+        if document.selected_operation is not None:
+            selected = next(
+                node
+                for node in nodes
+                if isinstance(node, OperationDefinitionNode)
+                and (node.name.value if node.name else None)
+                == document.selected_operation.name
+            )
+            operation = selected.operation.value
+        elif document.primary_fragment is not None:
+            selected = next(
+                node
+                for node in nodes
+                if isinstance(node, FragmentDefinitionNode)
+                and (node.name.value if node.name else None)
+                == document.primary_fragment.name
+            )
+            operation = "fragment"
+        else:
+            return "unknown", "unknown", "unknown"
+
+        schema = context.schema
+        coordinates: dict[str, str] = {}
+        used_scalar_inputs: set[str] = set()
+        used_scalar_outputs: set[str] = set()
+        used_enums: set[str] = set()
+        used_directives: set[str] = set()
+        has_fragment_spread = False
+        visited_fragments: set[str] = set()
+
+        def add(coordinate: str, fact: object) -> None:
+            encoded = json.dumps(
+                fact, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+            coordinates[coordinate] = hashlib.sha256(encoded).hexdigest()
+
+        def type_signature(type_: Any) -> str:
+            return str(type_)
+
+        def default_signature(value: object, type_: Any) -> str | None:
+            if value is Undefined:
+                return None
+            node = ast_from_value(value, type_)
+            if node is None:
+                raise ValueError("Cannot fingerprint a schema default value")
+            return print_ast(node)
+
+        def input_type(type_: Any, active: set[str] | None = None) -> None:
+            named: Any = cast(Any, get_named_type(type_))
+            name: str = named.name
+            if isinstance(named, GraphQLScalarType):
+                used_scalar_inputs.add(name)
+                add(f"scalar:{name}", [name, named.specified_by_url])
+            elif isinstance(named, GraphQLEnumType):
+                used_enums.add(name)
+                add(
+                    f"enum:{name}",
+                    [
+                        [value_name, value.deprecation_reason]
+                        for value_name, value in sorted(named.values.items())
+                    ],
+                )
+            elif isinstance(named, GraphQLInputObjectType):
+                visited: set[str] = active if active is not None else set()
+                if name in visited:
+                    return
+                visited.add(name)
+                add(f"input:{name}", [name, named.is_one_of])
+                for field_name, field in sorted(named.fields.items()):
+                    add(
+                        f"input:{name}.{field_name}",
+                        [
+                            type_signature(field.type),
+                            default_signature(field.default_value, field.type),
+                        ],
+                    )
+                    input_type(field.type, visited)
+                visited.remove(name)
+            else:
+                raise ValueError("Unsupported schema input type")
+
+        def directives(nodes_: tuple[DirectiveNode, ...] | None) -> None:
+            for directive_node in nodes_ or ():
+                name = directive_node.name.value
+                directive = schema.get_directive(name)
+                if directive is None:
+                    if name in client_directives:
+                        used_directives.add(name)
+                        continue
+                    raise ValueError("Unknown schema directive")
+                provided = {
+                    argument.name.value for argument in (directive_node.arguments or ())
+                }
+                add(
+                    f"directive:@{name}",
+                    [
+                        directive.is_repeatable,
+                        sorted(location.value for location in directive.locations),
+                        [
+                            arg_name
+                            for arg_name, arg in sorted(directive.args.items())
+                            if isinstance(cast(Any, arg).type, GraphQLNonNull)
+                            and arg.default_value is Undefined
+                        ],
+                    ],
+                )
+                for arg_name in sorted(provided):
+                    argument = directive.args.get(arg_name)
+                    if argument is None:
+                        raise ValueError("Unknown schema directive argument")
+                    argument_type: Any = cast(Any, argument).type
+                    add(
+                        f"directive:@{name}({arg_name})",
+                        [
+                            type_signature(argument_type),
+                            default_signature(argument.default_value, argument_type),
+                        ],
+                    )
+                    input_type(argument_type)
+
+        def abstract_types(type_: GraphQLCompositeType) -> None:
+            if isinstance(type_, (GraphQLInterfaceType, GraphQLUnionType)):
+                possible = sorted(
+                    item.name for item in schema.get_possible_types(type_)
+                )
+                add(f"possible-types:{type_.name}", possible)
+
+        def walk_selection_set(
+            selection_set: SelectionSetNode, parent: GraphQLCompositeType
+        ) -> None:
+            nonlocal has_fragment_spread
+            abstract_types(parent)
+            for selection in selection_set.selections:
+                directives(selection.directives)
+                if isinstance(selection, FieldNode):
+                    name = selection.name.value
+                    if name == "__typename":
+                        add(f"field:{parent.name}.__typename", ["String!"])
+                        continue
+                    field = getattr(parent, "fields", {}).get(name)
+                    if field is None:
+                        raise ValueError("Unknown schema field")
+                    add(
+                        f"field:{parent.name}.{name}",
+                        [
+                            type_signature(field.type),
+                            field.deprecation_reason,
+                            [
+                                arg_name
+                                for arg_name, arg in sorted(field.args.items())
+                                if isinstance(arg.type, GraphQLNonNull)
+                                and arg.default_value is Undefined
+                            ],
+                        ],
+                    )
+                    provided = {
+                        argument.name.value for argument in (selection.arguments or ())
+                    }
+                    for arg_name in sorted(provided):
+                        argument = field.args.get(arg_name)
+                        if argument is None:
+                            raise ValueError("Unknown schema field argument")
+                        add(
+                            f"argument:{parent.name}.{name}({arg_name})",
+                            [
+                                type_signature(argument.type),
+                                default_signature(
+                                    argument.default_value, argument.type
+                                ),
+                            ],
+                        )
+                        input_type(argument.type)
+                    result_type: Any = cast(Any, get_named_type(field.type))
+                    if isinstance(result_type, GraphQLScalarType):
+                        used_scalar_outputs.add(result_type.name)
+                        add(
+                            f"scalar:{result_type.name}",
+                            [result_type.name, result_type.specified_by_url],
+                        )
+                    elif isinstance(result_type, GraphQLEnumType):
+                        input_type(result_type)
+                    if isinstance(
+                        result_type,
+                        (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType),
+                    ):
+                        if selection.selection_set is None:
+                            raise ValueError("Missing composite selection")
+                        walk_selection_set(selection.selection_set, result_type)
+                    elif selection.selection_set is not None:
+                        raise ValueError("Leaf field has a selection")
+                elif isinstance(selection, InlineFragmentNode):
+                    condition = (
+                        parent
+                        if selection.type_condition is None
+                        else schema.get_type(selection.type_condition.name.value)
+                    )
+                    if not isinstance(
+                        condition,
+                        (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType),
+                    ):
+                        raise ValueError("Unknown fragment type condition")
+                    if selection.type_condition is not None:
+                        abstract_types(condition)
+                    walk_selection_set(selection.selection_set, condition)
+                elif isinstance(selection, FragmentSpreadNode):
+                    has_fragment_spread = True
+                    name = selection.name.value
+                    fragment = fragments.get(name)
+                    if fragment is None:
+                        raise ValueError("Missing fragment definition")
+                    if name in visited_fragments:
+                        continue
+                    visited_fragments.add(name)
+                    condition = schema.get_type(fragment.type_condition.name.value)
+                    if not isinstance(
+                        condition,
+                        (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType),
+                    ):
+                        raise ValueError("Unknown fragment type condition")
+                    abstract_types(condition)
+                    directives(fragment.directives)
+                    walk_selection_set(fragment.selection_set, condition)
+                else:
+                    raise ValueError("Unsupported GraphQL selection")
+
+        directives(selected.directives)
+        for variable in getattr(selected, "variable_definitions", ()) or ():
+            name = variable.variable.name.value
+            type_node = variable.type
+            while isinstance(type_node, (ListTypeNode, NonNullTypeNode)):
+                type_node = type_node.type
+            named_node = cast(NamedTypeNode, type_node)
+            named = schema.get_type(named_node.name.value)
+            if named is None:
+                raise ValueError("Unknown variable input type")
+            input_type(named)
+            directives(variable.directives)
+        if operation == "fragment":
+            fragment = cast(FragmentDefinitionNode, selected)
+            condition = schema.get_type(fragment.type_condition.name.value)
+            if not isinstance(
+                condition, (GraphQLObjectType, GraphQLInterfaceType, GraphQLUnionType)
+            ):
+                raise ValueError("Unknown fragment type condition")
+        else:
+            root = {
+                "query": schema.query_type,
+                "mutation": schema.mutation_type,
+                "subscription": schema.subscription_type,
+            }[operation]
+            if root is None:
+                raise ValueError("Missing operation root")
+            add(f"root:{operation}", root.name)
+            condition = root
+        walk_selection_set(selected.selection_set, condition)
+
+        mappings = {item.name: item for item in scalars}
+        enum_mappings = dict(enums)
+        config: dict[tuple[str, str], str | bool | None] = {}
+        mapping_symbols: set[str] = set()
+        for name in used_scalar_inputs:
+            mapping = mappings.get(name)
+            config[("scalar-input", name)] = mapping.input if mapping else None
+            if mapping:
+                mapping_symbols.add(mapping.input)
+        for name in used_scalar_outputs:
+            mapping = mappings.get(name)
+            config[("scalar-output", name)] = mapping.output if mapping else None
+            if mapping:
+                mapping_symbols.add(mapping.output)
+        for name in used_enums:
+            symbol = enum_mappings.get(name)
+            config[("enum-mapping", name)] = symbol
+            if symbol:
+                mapping_symbols.add(symbol)
+        for name in used_directives:
+            config[("client-directive", name)] = name in client_directives
+        if has_fragment_spread:
+            config[("disable-masking", "disable_masking")] = disable_masking
+        config_dependencies = tuple(
+            ConfigDependency(
+                cast(
+                    Literal[
+                        "scalar-input",
+                        "scalar-output",
+                        "enum-mapping",
+                        "client-directive",
+                        "disable-masking",
+                    ],
+                    kind,
+                ),
+                name,
+                value,
+            )
+            for (kind, name), value in sorted(config.items())
+        )
+        source_dependencies: set[ModuleDependency] = set()
+        if mapping_symbols:
+            for resolution in resolve_type_symbols(
+                tuple(sorted(mapping_symbols)), modules=modules, project_id=project_id
+            ):
+                if resolution.status not in {"resolved", "external"}:
+                    return "unknown", "unknown", "unknown"
+                source_dependencies.update(resolution.dependencies)
+        return (
+            tuple(
+                SchemaCoordinateDependency(key, value)
+                for key, value in sorted(coordinates.items())
+            ),
+            config_dependencies,
+            tuple(
+                sorted(
+                    source_dependencies, key=lambda item: (item.project, item.module)
+                )
+            ),
+        )
+    except (
+        AttributeError,
+        KeyError,
+        StopIteration,
+        TypeError,
+        ValueError,
+        RecursionError,
+    ):
+        return "unknown", "unknown", "unknown"
 
 
 def _rejected_provenance(
@@ -1376,6 +1818,7 @@ def _rejected_provenance(
                 definition_owners=None,
                 canonical_owner=None,
                 source_dependencies_known=False,
+                mapping_dependencies="unknown",
             )
         )
     for rejected in index.rejected_calls:
@@ -1398,6 +1841,7 @@ def _rejected_provenance(
                 canonical_owner=None,
                 selector_known=False,
                 source_dependencies_known=False,
+                mapping_dependencies="unknown",
             )
         )
     return tuple(records)

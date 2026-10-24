@@ -22,6 +22,106 @@ from tests.test_schema_url import endpoint
 
 
 class EditorWorkerTests(unittest.TestCase):
+    def test_quarantine_round_trip_preserves_unrelated_project(self) -> None:
+        def owner(project: str, offset: int) -> dict[str, object]:
+            return {
+                "module": {
+                    "project": project,
+                    "module": "queries",
+                    "uri": f"file:///{project}.py",
+                    "version": 1,
+                },
+                "codepoint": {"start": offset, "end": offset + 8},
+                "utf16": {"start": offset, "end": offset + 8},
+            }
+
+        def group(
+            project: str, package: str, symbol: str, identity: dict[str, object]
+        ) -> dict[str, object]:
+            return {
+                "project": project,
+                "generated_package": package,
+                "files": [
+                    {
+                        "relative_path": f"{package}/docs.pyi",
+                        "text": (
+                            "from graphql_desk.fragment_refs import FixtureDocument as "
+                            "__graphql_desk_FixtureDocument\n"
+                            f"class {symbol}(__graphql_desk_FixtureDocument["
+                            f"{symbol}Result, {symbol}Variables, {symbol}Input]): ...\n"
+                        ),
+                    }
+                ],
+                "provenance": [
+                    {
+                        "owner": identity,
+                        "canonical_owner": identity,
+                        "declaration_path": f"{package}/docs.pyi",
+                        "declaration_symbol": symbol,
+                        "status": "precise",
+                    }
+                ],
+            }
+
+        selected_owner = owner("first", 1)
+        first = group("first", "generated_first", "FirstDocument", selected_owner)
+        second = group(
+            "second", "generated_second", "SecondDocument", owner("second", 20)
+        )
+        request: dict[str, object] = {
+            "op": "quarantine",
+            "id": "quarantine-test",
+            "workspace": str(Path.cwd()),
+            "projects": [first, second],
+            "invalidated_owners": [selected_owner],
+        }
+
+        result = EditorWorker().handle(request)
+
+        self.assertTrue(result["ok"], result)
+        projects = cast(list[dict[str, object]], result["projects"])
+        first_text = cast(
+            str, cast(list[dict[str, object]], projects[0]["files"])[0]["text"]
+        )
+        second_text = cast(
+            str, cast(list[dict[str, object]], projects[1]["files"])[0]["text"]
+        )
+        second_files = cast(list[dict[str, object]], second["files"])
+        self.assertIn("NoReturn", first_text)
+        self.assertEqual(second_text, cast(str, second_files[0]["text"]))
+
+    def test_quarantine_rejects_unmatched_owner(self) -> None:
+        worker = EditorWorker()
+        owner = {
+            "module": {
+                "project": "p",
+                "module": "q",
+                "uri": "file:///q.py",
+                "version": 1,
+            },
+            "codepoint": {"start": 1, "end": 2},
+            "utf16": {"start": 1, "end": 2},
+        }
+        request: dict[str, object] = {
+            "op": "quarantine",
+            "id": "quarantine-missing-owner",
+            "workspace": str(Path.cwd()),
+            "projects": [
+                {
+                    "project": "p",
+                    "generated_package": "generated",
+                    "files": [],
+                    "provenance": [],
+                }
+            ],
+            "invalidated_owners": [owner],
+        }
+
+        self.assertEqual(
+            worker.handle(request),
+            {"ok": False, "error": "editor-request-failed"},
+        )
+
     def test_analysis_fingerprint_tracks_source_config_and_schema_content(self) -> None:
         def fingerprint() -> str:
             capture = self.capture()

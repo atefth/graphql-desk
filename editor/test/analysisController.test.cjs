@@ -234,6 +234,23 @@ test("source invalidation aborts active artifact work and discards its late gene
   controller.dispose();
 });
 
+test("empty text change notifications do not broaden operation invalidation", async t => {
+  const fixture = await setup(t);
+  const changes = [];
+  const controller = createAnalysisController(fixture.vscode, { changed: (...args) => changes.push(args) });
+  t.after(() => controller.dispose());
+
+  fixture.events.onDidChangeTextDocument.fire({ document: fixture.main, contentChanges: [] });
+  assert.deepEqual(changes, []);
+
+  fixture.events.onDidChangeTextDocument.fire({ document: fixture.main, contentChanges: [
+    { rangeOffset: 7, rangeLength: 3 },
+  ] });
+  assert.deepEqual(changes, [
+    [fixture.main.uri.toString(), [{ start: 7, end: 10 }]],
+  ]);
+});
+
 test("caller cancellation and controller disposal abort active artifacts and reject late generations", async t => {
   for (const transition of ["caller-cancellation", "disposal"]) {
     const fixture = await setup(t);
@@ -302,6 +319,28 @@ test("unrelated host documents do not stale artifacts, but required schema edits
   assert.equal(await controller.artifacts(snapshot, undefined, reason => skipped.push(reason)), null,
     "editing a required schema buffer must invalidate its prior result");
   assert.deepEqual(skipped, ["analysis-snapshot-stale"]);
+});
+
+test("saving an unchanged relevant buffer does not stale its artifacts", async t => {
+  const fixture = await setup(t);
+  const schemaPath = path.join(fixture.root, "schema.graphql");
+  await fs.writeFile(schemaPath, "type Query { title: String }\n");
+  const schema = fixture.document("schema.graphql", "type Query { title: String }\n");
+  schema.isDirty = true;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, requestOptions) {
+      const reply = await worker.request(message, requestOptions);
+      if (message.op === "artifacts") { schema.isDirty = false; schema.version += 1; }
+      return reply;
+    } };
+  } });
+  t.after(() => controller.dispose());
+
+  const snapshot = controller.snapshot(fixture.main);
+  const result = await controller.artifacts(snapshot);
+  assert.ok(result, "a clean transition with identical effective text must preserve current artifacts");
+  assert.equal(result.isCurrent(), true);
 });
 
 test("a transient Python extension activation failure is traced and retried for live typing", async t => {
@@ -593,21 +632,22 @@ test("untrusted, cancelled, superseded and disposed captures cannot publish or l
 test("explicit remote refresh survives typing without HTTP, but changed credentials/config remove contexts", async t => {
   let requests = 0;
   const payload = JSON.stringify({ data: introspectionFromSchema(buildSchema("type Query { title: String }")) });
-  const server = http.createServer((request, response) => { requests += 1; request.resume(); response.setHeader("Content-Type", "application/json"); response.end(payload); });
+  const server = http.createServer((request, response) => { requests += 1; request.resume(); response.setHeader("Content-Type", "application/json"); response.setHeader("Content-Length", Buffer.byteLength(payload)); response.end(payload); });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const fixture = await setup(t, `schema={url="http://127.0.0.1:${server.address().port}/graphql",headers={"X-Key"="\${env:TOKEN}"}}\n`);
   let environment = { TOKEN: "PRIVATE_SECRET", UNRELATED: "NEVER_SEND" };
   const messages = [];
   const statuses = [];
-  const controller = createAnalysisController(fixture.vscode, { status: value => statuses.push(value), environment: () => environment, workerFactory: options => {
+  const reports = [];
+  const controller = createAnalysisController(fixture.vscode, { status: value => statuses.push(value), report: value => reports.push(value), environment: () => environment, workerFactory: options => {
     const worker = createAnalysisWorker(options);
     return { ...worker, request(message) { messages.push(message); return worker.request(message); } };
   } }); t.after(() => controller.dispose());
   let snapshot = controller.snapshot(fixture.main);
   assert.equal((await controller.analyze(snapshot)).request.schemas.length, 0); assert.equal(requests, 0);
   assert.equal(statuses.at(-1), "Schema unavailable");
-  await controller.refresh(); assert.ok(requests > 0);
+  await controller.refresh(); assert.ok(requests > 0); assert.equal(reports.at(-1), "Schema refreshed.");
   const fetched = requests;
   let bundle = await controller.analyze(snapshot); assert.equal(bundle.request.schemas.length, 1);
   assert.equal(statuses.at(-1), null);
@@ -1002,6 +1042,18 @@ test("artifact publication and a newer analysis both survive queue coalescing", 
   assert.equal(generated.isCurrent(), true, "the generated artifacts still belong to the live analysis ticket");
 });
 
+test("same-input provider analysis does not stale an equivalent generated typing snapshot", async t => {
+  const fixture = await setup(t);
+  const controller = createAnalysisController(fixture.vscode);
+  t.after(() => controller.dispose());
+  const snapshot = controller.snapshot(fixture.main);
+  assert.ok(await controller.analyze(snapshot));
+  const generated = await controller.artifacts(snapshot);
+  assert.ok(generated?.isCurrent());
+  assert.ok(await controller.analyze(snapshot));
+  assert.equal(generated.isCurrent(), true, "an equivalent analysis preserves artifact eligibility");
+});
+
 test("an invalidated queued analysis is skipped before worker dispatch", async t => {
   const fixture = await setup(t);
   let release;
@@ -1036,6 +1088,70 @@ test("an invalidated queued analysis is skipped before worker dispatch", async t
   assert.ok(current);
   assert.equal(current.request.modules[0].version, fixture.main.version);
   assert.equal(prepares, 2, "a fresh request still dispatches normally");
+});
+
+test("quarantine aborts active artifact work and sends the owned manifest to the matching worker", async t => {
+  const fixture = await setup(t);
+  let artifactStarted;
+  const started = new Promise(resolve => { artifactStarted = resolve; });
+  let invalidations = 0;
+  let quarantineRequest;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker,
+      invalidate() { invalidations += 1; worker.invalidate(); },
+      request(message, settings) {
+        if (message.op === "artifacts") return new Promise((_resolve, reject) => {
+          artifactStarted();
+          settings.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        });
+        if (message.op === "quarantine") { quarantineRequest = message; return Promise.resolve({ ok: true, id: message.id }); }
+        return worker.request(message, settings);
+      },
+    };
+  } }); t.after(() => controller.dispose());
+
+  const snapshot = controller.snapshot(fixture.main);
+  assert.ok(await controller.analyze(snapshot));
+  const artifacts = controller.artifacts(snapshot);
+  await started;
+  const expectedWorkspace = await fs.realpath(fixture.root);
+  const projects = [{ project: "p", generated_package: "generated", files: [], provenance: [] }];
+  const invalidatedOwners = [{ module: { project: "p", module: "main", uri: "file:///main.py", version: 1 },
+    codepoint: { start: 0, end: 8 }, utf16: { start: 0, end: 8 } }];
+  const reply = await controller.quarantine({ workspace: fixture.root, projects, invalidated_owners: invalidatedOwners });
+
+  assert.equal(await artifacts, null, "aborted artifact work cannot return a late generation");
+  assert.ok(reply?.ok);
+  assert.equal(quarantineRequest.workspace, process.platform === "win32" ? expectedWorkspace.toLowerCase() : expectedWorkspace);
+  assert.equal(quarantineRequest.op, "quarantine");
+  assert.deepEqual(quarantineRequest.projects, projects);
+  assert.deepEqual(quarantineRequest.invalidated_owners, invalidatedOwners);
+  assert.ok(invalidations > 0, "the old worker is terminated before quarantine is requested");
+});
+
+test("selective post-analysis quarantine keeps the current snapshot valid", async t => {
+  const fixture = await setup(t);
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, invalidate() { invalidations += 1; return worker.invalidate(); }, request(message, settings) {
+      if (message.op === "quarantine") return Promise.resolve({ ok: true, id: message.id });
+      return worker.request(message, settings);
+    } };
+  } });
+  t.after(() => controller.dispose());
+
+  const snapshot = controller.snapshot(fixture.main);
+  const analysis = await controller.artifacts(snapshot);
+  assert.ok(analysis);
+  const reply = await controller.quarantine({ workspace: fixture.root,
+    projects: [{ project: "p", generated_package: "generated", files: [], provenance: [] }],
+    invalidated_owners: [], preserve_current: true });
+
+  assert.ok(reply?.ok);
+  assert.equal(invalidations, 0, "post-analysis quarantine must not kill the fresh snapshot's worker");
+  assert.equal(analysis.isCurrent(), true, "selective quarantine must not stale the facts it just compared");
 });
 
 test("explicit refresh cancellation aborts the worker and cannot admit a late remote schema", async t => {

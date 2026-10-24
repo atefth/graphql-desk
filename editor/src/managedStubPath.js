@@ -125,7 +125,7 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
           const generations = path.join(root, "generations");
           if (!inside(generations, target) || target === generations) throw new Error("Invalid managed generation path");
           if (verification?.directory !== target || verification.manifest?.owner !== "graphql-desk-analysis-generation" ||
-              verification.manifest.format !== 1 || verification.manifest.id !== path.basename(target) ||
+              verification.manifest.format !== 2 || verification.manifest.id !== path.basename(target) ||
               !this.ownsGeneration(target, verification.manifestFingerprint) || typeof verification.verify !== "function") throw new Error("Managed generation is not fully verified");
           const verifyGeneration = () => {
             const current = verification.verify();

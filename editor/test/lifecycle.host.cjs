@@ -131,9 +131,9 @@ exports.run = async () => {
   const stubPath = () => vscode.workspace.getConfiguration("python", sourceUri)
     .get("analysis.stubPath", ".graphql-desk/typings");
   let generationObserved = false;
-  const readGeneration = async () => {
+  const readGeneration = async (selectedOverride = null) => {
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const selected = stubPath();
+      const selected = selectedOverride ?? stubPath();
       const root = path.resolve(workspace, selected);
       const found = [];
       let stale = false;
@@ -174,11 +174,11 @@ exports.run = async () => {
           stale = true;
         }
       }
-      if (stubPath() !== selected) continue;
+      if (!selectedOverride && stubPath() !== selected) continue;
       if (rootMissing) {
         assert.ok(initialStubRoots.has(root), "A selected generated typing directory is missing");
         assert.equal(generationObserved, false, "The selected generated typing directory disappeared");
-        return { stubPath: selected, files: found };
+        return { stubPath: selected, files: found, manifest };
       }
       if (manifestMissing && !generationObserved && root === initialManagedStubRoot && found.length === 0) {
         return { stubPath: selected, files: found };
@@ -195,12 +195,15 @@ exports.run = async () => {
           `Generated stub ${relative} does not match its manifest`);
       }
       if (found.length) generationObserved = true;
-      return { stubPath: selected, files: found };
+      return { stubPath: selected, files: found, manifest };
     }
     throw new Error("The selected generated typing directory changed repeatedly while being read");
   };
   const hasSelected = generation => generation.files.some(([file, text]) =>
-    file.includes(`${path.sep}_documents${path.sep}`) && text.includes("'selected': 'String'"));
+    file.includes(`${path.sep}_documents${path.sep}`) && text.split("\n").some(line =>
+      line.startsWith("class GraphqlDeskDocument(") && line.includes("FixtureDocument[") && !line.includes("QuarantineTyping.NoReturn")));
+  const hasUnavailable = (generation, operationName) => generation.manifest?.operationManifest
+    ?.some(group => group.operations.some(operation => operation.operation_name === operationName && operation.status === "unavailable")) ?? false;
   const hasExtra = generation => generation.files.some(([, text]) => text.includes("query Extra { user { id } }"));
   const selectedHover = async () => {
     const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", sourceUri, new vscode.Position(8, 2)) || [];
@@ -260,16 +263,48 @@ exports.run = async () => {
     const failedArtifact = workerRequests.find(request => request.op === "artifacts" && request.error);
     assert.ok(failedArtifact.schemas?.some(schema => schema.hasBoolean),
       "The interrupted artifact request contains the changed schema snapshot");
-    const failedGeneration = await readGeneration();
-    assert.equal(failedGeneration.stubPath, savedGeneration.stubPath,
-      "The incomplete generation is not selected after worker failure");
-    assert.equal(hasSelected(failedGeneration), true,
-      "The last complete selected-field type remains during the failed refresh");
-    await fs.access(path.join(path.resolve(workspace, failedGeneration.stubPath), "complete.json"));
-    const failedRefreshHover = await selectedHover();
-    assert.match(failedRefreshHover, /selected:\s*String\b/,
-      "The previous type remains visible while refresh is unavailable");
-    results.lifecycle.workerFailureKeepsLastCompleteGeneration = true;
+    let failedGeneration;
+    let failedQuarantineGeneration;
+    await until(async () => {
+      const active = await readGeneration();
+      if (active.stubPath === savedGeneration.stubPath || hasSelected(active)) return false;
+      const generationsRoot = path.join(workspace, ".graphql-desk", "typings", "generations");
+      for (const entry of await fs.readdir(generationsRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        try {
+          const candidate = await readGeneration(path.join(".graphql-desk", "typings", "generations", entry.name));
+          if (candidate.manifest?.analysisId?.startsWith("quarantine-") && hasUnavailable(candidate, "Pick")) {
+            failedQuarantineGeneration = candidate;
+          }
+        } catch { /* Ignore a generation that has not finished publishing. */ }
+      }
+      if (!failedQuarantineGeneration) return false;
+      failedGeneration = active;
+      return true;
+    }, "worker failure publishes unavailable typing and leaves no stale type selected");
+    assert.notEqual(failedGeneration.stubPath, savedGeneration.stubPath,
+      "The affected operation switches away from stale typing before analysis succeeds");
+    assert.match(failedGeneration.manifest?.analysisId ?? "", /^quarantine-/,
+      "The active generation remains in quarantine after worker failure");
+    assert.equal(hasUnavailable(failedGeneration, "Pick") || failedGeneration.files.length === 0, true,
+      "The active generation either marks Pick unavailable or publishes no stubs");
+    assert.equal(hasUnavailable(failedQuarantineGeneration, "Pick"), true,
+      "A complete quarantine generation marks the failed Pick operation unavailable");
+    assert.equal(hasSelected(failedQuarantineGeneration), false,
+      "The quarantine generation does not retain the stale selected-field type");
+    assert.equal(hasSelected(failedGeneration), false,
+      "The active generation does not retain the stale selected-field type");
+    await fs.access(path.join(path.resolve(workspace, failedQuarantineGeneration.stubPath), "complete.json"));
+    let failedRefreshHover;
+    await until(async () => {
+      failedRefreshHover = await selectedHover();
+      return failedGeneration.files.length === 0
+        ? /\bAny\b/.test(failedRefreshHover)
+        : /Never|NoReturn|Unknown/.test(failedRefreshHover);
+    },
+      "Pylance consumes the unavailable type after worker failure");
+    assert.match(failedRefreshHover, failedGeneration.files.length === 0 ? /\bAny\b/ : /Never|NoReturn|Unknown/);
+    results.lifecycle.workerFailureKeepsAffectedTypingUnavailable = true;
 
     await replaceSelectedSchemaType("Boolean", "Int");
     await until(async () => {

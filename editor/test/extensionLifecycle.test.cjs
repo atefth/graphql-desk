@@ -1,8 +1,80 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
-const { reconfigureWorkspaceRoots } = require("../src/extension");
+const { pathToFileURL } = require("node:url");
+const { operationDependencyImpact, reconfigureWorkspaceRoots } = require("../src/extension");
+
+test("schema and config deltas target only operations with changed provenance facts", () => {
+  const operation = (binding, coordinate, fingerprint, config = []) => ({
+    owner: { module: { project: "project", module: "consumer", uri: "file:///consumer.py" }, codepoint: { start: binding.length, end: binding.length + 1 } },
+    binding, selector: binding, operation_name: binding, operation_kind: "query", status: "precise",
+    source_dependencies_known: true, mapping_dependencies: [],
+    schema_identity: ["project", "default"], context_token: "schema-context",
+    schema_dependencies: [{ coordinate, fingerprint }], config_dependencies: config,
+  });
+  const before = [
+    { project: "project", generated_package: "graphql_desk_generated.default", operations: [
+      operation("selected", "field:Query.selected", "a".repeat(64), [{ kind: "scalar-output", name: "String", value: "builtins.str" }]),
+      operation("id", "field:Query.id", "b".repeat(64)),
+    ] },
+  ];
+  const after = [
+    { ...before[0], operations: [
+      { ...operation("selected", "field:Query.selected", "c".repeat(64), [{ kind: "scalar-output", name: "String", value: "builtins.int" }]), context_token: "next-snapshot" },
+      { ...operation("id", "field:Query.id", "b".repeat(64)), context_token: "next-snapshot" },
+    ] },
+  ];
+
+  assert.deepEqual(operationDependencyImpact(before, after), [before[0].operations[0].owner]);
+  const fragment = { module: { project: "project", module: "fragments", uri: "file:///fragments.py", version: 1 },
+    codepoint: { start: 0, end: 20 }, utf16: { start: 0, end: 20 } };
+  const sourceBefore = [{ ...before[0], operations: [
+    { ...before[0].operations[0], direct_fragments: [fragment], dependencies: [fragment.module] }, before[0].operations[1],
+  ] }];
+  const sourceAfter = [{ ...sourceBefore[0], operations: [
+    { ...sourceBefore[0].operations[0], direct_fragments: [{ ...fragment,
+      module: { ...fragment.module, version: 2 } }], dependencies: [{ ...fragment.module, version: 2 }] },
+    sourceBefore[0].operations[1],
+  ] }];
+  assert.deepEqual(operationDependencyImpact(sourceBefore, sourceAfter), [sourceBefore[0].operations[0].owner],
+    "a source dependency change during broad invalidation must keep its old declaration quarantined");
+  assert.deepEqual(operationDependencyImpact(before, [{ ...after[0], operations: [
+    { ...after[0].operations[0], schema_dependencies: "unknown" }, after[0].operations[1],
+  ] }]), [before[0].operations[0].owner],
+  "unknown facts quarantine only their operation when the sibling has complete unchanged provenance");
+  assert.equal(operationDependencyImpact(before, [{ ...after[0], operations: "unknown" }]), null,
+    "a malformed project manifest keeps the whole project fail-closed");
+  assert.deepEqual(operationDependencyImpact(before, [{ ...after[0], operations: [after[0].operations[1]] }]),
+    [before[0].operations[0].owner], "a disappeared operation does not quarantine a proven unaffected sibling");
+  assert.deepEqual(operationDependencyImpact(before, [{ ...after[0], operations: [
+    after[0].operations[0], after[0].operations[0], after[0].operations[1],
+  ] }]), [before[0].operations[0].owner],
+  "ambiguous matches quarantine their owner without widening to a proven sibling");
+});
+
+test("operation impact matches Windows paths that differ only by case", t => {
+  if (process.platform !== "win32") return t.skip("Windows canonical path behavior");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "graphql-desk-path-key-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "Consumer.py");
+  const project = path.join(root, "pyproject.toml");
+  fs.writeFileSync(source, "");
+  fs.writeFileSync(project, "");
+  const differentlyCased = value => value.replace(/[a-z]/g, letter => letter.toUpperCase());
+  const operation = (sourcePath, projectPath) => ({
+    owner: { module: { project: pathToFileURL(projectPath).href, module: "consumer", uri: pathToFileURL(sourcePath).href } },
+    binding: "doc", selector: "doc", operation_name: "Pick", operation_kind: "query", status: "precise",
+    source_dependencies_known: true, mapping_dependencies: [], schema_identity: [pathToFileURL(projectPath).href, "default"],
+    context_token: "same", schema_dependencies: [], config_dependencies: [],
+  });
+  const before = [{ project: "project", generated_package: "generated", operations: [operation(source, project)] }];
+  const after = [{ ...before[0], operations: [operation(differentlyCased(source), differentlyCased(project))] }];
+  assert.deepEqual(operationDependencyImpact(before, after), [],
+    "path aliases for the same source and project must not force broad quarantine");
+});
 
 test("a stubPath conflict retires only its workspace and reconfigures the remaining roots", async () => {
   const firstPath = path.resolve("workspace-one");

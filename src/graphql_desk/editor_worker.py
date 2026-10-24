@@ -28,8 +28,13 @@ from .editor_snapshot import (
     is_editor_snapshot_current,
     prepare_editor_snapshot,
 )
-from .factory_generation import FactoryArtifacts, generate_project_factory_artifacts
+from .factory_generation import (
+    FactoryArtifacts,
+    GeneratedFile,
+    generate_project_factory_artifacts,
+)
 from .fragments import FragmentIndex
+from .quarantine import quarantine_generated_stubs
 from .schema_url import load_from_url
 from .source_graph import DocumentIdentity, IncrementalResolver, ModuleDependency
 
@@ -372,6 +377,97 @@ def _check_buffers(
         seen.add(key)
 
 
+def _quarantine_request(raw: dict[str, object]) -> dict[str, object]:
+    item = _object(raw, {"op", "id", "workspace", "projects", "invalidated_owners"})
+    identifier = _string(item["id"])
+    _path(item["workspace"])
+    groups = _array(item["projects"])
+    invalidated = _array(item["invalidated_owners"])
+    if len(groups) > 4096 or len(invalidated) > 8192:
+        raise ValueError("Invalid quarantine request")
+    owner_keys = {_json_identity(owner) for owner in invalidated}
+    projects: list[dict[str, object]] = []
+    seen_projects: set[str] = set()
+    matched = False
+    total = 0
+    for raw_group in groups:
+        group = _object(
+            raw_group, {"project", "generated_package", "files", "provenance"}
+        )
+        project = _string(group["project"])
+        package = _string(group["generated_package"])
+        if project in seen_projects or not re.fullmatch(
+            r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", package
+        ):
+            raise ValueError("Invalid quarantine project")
+        seen_projects.add(project)
+        files = _array(group["files"])
+        provenance = _array(group["provenance"])
+        if len(files) > 4096 or len(provenance) > 8192:
+            raise ValueError("Invalid quarantine project")
+        for record in provenance:
+            if not isinstance(record, dict):
+                raise ValueError("Invalid quarantine provenance")
+            record = cast(dict[str, object], record)
+            if not isinstance(record.get("owner"), dict):
+                raise ValueError("Invalid quarantine provenance")
+        matched = matched or any(
+            _json_identity(cast(dict[str, object], record)["owner"]) in owner_keys
+            for record in provenance
+        )
+        parsed_files: list[GeneratedFile] = []
+        prefix = package.replace(".", "/") + "/"
+        for raw_file in files:
+            file = _object(raw_file, {"relative_path", "text"})
+            relative = _string(file["relative_path"])
+            text = file["text"]
+            if (
+                not relative.startswith(prefix)
+                or "\\" in relative
+                or "\x00" in relative
+                or relative.startswith("/")
+                or any(part in {"", ".", ".."} for part in relative.split("/"))
+                or not relative.endswith(".pyi")
+                or not isinstance(text, str)
+            ):
+                raise ValueError("Invalid quarantine artifact")
+            total += len(text.encode("utf-8"))
+            if total > 4 * 1024 * 1024:
+                raise ValueError("Quarantine artifacts exceed limit")
+            parsed_files.append(GeneratedFile(relative, text))
+        quarantined = (
+            quarantine_generated_stubs(
+                tuple(parsed_files),
+                tuple(cast(dict[str, object], record) for record in provenance),
+                tuple(invalidated),
+            )
+            if any(
+                _json_identity(cast(dict[str, object], record)["owner"]) in owner_keys
+                for record in provenance
+            )
+            else tuple(parsed_files)
+        )
+        projects.append(
+            {
+                "project": project,
+                "generated_package": package,
+                "files": [
+                    {"relative_path": file.relative_path, "text": file.text}
+                    for file in quarantined
+                ],
+            }
+        )
+    if invalidated and not matched:
+        raise ValueError("No operation provenance matches invalidated owners")
+    return {"ok": True, "id": identifier, "projects": projects}
+
+
+def _json_identity(value: object) -> str:
+    if not isinstance(value, dict):
+        raise ValueError("Invalid operation identity")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
 class EditorWorker:
     """One workspace/job; callers own trust, cancellation and credential revisions.
 
@@ -424,6 +520,8 @@ class EditorWorker:
             raise ValueError("Invalid request")
         raw = cast(dict[str, object], value)
         operation = raw.get("op")
+        if operation == "quarantine":
+            return _quarantine_request(raw)
         if not isinstance(operation, str) or operation not in {
             "prepare",
             "analyze",

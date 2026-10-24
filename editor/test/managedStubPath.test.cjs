@@ -81,7 +81,7 @@ test("rotates only the extension-owned setting and restores ownership across act
   await fs.mkdir(generations);
   const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
   await fs.mkdir(generation);
-  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 1, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
+  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
   await ownGeneration(first, verified);
   assert.equal(await first.selectGeneration(generation, () => true, verified), true);
   assert.equal(f.values["analysis.stubPath"], ".graphql-desk/typings/generations/g-1-00000000-0000-0000-0000-000000000000");
@@ -110,7 +110,7 @@ test("recovers ownership when activation interrupts a managed stubPath rotation"
   await fs.mkdir(previousPath);
   await fs.mkdir(nextPath);
   const verified = { directory: nextPath, manifest: {
-    owner: "graphql-desk-analysis-generation", format: 1,
+    owner: "graphql-desk-analysis-generation", format: 2,
     id: path.basename(nextPath), artifactFingerprint: "a",
   }, verify() { return this; } };
   await ownGeneration(first, verified);
@@ -151,7 +151,7 @@ test("recognizes owned stubPath when VS Code stores a single-folder setting at w
   await fs.mkdir(generations);
   const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
   await fs.mkdir(generation);
-  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 1, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
+  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
   await ownGeneration(managed, verified);
   assert.equal(await managed.selectGeneration(generation, () => true, verified), true);
   assert.equal(managed.stillOwnsSetting(), true);
@@ -167,7 +167,7 @@ test("rolls ownership state back when the workspace setting write fails before m
   await fs.mkdir(generations);
   const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
   await fs.mkdir(generation);
-  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 1, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
+  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
   await ownGeneration(managed, verified);
   f.rejectNextUpdate();
   await assert.rejects(managed.selectGeneration(generation, () => true, verified), /settings write failed/);
@@ -184,7 +184,7 @@ test("restores in-memory ownership when persisting the selected setting fails be
   await fs.mkdir(generations);
   const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
   await fs.mkdir(generation);
-  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 1, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
+  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
   await ownGeneration(managed, verified);
   f.rejectNextStateUpdate();
   await assert.rejects(managed.selectGeneration(generation, () => true, verified), /workspace state write failed/);
@@ -203,7 +203,7 @@ test("serializes overlapping generation selection so the latest edit wins", asyn
   const second = path.join(generations, "g-2-00000000-0000-0000-0000-000000000000");
   await fs.mkdir(first);
   await fs.mkdir(second);
-  const verified = directory => ({ directory, manifest: { owner: "graphql-desk-analysis-generation", format: 1, id: path.basename(directory), artifactFingerprint: "a" }, verify() { return this; } });
+  const verified = directory => ({ directory, manifest: { owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(directory), artifactFingerprint: "a" }, verify() { return this; } });
   const firstVerification = verified(first);
   const secondVerification = verified(second);
   await ownGeneration(managed, firstVerification);
@@ -237,7 +237,7 @@ test("revalidates generation bytes immediately before selecting stubPath", async
   f.onStateUpdate(value => {
     if (value?.current === targetSetting) fsSync.writeFileSync(artifact, "changed during state update");
   });
-  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 1, id: path.basename(generation), artifactFingerprint: "a" },
+  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(generation), artifactFingerprint: "a" },
     verify() {
       const current = fsSync.readFileSync(artifact);
       if (createHash("sha256").update(current).digest("hex") !== fingerprint) throw new Error("generation changed");

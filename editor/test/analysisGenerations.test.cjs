@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
-const { createAnalysisGenerations } = require("../src/analysisGenerations");
+const { createAnalysisGenerations, validOperationManifest } = require("../src/analysisGenerations");
 
 function fixture(t) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "graphql-desk-generations-"));
@@ -39,10 +39,21 @@ const fingerprint = packages => createHash("sha256").update(JSON.stringify(
   [...packages].flatMap(([, values]) => values.map(({ relative_path, text }) => [relative_path, text])).sort(([a], [b]) => a.localeCompare(b)),
 )).digest("hex");
 const savedSourceFingerprint = createHash("sha256").update("saved sources").digest("hex");
-const publish = (f, packages, id, isCurrent = () => true, inputFingerprint = fingerprint(packages)) =>
-  f.publisher.publish(packages, id, isCurrent, f.managed, inputFingerprint, savedSourceFingerprint);
-const recover = (publisher, managed, packages, isCurrent = () => true) =>
-  publisher.recover(managed, isCurrent, fingerprint(packages), savedSourceFingerprint);
+const operationManifest = (binding = "selected") => [{ project: "p", generated_package: "graphql_desk_generated", operations: [{
+  owner: { module: { project: "p", module: "consumer", uri: "file:///workspace/consumer.py", version: 1 },
+    codepoint: { start: 0, end: 12 }, utf16: { start: 0, end: 12 } },
+  selector: null, operation_name: "Selected", operation_kind: "query", schema_identity: ["p", "main"],
+  context_token: "schema-1", binding, status: "precise",
+  declaration_path: "graphql_desk_generated/_documents/default/d0.pyi", declaration_symbol: "SelectedDocument",
+  source_exports: [], dependencies: [], direct_fragments: [], definition_owners: [], canonical_owner: null,
+  selector_known: true, source_dependencies_known: true, mapping_dependencies: [],
+  schema_dependencies: [{ coordinate: "field:Query.id", fingerprint: "a".repeat(64) }],
+  config_dependencies: [{ kind: "scalar-output", name: "String", value: null }],
+}] }];
+const publish = (f, packages, id, isCurrent = () => true, inputFingerprint = fingerprint(packages), manifest = operationManifest()) =>
+  f.publisher.publish(packages, id, isCurrent, f.managed, inputFingerprint, savedSourceFingerprint, manifest);
+const recover = (publisher, managed, packages, isCurrent = () => true, manifest = operationManifest()) =>
+  publisher.recover(managed, isCurrent, fingerprint(packages), savedSourceFingerprint, manifest);
 
 test("publishes immutable complete generations and recovers the latest verified one", async t => {
   const f = fixture(t);
@@ -51,6 +62,7 @@ test("publishes immutable complete generations and recovers the latest verified 
   assert.ok(fs.existsSync(path.join(first, "complete.json")));
   const firstBytes = fs.readFileSync(path.join(first, "graphql_desk_generated", "default.pyi"));
   assert.ok(fs.existsSync(path.join(first, "graphql_desk_generated", "default.py")));
+  assert.deepEqual(f.publisher.current(f.managed)[0].manifest.operationManifest, operationManifest());
 
   assert.equal(await publish(f, files("int"), "analysis-2"), true);
   const second = path.resolve(f.workspace, f.managed.selectedSetting);
@@ -94,6 +106,83 @@ test("recovery does not select a complete generation from older captured inputs"
   f.managed.selectedSetting = ".graphql-desk/typings";
   assert.equal(await recover(f.publisher, f.managed, files("int")), false);
   assert.equal(f.managed.selectedSetting, ".graphql-desk/typings");
+});
+
+test("recovery requires matching operation provenance and rejects missing manifests", async t => {
+  const f = fixture(t);
+  assert.equal(await publish(f, files("str"), "analysis-1"), true);
+  f.managed.selectedSetting = ".graphql-desk/typings";
+  assert.equal(await recover(f.publisher, f.managed, files("str"), () => true, operationManifest("other")), false);
+  assert.equal(await recover(f.publisher, f.managed, files("str")), true);
+  assert.equal(await f.publisher.publish(files("int"), "missing-manifest", () => true, f.managed,
+    fingerprint(files("int")), savedSourceFingerprint), false);
+});
+
+test("operation manifests reject duplicate owners, foreign declarations, and oversized payloads", async t => {
+  const f = fixture(t);
+  const duplicateOwner = operationManifest()[0].operations[0];
+  assert.equal(await publish(f, files("str"), "duplicate", () => true, fingerprint(files("str")),
+    [{ ...operationManifest()[0], operations: [duplicateOwner, duplicateOwner] }]), false);
+  assert.equal(await publish(f, files("str"), "foreign", () => true, fingerprint(files("str")),
+    [{ ...operationManifest()[0], operations: [{ ...duplicateOwner, declaration_path: "other/default.pyi" }] }]), false);
+  assert.equal(await publish(f, files("str"), "bad-facts", () => true, fingerprint(files("str")),
+    [{ ...operationManifest()[0], operations: [{ ...duplicateOwner, schema_dependencies: [
+      { coordinate: "field:Query.name", fingerprint: "a".repeat(64) }, { coordinate: "field:Query.id", fingerprint: "b".repeat(64) },
+    ] }] }]), false);
+  assert.equal(await publish(f, files("str"), "bad-config", () => true, fingerprint(files("str")),
+    [{ ...operationManifest()[0], operations: [{ ...duplicateOwner, config_dependencies: [
+      { kind: "enum-mapping", name: "Color", value: false },
+    ] }] }]), false);
+  assert.equal(await publish(f, files("str"), "oversized", () => true, fingerprint(files("str")),
+    [{ ...operationManifest()[0], operations: [{ ...duplicateOwner, source_exports: [{ relative_path: "x", symbol: "x", alias: "x" }], padding: "x".repeat(1024 * 1024) }] }]), false);
+  assert.equal(f.publisher.current(f.managed).length, 0);
+});
+
+test("publishes the documented 2,000-operation manifest size", async t => {
+  const f = fixture(t);
+  const base = operationManifest()[0].operations[0];
+  const operations = Array.from({ length: 2000 }, (_, index) => ({ ...base,
+    binding: `document_${index}`, operation_name: `Operation${index}`,
+    owner: { ...base.owner, codepoint: { start: index * 2, end: index * 2 + 1 },
+      utf16: { start: index * 2, end: index * 2 + 1 } },
+    schema_dependencies: Array.from({ length: 20 }, (_, field) => ({
+      coordinate: `field:Type${String(field).padStart(2, "0")}.field${String(field).padStart(3, "0")}`,
+      fingerprint: "a".repeat(64),
+    })),
+  }));
+  const manifest = [{ project: "p", generated_package: "graphql_desk_generated", operations }];
+  assert.ok(Buffer.byteLength(JSON.stringify(manifest)) > 1024 * 1024);
+  assert.equal(await publish(f, files("str"), "large-manifest", () => true, fingerprint(files("str")), manifest), true);
+  assert.equal(f.publisher.current(f.managed).length, 1);
+});
+
+test("accepts URI-backed project identities from the Python artifact manifest", () => {
+  const manifest = operationManifest();
+  const project = "file:///C:/Users/test/AppData/Local/Temp/graphql-desk/workspace/pyproject.toml";
+  manifest[0].project = project;
+  manifest[0].operations[0].owner.module.project = project;
+  manifest[0].operations[0].schema_identity[0] = project;
+  assert.equal(validOperationManifest(manifest), true);
+  manifest[0].project = "";
+  assert.equal(validOperationManifest(manifest), false);
+});
+
+test("manifest tampering and legacy generations cannot be recovered", async t => {
+  const f = fixture(t);
+  await publish(f, files("str"), "analysis-1");
+  const selected = path.resolve(f.workspace, f.managed.selectedSetting);
+  const complete = path.join(selected, "complete.json");
+  const manifest = JSON.parse(fs.readFileSync(complete, "utf8"));
+  manifest.operationManifest[0].operations[0].binding = "changed";
+  fs.writeFileSync(complete, `${JSON.stringify(manifest, null, 2)}\n`);
+  assert.equal(f.publisher.current(f.managed).length, 0);
+  f.managed.selectedSetting = ".graphql-desk/typings";
+  assert.equal(await recover(f.publisher, f.managed, files("str")), false);
+  const legacy = { ...manifest, format: 1 };
+  fs.writeFileSync(complete, `${JSON.stringify(legacy, null, 2)}\n`);
+  assert.equal(f.publisher.current(f.managed).length, 0);
+  assert.equal(await recover(f.publisher, f.managed, files("str")), false);
+  assert.equal(fs.existsSync(complete), true, "unverified generations are preserved");
 });
 
 test("serializes overlapping publication so stale output cannot win recovery ordering", async t => {
@@ -249,7 +338,7 @@ test("duplicate paths and abandoned incomplete generations are never adopted or 
   const duplicate = files("str").get("graphql_desk_generated");
   await assert.rejects(f.publisher.publish([
     ["graphql_desk_generated", duplicate], ["graphql_desk_generated", duplicate],
-  ], "analysis-1", () => true, f.managed, fingerprint(files("str")), createHash("sha256").update("saved sources").digest("hex")), /Invalid or oversized generation artifact/);
+  ], "analysis-1", () => true, f.managed, fingerprint(files("str")), createHash("sha256").update("saved sources").digest("hex"), operationManifest()), /Invalid or oversized generation artifact/);
   assert.equal(fs.readFileSync(partialFile, "utf8"), "partial user-visible bytes");
   assert.equal(fs.readdirSync(path.join(f.root, "generations")).length, 1);
   assert.equal(await publish(f, files("str"), "analysis-2"), true);
@@ -268,9 +357,9 @@ test("forged complete generations without an extension ownership record are neve
   fs.writeFileSync(artifact, bytes);
   const digest = value => createHash("sha256").update(value).digest("hex");
   const manifestFiles = [{ path: artifactPath, sha256: digest(bytes) }];
-  const manifest = { owner: "graphql-desk-analysis-generation", format: 1, id, sequence: 99,
+  const manifest = { owner: "graphql-desk-analysis-generation", format: 2, id, sequence: 99,
     analysisId: null, inputFingerprint: digest(Buffer.from("forged")),
-    artifactFingerprint: digest(Buffer.from(JSON.stringify(manifestFiles))), files: manifestFiles };
+    artifactFingerprint: digest(Buffer.from(JSON.stringify(manifestFiles))), files: manifestFiles, operationManifest: [] };
   fs.writeFileSync(path.join(directory, "complete.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 
   assert.equal(f.publisher.current(f.managed).length, 0);
