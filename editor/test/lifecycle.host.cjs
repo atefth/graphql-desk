@@ -95,6 +95,7 @@ exports.run = async () => {
   const results = { host: vscode.version, lifecycle: {} };
   const sourcePath = path.join(workspace, "consumer.py");
   const sourceUri = vscode.Uri.file(sourcePath);
+  const initialStubRoot = path.resolve(workspace, ".graphql-desk/typings");
   const source = await fs.readFile(sourcePath, "utf8");
   let sourceChanges = 0;
   const outputMessages = [];
@@ -133,6 +134,7 @@ exports.run = async () => {
       const found = [];
       let stale = false;
       let rootMissing = false;
+      let manifestMissing = false;
       async function visit(directory) {
         let entries;
         try {
@@ -164,12 +166,16 @@ exports.run = async () => {
           manifest = JSON.parse(await fs.readFile(path.join(root, "complete.json"), "utf8"));
         } catch (error) {
           if (error.code !== "ENOENT") throw error;
+          manifestMissing = true;
           stale = true;
         }
       }
       if (stubPath() !== selected) continue;
       if (rootMissing) {
         assert.equal(generationObserved, false, "The selected generated typing directory disappeared");
+        return { stubPath: selected, files: found };
+      }
+      if (manifestMissing && !generationObserved && root === initialStubRoot && found.length === 0) {
         return { stubPath: selected, files: found };
       }
       assert.equal(stale, false, "The selected generated typing directory is incomplete");
