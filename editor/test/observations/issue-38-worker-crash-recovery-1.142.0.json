@@ -5,16 +5,16 @@
     "ms-python.python": "2026.10.0",
     "ms-python.vscode-pylance": "2026.4.1"
   },
-  "scope": "Bounded worker-crash recovery during live artifact generation.",
+  "scope": "Fail-closed typing and recovery during a worker artifact failure.",
   "forcedFailure": {
     "operation": "artifacts",
     "mechanism": "The host starts a real worker request, then invalidates that worker before the event loop resumes; the pending request rejects.",
     "capturedSchema": "selected: Boolean!",
     "selectedBeforeFailure": "String",
-    "selectedDuringFailure": "String",
-    "requestRejected": true,
-    "lastCompleteGenerationRemainedSelected": true,
-    "incompleteGenerationSelected": false
+    "selectedDuringFailure": "Unknown",
+    "unaffectedSiblingDuringFailure": "ID",
+    "failedArtifactRequestRetried": true,
+    "staleSelectedTypeVisible": false
   },
   "recovery": {
     "freshSchemaEdit": "selected: Boolean! -> selected: Int!",
@@ -25,8 +25,8 @@
   },
   "outcome": "passed",
   "limits": [
-    "This proves recovery after a forced worker failure only when a later schema edit triggers new analysis.",
-    "The last-known String type remains visible during the failed refresh; this does not prove a no-stale interval or cancellation/supersession safety.",
-    "This is bounded evidence only; issue #38 and live-typing gate #42 remain open."
+    "This proves the failure and recovery path on VS Code 1.142.0 with Python 2026.10.0 and Pylance 2026.4.1.",
+    "The fixture covers two operations and one forced artifact failure; it does not prove every source, schema, config, cancellation, and lifecycle combination.",
+    "Issue #38's acceptance is bounded to this worker/editor contract. Broader GraphQL typing and editor parity remain open under #42."
   ]
 }

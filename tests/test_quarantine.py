@@ -54,23 +54,8 @@ def base_arguments(source: str, class_name: str, alias: str) -> list[ast.expr]:
     return list(base.slice.elts) if isinstance(base.slice, ast.Tuple) else [base.slice]
 
 
-def is_no_return(node: ast.expr, alias: str) -> bool:
-    return (
-        isinstance(node, ast.Attribute)
-        and node.attr == "NoReturn"
-        and isinstance(node.value, ast.Name)
-        and node.value.id == alias
-    )
-
-
-def typing_alias(source: str) -> str:
-    alias = next(
-        node.names[0].asname
-        for node in ast.parse(source).body
-        if isinstance(node, ast.Import) and node.names[0].name == "typing"
-    )
-    assert alias is not None
-    return alias
+def is_object(node: ast.expr) -> bool:
+    return isinstance(node, ast.Name) and node.id == "object"
 
 
 class QuarantineTests(unittest.TestCase):
@@ -91,10 +76,9 @@ class QuarantineTests(unittest.TestCase):
             (first,),
         )
         output = result[0].text
-        alias = typing_alias(output)
         self.assertTrue(
             all(
-                is_no_return(arg, alias)
+                is_object(arg)
                 for arg in base_arguments(
                     output, "FirstDocument", "__graphql_desk_FixtureDocument"
                 )
@@ -130,16 +114,15 @@ class QuarantineTests(unittest.TestCase):
             (operation(identity, "FieldsDocument", path="generated/d1.pyi"),),
             (identity,),
         )[0].text
-        alias = typing_alias(result)
         fragment = base_arguments(
             result, "FieldsDocument", "__graphql_desk_FragmentDocument"
         )
         self.assertEqual(ast.unparse(fragment[0]), "FieldsIdentity")
-        self.assertTrue(all(is_no_return(arg, alias) for arg in fragment[1:]))
+        self.assertTrue(all(is_object(arg) for arg in fragment[1:]))
         fixture = base_arguments(
             result, "FieldsDocument", "__graphql_desk_FixtureDocument"
         )
-        self.assertTrue(all(is_no_return(arg, alias) for arg in fixture))
+        self.assertTrue(all(is_object(arg) for arg in fixture))
 
     def test_quarantines_all_records_in_a_canonical_declaration_group(self) -> None:
         source = (
@@ -158,11 +141,10 @@ class QuarantineTests(unittest.TestCase):
             ),
             (first,),
         )[0].text
-        alias_name = typing_alias(result)
         for symbol in ("FirstDocument", "AliasDocument"):
             self.assertTrue(
                 all(
-                    is_no_return(arg, alias_name)
+                    is_object(arg)
                     for arg in base_arguments(
                         result, symbol, "__graphql_desk_FixtureDocument"
                     )

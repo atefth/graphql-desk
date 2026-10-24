@@ -88,7 +88,7 @@ class EditorWorkerTests(unittest.TestCase):
             str, cast(list[dict[str, object]], projects[1]["files"])[0]["text"]
         )
         second_files = cast(list[dict[str, object]], second["files"])
-        self.assertIn("NoReturn", first_text)
+        self.assertIn("FixtureDocument[object, object, object]", first_text)
         self.assertEqual(second_text, cast(str, second_files[0]["text"]))
 
     def test_quarantine_rejects_unmatched_owner(self) -> None:

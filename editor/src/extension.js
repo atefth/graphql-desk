@@ -249,7 +249,7 @@ function activate(context) {
     previousOverride = null, ownersOverride = null, preserveCurrent = false) {
     if (!sourceUri && broad) {
       const results = await Promise.all((vscode.workspace.workspaceFolders ?? []).map(folder =>
-        quarantinePublishedTyping(folder.uri.toString(), ticket, true)));
+        quarantinePublishedTyping(folder.uri.toString(), ticket, true, null, null, null, preserveCurrent)));
       return results.flat().filter(Boolean);
     }
     const parsed = sourceUri ? vscode.Uri.parse(sourceUri) : null;
@@ -402,7 +402,8 @@ function activate(context) {
         await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
       }
       if (isCurrent()) {
-        latestArtifacts.set(folderRoot, { ...previous, operationManifest: nextManifest, projects: nextProjects });
+        latestArtifacts.set(folderRoot, { ...previous, selectedSetting: managed.selectedSetting,
+          operationManifest: nextManifest, projects: nextProjects });
         setInvalidatedDiagnostics(folderRoot, reply?.ok ? quarantinedOwners : operationManifest.flatMap(group => group.operations));
       }
     } catch (error) {
@@ -414,7 +415,13 @@ function activate(context) {
   async function publishTypes(editor, ticket, token, quarantineContext) {
     const document = editor.document;
     const snapshot = controller.snapshot(document);
-    const result = await controller.artifacts(snapshot, token, traceSkip);
+    let artifactFailureReason;
+    const captureArtifactFailure = reason => { artifactFailureReason = reason; traceSkip(reason); };
+    let result = await controller.artifacts(snapshot, token, captureArtifactFailure);
+    if (!result && artifactFailureReason === "worker-artifacts-failed" &&
+        !disposed && ticket === generation && !token?.isCancellationRequested) {
+      result = await controller.artifacts(snapshot, token, captureArtifactFailure);
+    }
     if (!result) return;
     if (result.unavailable_schemas.length) { traceSkip("schema-unavailable"); return; }
     if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
@@ -500,7 +507,8 @@ function activate(context) {
     const parsed = sourceUri ? vscode.Uri.parse(sourceUri) : null;
     const targetedSource = parsed?.scheme === "file" && path.extname(parsed.fsPath).toLowerCase() === ".py";
     const quarantineContext = { previousByFolder: new Map(), refined: new Set() };
-    const quarantine = (invalidateTypes ? quarantinePublishedTyping(sourceUri, ticket, !targetedSource, sourceRanges) : Promise.resolve([]))
+    const quarantine = (invalidateTypes ? quarantinePublishedTyping(sourceUri, ticket, !targetedSource,
+      sourceRanges, null, null, !sourceUri) : Promise.resolve([]))
       .then(results => { for (const item of results ?? []) quarantineContext.previousByFolder.set(item.folderRoot, item.previous); })
       .catch(error => { output.appendLine(`Typing quarantine failed: ${String(error)}`); traceSkip("typing-quarantine-failed"); });
     refreshCancellation?.cancel();

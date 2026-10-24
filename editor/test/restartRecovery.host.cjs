@@ -55,7 +55,7 @@ exports.run = async () => {
         const diagnostic = vscode.languages.getDiagnostics(consumerUri).some(item =>
           item.source === "GraphQL Desk" && /Cannot query field.*selected/.test(item.message));
         results.lifecycle.staleInputProbe = { diagnostic, selectedHover, siblingHover, unavailable: /GraphqlDeskUnavailable/.test(stub) };
-        return diagnostic && results.lifecycle.staleInputProbe.unavailable && /Unknown|Never|NoReturn/.test(selectedHover) &&
+        return diagnostic && results.lifecycle.staleInputProbe.unavailable && /Unknown|Never|NoReturn|object/.test(selectedHover) &&
           !/String|\bstr\b/.test(selectedHover) && /\bID\b/.test(siblingHover);
       }, "changed saved schema quarantines stale operation typing while preserving its sibling", 60000);
       assert.ok(results.lifecycle.staleInputQuarantined, JSON.stringify(results.lifecycle.staleInputProbe));

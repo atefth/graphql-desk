@@ -318,8 +318,8 @@ exports.run = async () => {
             const declaration = operations.doc?.declaration_path;
             const stub = declaration ? await fs.readFile(path.join(selectedGeneration, ...declaration.split("/")), "utf8") : "";
             observed = { selectedGeneration, analysisId: manifest.analysisId, targetStatus: operations.doc?.status,
-              siblingStatus: operations.other_doc?.status, targetHasNoReturn: /NoReturn/.test(stub) };
-            if (observed.targetStatus === "unavailable" && observed.siblingStatus === "precise" && observed.targetHasNoReturn) return observed;
+              siblingStatus: operations.other_doc?.status, targetUsesUnavailableObject: /FixtureDocument\[object, object, object\]/.test(stub) };
+            if (observed.targetStatus === "unavailable" && observed.siblingStatus === "precise" && observed.targetUsesUnavailableObject) return observed;
           } catch { /* Wait for the complete selected quarantine generation. */ }
         }
         await new Promise(resolve => setTimeout(resolve, 10));
