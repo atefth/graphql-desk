@@ -8,10 +8,13 @@ from importlib import metadata
 from pathlib import Path
 from typing import NoReturn
 
+from .config import ProjectConfig, SchemaConfig
 from .project import effective_project, select_schema, validate_project_ownership
 from .schema_loading import load_local_schema
 from .schema_types import render_schema_types
 from .schema_url import load_from_url
+from .source_graph import ModuleSnapshot, TypeSymbolResolution, resolve_type_symbols
+from .source_selection import select_project_sources
 
 
 class _Parser(argparse.ArgumentParser):
@@ -25,6 +28,58 @@ def _version(distribution: str) -> str:
         return metadata.version(distribution)
     except (metadata.PackageNotFoundError, OSError, ValueError):
         return "unavailable (distribution metadata not found)"
+
+
+def _mapping_symbols(schema: SchemaConfig) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                symbol
+                for mapping in schema.scalars
+                for symbol in (mapping.input, mapping.output)
+                if symbol != "typing.Any"
+            }
+            | {symbol for _, symbol in schema.enums if symbol != "typing.Any"}
+        )
+    )
+
+
+def _resolve_local_mapping_symbols(
+    config: ProjectConfig, symbols: tuple[str, ...]
+) -> tuple[TypeSymbolResolution, ...]:
+    if not symbols:
+        return ()
+    candidates: set[Path] = set()
+    for symbol in symbols:
+        module = symbol.rpartition(".")[0]
+        parts = module.split(".")
+        for root in config.source_roots:
+            candidates.add(root.joinpath(*parts).with_suffix(".py"))
+            candidates.add(root.joinpath(*parts, "__init__.py"))
+            candidates.update(
+                root.joinpath(*parts[:length], "__init__.py")
+                for length in range(1, len(parts))
+            )
+    supplied = tuple(path for path in candidates if path.is_file())
+    sources = select_project_sources(
+        config,
+        supplied,
+        workspace=config.root if config.source_scope != "explicit_cli" else None,
+    )
+    modules = tuple(
+        ModuleSnapshot(
+            config.path.as_uri(),
+            source.module,
+            source.path.as_uri(),
+            1,
+            source.path.read_text(encoding="utf-8"),
+            source.is_package,
+        )
+        for source in sources
+    )
+    return resolve_type_symbols(
+        symbols, modules=modules, project_id=config.path.as_uri()
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -124,8 +179,53 @@ def _doctor(
                 )
             else:
                 print(
-                    f"schema {schema.name}: mapping declarations ready; "
-                    "symbol compatibility remains unverified",
+                    f"schema {schema.name}: mapping declarations ready", file=sys.stderr
+                )
+            symbols = _mapping_symbols(schema)
+            if not symbols:
+                print(
+                    f"schema {schema.name}: mapping symbols not configured",
+                    file=sys.stderr,
+                )
+                continue
+            try:
+                resolutions = _resolve_local_mapping_symbols(config, symbols)
+            except (OSError, ValueError, RuntimeError, UnicodeError):
+                print(
+                    f"schema {schema.name}: local mapping symbols unavailable; "
+                    "source capture failed",
+                    file=sys.stderr,
+                )
+                continue
+            resolved = sum(item.status == "resolved" for item in resolutions)
+            external = sum(item.status == "external" for item in resolutions)
+            unavailable = [
+                item
+                for item in resolutions
+                if item.status not in {"resolved", "external"}
+            ]
+            if resolved:
+                print(
+                    f"schema {schema.name}: captured local mapping symbols resolved "
+                    f"(static names only): {resolved}",
+                    file=sys.stderr,
+                )
+            if external:
+                print(
+                    f"schema {schema.name}: external mapping symbols unverified: "
+                    f"{external}",
+                    file=sys.stderr,
+                )
+            if unavailable:
+                statuses: dict[str, int] = {}
+                for item in unavailable:
+                    statuses[item.status] = statuses.get(item.status, 0) + 1
+                summary = ", ".join(
+                    f"{status}={count}" for status, count in sorted(statuses.items())
+                )
+                print(
+                    f"schema {schema.name}: captured local mapping symbols "
+                    f"unavailable: {summary}",
                     file=sys.stderr,
                 )
     print(
@@ -134,13 +234,6 @@ def _doctor(
     )
     for checker in ("mypy", "pyright"):
         print(f"installed {checker} distribution: {_version(checker)}", file=sys.stderr)
-    if any(schema.scalars or schema.enums for schema in schemas):
-        print(
-            "mapping symbols: unverified; source capture is not implemented",
-            file=sys.stderr,
-        )
-    else:
-        print("mapping symbols: not configured", file=sys.stderr)
     print(
         "generated ownership: unavailable; no verified ownership manifest",
         file=sys.stderr,
