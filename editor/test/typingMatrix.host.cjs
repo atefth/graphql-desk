@@ -256,7 +256,18 @@ exports.run = async () => {
     });
     assert.equal(runtimeCheck.status, 0, runtimeCheck.stderr);
     results.pylance.aliasedTypenamePreservesRuntimeIdentity = true;
+    await replace(semanticDocument, semanticSource);
+    assert.equal(await semanticDocument.save(), true, "The temporary typing fixture returns to its saved baseline");
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    await fs.unlink(semanticPath);
     await vscode.window.showTextDocument(document, { preview: false });
+    const temporaryCompanionRemoved = await until(async () => {
+      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      const root = path.resolve(workspace, settings["python.analysis.stubPath"]);
+      return fs.access(path.join(root, "graphql_desk_generated", "sources", "operation_semantics.pyi"))
+        .then(() => false, () => true);
+    }, "temporary abstract/conditional fixture leaves the selected generation", 60000);
+    assert.ok(temporaryCompanionRemoved);
 
     const otherIdPosition = position("other_id");
     const otherIdHover = async () => {
