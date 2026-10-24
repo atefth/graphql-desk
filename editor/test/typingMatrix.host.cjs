@@ -349,6 +349,44 @@ exports.run = async () => {
     assert.ok(results.lifecycle.invalidationAndRepair.schemaRepair,
       JSON.stringify(results.lifecycle.invalidationAndRepair.schemaRepairProbe));
 
+    const finalSchema = originalSchema.replace("selected: String!", "selected: Int!");
+    const supersededSchema = originalSchema.replace("selected: String!", "selected: Boolean!");
+    assert.notEqual(finalSchema, originalSchema, "Schema fixture must contain the selected String field");
+    assert.notEqual(supersededSchema, originalSchema);
+    const previousStubPath = vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", "");
+    await replace(schemaDocument, supersededSchema);
+    await replace(schemaDocument, finalSchema);
+    results.lifecycle.finalGenerationAfterRapidEdits = await until(async () => {
+      const selectedType = await selectedHover();
+      const unaffectedType = await otherIdHover();
+      let settings;
+      try { settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")); }
+      catch { return false; }
+      const setting = settings["python.analysis.stubPath"];
+      if (typeof setting !== "string" || !setting || setting === previousStubPath) return false;
+      const selectedRoot = path.resolve(workspace, setting);
+      let manifest;
+      try { manifest = JSON.parse(await fs.readFile(path.join(selectedRoot, "complete.json"), "utf8")); }
+      catch { return false; }
+      const operations = Object.fromEntries(manifest.operationManifest.flatMap(group => group.operations.map(item => [item.binding, item])));
+      const declaration = operations.doc?.declaration_path;
+      let stub = "";
+      try { stub = declaration ? await fs.readFile(path.join(selectedRoot, ...declaration.split("/")), "utf8") : ""; }
+      catch { return false; }
+      results.lifecycle.finalGenerationAfterRapidEditsProbe = { selectedType, unaffectedType,
+        selectedStatus: operations.doc?.status, siblingStatus: operations.other_doc?.status,
+        finalTypeInStub: /['\"]selected['\"]:\s*['\"]?Int\b/.test(stub), selectedRoot };
+      return /\bint\b|\bInt\b/.test(selectedType) && /\bID\b/.test(unaffectedType) &&
+        operations.doc?.status === "precise" && operations.other_doc?.status === "precise" &&
+        results.lifecycle.finalGenerationAfterRapidEditsProbe.finalTypeInStub;
+    }, "rapid successive schema edits settle on the final Pylance types while the sibling stays precise", 60000);
+    assert.ok(results.lifecycle.finalGenerationAfterRapidEdits,
+      JSON.stringify(results.lifecycle.finalGenerationAfterRapidEditsProbe));
+    await replace(schemaDocument, originalSchema);
+    const rapidEditRestore = await until(async () => /\bString\b/.test(await selectedHover()) && /\bID\b/.test(await otherIdHover()),
+      "restoring the original schema restores both operation types", 60000);
+    assert.ok(rapidEditRestore);
+
     const configDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(workspace, "pyproject.toml")));
     const originalConfig = configDocument.getText();
     const mappedConfig = originalConfig.replace("[tool.graphql-desk]\n",
