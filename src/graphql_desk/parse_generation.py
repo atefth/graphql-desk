@@ -16,6 +16,7 @@ from .source_graph import (
     GraphDiagnostic,
     ModuleDependency,
     ModuleSnapshot,
+    ParseSources,
     resolve_parse_sources,
 )
 from .source_maps import HostSpan, build_source_map
@@ -47,7 +48,11 @@ class CapturedParseCompanion:
 
 
 def render_captured_parse_companion(
-    modules: tuple[ModuleSnapshot, ...], *, project_id: str, module: str
+    modules: tuple[ModuleSnapshot, ...],
+    *,
+    project_id: str,
+    module: str,
+    generated_package: str | None = None,
 ) -> CapturedParseCompanion:
     """Select one captured owner's declarations and diagnostics; never publish.
 
@@ -56,7 +61,39 @@ def render_captured_parse_companion(
     the selected owner. Unavailable provenance falls back to the whole host call;
     decoded parser locations remain in messages. Imports are not rewritten.
     """
-    facts = resolve_parse_sources(modules)
+    facts = resolve_parse_sources(modules, generated_package=generated_package)
+    return _render_captured_parse_companion(modules, facts, project_id, module)
+
+
+def render_captured_parse_companions(
+    modules: tuple[ModuleSnapshot, ...],
+    *,
+    project_id: str,
+    generated_package: str | None = None,
+) -> tuple[CapturedParseCompanion, ...]:
+    """Render recognized parser owners after resolving the project graph once."""
+    facts = resolve_parse_sources(modules, generated_package=generated_package)
+    calls = {item.module for item in facts.calls}
+    diagnostics = {
+        item.module
+        for item in facts.diagnostics
+        if item.code == "parse-fallback" and item.module.project == project_id
+    }
+    return tuple(
+        _render_captured_parse_companion(modules, facts, project_id, item.module)
+        for item in modules
+        if item.project == project_id
+        and ModuleDependency(item.project, item.module, item.uri, item.version)
+        in calls | diagnostics
+    )
+
+
+def _render_captured_parse_companion(
+    modules: tuple[ModuleSnapshot, ...],
+    facts: ParseSources,
+    project_id: str,
+    module: str,
+) -> CapturedParseCompanion:
     owners = [
         item for item in modules if (item.project, item.module) == (project_id, module)
     ]

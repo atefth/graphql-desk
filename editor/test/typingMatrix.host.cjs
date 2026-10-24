@@ -90,6 +90,33 @@ exports.run = async () => {
     assert.ok(ready, JSON.stringify(observed));
     results.pylance = { ...results.pylance, ...observed };
 
+    const parserUri = vscode.Uri.file(path.join(workspace, "parser_consumer.py"));
+    const parserDocument = await vscode.workspace.openTextDocument(parserUri);
+    await vscode.window.showTextDocument(parserDocument, { preview: false });
+    const parserPosition = () => parserDocument.positionAt(parserDocument.getText().indexOf("parsed_name") + 2);
+    const parserHover = async () => {
+      const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", parserUri, parserPosition()) || [];
+      return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
+    };
+    await until(async () => {
+      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      const root = path.resolve(workspace, settings["python.analysis.stubPath"]);
+      return fs.access(path.join(root, "graphql_desk_generated", "parsers", "parser_consumer.pyi")).then(() => true, () => false);
+    }, "the worker publishes a schema-independent parser companion");
+    await replaceText(parserDocument, "from graphql_desk import parse",
+      "from graphql_desk_generated.parsers.parser_consumer import parse");
+    const parserTyped = await until(async () => {
+      const hover = await parserHover();
+      results.pylance.parserName = hover;
+      return /Literal\[['\"]ParserQuery['\"]\]/.test(hover);
+    }, "generated parser imports provide exact Pylance AST literal inference", 60000);
+    assert.ok(parserTyped, results.pylance.parserName);
+    assert.equal(parserDocument.isDirty, true, "GraphQL Desk preserves the user's unsaved import edit");
+    assert.equal(await fs.readFile(parserUri.fsPath, "utf8"),
+      "from graphql_desk import parse\ndocument = parse('query ParserQuery { selected }')\nparsed_name = document.definitions[0].name.value\n");
+    results.pylance.parserLiteralInference = true;
+    await vscode.window.showTextDocument(document, { preview: false });
+
     const otherIdPosition = position("other_id");
     const otherIdHover = async () => {
       const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", uri, otherIdPosition) || [];

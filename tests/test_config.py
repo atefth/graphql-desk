@@ -64,6 +64,16 @@ class ConfigTests(unittest.TestCase):
                     source_scope="explicit_cli",
                 )
 
+    def test_parser_companion_namespace_is_reserved_for_generated_types(self) -> None:
+        text = (
+            "[tool.graphql-desk]\n"
+            'generated_package = "graphql_desk_generated"\n'
+            'schemas = [{ name = "parsers", schema = "schema.graphql", '
+            'schema_output = "graphql_desk_generated/parsers.pyi" }]\n'
+        )
+        with self.assertRaisesRegex(ValueError, "generated namespace"):
+            parse_project_config(text, config_path=self.path)
+
     def test_inactive_project_and_default_facts(self) -> None:
         self.assertIsNone(
             parse_project_config('[project]\nname="other"', config_path=self.path)

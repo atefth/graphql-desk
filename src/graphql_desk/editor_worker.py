@@ -34,6 +34,7 @@ from .factory_generation import (
     generate_project_factory_artifacts,
 )
 from .fragments import FragmentIndex
+from .parse_generation import render_captured_parse_companions
 from .quarantine import quarantine_generated_stubs
 from .schema_url import load_from_url
 from .source_graph import DocumentIdentity, IncrementalResolver, ModuleDependency
@@ -685,6 +686,9 @@ class EditorWorker:
             }
             for config in self._snapshot.project_configs:
                 project = config.path.as_uri()
+                project_modules = tuple(
+                    module for module in facts.modules if module.project == project
+                )
                 index = FragmentIndex(
                     tuple(
                         document
@@ -720,26 +724,58 @@ class EditorWorker:
                             for schema in config.schemas
                         ),
                         index,
-                        modules=tuple(
-                            module
-                            for module in facts.modules
-                            if module.project == project
-                        ),
+                        modules=project_modules,
                         project_id=project,
                     )
                 )
+                generated_files = {
+                    file.relative_path: file.text for file in artifacts.files
+                }
+                parser_diagnostics: list[dict[str, object]] = []
+                for companion in render_captured_parse_companions(
+                    project_modules,
+                    project_id=project,
+                    generated_package=config.generated_package,
+                ):
+                    module = next(
+                        item
+                        for item in project_modules
+                        if item.module == companion.module.module
+                        and item.uri == companion.module.uri
+                    )
+                    base = (
+                        f"{config.generated_package.replace('.', '/')}/parsers/"
+                        f"{module.module.replace('.', '/')}"
+                    )
+                    if module.is_package:
+                        base += "/__init__"
+                    generated_files[base + ".py"] = companion.companion.runtime
+                    generated_files[base + ".pyi"] = companion.companion.stub
+                    parts = (base + ".py").split("/")[:-1]
+                    for length in range(1, len(parts) + 1):
+                        package = "/".join(parts[:length])
+                        generated_files.setdefault(
+                            package + "/__init__.py",
+                            '"""Generated GraphQL Desk package."""\n',
+                        )
+                        generated_files.setdefault(package + "/__init__.pyi", "")
+                    parser_diagnostics.extend(
+                        editor_diagnostic(item, snapshots)
+                        for item in companion.diagnostics
+                    )
                 projects.append(
                     {
                         "project": project,
                         "generated_package": config.generated_package,
                         "files": [
-                            {"relative_path": file.relative_path, "text": file.text}
-                            for file in artifacts.files
+                            {"relative_path": filename, "text": text}
+                            for filename, text in sorted(generated_files.items())
                         ],
                         "diagnostics": [
                             editor_diagnostic(diagnostic, snapshots)
                             for diagnostic in artifacts.diagnostics
-                        ],
+                        ]
+                        + parser_diagnostics,
                         "provenance": _operation_provenance(
                             artifacts.provenance, snapshots
                         ),

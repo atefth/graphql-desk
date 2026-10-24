@@ -13,6 +13,7 @@ from graphql import DocumentNode, GraphQLError, parse
 from graphql_desk.literal_ast import render_document_ast_types
 from graphql_desk.parse_generation import (
     render_captured_parse_companion,
+    render_captured_parse_companions,
     render_parse_companion,
 )
 from graphql_desk.source_graph import (
@@ -89,6 +90,50 @@ class ParseGenerationTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             render_captured_parse_companion(modules, project_id="p", module="missing")
+
+    def test_generated_parser_import_reuses_its_captured_literal_contract(self) -> None:
+        module = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            1,
+            "from graphql_desk_generated.parsers.main import parse\n"
+            "value = parse('query Q { id }')\n",
+        )
+        companion = render_captured_parse_companion(
+            (module,),
+            project_id="p",
+            module="main",
+            generated_package="graphql_desk_generated",
+        )
+        self.assertIn("Literal['query Q { id }']", companion.companion.stub)
+        self.assertEqual(
+            render_captured_parse_companions(
+                (module,),
+                project_id="p",
+                generated_package="graphql_desk_generated",
+            ),
+            (companion,),
+        )
+
+    def test_generated_parser_import_is_bound_to_its_source_module(self) -> None:
+        main = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            1,
+            "from graphql_desk_generated.parsers.other import parse\n"
+            "value = parse('query Q { id }')\n",
+        )
+        other = ModuleSnapshot("p", "other", "file:///other.py", 1, "value = 1\n")
+        self.assertEqual(
+            render_captured_parse_companions(
+                (main, other),
+                project_id="p",
+                generated_package="graphql_desk_generated",
+            ),
+            (),
+        )
 
     def test_captured_nesting_failures_preserve_independent_declarations(self) -> None:
         parser_limit = "{" + "a{" * 350 + "id" + "}" * 351

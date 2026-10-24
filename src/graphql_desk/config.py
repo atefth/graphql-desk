@@ -410,7 +410,7 @@ def parse_project_settings(
             name = _identifier(item.get("name"), "schema name")
             if not _NAME.fullmatch(name):
                 raise ValueError("Schema names must be GraphQL identifiers")
-            if name in {"sources", "persisted", "__init__"}:
+            if name in {"sources", "persisted", "parsers", "__init__"}:
                 raise ValueError("Schema name collides with a generated namespace")
             schemas.append(_schema(item, name, root, package))
     else:
