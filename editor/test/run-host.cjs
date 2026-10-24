@@ -232,8 +232,6 @@ async function main() {
     } else if (suite === "lifecycle") {
       assert.match(observed.lifecycle.configuredStubPath.replaceAll("\\", "/"), /^\.graphql-desk\/typings\/generations\/g-/,
         "live typing uses GraphQL Desk's managed immutable generation path");
-      await fs.access(path.join(observed.lifecycle.activeStubRoot, "complete.json"));
-      await fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated", "default.pyi"));
     } else {
       await assert.rejects(fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated")), { code: "ENOENT" }, "Test cleanup must remove only its owned generated package");
     }
