@@ -162,7 +162,7 @@ function activate(context) {
   function setInvalidatedDiagnostics(folderRoot, operations) {
     const byUri = new Map();
     for (const operation of operations) {
-      const uri = vscode.Uri.parse(operation.owner.module.uri);
+      const uri = controller.resolveUri(operation.owner.module.uri);
       const document = vscode.workspace.textDocuments.find(item => item.uri.toString() === uri.toString());
       const position = document?.positionAt(operation.owner.utf16.start) ?? new vscode.Position(0, 0);
       const diagnostic = new vscode.Diagnostic(new vscode.Range(position, position),
