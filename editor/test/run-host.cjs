@@ -139,6 +139,8 @@ async function main() {
       fs.writeFile(path.join(workspace, "pyproject.toml"), '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n'),
       fs.writeFile(path.join(workspace, "schema.graphql"), `type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${shapeFields} }\n`),
       fs.writeFile(sourcePath, source),
+      ...(suite === "typingMatrix" ? [fs.writeFile(path.join(workspace, "parser_consumer.py"),
+        "from graphql_desk import parse\ndocument = parse('query ParserQuery { selected }')\nparsed_name = document.definitions[0].name.value\n")] : []),
       fs.writeFile(path.join(workspace, "fragments.py"), "from graphql_desk_generated.default import graphql\ncard = graphql('fragment Card on User { name }')\n"),
       ...(suite === "lifecycle" ? [fs.writeFile(path.join(workspace, "lifecycle_calls.py"), "from graphql_desk_generated.default import graphql\nextra = graphql('query Extra { user { id } }')\n")] : []),
     ]);

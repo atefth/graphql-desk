@@ -11,7 +11,7 @@ Precedence: command options override their corresponding project keys for that c
 | Python configuration key | Default / validation | Upstream disposition |
 |---|---|---|
 | `schema` | Required unless `schemas` is present; SDL/introspection path, HTTP(S) URL, or `{url, headers}`; headers string map | `schema`; authenticated remote loading retained |
-| `schemas` | Absent; nonempty array of `{name, schema, schema_output, persisted_output?, cache_output?, scalars?, enums?, disable_masking?}`; unique names and outputs | Named multi-schema selection retained; mutually exclusive with single-schema fields |
+| `schemas` | Absent; nonempty array of `{name, schema, schema_output, persisted_output?, cache_output?, scalars?, enums?, disable_masking?}`; unique names/outputs; reserved generated namespaces cannot be used as schema names | Named multi-schema selection retained; mutually exclusive with single-schema fields |
 | `generated_package` | `graphql_desk_generated`, importable package directory under the project root; require a valid Python package identifier and reject paths outside the project | Python generated schema/factory binding |
 | `schema_output` | Required for configured editor/type generation: explicit writable `.pyi` path inside `generated_package`; one-off stdout/schema conversion may omit it | `tadaOutputLocation`; Python schema metadata/type output |
 | `persisted_output` | Absent; required when generation has no explicit output/stdout destination | `tadaPersistedLocation` |

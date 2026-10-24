@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -854,6 +855,64 @@ if TYPE_CHECKING:
         for path, content in original.items():
             self.assertEqual(path.read_bytes(), content)
         self.assertFalse((self.root / "graphql_desk_generated").exists())
+
+    def test_parser_companions_publish_runtime_and_live_literal_overloads(self) -> None:
+        source = (
+            "from typing import Literal\n"
+            "from typing_extensions import assert_type\n"
+            "from graphql_desk_generated.parsers.main import parse\n"
+            "document = parse('query Q { disk }')\n"
+            "assert_type(document.definitions[0].name.value, Literal['Q'])\n"
+            "assert_type(\n"
+            "    document.definitions[0].selection_set.selections[0].name.value,\n"
+            "    Literal['disk'],\n"
+            ")\n"
+        )
+        self.source.write_text(source, encoding="utf8")
+        capture = self.capture()
+        identity = self.prepare(capture)
+        self.assertTrue(self.analyze(capture, identity)["ok"])
+        result = self.worker.handle(
+            {"op": "artifacts", **capture, "id": identity, "schema_buffers": []}
+        )
+        self.assertTrue(result["ok"], result)
+        project = cast(list[dict[str, object]], result["projects"])[0]
+        self.assertEqual(project["diagnostics"], [])
+        files = cast(list[dict[str, str]], project["files"])
+        by_path = {file["relative_path"]: file["text"] for file in files}
+        runtime_path = "graphql_desk_generated/parsers/main.py"
+        stub_path = "graphql_desk_generated/parsers/main.pyi"
+        self.assertEqual(
+            by_path[runtime_path], "from graphql_desk import parse as parse\n"
+        )
+        self.assertIn("Literal['query Q { disk }']", by_path[stub_path])
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative, text in by_path.items():
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(text, encoding="utf8")
+            (root / "main.py").write_text(source, encoding="utf8")
+            factory_tests.FactoryGenerationTests().check(root)
+            runtime = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import graphql_desk; import main; "
+                    "assert main.parse is graphql_desk.parse",
+                ],
+                cwd=root,
+                env={
+                    **os.environ,
+                    "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")
+                    + os.pathsep
+                    + os.environ.get("PYTHONPATH", ""),
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stderr)
 
     def test_factory_artifacts_invalid_and_repaired_calls_preserve_diagnostics(
         self,

@@ -487,8 +487,10 @@ class _Graph:
         *,
         type_symbols: bool = False,
         parsers: bool = False,
+        generated_parser_package: str | None = None,
     ) -> None:
         self.parsers = parsers
+        self.generated_parser_package = generated_parser_package
         self.type_symbols = type_symbols
         self.reflected_type_projects: set[str] = set()
         self.documents: dict[DocumentIdentity, ResolvedCall] = {}
@@ -1268,6 +1270,15 @@ class _Graph:
             and symbol == "parse"
         ):
             return _Value("parser", "graphql_desk.parse")
+        if (
+            self.parsers
+            and target is None
+            and symbol == "parse"
+            and self.generated_parser_package
+            and imported
+            == f"{self.generated_parser_package}.parsers.{caller.snapshot.module}"
+        ):
+            return _Value("parser", imported + ".parse")
         if target is None and imported == "graphql_desk" and symbol == "init_graphql":
             return _Value("initializer", "graphql_desk.init_graphql")
         builtin = (
@@ -1744,14 +1755,21 @@ class _CallScopes(ast.NodeVisitor):
     visit_GeneratorExp = visit_unsupported_scope
 
 
-def resolve_parse_sources(modules: tuple[ModuleSnapshot, ...]) -> ParseSources:
+def resolve_parse_sources(
+    modules: tuple[ModuleSnapshot, ...], *, generated_package: str | None = None
+) -> ParseSources:
     """Resolve static parser strings with supported options, without schema facts.
 
     Other recognized calls retain the ordinary parser fallback with a local
     diagnostic. Normal document resolution and its diagnostics are unchanged.
     """
     ordered = tuple(sorted(modules, key=lambda item: (item.project, item.module)))
-    graph = _Graph(ordered, (), parsers=True)
+    graph = _Graph(
+        ordered,
+        (),
+        parsers=True,
+        generated_parser_package=generated_package,
+    )
     calls: list[ResolvedParseCall] = []
     for module in graph.modules.values():
 

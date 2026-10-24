@@ -24,7 +24,7 @@ renderer. Dynamic strings, `Source` objects, SDL and nondefault options retain t
 ordinary `DocumentNode` return. Sources deduplicate deterministically; invalid
 syntax raises the original parser error, and unknown schema fields still parse.
 
-This is a retained-source opt-in companion foundation for #25. Attachment to original imports, regeneration/editor publication and
+This is a retained-source opt-in companion foundation for #25. Attachment to original imports and
 complete exact-location acceptance remain open. API-01 and the live-typing gate
 have not passed. Tests cover actual generated imports and exact positive/negative
 bindings in both strict checkers, runtime identity, fallback/options, schema-independent
@@ -41,7 +41,19 @@ captured owner and returns its identity, opt-in companion and selected-call diag
 Independent valid literals survive invalid parser syntax. Sources deduplicate
 deterministically and remain schema-independent. Callers still own publication and
 explicit companion imports; neither function rewrites original imports or writes
-files. Full automatic attachment and exact-location acceptance remain open.
+files. Explicit import attachment remains caller-owned; automatic import assistance
+and exact-location acceptance remain open.
+
+The trusted editor artifact response now includes these captured companions under
+`<generated_package>.parsers.<source_module>` and publishes their stubs in the same managed
+generation as the schema-bound factory stubs. That managed stub path serves Pylance;
+the runtime companion must also be present in the configured generated package for Python
+imports to work. Parser analysis remains available when
+a project's schema is unavailable. Importing that generated module is recognized on
+subsequent captures so its literal overloads stay current. The runtime companion
+re-exports the exact `graphql_desk.parse` function. The editor does not rewrite the
+user's source import; automatic import assistance and two-host Pylance verification
+remain open under #25.
 
 Captured parser syntax errors use the existing versioned source map to locate the
 actual contributing Python literals, including imported constants, concatenation,
