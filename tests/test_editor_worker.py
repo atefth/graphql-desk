@@ -68,7 +68,7 @@ class EditorWorkerTests(unittest.TestCase):
         second = group(
             "second", "generated_second", "SecondDocument", owner("second", 20)
         )
-        request = {
+        request: dict[str, object] = {
             "op": "quarantine",
             "id": "quarantine-test",
             "workspace": str(Path.cwd()),
@@ -86,8 +86,9 @@ class EditorWorkerTests(unittest.TestCase):
         second_text = cast(
             str, cast(list[dict[str, object]], projects[1]["files"])[0]["text"]
         )
+        second_files = cast(list[dict[str, object]], second["files"])
         self.assertIn("NoReturn", first_text)
-        self.assertEqual(second_text, cast(str, second["files"][0]["text"]))
+        self.assertEqual(second_text, cast(str, second_files[0]["text"]))
 
     def test_quarantine_rejects_unmatched_owner(self) -> None:
         worker = EditorWorker()
@@ -101,7 +102,7 @@ class EditorWorkerTests(unittest.TestCase):
             "codepoint": {"start": 1, "end": 2},
             "utf16": {"start": 1, "end": 2},
         }
-        request = {
+        request: dict[str, object] = {
             "op": "quarantine",
             "id": "quarantine-missing-owner",
             "workspace": str(Path.cwd()),

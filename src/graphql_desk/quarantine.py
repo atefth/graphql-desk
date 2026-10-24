@@ -22,17 +22,20 @@ def _identity_key(value: object) -> tuple[str, str, str, int, int, int]:
         )
     if not isinstance(value, Mapping):
         raise ValueError("Invalid operation owner identity")
-    module_data = value.get("module")
-    span = value.get("codepoint", value.get("call_range"))
-    if not isinstance(module_data, Mapping) or not isinstance(span, Mapping):
+    identity = cast(Mapping[str, object], value)
+    module_data = identity.get("module")
+    span_data = identity.get("codepoint", identity.get("call_range"))
+    if not isinstance(module_data, Mapping) or not isinstance(span_data, Mapping):
         raise ValueError("Invalid operation owner identity")
+    module_mapping = cast(Mapping[str, object], module_data)
+    location_mapping = cast(Mapping[str, object], span_data)
     project, name, uri, version = (
-        module_data.get("project"),
-        module_data.get("module"),
-        module_data.get("uri"),
-        module_data.get("version"),
+        module_mapping.get("project"),
+        module_mapping.get("module"),
+        module_mapping.get("uri"),
+        module_mapping.get("version"),
     )
-    start, end = span.get("start"), span.get("end")
+    start, end = location_mapping.get("start"), location_mapping.get("end")
     if (
         not all(isinstance(item, str) and item for item in (project, name, uri))
         or type(version) is not int

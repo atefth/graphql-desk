@@ -406,9 +406,10 @@ def _quarantine_request(raw: dict[str, object]) -> dict[str, object]:
         if len(files) > 4096 or len(provenance) > 8192:
             raise ValueError("Invalid quarantine project")
         for record in provenance:
-            if not isinstance(record, dict) or not isinstance(
-                record.get("owner"), dict
-            ):
+            if not isinstance(record, dict):
+                raise ValueError("Invalid quarantine provenance")
+            record = cast(dict[str, object], record)
+            if not isinstance(record.get("owner"), dict):
                 raise ValueError("Invalid quarantine provenance")
         matched = matched or any(
             _json_identity(cast(dict[str, object], record)["owner"]) in owner_keys

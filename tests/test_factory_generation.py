@@ -6,13 +6,16 @@ import tempfile
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from graphql import build_schema
 
 from graphql_desk.config import ProjectConfig, ScalarMapping, parse_project_config
 from graphql_desk.factory_generation import (
+    ConfigDependency,
     FactoryArtifacts,
+    SchemaCoordinateDependency,
     generate_factory_artifacts,
     generate_project_factory_artifacts,
 )
@@ -1668,15 +1671,20 @@ invalid_again=graphql('query Invalid {missing}')
                 self.assertEqual(record.schema_dependencies, "unknown")
                 self.assertEqual(record.config_dependencies, "unknown")
             else:
-                self.assertIsInstance(record.schema_dependencies, tuple)
-                self.assertTrue(record.schema_dependencies)
+                schema_dependencies = cast(
+                    tuple[SchemaCoordinateDependency, ...], record.schema_dependencies
+                )
+                self.assertTrue(schema_dependencies)
                 self.assertTrue(
                     all(
                         re.fullmatch(r"[a-f0-9]{64}", item.fingerprint)
-                        for item in record.schema_dependencies
+                        for item in schema_dependencies
                     )
                 )
-                self.assertIsInstance(record.config_dependencies, tuple)
+                config_dependencies = cast(
+                    tuple[ConfigDependency, ...], record.config_dependencies
+                )
+                self.assertIsInstance(config_dependencies, tuple)
             self.assertIsInstance(record.mapping_dependencies, tuple)
             self.assertTrue(record.source_dependencies_known)
             for export in record.source_exports:
@@ -1875,9 +1883,11 @@ search=graphql('query Search($filter:Filter!){search(filter:$filter)}')
         )
         self.assertEqual(result.diagnostics, ())
         records = {record.binding: record for record in result.provenance}
+        token_config_dependencies = cast(
+            tuple[ConfigDependency, ...], records["token"].config_dependencies
+        )
         token_config = {
-            (item.kind, item.name, item.value)
-            for item in records["token"].config_dependencies
+            (item.kind, item.name, item.value) for item in token_config_dependencies
         }
         self.assertIn(("scalar-output", "Token", "builtins.bytes"), token_config)
         self.assertNotIn(("scalar-input", "Token", "builtins.str"), token_config)
@@ -1887,18 +1897,27 @@ search=graphql('query Search($filter:Filter!){search(filter:$filter)}')
             ("disable-masking", "disable_masking", False),
             {
                 (item.kind, item.name, item.value)
-                for item in records["with_fragment"].config_dependencies
+                for item in cast(
+                    tuple[ConfigDependency, ...],
+                    records["with_fragment"].config_dependencies,
+                )
             },
         )
         search_coordinates = {
-            item.coordinate for item in records["search"].schema_dependencies
+            item.coordinate
+            for item in cast(
+                tuple[SchemaCoordinateDependency, ...],
+                records["search"].schema_dependencies,
+            )
         }
         self.assertIn("field:Query.search", search_coordinates)
         self.assertIn("input:Filter.token", search_coordinates)
         self.assertIn("scalar:Token", search_coordinates)
         search_config = {
             (item.kind, item.name, item.value)
-            for item in records["search"].config_dependencies
+            for item in cast(
+                tuple[ConfigDependency, ...], records["search"].config_dependencies
+            )
         }
         self.assertIn(("scalar-input", "Token", "builtins.str"), search_config)
         self.assertNotIn(("scalar-output", "Token", "builtins.bytes"), search_config)
@@ -1922,22 +1941,34 @@ search=graphql('query Search($filter:Filter!){search(filter:$filter)}')
         new = {record.binding: record for record in changed.provenance}
         old_facts = {
             item.coordinate: item.fingerprint
-            for item in old["first"].schema_dependencies
+            for item in cast(
+                tuple[SchemaCoordinateDependency, ...],
+                old["first"].schema_dependencies,
+            )
         }
         new_facts = {
             item.coordinate: item.fingerprint
-            for item in new["first"].schema_dependencies
+            for item in cast(
+                tuple[SchemaCoordinateDependency, ...],
+                new["first"].schema_dependencies,
+            )
         }
         self.assertNotEqual(
             old_facts["field:Query.first"], new_facts["field:Query.first"]
         )
         old_sibling = {
             item.coordinate: item.fingerprint
-            for item in old["second"].schema_dependencies
+            for item in cast(
+                tuple[SchemaCoordinateDependency, ...],
+                old["second"].schema_dependencies,
+            )
         }
         new_sibling = {
             item.coordinate: item.fingerprint
-            for item in new["second"].schema_dependencies
+            for item in cast(
+                tuple[SchemaCoordinateDependency, ...],
+                new["second"].schema_dependencies,
+            )
         }
         self.assertEqual(old_sibling, new_sibling)
 

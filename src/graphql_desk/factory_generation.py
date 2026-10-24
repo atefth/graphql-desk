@@ -10,6 +10,7 @@ import unicodedata
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
+import graphql.utilities as graphql_utilities
 from graphql import (
     FieldNode,
     FragmentDefinitionNode,
@@ -17,7 +18,6 @@ from graphql import (
     GraphQLCompositeType,
     GraphQLEnumType,
     GraphQLInputObjectType,
-    GraphQLInputType,
     GraphQLInterfaceType,
     GraphQLNonNull,
     GraphQLObjectType,
@@ -26,7 +26,6 @@ from graphql import (
     InlineFragmentNode,
     OperationDefinitionNode,
     Undefined,
-    ast_from_value,
     get_named_type,
     parse,
     print_ast,
@@ -64,6 +63,8 @@ from .source_graph import (
 )
 from .source_maps import Position, build_source_map, position_to_offset
 from .testing import render_unsafe_result_helper
+
+ast_from_value: Any = getattr(graphql_utilities, "ast_from_value")
 
 
 @dataclass(frozen=True)
@@ -1371,6 +1372,9 @@ def _generate_factory_artifacts(
                 )
             )
         mapping_dependencies_known = mapping_dependencies != "unknown"
+        mapping_source_dependencies = (
+            () if mapping_dependencies == "unknown" else mapping_dependencies
+        )
         provenance.append(
             OperationProvenance(
                 owner=identity,
@@ -1389,11 +1393,7 @@ def _generate_factory_artifacts(
                     sorted(
                         {
                             *document.dependencies,
-                            *(
-                                mapping_dependencies
-                                if mapping_dependencies_known
-                                else ()
-                            ),
+                            *mapping_source_dependencies,
                         },
                         key=lambda item: (item.project, item.module),
                     )
@@ -1499,10 +1499,10 @@ def _operation_dependencies(
             ).encode("utf-8")
             coordinates[coordinate] = hashlib.sha256(encoded).hexdigest()
 
-        def type_signature(type_: object) -> str:
+        def type_signature(type_: Any) -> str:
             return str(type_)
 
-        def default_signature(value: object, type_: GraphQLInputType) -> str | None:
+        def default_signature(value: object, type_: Any) -> str | None:
             if value is Undefined:
                 return None
             node = ast_from_value(value, type_)
@@ -1510,9 +1510,9 @@ def _operation_dependencies(
                 raise ValueError("Cannot fingerprint a schema default value")
             return print_ast(node)
 
-        def input_type(type_: GraphQLInputType, active: set[str] | None = None) -> None:
-            named = get_named_type(type_)
-            name = named.name
+        def input_type(type_: Any, active: set[str] | None = None) -> None:
+            named: Any = cast(Any, get_named_type(type_))
+            name: str = named.name
             if isinstance(named, GraphQLScalarType):
                 used_scalar_inputs.add(name)
                 add(f"scalar:{name}", [name, named.specified_by_url])
@@ -1526,7 +1526,7 @@ def _operation_dependencies(
                     ],
                 )
             elif isinstance(named, GraphQLInputObjectType):
-                visited = active if active is not None else set()
+                visited: set[str] = active if active is not None else set()
                 if name in visited:
                     return
                 visited.add(name)
@@ -1564,7 +1564,7 @@ def _operation_dependencies(
                         [
                             arg_name
                             for arg_name, arg in sorted(directive.args.items())
-                            if isinstance(arg.type, GraphQLNonNull)
+                            if isinstance(cast(Any, arg).type, GraphQLNonNull)
                             and arg.default_value is Undefined
                         ],
                     ],
@@ -1573,14 +1573,15 @@ def _operation_dependencies(
                     argument = directive.args.get(arg_name)
                     if argument is None:
                         raise ValueError("Unknown schema directive argument")
+                    argument_type: Any = cast(Any, argument).type
                     add(
                         f"directive:@{name}({arg_name})",
                         [
-                            type_signature(argument.type),
-                            default_signature(argument.default_value, argument.type),
+                            type_signature(argument_type),
+                            default_signature(argument.default_value, argument_type),
                         ],
                     )
-                    input_type(argument.type)
+                    input_type(argument_type)
 
         def abstract_types(type_: GraphQLCompositeType) -> None:
             if isinstance(type_, (GraphQLInterfaceType, GraphQLUnionType)):
@@ -1634,7 +1635,7 @@ def _operation_dependencies(
                             ],
                         )
                         input_type(argument.type)
-                    result_type = get_named_type(field.type)
+                    result_type: Any = cast(Any, get_named_type(field.type))
                     if isinstance(result_type, GraphQLScalarType):
                         used_scalar_outputs.add(result_type.name)
                         add(
@@ -1697,7 +1698,7 @@ def _operation_dependencies(
             named = schema.get_type(named_node.name.value)
             if named is None:
                 raise ValueError("Unknown variable input type")
-            input_type(cast(GraphQLInputType, named))
+            input_type(named)
             directives(variable.directives)
         if operation == "fragment":
             fragment = cast(FragmentDefinitionNode, selected)
