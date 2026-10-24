@@ -72,8 +72,7 @@ function operationDependencyImpact(previous, current) {
         !same(old.definition_owners, next.definition_owners) || !same(old.direct_fragments, next.direct_fragments) ||
         !same(old.dependencies, next.dependencies) || !same(old.source_exports, next.source_exports) ||
         old.selector_known !== next.selector_known ||
-        !sameSchemaIdentity(old.schema_identity, next.schema_identity) ||
-        old.context_token !== next.context_token) impacted.push(old.owner);
+        !sameSchemaIdentity(old.schema_identity, next.schema_identity)) impacted.push(old.owner);
     byKey.delete(identity);
   }
   if (byKey.size) return null;

@@ -23,8 +23,8 @@ test("schema and config deltas target only operations with changed provenance fa
   ];
   const after = [
     { ...before[0], operations: [
-      operation("selected", "field:Query.selected", "c".repeat(64), [{ kind: "scalar-output", name: "String", value: "builtins.int" }]),
-      operation("id", "field:Query.id", "b".repeat(64)),
+      { ...operation("selected", "field:Query.selected", "c".repeat(64), [{ kind: "scalar-output", name: "String", value: "builtins.int" }]), context_token: "next-snapshot" },
+      { ...operation("id", "field:Query.id", "b".repeat(64)), context_token: "next-snapshot" },
     ] },
   ];
 
