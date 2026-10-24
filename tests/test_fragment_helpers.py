@@ -282,6 +282,16 @@ def nullable_required(values:list[FragmentRef[RequiredIdentity]|None]|None)->Non
  assert_type(read_required(values),Sequence[RequiredResult|None]|None)
  assert_type(read_fragment(required,values),Sequence[RequiredResult|None]|None)
 
+def nullable_empty(values:Sequence[Never]|None)->None:
+ assert_type(read_required(values),Sequence[Never]|None)
+ assert_type(read_fragment(required,values),Sequence[Never]|None)
+ assert_type(passthrough(required,values),Sequence[Never]|None)
+
+def nullable_nones(values:Sequence[None]|None)->None:
+ assert_type(read_required(values),Sequence[None]|None)
+ assert_type(read_fragment(required,values),Sequence[None]|None)
+ assert_type(passthrough(required,values),Sequence[None]|None)
+
 def nullable_raw(values:list[RequiredResult|None]|None)->None:
  assert_type(read_required(values),Sequence[RequiredResult|None]|None)
 

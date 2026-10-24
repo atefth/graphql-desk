@@ -49,10 +49,25 @@ def read_fragment(
 
 
 @overload
-def read_fragment(
+def read_fragment(  # type: ignore[overload-overlap]  # Empty sequences overlap with the None-only sequence signature.
     document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
     data: Sequence[None],
 ) -> Sequence[None]: ...
+
+
+# `Never` makes this identity-preserving case intentionally overlap result readers.
+@overload
+def read_fragment(  # type: ignore[overload-overlap]  # pyright: ignore[reportOverlappingOverload]
+    document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
+    data: Sequence[Never] | None,
+) -> Sequence[Never] | None: ...
+
+
+@overload
+def read_fragment(  # type: ignore[overload-overlap]  # Empty and None-only sequences intersect general sequence overloads.
+    document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
+    data: Sequence[None] | None,
+) -> Sequence[None] | None: ...
 
 
 @overload
@@ -148,10 +163,25 @@ def read_fragment_passthrough(
 
 
 @overload
-def read_fragment_passthrough(
+def read_fragment_passthrough(  # type: ignore[overload-overlap]  # Empty sequences overlap with the None-only sequence signature.
     document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
     data: Sequence[None],
 ) -> Sequence[None]: ...
+
+
+# `Never` makes this identity-preserving case intentionally overlap result readers.
+@overload
+def read_fragment_passthrough(  # type: ignore[overload-overlap]  # pyright: ignore[reportOverlappingOverload]
+    document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
+    data: Sequence[Never] | None,
+) -> Sequence[Never] | None: ...
+
+
+@overload
+def read_fragment_passthrough(  # type: ignore[overload-overlap]  # Empty and None-only sequences intersect general sequence overloads.
+    document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
+    data: Sequence[None] | None,
+) -> Sequence[None] | None: ...
 
 
 @overload
