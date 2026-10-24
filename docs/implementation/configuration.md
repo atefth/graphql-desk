@@ -37,8 +37,15 @@ stderr. For each loaded schema it checks declaration compatibility through the
 existing schema renderer, including missing custom-scalar mappings, without writing
 its output. Explicit `typing.Any` scalar input/output and enum mappings are named
 separately. Declaration readiness does not verify imported type compatibility;
-failed schema loads do not produce a declaration-readiness claim. Its status remains degraded (exit 1): mapping symbols, generated ownership,
-active editor and live bridge health do not yet have authoritative CLI inputs.
+failed schema loads do not produce a declaration-readiness claim. Configured mapping
+names are also checked against local `.py` and `.pyi` files reached through static
+imports from those mapping modules within configured source roots; stubs take
+precedence over same-module Python files. It does not scan unrelated files or import
+or execute project code. There is no numeric file or size cap, so an unusually large
+reachable import closure can make doctor slow. External installed-package symbols
+and checker-level type compatibility remain unverified. Its status remains degraded
+(exit 1) because full mapping compatibility, generated ownership, active editor and
+live bridge health do not yet have authoritative CLI inputs.
 `--help` and `--version` exit 0; invalid arguments exit 2 without echoing supplied
 values. This command is a diagnostic foundation, not full doctor acceptance.
 

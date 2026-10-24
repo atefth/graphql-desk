@@ -261,6 +261,123 @@ class CLITests(unittest.TestCase):
             err,
         )
 
+    def test_doctor_resolves_stub_only_mapping_symbols_and_package_reexports(
+        self,
+    ) -> None:
+        self.schema.write_text(
+            "scalar Date\nenum Color { RED BLUE }\n"
+            "type Query { date: Date color: Color }",
+            encoding="utf8",
+        )
+        (self.root / "models.pyi").write_text(
+            "class DateInput: ...\nclass DateOutput: ...\n", encoding="utf8"
+        )
+        package = self.root / "colors"
+        package.mkdir()
+        (package / "__init__.pyi").write_text(
+            "from .types import Color as Color\n", encoding="utf8"
+        )
+        (package / "types.pyi").write_text("class Color: ...\n", encoding="utf8")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'scalars={Date={input="models.DateInput",output="models.DateOutput"}}\n'
+            'enums={Color="colors.Color"}\n',
+            encoding="utf8",
+        )
+        with patch("importlib.import_module", side_effect=AssertionError("No imports")):
+            _code, _out, err = self.invoke(["doctor"])
+        self.assertIn(
+            "captured local mapping symbols resolved (static names only): 3",
+            err,
+        )
+        self.assertNotIn("external mapping symbols unverified", err)
+        self.assertNotIn("colors", sys.modules)
+        self.assertNotIn("models", sys.modules)
+
+    def test_doctor_prefers_stub_and_reports_missing_or_invalid_stub_exports(
+        self,
+    ) -> None:
+        self.schema.write_text(
+            "scalar Date\ntype Query { date: Date }", encoding="utf8"
+        )
+        implementation = self.root / "models.py"
+        implementation.write_text("class Date: ...\n", encoding="utf8")
+        stub = self.root / "models.pyi"
+        stub.write_text("class Other: ...\n", encoding="utf8")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'scalars={Date="models.Date"}\n',
+            encoding="utf8",
+        )
+        with patch("importlib.import_module", side_effect=AssertionError("No imports")):
+            _code, _out, err = self.invoke(["doctor"])
+        self.assertIn(
+            "captured local mapping symbols unavailable: missing=1",
+            err,
+        )
+
+        stub.write_text("class Date(: ...\n", encoding="utf8")
+        with patch("importlib.import_module", side_effect=AssertionError("No imports")):
+            _code, _out, err = self.invoke(["doctor"])
+        self.assertIn(
+            "captured local mapping symbols unavailable: unresolved=1",
+            err,
+        )
+
+    def test_doctor_follows_submodule_import_aliases_in_stub_packages(self) -> None:
+        cases = (
+            (
+                "relative",
+                "relative/__init__.pyi",
+                "from . import types as _types\nDate = _types.Date\n",
+                "relative/types.pyi",
+            ),
+            (
+                "absolute",
+                "absolute/__init__.pyi",
+                "from absolute import types as _types\nDate = _types.Date\n",
+                "absolute/types.pyi",
+            ),
+            (
+                "nested",
+                "nested/child/__init__.pyi",
+                "from .. import types as _types\nDate = _types.Date\n",
+                "nested/types.pyi",
+            ),
+        )
+        for package, init_path, init_text, types_path in cases:
+            with self.subTest(package=package):
+                for relative, content in (
+                    (init_path, init_text),
+                    (types_path, "class Date: ...\n"),
+                ):
+                    path = self.root / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(content, encoding="utf8")
+                self.schema.write_text(
+                    "scalar Date\ntype Query { date: Date }", encoding="utf8"
+                )
+                symbol_module = f"{package}.child" if package == "nested" else package
+                self.config.write_text(
+                    '[tool.graphql-desk]\nschema="schema.graphql"\n'
+                    'schema_output="graphql_desk_generated/default.pyi"\n'
+                    f'scalars={{Date="{symbol_module}.Date"}}\n',
+                    encoding="utf8",
+                )
+                with patch(
+                    "importlib.import_module",
+                    side_effect=AssertionError("No imports"),
+                ):
+                    _code, _out, err = self.invoke(["doctor"])
+                self.assertIn(
+                    "captured local mapping symbols resolved (static names only): 1",
+                    err,
+                )
+                self.assertNotIn("external mapping symbols unverified", err)
+                self.assertNotIn(package, sys.modules)
+
     def test_explicit_any_report_preserves_mapping_directions_and_schema_selection(
         self,
     ) -> None:

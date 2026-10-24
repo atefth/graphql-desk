@@ -1,6 +1,7 @@
 """Explicit read-only diagnostics; importing this module performs no work."""
 
 import argparse
+import ast
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -50,33 +51,82 @@ def _resolve_local_mapping_symbols(
     if not symbols:
         return ()
     candidates: set[Path] = set()
-    for symbol in symbols:
-        module = symbol.rpartition(".")[0]
+
+    def add_module(module: str) -> None:
         parts = module.split(".")
         for root in config.source_roots:
-            candidates.add(root.joinpath(*parts).with_suffix(".py"))
-            candidates.add(root.joinpath(*parts, "__init__.py"))
-            candidates.update(
-                root.joinpath(*parts[:length], "__init__.py")
-                for length in range(1, len(parts))
-            )
-    supplied = tuple(path for path in candidates if path.is_file())
-    sources = select_project_sources(
-        config,
-        supplied,
-        workspace=config.root if config.source_scope != "explicit_cli" else None,
-    )
-    modules = tuple(
-        ModuleSnapshot(
-            config.path.as_uri(),
-            source.module,
-            source.path.as_uri(),
-            1,
-            source.path.read_text(encoding="utf-8"),
-            source.is_package,
+            for suffix in (".pyi", ".py"):
+                candidates.add(root.joinpath(*parts).with_suffix(suffix))
+                candidates.add(root.joinpath(*parts, f"__init__{suffix}"))
+                candidates.update(
+                    root.joinpath(*parts[:length], f"__init__{suffix}")
+                    for length in range(1, len(parts))
+                )
+
+    for symbol in symbols:
+        add_module(symbol.rpartition(".")[0])
+
+    sources_by_path: dict[Path, ModuleSnapshot] = {}
+    supplied_modules: set[str] = set()
+    while True:
+        sources = select_project_sources(
+            config,
+            tuple(path for path in candidates if path.is_file()),
+            workspace=config.root if config.source_scope != "explicit_cli" else None,
+            include_stubs=True,
+            validate_entrypoints=False,
         )
-        for source in sources
-    )
+        added = False
+        for source in sources:
+            if source.path in sources_by_path:
+                continue
+            source_text = source.path.read_text(encoding="utf-8")
+            sources_by_path[source.path] = ModuleSnapshot(
+                config.path.as_uri(),
+                source.module,
+                source.path.as_uri(),
+                1,
+                source_text,
+                source.is_package,
+            )
+            if source.module in supplied_modules:
+                continue
+            supplied_modules.add(source.module)
+            try:
+                tree = ast.parse(source_text)
+            except (SyntaxError, ValueError, UnicodeError, RecursionError):
+                continue
+            for statement in tree.body:
+                if isinstance(statement, ast.Import):
+                    imported_modules = tuple(alias.name for alias in statement.names)
+                elif isinstance(statement, ast.ImportFrom):
+                    package = source.module.split(".")
+                    if not source.is_package:
+                        package.pop()
+                    if statement.level:
+                        if statement.level > len(package):
+                            continue
+                        base = package[: len(package) - statement.level + 1]
+                        imported_name = ".".join(
+                            [*base, *([statement.module] if statement.module else [])]
+                        )
+                    else:
+                        imported_name = statement.module or ""
+                    imported_modules = (
+                        (imported_name,) if imported_name else ()
+                    ) + tuple(
+                        f"{imported_name}.{alias.name}"
+                        for alias in statement.names
+                        if imported_name and alias.name != "*"
+                    )
+                else:
+                    continue
+                for module in imported_modules:
+                    add_module(module)
+                    added = True
+        if not added:
+            break
+    modules = tuple(sources_by_path.values())
     return resolve_type_symbols(
         symbols, modules=modules, project_id=config.path.as_uri()
     )

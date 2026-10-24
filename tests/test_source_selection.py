@@ -70,6 +70,46 @@ class SourceSelectionTests(unittest.TestCase):
         )
         self.assertEqual(resolve_project(records).diagnostics, ())
 
+    def test_stub_selection_is_opt_in_and_prefers_stubs_for_mapping_identity(
+        self,
+    ) -> None:
+        config = self.config()
+        implementation = self.file("models.py")
+        implementation.write_text("class SourceType: ...", encoding="utf-8")
+        stub = self.file("models.pyi")
+        stub.write_text("class StubType: ...", encoding="utf-8")
+
+        self.assertEqual(
+            [
+                item.path
+                for item in select_project_sources(config, (stub, implementation))
+            ],
+            [implementation],
+        )
+        selected = select_project_sources(
+            config,
+            (implementation, stub),
+            include_stubs=True,
+            validate_entrypoints=False,
+        )
+        self.assertEqual(
+            [(item.path, item.module) for item in selected], [(stub, "models")]
+        )
+
+        explicit_stub_glob = replace(config, include=("models.pyi",))
+        self.assertEqual(
+            [
+                item.path
+                for item in select_project_sources(
+                    explicit_stub_glob,
+                    (stub,),
+                    include_stubs=True,
+                    validate_entrypoints=False,
+                )
+            ],
+            [stub],
+        )
+
     def test_default_exclusions_and_owned_outputs_cannot_be_reincluded(self) -> None:
         config = self.config()
         hidden = (
