@@ -15,8 +15,6 @@ const artifactCalls = [];
 const skipReasons = [];
 let crashNextArtifacts = false;
 let delayedArtifact = null;
-let releaseDelayedArtifact = null;
-let delayedArtifactTimer = null;
 const createWorker = workerModule.createAnalysisWorker;
 workerModule.createAnalysisWorker = options => {
   const worker = createWorker(options);
@@ -102,6 +100,8 @@ async function until(check, label, timeout = 45000) {
 exports.run = async () => {
   const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
   const results = { host: vscode.version, lifecycle: {} };
+  let releaseDelayedArtifact = null;
+  let delayedArtifactTimer = null;
   const sourcePath = path.join(workspace, "consumer.py");
   const sourceUri = vscode.Uri.file(sourcePath);
   const initialManagedStubRoot = path.resolve(workspace, ".graphql-desk/typings");
@@ -348,7 +348,6 @@ exports.run = async () => {
     results.lifecycle.workerRecoveryOperations = recoveryRequests.filter(request => ["prepare", "analyze", "artifacts"].includes(request.op))
       .map(({ op, ok, error }) => ({ op, ok: Boolean(ok), ...(error ? { error } : {}) }));
 
-    let releaseDelayedArtifact;
     let delayedArtifactStarted;
     let rejectDelayedArtifact;
     const delayedArtifactReady = new Promise((resolve, reject) => {
