@@ -23,7 +23,7 @@ test("resolved highlighting uses real maps with escapes, Unicode, CRLF and adjac
   }
 });
 
-test("escaped ordinary literals stay conservative until resolution restores exact Unicode host ranges", async () => {
+test("escaped ordinary literals highlight lexically, then resolve to exact Unicode host ranges", async () => {
   const incompleteText = [
     "# 😀",
     "from graphql_desk import gql",
@@ -41,7 +41,11 @@ test("escaped ordinary literals stay conservative until resolution restores exac
   });
 
   const incomplete = { uri: "file:///workspace/main.py", version: 1, text: incompleteText };
-  assert.deepEqual(await highlighter.highlight(incomplete), []);
+  const lexical = await highlighter.highlight(incomplete);
+  const lexicalString = String.raw`\"a\\\"😀\"`;
+  const lexicalStart = incompleteText.indexOf(lexicalString);
+  assert.ok(lexical.some(item => item.mode === "lexical" && item.scope === "string" &&
+    item.start === lexicalStart && item.end === lexicalStart + lexicalString.length));
 
   const repaired = { ...incomplete, version: 2, text: repairedText };
   const highlights = await highlighter.highlight(repaired);
@@ -153,6 +157,60 @@ test("incomplete Python uses a lexical candidate, then recovers to resolved maps
   assert.ok(resolved.every((item) => item.mode === "resolved"));
 });
 
+test("incomplete Python escape decoding maps GraphQL token spans to their full source escapes", async () => {
+  for (const [literal, expectedString] of [
+    [String.raw`\"x\\u006d\\\\y😀\"`, String.raw`"x\u006d\\y😀"`],
+    [String.raw`\"x\u006d😀\"`, '"xm😀"'],
+    [String.raw`\"x\x6d😀\"`, '"xm😀"'],
+    [String.raw`\"x\155😀\"`, '"xm😀"'],
+    [String.raw`\"x\U0000006d😀\"`, '"xm😀"'],
+  ]) {
+    const text = ["from graphql_desk import gql", `q=gql("query { user(name: ${literal}, color: RED) { name`].join("\r\n");
+    const candidate = lexicalCandidates(text)[0];
+    assert.equal(candidate?.text, `query { user(name: ${expectedString}, color: RED) { name`);
+    const highlights = await createHighlighting({
+      analyze: async snapshot => bundle(snapshot.text, { version: snapshot.version }),
+      isCurrent: async () => true,
+      isTrusted: () => true,
+    }).highlight({ uri: "file:///workspace/main.py", version: 1, text });
+    const stringStart = text.indexOf(literal);
+    const stringToken = highlights.find(item => item.scope === "string" && item.start === stringStart);
+    assert.ok(stringToken, text);
+    assert.equal(stringToken.end, stringStart + literal.length);
+    assert.equal(text.slice(stringToken.start, stringToken.end), literal);
+    const redStart = text.indexOf("RED");
+    assert.ok(highlights.some(item => item.scope === "string-2" && item.start === redStart && item.end === redStart + 3));
+    assert.ok(highlights.every(item => item.mode === "lexical"));
+  }
+});
+
+test("incomplete Python escaped line continuations preserve the GraphQL token's full source range", async () => {
+  const text = String.raw`from graphql_desk import gql
+q=gql("""query { user(name: "x\
+m😀") { name`;
+  assert.equal(lexicalCandidates(text)[0]?.text, 'query { user(name: "xm😀") { name');
+  const highlights = await createHighlighting({
+    analyze: async snapshot => bundle(snapshot.text, { version: snapshot.version }),
+    isCurrent: async () => true,
+    isTrusted: () => true,
+  }).highlight({ uri: "file:///workspace/main.py", version: 1, text });
+  const start = text.indexOf('"x\\');
+  const end = text.indexOf('m😀"', start) + 'm😀"'.length;
+  assert.ok(highlights.some(item => item.scope === "string" && item.start === start && item.end === end));
+});
+
+test("incomplete Python keeps unsupported string escapes conservative", () => {
+  for (const escape of [String.raw`\x1`, String.raw`\u123`, String.raw`\U00110000`,
+    String.raw`\N{LATIN CAPITAL LETTER A}`, String.raw`\q`]) {
+    const text = `from graphql_desk import gql\nq=gql("${escape}query { field`;
+    assert.deepEqual(lexicalCandidates(text), [], escape);
+  }
+  for (const prefix of ["b", "f", "bf", "fb"]) {
+    const text = `from graphql_desk import gql\nq=gql(${prefix}"query { field`;
+    assert.deepEqual(lexicalCandidates(text), [], prefix);
+  }
+});
+
 test("incomplete Python highlights only valid non-interpolated string prefixes", async () => {
   for (const prefix of ["ur", "ru", "rr", "br", "rb", "fr", "rf", "b", "f"]) {
     const value = bundle(`from graphql_desk import gql\nq=gql(${prefix}'''query { field`);
@@ -177,7 +235,7 @@ test("lexical candidates exclude lookalikes, strings/comments as imports, interp
     "from graphql_desk import gql\nq=gql(f'query { field }')",
     "from graphql_desk import gql\nq=gql(b'query { field }')",
     "from graphql_desk import gql\ngql=lambda source:source\nq=gql('query { field }')",
-    "from graphql_desk import gql\nq=gql('query\\n{ field }')",
+    "from graphql_desk import gql\nq=gql('query\\q{ field }')",
   ];
   for (const text of unrelated) assert.deepEqual(lexicalCandidates(text), [], text);
   for (const text of [
@@ -217,7 +275,7 @@ test("configured factory candidates accept exact direct/qualified aliases and pr
     "import generated.default as documents\nimport other as documents\nq=documents.graphql('query { title",
     "from generated.default import graphql\nq=graphql(f'query { title",
     "from generated.default import graphql\nq=graphql(b'query { title",
-    "from generated.default import graphql\nq=graphql('query\\n{ title",
+    "from generated.default import graphql\nq=graphql('query\\q{ title",
     "# from generated.default import graphql\nq=graphql('query { title",
     "'from generated.default import graphql'\nq=graphql('query { title",
   ]) assert.deepEqual(lexicalCandidates(text, factories), [], text);

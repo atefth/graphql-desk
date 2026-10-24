@@ -13,5 +13,6 @@
   "nativePythonHover": true,
   "untrustedNoAnalysis": true,
   "diskUnchanged": true,
-  "cleanBuffers": true
+  "cleanBuffers": true,
+  "escapedLexicalHighlighting": true
 }

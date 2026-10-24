@@ -33,6 +33,60 @@ function tokens(text) {
   return result;
 }
 
+function decodePythonString(text, raw) {
+  const output = [];
+  const source = [];
+  const append = (value, start, end) => {
+    output.push(value);
+    for (let index = 0; index < value.length; index += 1) source.push({ start, end });
+  };
+  const codePoint = digits => {
+    const value = Number.parseInt(digits, 16);
+    return Number.isSafeInteger(value) && value <= 0x10ffff && !(value >= 0xd800 && value <= 0xdfff)
+      ? String.fromCodePoint(value) : null;
+  };
+  const simple = { "\\": "\\", "'": "'", '"': '"', a: "\x07", b: "\b", f: "\f",
+    n: "\n", r: "\r", t: "\t", v: "\x0b" };
+  for (let index = 0; index < text.length;) {
+    if (raw || text[index] !== "\\") {
+      const value = String.fromCodePoint(text.codePointAt(index));
+      append(value, index, index + value.length);
+      index += value.length;
+      continue;
+    }
+    const escape = text[index + 1];
+    if (escape === undefined) return null;
+    if (Object.prototype.hasOwnProperty.call(simple, escape)) {
+      append(simple[escape], index, index + 2);
+      index += 2;
+      continue;
+    }
+    if (escape === "\n" || escape === "\r") {
+      index += escape === "\r" && text[index + 2] === "\n" ? 3 : 2;
+      continue;
+    }
+    if (escape === "x" || escape === "u" || escape === "U") {
+      const size = escape === "x" ? 2 : escape === "u" ? 4 : 8;
+      const digits = text.slice(index + 2, index + 2 + size);
+      if (digits.length !== size || !/^[0-9a-f]+$/i.test(digits)) return null;
+      const value = codePoint(digits);
+      if (value === null) return null;
+      append(value, index, index + size + 2);
+      index += size + 2;
+      continue;
+    }
+    if (/[0-7]/.test(escape)) {
+      const digits = text.slice(index + 1).match(/^[0-7]{1,3}/)[0];
+      append(String.fromCodePoint(Number.parseInt(digits, 8)), index, index + digits.length + 1);
+      index += digits.length + 1;
+      continue;
+    }
+    // shortcut: named and unknown escapes stay unhighlighted until an exact non-executing decoder is available.
+    return null;
+  }
+  return { text: output.join(""), source };
+}
+
 /** Lexical candidates never become semantic source, diagnostics or typed facts. */
 function lexicalCandidates(text, factories = []) {
   const strings = [];
@@ -91,9 +145,8 @@ function lexicalCandidates(text, factories = []) {
   }
   return strings.flatMap((literal) => {
     if (!["", "r", "u"].includes(literal.prefix)) return [];
-    const body = text.slice(literal.bodyStart, literal.bodyEnd);
-    // Escaped ordinary literals require the semantic decoder, never guessed offsets.
-    if (!literal.prefix.includes("r") && body.includes("\\")) return [];
+    const decoded = decodePythonString(text.slice(literal.bodyStart, literal.bodyEnd), literal.prefix === "r");
+    if (!decoded) return [];
     const match = /([_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*)\s*\(\s*(?:source\s*=\s*)?$/.exec(code.slice(0, literal.start));
     if (!match || !callees.has(match[1])) return [];
     if (/(?:[\p{ID_Continue}]|\.\s*)$/u.test(code.slice(0, match.index))) return [];
@@ -102,15 +155,19 @@ function lexicalCandidates(text, factories = []) {
     if (new RegExp(`(?:\\b(?:def|class)\\s+${name}\\b|\\b${name}\\s*=(?!=))`).test(code)) return [];
     const parts = match[1].split(".");
     if (parts.some((_, index) => new RegExp(`\\b${parts.slice(0, index + 1).join("\\.")}\\s*=(?!=)`).test(code))) return [];
-    return [{ text: body, start: literal.bodyStart, end: literal.bodyEnd, mode: "lexical" }];
+    return [{ ...decoded, start: literal.bodyStart, mode: "lexical" }];
   });
 }
 
 function createHighlighting({ analyze, isCurrent, isTrusted, mapSnapshot = value => value }) {
   if (![analyze, isCurrent, isTrusted].every((item) => typeof item === "function")) throw new Error("Analysis, trust and freshness callbacks are required");
   const lexical = (snapshot, factories = []) => lexicalCandidates(snapshot.text, factories).flatMap((candidate) =>
-    tokens(candidate.text).map((token) => ({ ...token, start: token.start + candidate.start,
-      end: token.end + candidate.start, mode: "lexical" })));
+    tokens(candidate.text).flatMap((token) => {
+      const first = candidate.source[token.start];
+      const last = candidate.source[token.end - 1];
+      return first && last ? [{ ...token, start: first.start + candidate.start,
+        end: last.end + candidate.start, mode: "lexical" }] : [];
+    }));
   return {
     async highlight(snapshot, token) {
       if (token?.isCancellationRequested) return [];
