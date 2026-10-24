@@ -187,6 +187,7 @@ async function main() {
         "from graphql_desk import parse\ndocument = parse('query ParserQuery { selected }')\nparsed_name = document.definitions[0].name.value\n")] : []),
       fs.writeFile(path.join(workspace, "fragments.py"), "from graphql_desk_generated.default import graphql\ncard = graphql('fragment Card on User { name }')\n"),
       ...(suite === "lifecycle" ? [fs.writeFile(path.join(workspace, "lifecycle_calls.py"), "from graphql_desk_generated.default import graphql\nextra = graphql('query Extra { user { id } }')\n")] : []),
+      ...(suite === "lifecycle" ? [fs.writeFile(path.join(workspace, "preserved_user.py"), "value = 'saved'\n")] : []),
     ]);
     const runtimePackage = path.join(workspace, "graphql_desk_generated");
     await fs.mkdir(path.join(runtimePackage, "sources"), { recursive: true });
