@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
+const { spawn: spawnProcess } = require("node:child_process");
 const { EventEmitter } = require("node:events");
 const { PassThrough, Writable } = require("node:stream");
 const { createAnalysisWorker, MAX_FRAME_BYTES } = require("../src/analysisWorker");
@@ -15,6 +16,37 @@ const python = process.env.GRAPHQL_DESK_PYTHON ?? path.join(root, ".venv", proce
 const message = workspace => ({ op: "prepare", workspace, candidates: [], buffers: [], documents: [], editor_fallback: null });
 const reply = { ok: true, id: "job", local_schemas: [], remote_schemas: [], required_buffers: [] };
 const generic = { message: "GraphQL Desk worker request failed" };
+
+test("hung process times out and a fresh worker succeeds", async t => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-hung-worker-"));
+  const workspace = path.join(temporary, "workspace");
+  await fs.mkdir(workspace);
+  let hung;
+  let hungExit;
+  const spawn = (command, args, options) => {
+    if (command === python && !hung) {
+      hung = spawnProcess(process.execPath, ["-e", "process.stdin.resume()"], options);
+      hungExit = new Promise(resolve => hung.once("exit", (code, signal) => resolve({ code, signal })));
+      return hung;
+    }
+    return spawnProcess(command, args, options);
+  };
+  const worker = createAnalysisWorker({ python, workspace, isTrusted: () => true, timeoutMs: 3000, spawn });
+  t.after(async () => {
+    worker.dispose();
+    await fs.rm(temporary, { recursive: true, force: true });
+  });
+
+  await assert.rejects(worker.request(message(workspace)), generic);
+  const exit = await hungExit;
+  assert.ok(exit.code !== null || exit.signal !== null);
+  const result = await worker.request(message(workspace));
+  assert.equal(result.ok, true);
+  assert.equal(typeof result.id, "string");
+  assert.deepEqual(result.local_schemas, []);
+  assert.deepEqual(result.remote_schemas, []);
+  assert.deepEqual(result.required_buffers, []);
+});
 
 function fakeSpawn(onWrite = () => {}) {
   const children = [];
