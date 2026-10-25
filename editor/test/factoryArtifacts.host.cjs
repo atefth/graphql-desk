@@ -189,13 +189,15 @@ exports.run = async () => {
     const hoverIndex = trace.findIndex(item => item.stage === "pylance.hover.indexed");
     assert.ok(artifactsIndex >= 0 && publicationIndex > artifactsIndex && hoverIndex > publicationIndex,
       JSON.stringify(trace));
-    const initialPublication = trace[publicationIndex];
-    const publishedRoot = path.resolve(workspace, initialPublication.setting);
-    const rootAtHover = trace.filter(item => item.stage === "pylance.stubPath.changed" && item.elapsedMs <= trace[hoverIndex].elapsedMs).at(-1)?.setting;
-    assert.equal(publishedRoot, path.resolve(workspace, rootAtHover));
+    const hoverElapsedMs = trace[hoverIndex].elapsedMs;
+    const publicationAtHover = trace.filter(item => item.stage === "generation.publish.returned" && item.changed &&
+      item.setting.includes("/generations/") && item.elapsedMs <= hoverElapsedMs).at(-1);
+    const rootAtHover = trace.filter(item => item.stage === "pylance.stubPath.changed" && item.elapsedMs <= hoverElapsedMs).at(-1)?.setting;
+    assert.ok(publicationAtHover, JSON.stringify(trace));
+    assert.equal(path.resolve(workspace, publicationAtHover.setting), path.resolve(workspace, rootAtHover));
     await Promise.all([
-      fs.access(path.join(publishedRoot, "complete.json")),
-      fs.access(path.join(publishedRoot, "graphql_desk_generated", "default.pyi")),
+      fs.access(path.join(workspace, publicationAtHover.setting, "complete.json")),
+      fs.access(path.join(workspace, publicationAtHover.setting, "graphql_desk_generated", "default.pyi")),
     ]);
     results.pylance.resultType = observed.result;
     results.pylance.selectedType = observed.selected;
