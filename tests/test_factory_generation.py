@@ -1827,7 +1827,7 @@ from generated.main import graphql
 from generated.sources.main import QueryResult,QueryVariables
 from local_types import ValueList
 query=graphql('query Read($value:String!){greeting echo(value:$value)}')
-value:ValueList=['hello',None]
+value:ValueList=['hello',1,None]
 assert graphql.scalar('String',value) is value
 variables:QueryVariables={'value':value}
 if TYPE_CHECKING:
@@ -1836,8 +1836,8 @@ if TYPE_CHECKING:
  assert_type(result['echo'],ValueList)
  assert_type(variables['value'],ValueList)
  wrong: list[str] = result['greeting'] # error
- bad_variables:QueryVariables={'value':[1]} # error
- bad_scalar=graphql.scalar('String',[1]) # error
+ bad_variables:QueryVariables={'value':[1.5]} # error
+ bad_scalar=graphql.scalar('String',[1.5]) # error
 """
         modules = (
             ModuleSnapshot("p", "main", "file:///main.py", 1, source),
@@ -1847,7 +1847,7 @@ if TYPE_CHECKING:
                 "file:///local_types.py",
                 1,
                 "from typing import TypeAlias,Union\n"
-                "ValueList:TypeAlias=list[Union[str,None]]\n",
+                "ValueList:TypeAlias=list[Union[str|int,None]]\n",
             ),
         )
         resolved = resolve_project(
