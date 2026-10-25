@@ -128,7 +128,10 @@ async function run() {
   // Source edits use buffer text; no file save or generated overlay is involved.
   await vscode.window.showTextDocument(main);
   await replace(main, 'from graphql_desk import gql\nq=gql("{user {name}}")\n');
-  await until(() => diagnostics(main), values => values.length === 0, "Repair clears stale diagnostics");
+  const repairedNamePosition = main.positionAt(main.getText().indexOf("name") + 1);
+  await until(async () => diagnostics(main).length === 0 && /Display name/.test(hoverText(
+    await vscode.commands.executeCommand("vscode.executeHoverProvider", main.uri, repairedNamePosition))),
+  value => value, "Repair clears stale diagnostics and restores fresh GraphQL hover");
   await replace(main, 'from graphql_desk import gql\nq=gql("{user {differentMissing}}")\n');
   const changed = await until(() => diagnostics(main), values => values.some(item => /differentMissing/.test(item.message)), "Unsaved source publishes only new diagnostics");
   assert.equal(main.getText(changed.find(item => /differentMissing/.test(item.message)).range), "differentMissing");

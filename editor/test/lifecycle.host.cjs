@@ -457,8 +457,20 @@ exports.run = async () => {
       if (/selected:\s*(?:str|String)\b/.test(restoredConfigHover)) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     } while (Date.now() < configRestoreDeadline);
+    let restoredConfigGeneration;
+    try { restoredConfigGeneration = await readGeneration(); } catch { /* Keep the hover and path even if the generation is incomplete. */ }
+    const restoredConfigProbe = {
+      hover: restoredConfigHover,
+      stubPath: stubPath(),
+      analysisId: restoredConfigGeneration?.manifest?.analysisId,
+      operations: restoredConfigGeneration?.manifest?.operationManifest.flatMap(group => group.operations
+        .map(({ binding, status, declaration_path }) => ({ binding, status, declaration_path }))),
+      stubs: restoredConfigGeneration?.files.map(([file]) => path.relative(workspace, file).replaceAll("\\", "/")),
+      configDirty: configDocument.isDirty,
+      configRestored: configDocument.getText() === originalConfig,
+    };
     assert.match(restoredConfigHover, /selected:\s*(?:str|String)\b/,
-      `Restoring the original config should restore schema typing: ${String(restoredConfigHover).slice(0, 2000)}`);
+      `Restoring the original config should restore schema typing: ${JSON.stringify(restoredConfigProbe).slice(0, 2000)}`);
     const settingsAfterRace = JSON.parse(await fs.readFile(settingsPath, "utf8"));
     const settingsWithoutManagedPath = { ...settingsAfterRace };
     const managedStubPath = settingsWithoutManagedPath["python.analysis.stubPath"];
