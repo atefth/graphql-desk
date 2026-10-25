@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from .config import ProjectConfig, SchemaConfig
+from .external_type_sources import capture_external_type_sources
 from .project import effective_project, select_schema, validate_project_ownership
 from .schema_loading import load_local_schema
 from .schema_types import render_schema_types
@@ -130,6 +131,30 @@ def _resolve_local_mapping_symbols(
     return resolve_type_symbols(
         symbols, modules=modules, project_id=config.path.as_uri()
     )
+
+
+def _resolve_interpreter_mapping_symbols(
+    config: ProjectConfig, symbols: tuple[str, ...]
+) -> tuple[TypeSymbolResolution, ...]:
+    roots: list[Path] = []
+    local_roots = (config.root, *config.source_roots)
+    for value in sys.path:
+        if not value:
+            continue
+        try:
+            root = Path(value).resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if not root.is_dir() or any(
+            root == local or root.is_relative_to(local) for local in local_roots
+        ):
+            continue
+        roots.append(root)
+    project_id = config.path.as_uri() + "#interpreter"
+    modules = capture_external_type_sources(
+        symbols, search_roots=tuple(roots), project_id=project_id
+    )
+    return resolve_type_symbols(symbols, modules=modules, project_id=project_id)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -261,11 +286,58 @@ def _doctor(
                     file=sys.stderr,
                 )
             if external:
-                print(
-                    f"schema {schema.name}: external mapping symbols unverified: "
-                    f"{external}",
-                    file=sys.stderr,
+                external_symbols = tuple(
+                    item.symbol for item in resolutions if item.status == "external"
                 )
+                try:
+                    environment_resolutions = _resolve_interpreter_mapping_symbols(
+                        config, external_symbols
+                    )
+                except (OSError, ValueError, RuntimeError, UnicodeError):
+                    print(
+                        f"schema {schema.name}: interpreter mapping symbols "
+                        f"unverified: {external}",
+                        file=sys.stderr,
+                    )
+                else:
+                    interpreter_resolved = sum(
+                        item.status == "resolved" for item in environment_resolutions
+                    )
+                    interpreter_unverified = sum(
+                        item.status == "external" for item in environment_resolutions
+                    )
+                    interpreter_unavailable = [
+                        item
+                        for item in environment_resolutions
+                        if item.status not in {"resolved", "external"}
+                    ]
+                    if interpreter_resolved:
+                        print(
+                            f"schema {schema.name}: interpreter mapping symbols "
+                            f"resolved (static names only): {interpreter_resolved}",
+                            file=sys.stderr,
+                        )
+                    if interpreter_unverified:
+                        print(
+                            f"schema {schema.name}: external mapping symbols "
+                            f"unverified: {interpreter_unverified}",
+                            file=sys.stderr,
+                        )
+                    if interpreter_unavailable:
+                        environment_statuses: dict[str, int] = {}
+                        for item in interpreter_unavailable:
+                            environment_statuses[item.status] = (
+                                environment_statuses.get(item.status, 0) + 1
+                            )
+                        summary = ", ".join(
+                            f"{status}={count}"
+                            for status, count in sorted(environment_statuses.items())
+                        )
+                        print(
+                            f"schema {schema.name}: interpreter mapping symbols "
+                            f"unavailable: {summary}",
+                            file=sys.stderr,
+                        )
             if unavailable:
                 statuses: dict[str, int] = {}
                 for item in unavailable:
