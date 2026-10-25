@@ -21,6 +21,14 @@ exports.run = async () => {
   const results = { host: vscode.version, pylance: {}, generatedFiles: true, lifecycle: { coldTrace: [], skipTraces: [] } };
   const mark = (stage, details = {}) => results.lifecycle.coldTrace.push({ stage, elapsedMs: Date.now() - started, ...details });
   const workerCalls = new Map();
+  const consumerUri = vscode.Uri.file(path.join(process.env.GRAPHQL_DESK_TEST_WORKSPACE, "consumer.py"));
+  const settingChanges = vscode.workspace.onDidChangeConfiguration(event => {
+    if (event.affectsConfiguration("python.analysis.stubPath", consumerUri)) {
+      mark("pylance.stubPath.changed", {
+        setting: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""),
+      });
+    }
+  });
   const createOutputChannel = vscode.window.createOutputChannel.bind(vscode.window);
   vscode.window.createOutputChannel = (name, ...args) => {
     const channel = createOutputChannel(name, ...args);
@@ -54,14 +62,15 @@ exports.run = async () => {
         if (property === "request") return async (message, requestOptions) => {
           const count = (workerCalls.get(message.op) ?? 0) + 1;
           workerCalls.set(message.op, count);
-          if (count === 1) mark(`worker.${message.op}.started`, { candidates: message.candidates?.length, buffers: message.buffers?.length });
+          const traceCall = count === 1 || message.op === "artifacts";
+          if (traceCall) mark(`worker.${message.op}.started`, { candidates: message.candidates?.length, buffers: message.buffers?.length });
           try {
             const reply = await target.request(message, requestOptions);
-            if (count === 1) mark(`worker.${message.op}.returned`, { ok: reply.ok, projects: reply.projects?.length,
+            if (traceCall) mark(`worker.${message.op}.returned`, { ok: reply.ok, projects: reply.projects?.length,
               files: reply.projects?.reduce((total, project) => total + (project.files?.length ?? 0), 0),
               unavailableSchemas: reply.unavailable_schemas?.length });
             return reply;
-          } catch (error) { if (count === 1) mark(`worker.${message.op}.failed`, { error: String(error) }); throw error; }
+          } catch (error) { if (traceCall) mark(`worker.${message.op}.failed`, { error: String(error) }); throw error; }
         };
         const value = Reflect.get(target, property, target);
         return typeof value === "function" ? value.bind(target) : value;
@@ -76,9 +85,31 @@ exports.run = async () => {
         return handle;
       } catch (error) { mark("publisher.create.failed", { error: String(error) }); throw error; }
     };
+    const generationModule = require("../src/analysisGenerations");
+    const createGenerations = generationModule.createAnalysisGenerations;
+    generationModule.createAnalysisGenerations = (...args) => {
+      const publisher = createGenerations(...args);
+      return new Proxy(publisher, { get(target, property) {
+        if (property === "recover" || property === "publish") return async (...methodArgs) => {
+          mark(`generation.${property}.started`);
+          try {
+            const changed = await target[property](...methodArgs);
+            mark(`generation.${property}.returned`, {
+              changed: Boolean(changed),
+              setting: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""),
+            });
+            return changed;
+          } catch (error) {
+            mark(`generation.${property}.failed`, { error: error?.name || "Error" });
+            throw error;
+          }
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    };
     const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
     assert.ok(extension, "GraphQL Desk extension must be loaded in the host");
-    const consumerUri = vscode.Uri.file(path.join(process.env.GRAPHQL_DESK_TEST_WORKSPACE, "consumer.py"));
     const consumer = await vscode.workspace.openTextDocument(consumerUri);
     await vscode.window.showTextDocument(consumer, { preview: false });
     const selectedStubRoot = () => path.resolve(workspace, vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ".graphql-desk/typings"));
@@ -122,6 +153,20 @@ exports.run = async () => {
     }, "generated result and variable types");
     results.pylance = { ...results.pylance, ...observed };
     assert.ok(ready, JSON.stringify(observed));
+    const trace = results.lifecycle.coldTrace;
+    const artifactsIndex = trace.findIndex(item => item.stage === "worker.artifacts.returned" && item.ok && item.files > 0);
+    const publicationIndex = trace.findIndex((item, index) => index > artifactsIndex &&
+      item.stage === "generation.publish.returned" && item.changed && item.setting.includes("/generations/"));
+    const hoverIndex = trace.findIndex(item => item.stage === "pylance.hover.indexed");
+    assert.ok(artifactsIndex >= 0 && publicationIndex > artifactsIndex && hoverIndex > publicationIndex,
+      JSON.stringify(trace));
+    const initialPublication = trace[publicationIndex];
+    const publishedRoot = path.resolve(workspace, initialPublication.setting);
+    assert.equal(publishedRoot, selectedStubRoot());
+    await Promise.all([
+      fs.access(path.join(publishedRoot, "complete.json")),
+      fs.access(path.join(publishedRoot, "graphql_desk_generated", "default.pyi")),
+    ]);
     results.pylance.resultType = observed.result;
     results.pylance.selectedType = observed.selected;
     results.pylance.countType = observed.count;
@@ -492,6 +537,7 @@ exports.run = async () => {
     results.outcome = "generated-factory-artifacts-failed";
     throw error;
   } finally {
+    settingChanges.dispose();
     require("node:fs").writeFileSync(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
     console.log(`GRAPHQL_DESK_FACTORY_ARTIFACTS ${JSON.stringify(results)}`);
   }
