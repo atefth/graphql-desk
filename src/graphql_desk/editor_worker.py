@@ -165,6 +165,11 @@ def _analysis_input_fingerprint(snapshot: EditorSnapshot) -> str:
                     for item in schemas
                     if item["project"] == project
                 ),
+                "external_mapping_modules": sorted(
+                    (item.module, item.uri, item.source)
+                    for item in snapshot.external_mapping_modules
+                    if item.project == project + "#interpreter"
+                ),
             }
         )
     payload = json.dumps(
@@ -821,7 +826,11 @@ class EditorWorker:
             remote_schemas=remote_schemas,
         )
         request = snapshot.request
-        analysis = analyze_editor_snapshot_details(request, resolver=self._resolver)
+        analysis = analyze_editor_snapshot_details(
+            request,
+            resolver=self._resolver,
+            external_mapping_modules=snapshot.external_mapping_modules,
+        )
         self._analysis = analysis
         self._snapshot = self._previous = snapshot
         self._schema_buffers = schema_buffers

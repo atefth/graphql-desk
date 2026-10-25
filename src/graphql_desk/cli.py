@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import NoReturn
 
 from .config import ProjectConfig, SchemaConfig
-from .external_type_sources import capture_external_type_sources
+from .external_type_sources import (
+    capture_external_type_sources,
+    interpreter_type_roots,
+)
 from .project import effective_project, select_schema, validate_project_ownership
 from .schema_loading import load_local_schema
 from .schema_types import render_schema_types
@@ -136,23 +139,15 @@ def _resolve_local_mapping_symbols(
 def _resolve_interpreter_mapping_symbols(
     config: ProjectConfig, symbols: tuple[str, ...]
 ) -> tuple[TypeSymbolResolution, ...]:
-    roots: list[Path] = []
-    local_roots = (config.root, *config.source_roots)
-    for value in sys.path:
-        if not value:
-            continue
-        try:
-            root = Path(value).resolve(strict=True)
-        except (OSError, RuntimeError):
-            continue
-        if not root.is_dir() or any(
-            root == local or root.is_relative_to(local) for local in local_roots
-        ):
-            continue
-        roots.append(root)
+    roots = interpreter_type_roots(
+        sys.path, excluded_roots=(config.root, *config.source_roots)
+    )
     project_id = config.path.as_uri() + "#interpreter"
     modules = capture_external_type_sources(
-        symbols, search_roots=tuple(roots), project_id=project_id
+        symbols,
+        search_roots=roots,
+        project_id=project_id,
+        shadow_roots=(config.root, *config.source_roots),
     )
     return resolve_type_symbols(symbols, modules=modules, project_id=project_id)
 

@@ -73,6 +73,60 @@ def graph_inputs(
 
 
 class EditorSnapshotTests(unittest.TestCase):
+    def test_interpreter_mapping_sources_are_captured_and_refresh_the_snapshot(
+        self,
+    ) -> None:
+        mapping_config = (
+            _BASE
+            + 'scalars={Date={input="vendor_types.DateInput", '
+            + 'output="vendor_types.DateOutput"}}\n'
+        )
+        self.project(text=mapping_config)
+        self.write("schema.graphql", "scalar Date\ntype Query { date: Date }")
+        source = self.write(
+            "main.py", 'from graphql_desk import gql\nq=gql("{ date }")\n'
+        )
+        external_root = self.root / "interpreter" / "site-packages"
+        external_root.mkdir(parents=True)
+        external = external_root / "vendor_types.pyi"
+        external.write_text(
+            "class DateInput: ...\nclass DateOutput: ...\n", encoding="utf8"
+        )
+        with patch(
+            "graphql_desk.editor_snapshot.interpreter_type_roots",
+            return_value=(external_root,),
+        ):
+            snapshot = acquire_editor_snapshot(
+                workspace=self.root, candidates=(source,), generation=1
+            )
+            self.assertEqual(
+                [item.module for item in snapshot.external_mapping_modules],
+                ["vendor_types"],
+            )
+            result = analyze_editor_snapshot(
+                snapshot.request,
+                external_mapping_modules=snapshot.external_mapping_modules,
+            )
+            self.assertEqual(result["diagnostics"], [])
+            self.assertTrue(is_editor_snapshot_current(snapshot, candidates=(source,)))
+
+            external.write_text(
+                "class DateInput: ...\nclass Renamed: ...\n", encoding="utf8"
+            )
+            self.assertFalse(is_editor_snapshot_current(snapshot, candidates=(source,)))
+            self.write("vendor_types.py", "class LocalDate: ...\n")
+            shadowed = acquire_editor_snapshot(
+                workspace=self.root, candidates=(source,), generation=2
+            )
+            self.assertEqual(shadowed.external_mapping_modules, ())
+            shadowed_result = analyze_editor_snapshot(
+                shadowed.request,
+                external_mapping_modules=shadowed.external_mapping_modules,
+            )
+            diagnostics = cast(list[dict[str, object]], shadowed_result["diagnostics"])
+            diagnostic = diagnostics[0]
+            self.assertEqual(diagnostic["code"], "mapping-unverified")
+
     def test_supplied_remote_facts_are_explicit_current_and_stale_safe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

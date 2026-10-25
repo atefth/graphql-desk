@@ -11,7 +11,7 @@ from graphql import build_schema, introspection_from_schema
 
 from graphql_desk import source_graph
 from graphql_desk.editor_analysis import analyze_editor_json, analyze_editor_snapshot
-from graphql_desk.source_graph import IncrementalResolver
+from graphql_desk.source_graph import IncrementalResolver, ModuleSnapshot
 
 
 def module(
@@ -101,6 +101,77 @@ class EditorAnalysisTests(unittest.TestCase):
         diagnostics = [object_(item) for item in array(response["diagnostics"])]
         self.assertEqual([item["code"] for item in diagnostics], ["mapping-unresolved"])
         self.assertIn("Missing", cast(str, diagnostics[0]["message"]))
+
+    def test_interpreter_mapping_sources_verify_only_the_matching_project_schema(
+        self,
+    ) -> None:
+        payload = request("from graphql_desk import gql\nq=gql('{ date }')")
+        binding = object_(array(payload["bindings"])[0])
+        binding["schemas"] = ["events", "admin"]
+        binding["default_schema"] = "events"
+        binding["type_mappings"] = [
+            {
+                "schema_name": "events",
+                "scalars": [
+                    {
+                        "name": "Date",
+                        "input": "vendor_dates.DateInput",
+                        "output": "vendor_dates.DateOutput",
+                    }
+                ],
+                "enums": [],
+            }
+        ]
+        schema = object_(array(payload["schemas"])[0])
+        schema["schema_name"] = "events"
+        schema["text"] = "scalar Date\ntype Query { date: Date }"
+        cast(list[dict[str, object]], payload["schemas"]).append(
+            {
+                **schema,
+                "schema_name": "admin",
+                "token": "admin-schema",
+                "text": "type Query { status: String }",
+            }
+        )
+        external = ModuleSnapshot(
+            "p#interpreter",
+            "vendor_dates",
+            "file:///external/vendor_dates.pyi",
+            1,
+            "class DateInput: ...\nclass DateOutput: ...\n",
+        )
+
+        response = analyze_editor_snapshot(
+            payload, external_mapping_modules=(external,)
+        )
+        self.assertEqual(response["diagnostics"], [])
+
+        missing = ModuleSnapshot(
+            external.project,
+            external.module,
+            external.uri,
+            2,
+            "class DateInput: ...\nclass Different: ...\n",
+        )
+        response = analyze_editor_snapshot(payload, external_mapping_modules=(missing,))
+        diagnostics = [object_(item) for item in array(response["diagnostics"])]
+        self.assertEqual([item["code"] for item in diagnostics], ["mapping-unresolved"])
+
+        isolated = ModuleSnapshot(
+            "other#interpreter",
+            external.module,
+            external.uri,
+            1,
+            external.source,
+        )
+        response = analyze_editor_snapshot(
+            payload, external_mapping_modules=(isolated,)
+        )
+        diagnostics = [object_(item) for item in array(response["diagnostics"])]
+        self.assertEqual(
+            [item["code"] for item in diagnostics],
+            ["mapping-unverified", "mapping-unverified"],
+        )
 
     def test_explicit_resolver_reuses_only_source_facts(self) -> None:
         payload = request()

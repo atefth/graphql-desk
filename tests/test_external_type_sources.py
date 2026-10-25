@@ -5,11 +5,29 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from graphql_desk.external_type_sources import capture_external_type_sources
+from graphql_desk.external_type_sources import (
+    capture_external_type_sources,
+    interpreter_type_roots,
+)
 from graphql_desk.source_graph import resolve_type_symbols
 
 
 class ExternalTypeSourcesTests(unittest.TestCase):
+    def test_interpreter_roots_exclude_workspace_and_keep_unique_canonical_paths(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            environment = root / "environment"
+            workspace.mkdir()
+            environment.mkdir()
+            roots = interpreter_type_roots(
+                (str(workspace), str(environment), str(environment)),
+                excluded_roots=(workspace,),
+            )
+        self.assertEqual(roots, (environment.resolve(),))
+
     def test_captures_stub_class_and_package_reexport_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -38,6 +56,29 @@ class ExternalTypeSourcesTests(unittest.TestCase):
             )[0].status,
             "resolved",
         )
+
+    def test_workspace_module_candidate_blocks_unrelated_interpreter_package(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            environment = root / "site-packages"
+            workspace.mkdir()
+            environment.mkdir()
+            (workspace / "vendor_types.py").write_text(
+                "class ProjectDate: ...\n", encoding="utf-8"
+            )
+            (environment / "vendor_types.pyi").write_text(
+                "class InstalledDate: ...\n", encoding="utf-8"
+            )
+            modules = capture_external_type_sources(
+                ("vendor_types.InstalledDate",),
+                search_roots=(environment,),
+                project_id="environment",
+                shadow_roots=(workspace,),
+            )
+        self.assertEqual(modules, ())
 
     def test_missing_external_symbol_remains_unverified(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

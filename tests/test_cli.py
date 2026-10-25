@@ -292,6 +292,33 @@ class CLITests(unittest.TestCase):
         )
         self.assertNotIn("external mapping symbols unverified", err)
 
+    def test_doctor_does_not_verify_site_package_shadowed_by_unselected_project_module(
+        self,
+    ) -> None:
+        self.schema.write_text(
+            "scalar Date\ntype Query { date: Date }", encoding="utf8"
+        )
+        (self.root / "main.py").write_text("pass\n", encoding="utf8")
+        (self.root / "vendor_types.py").write_text(
+            "class LocalDate: ...\n", encoding="utf8"
+        )
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'include=["main.py"]\n'
+            'scalars={Date="vendor_types.InstalledDate"}\n',
+            encoding="utf8",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "vendor_types.pyi").write_text(
+                "class InstalledDate: ...\n", encoding="utf8"
+            )
+            with patch("graphql_desk.cli.sys.path", [directory, *sys.path]):
+                _code, _out, err = self.invoke(["doctor"])
+
+        self.assertIn("external mapping symbols unverified: 1", err)
+        self.assertNotIn("interpreter mapping symbols resolved", err)
+
     def test_doctor_reports_external_non_type_without_claiming_verification(
         self,
     ) -> None:
