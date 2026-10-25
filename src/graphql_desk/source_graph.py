@@ -1134,6 +1134,27 @@ class _Graph:
                 "Type alias constructor namespace is not trusted external"
             )
         if constructor.kind == "external" and constructor.text in {
+            "typing.Annotated",
+            "typing_extensions.Annotated",
+        }:
+            arguments = node.slice.elts if isinstance(node.slice, ast.Tuple) else []
+            if len(arguments) < 2 or not isinstance(
+                arguments[0], (ast.Name, ast.Attribute)
+            ):
+                raise _Unresolved("Annotated aliases require a named type and metadata")
+            target = self.expression(module, arguments[0], before, active)
+            if target.kind not in {"type", "external"} or target.text in {
+                "typing.TypeAlias",
+                "typing_extensions.TypeAlias",
+            }:
+                raise _Unresolved("Annotated alias target is not an established type")
+            return _Value(
+                target.kind,
+                f"{module.snapshot.module}.{name}",
+                dependencies=constructor.dependencies | target.dependencies,
+                class_base=False,
+            )
+        if constructor.kind == "external" and constructor.text in {
             "typing.Literal",
             "typing_extensions.Literal",
         }:

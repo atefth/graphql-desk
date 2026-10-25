@@ -64,6 +64,10 @@ PEP613 aliases (`Alias: TypeAlias = ClassName`) also reuse those checks when the
 marker resolves to uncaptured `typing.TypeAlias` or `typing_extensions.TypeAlias`.
 On Python 3.12 and newer, non-generic PEP 695 aliases (`type Alias = Target`) use the
 same bounded resolver; generic PEP 695 aliases remain unresolved.
+Explicit `Annotated` aliases accept only `typing.Annotated` or
+`typing_extensions.Annotated` with a named/qualified first type argument and at
+least one metadata argument. Metadata is opaque and never resolved or evaluated;
+the alias retains its own identity and cannot be used as a class base.
 Direct `typing.NewType` and `typing_extensions.NewType` assignments with a literal
 name and named class supertype resolve as non-base mapping types. Their call is
 never executed; dynamic arguments and using a NewType as a class base stay
