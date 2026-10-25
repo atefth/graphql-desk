@@ -26,7 +26,7 @@ class ExternalTypeSourcesTests(unittest.TestCase):
                 (str(workspace), str(environment), str(environment)),
                 excluded_roots=(workspace,),
             )
-        self.assertEqual(roots, (environment,))
+        self.assertEqual(roots, (environment.resolve(),))
 
     def test_captures_stub_class_and_package_reexport_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
