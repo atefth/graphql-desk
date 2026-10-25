@@ -91,8 +91,12 @@ async function run() {
   await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", selected.uri, position), value => /Display name/.test(hoverText(value)), "Activated GraphQL hover");
   const pythonHover = await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", selected.uri, selected.positionAt(selected.getText().indexOf("outside") + 2)), value => /outside/.test(hoverText(value)) && /int|Literal/.test(hoverText(value)), "Pylance native hover must coexist");
   assert.doesNotMatch(hoverText(pythonHover), /Display name/);
-  const definitions = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", selected.uri, position);
-  assert.ok(definitions.map(target).some(value => value.uri.toString() === documents.get("schema.graphql").uri.toString()));
+  const schemaUri = documents.get("schema.graphql").uri.toString();
+  const definitions = await until(
+    () => vscode.commands.executeCommand("vscode.executeDefinitionProvider", selected.uri, position),
+    value => Array.isArray(value) && value.map(target).some(item => item.uri.toString() === schemaUri),
+    "Schema definition should resolve to schema.graphql",
+  );
   const fragments = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", selected.uri, selected.positionAt(selected.getText().indexOf("...Card") + 4));
   assert.ok(fragments.map(target).some(value => value.uri.toString() === documents.get("fragments.py").uri.toString()));
   await until(() => diagnostics(selected), values => !values.some(item => /Unknown directive/.test(item.message)), "Configured client directive must survive production capture");

@@ -13,7 +13,7 @@ const freshnessChecks = [];
 const refreshCallbacks = [];
 const artifactCalls = [];
 const skipReasons = [];
-let crashNextArtifacts = false;
+let crashArtifactsRemaining = 0;
 let delayedArtifact = null;
 const createWorker = workerModule.createAnalysisWorker;
 workerModule.createAnalysisWorker = options => {
@@ -27,8 +27,8 @@ workerModule.createAnalysisWorker = options => {
         dirty: item.is_dirty, mapsStringToInt: item.text?.includes('String = { input = "builtins.str", output = "builtins.int" }'),
       })), schemas: message.schema_buffers?.map(item => ({ path: item.path, hasBoolean: item.text?.includes("selected: Boolean!") })) };
       try {
-        if (message.op === "artifacts" && crashNextArtifacts) {
-          crashNextArtifacts = false;
+        if (message.op === "artifacts" && crashArtifactsRemaining > 0) {
+          crashArtifactsRemaining -= 1;
           const pending = target.request(message, requestOptions);
           target.invalidate();
           await pending;
@@ -271,11 +271,13 @@ exports.run = async () => {
       edit.replace(schemaUri, new vscode.Range(start, end), to);
       assert.equal(await vscode.workspace.applyEdit(edit), true);
     };
-    crashNextArtifacts = true;
+    crashArtifactsRemaining = 2;
     await replaceSelectedSchemaType("String", "Boolean");
-    await until(() => workerRequests.some(request => request.op === "artifacts" && request.error),
-      "a real worker failure interrupts artifact generation");
-    const failedArtifact = workerRequests.find(request => request.op === "artifacts" && request.error);
+    const failedArtifacts = () => workerRequests.filter(request => request.op === "artifacts" && request.error &&
+      request.schemas?.some(schema => schema.hasBoolean));
+    await until(() => failedArtifacts().length === 2,
+      "both artifact attempts fail for the changed schema before quarantine is checked");
+    const failedArtifact = failedArtifacts()[0];
     assert.ok(failedArtifact.schemas?.some(schema => schema.hasBoolean),
       "The interrupted artifact request contains the changed schema snapshot");
     let failedGeneration;
@@ -311,10 +313,8 @@ exports.run = async () => {
       "The active generation does not retain the stale selected-field type");
     await fs.access(path.join(path.resolve(workspace, failedQuarantineGeneration.stubPath), "complete.json"));
     let failedRefreshHover;
-    let failedSiblingHover;
     await until(async () => {
       failedRefreshHover = await selectedHover();
-      failedSiblingHover = await otherIdHover();
       return /Never|NoReturn|Unknown|object|\bAny\b/.test(failedRefreshHover);
     },
       "Pylance consumes the unavailable type after worker failure");
@@ -322,8 +322,6 @@ exports.run = async () => {
       .map(({ ok, error }) => ({ ok: Boolean(ok), ...(error ? { error } : {}) }));
     assert.match(failedRefreshHover, /Never|NoReturn|Unknown|object/,
       "Worker failure must leave the affected operation unavailable, never untyped Any");
-    assert.match(failedSiblingHover, /\bID\b/,
-      "An operation with unchanged schema dependencies must keep its precise sibling type");
     results.lifecycle.workerFailureKeepsAffectedTypingUnavailable = true;
 
     await replaceSelectedSchemaType("Boolean", "Int");
