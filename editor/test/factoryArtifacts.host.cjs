@@ -1,6 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 const vscode = require("vscode");
 const fs = require("node:fs/promises");
 const artifactModule = require("../src/ownedAnalysisArtifacts");
@@ -30,6 +31,19 @@ exports.run = async () => {
       });
     }
   });
+  const executeCommand = vscode.commands.executeCommand.bind(vscode.commands);
+  vscode.commands.executeCommand = async (command, ...args) => {
+    if (command !== "python.analysis.restartLanguageServer") return executeCommand(command, ...args);
+    mark("pylance.restart.started", { setting: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", "") });
+    try {
+      const result = await executeCommand(command, ...args);
+      mark("pylance.restart.returned", { setting: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", "") });
+      return result;
+    } catch (error) {
+      mark("pylance.restart.failed", { error: String(error) });
+      throw error;
+    }
+  };
   const createOutputChannel = vscode.window.createOutputChannel.bind(vscode.window);
   vscode.window.createOutputChannel = (name, ...args) => {
     const channel = createOutputChannel(name, ...args);
@@ -83,7 +97,16 @@ exports.run = async () => {
       try {
         const handle = createArtifacts(...args);
         mark("publisher.create.returned", { files: args[4]?.length });
-        return handle;
+        return new Proxy(handle, { get(target, property) {
+          if (property === "publish") return async (...publishArgs) => {
+            const changed = await target.publish(...publishArgs);
+            const signature = createHash("sha256").update(JSON.stringify(publishArgs[0])).digest("hex").slice(0, 12);
+            mark("publisher.publish.returned", { files: publishArgs[0]?.length, root: args[2], generatedPackage: args[3], changed, signature });
+            return changed;
+          };
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        } });
       } catch (error) { mark("publisher.create.failed", { error: String(error) }); throw error; }
     };
     const generationModule = require("../src/analysisGenerations");
