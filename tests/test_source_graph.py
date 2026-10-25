@@ -1878,7 +1878,9 @@ class SourceGraphTests(unittest.TestCase):
         snapshots = (
             module(
                 "models",
-                "from typing import TypeAlias\n"
+                "import typing\n"
+                "from typing import TypeAlias, Union\n"
+                "from typing_extensions import Union as ExtUnion\n"
                 "from typing_extensions import TypedDict\n"
                 "class Data(TypedDict):\n value: str\n"
                 "Maybe:TypeAlias=str|None\nReverse:TypeAlias=None|bool\n"
@@ -1886,7 +1888,11 @@ class SourceGraphTests(unittest.TestCase):
                 "Items:TypeAlias=list[Maybe]\n"
                 "NullableItems:TypeAlias=list[str|None]\n"
                 "MixedItems:TypeAlias=list[str|int]\n"
-                "TripleItems:TypeAlias=list[str|int|None]",
+                "TripleItems:TypeAlias=list[str|int|None]\n"
+                "LegacyItems:TypeAlias=list[Union[str,None]]\n"
+                "ExtLegacyItems:TypeAlias=list[ExtUnion[bool,None]]\n"
+                "QualifiedLegacyItems:TypeAlias=list[typing.Union[str,int,None]]\n"
+                "LegacyScalar:TypeAlias=Union[str,int,None]",
             ),
             module("exports", "from models import Alias as Public"),
         )
@@ -1899,6 +1905,10 @@ class SourceGraphTests(unittest.TestCase):
             "models.NullableItems",
             "models.MixedItems",
             "models.TripleItems",
+            "models.LegacyItems",
+            "models.ExtLegacyItems",
+            "models.QualifiedLegacyItems",
+            "models.LegacyScalar",
             "exports.Public",
         )
         result = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
@@ -1914,6 +1924,7 @@ class SourceGraphTests(unittest.TestCase):
             "from exports import Public\nclass Bad(Public): pass",
             "from models import DataMaybe\nclass Bad(DataMaybe,total=False): pass",
             "from models import Reverse\nclass Bad(Reverse): pass",
+            "from models import LegacyScalar\nclass Bad(LegacyScalar): pass",
         ):
             self.assertEqual(
                 resolve_type_symbols(
@@ -1939,6 +1950,19 @@ class SourceGraphTests(unittest.TestCase):
             "Alias:TypeAlias=list[None|None]",
             "Alias:TypeAlias=list[str|(int|None)]",
             "Alias:TypeAlias=list[str|list[int]]",
+            "Alias:TypeAlias=list[Union[str]]",
+            "Alias:TypeAlias=list[Union[None,None]]",
+            "Alias:TypeAlias=list[Union[str,list[int]]]",
+            "Alias:TypeAlias=list[Union[str,'int']]",
+            "Alias:TypeAlias=list[Union[str|int,None]]",
+            "Alias:TypeAlias=Union[str]",
+            "Alias:TypeAlias=Union[None,None]",
+            "Alias:TypeAlias=Union[str,list[int]]",
+            "Alias:TypeAlias=Union['str',None]",
+            "Alias:TypeAlias=Union[str|int,None]",
+            "Alias:TypeAlias=Union[Union[str,int],None]",
+            "import typing\ntyping.Union=object\n"
+            "Alias:TypeAlias=list[typing.Union[str,None]]",
             "Marker=TypeAlias\nAlias:Marker=str|None",
         ):
             with self.subTest(declaration=declaration):
@@ -1947,7 +1971,8 @@ class SourceGraphTests(unittest.TestCase):
                         ("bad.Alias",),
                         modules=(
                             module(
-                                "bad", "from typing import TypeAlias\n" + declaration
+                                "bad",
+                                "from typing import TypeAlias, Union\n" + declaration,
                             ),
                         ),
                         project_id="app",

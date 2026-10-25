@@ -1204,6 +1204,8 @@ class _Graph:
             "collections.abc.Mapping",
             "typing.Sequence",
             "typing.Optional",
+            "typing.Union",
+            "typing_extensions.Union",
         }:
             raise _Unresolved(
                 "Type alias subscriptions require a trusted supported constructor"
@@ -1230,15 +1232,58 @@ class _Graph:
             if not isinstance(argument, ast.Tuple) or len(argument.elts) != 2:
                 raise _Unresolved("Mapping aliases require two named types")
             arguments = argument.elts
+        if constructor.text in {"typing.Union", "typing_extensions.Union"}:
+            if not isinstance(argument, ast.Tuple) or len(argument.elts) < 2:
+                raise _Unresolved("Union aliases require at least two type arguments")
+            arguments = argument.elts
+        union_constructors = {"typing.Union", "typing_extensions.Union"}
         elements: list[_Value] = []
         for argument in arguments:
             operands = [argument]
-            while (
-                operands
-                and isinstance(operands[0], ast.BinOp)
-                and isinstance(operands[0].op, ast.BitOr)
+            if constructor.text not in union_constructors and isinstance(
+                argument, ast.Subscript
             ):
-                operands[:1] = [operands[0].left, operands[0].right]
+                nested_constructor = self.expression(
+                    module, argument.value, before, active
+                )
+                nested_union = (
+                    nested_constructor.kind == "external"
+                    and nested_constructor.text in union_constructors
+                    and self.trusted_external(module, nested_constructor)
+                )
+                if nested_union:
+                    nested_arguments = argument.slice
+                    if (
+                        not isinstance(nested_arguments, ast.Tuple)
+                        or len(nested_arguments.elts) < 2
+                        or any(
+                            isinstance(item, ast.BinOp)
+                            and isinstance(item.op, ast.BitOr)
+                            for item in nested_arguments.elts
+                        )
+                    ):
+                        raise _Unresolved(
+                            "Union aliases require direct named type arguments"
+                        )
+                    operands = list(nested_arguments.elts)
+            flat_operands: list[ast.expr] = []
+            for operand in operands:
+                if (
+                    constructor.text not in union_constructors
+                    and isinstance(operand, ast.BinOp)
+                    and isinstance(operand.op, ast.BitOr)
+                ):
+                    chain: list[ast.expr] = [operand]
+                    while (
+                        chain
+                        and isinstance(chain[0], ast.BinOp)
+                        and isinstance(chain[0].op, ast.BitOr)
+                    ):
+                        chain[:1] = [chain[0].left, chain[0].right]
+                    flat_operands.extend(chain)
+                else:
+                    flat_operands.append(operand)
+            operands = flat_operands
             if len(operands) > 1 and not all(
                 isinstance(operand, (ast.Name, ast.Attribute))
                 or isinstance(operand, ast.Constant)
@@ -1264,10 +1309,12 @@ class _Graph:
                     )
                 elements.append(element)
                 named += 1
-            if named == 0:
+            if named == 0 and constructor.text not in union_constructors:
                 raise _Unresolved(
                     "Container union arguments require at least one named type"
                 )
+        if constructor.text in union_constructors and not elements:
+            raise _Unresolved("Union aliases require at least one named type")
         return _Value(
             "external"
             if any(element.kind == "external" for element in elements)
@@ -1276,7 +1323,8 @@ class _Graph:
             dependencies=constructor.dependencies.union(
                 *(element.dependencies for element in elements)
             ),
-            class_base=constructor.text != "typing.Optional",
+            class_base=constructor.text != "typing.Optional"
+            and constructor.text not in union_constructors,
         )
 
     def export(

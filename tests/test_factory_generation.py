@@ -1602,7 +1602,8 @@ if TYPE_CHECKING:
                 "local_types",
                 "file:///local_types.py",
                 1,
-                "from typing import TypeAlias\nValueList:TypeAlias=list[str|None]\n",
+                "from typing import TypeAlias,Union\n"
+                "ValueList:TypeAlias=list[Union[str,None]]\n",
             ),
         )
         resolved = resolve_project(

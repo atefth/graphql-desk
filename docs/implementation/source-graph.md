@@ -89,13 +89,16 @@ aliased `bool` class bases remain rejected as non-subclassable. Constructors mus
 `typing_extensions` or `collections.abc` exports; shadowing and mutations invalidate that proof. External arguments stay
 unverified, and containers do not inherit TypedDict provenance from their element.
 Explicit binary unions accept two direct named/qualified type operands or literal
-None, with at least one named operand: `N | M`, `N | None` or `None | N`. Trusted
-external `typing.Optional[N]` retains its one named/qualified operand. They retain their own alias identity and
-never confer class-base or TypedDict capabilities through aliases or reexports.
-External operands remain unverified. Duplicate union operands also retain the
-conservative non-base policy: runtime and Pyright allow the tested reduced class
-base, while pinned mypy rejects it. Nested/direct multi-operand expressions and
-general Union evaluation remain unsupported.
+None, with at least one named operand: `N | M`, `N | None` or `None | N`. Flat
+`typing.Union[...]` and `typing_extensions.Union[...]` aliases use direct named
+operands or literal None, and may appear inside a supported container alias.
+Trusted external `typing.Optional[N]` retains its one named/qualified operand.
+Aliases retain their own identity and never confer class-base or TypedDict
+capabilities through aliases or reexports. External operands remain unverified.
+Duplicate union operands also retain the conservative non-base policy: runtime
+and Pyright allow the tested reduced class base, while pinned mypy rejects it.
+Nested PEP 604 unions, nested Union arguments, and general recursive Union
+evaluation remain unsupported.
 Trusted external `typing.Literal` and `typing_extensions.Literal` aliases accept
 one or more flat string, bytes, integer, boolean or None constants, plus one unary
 minus on an exact integer. They retain their own identity without class-base or
