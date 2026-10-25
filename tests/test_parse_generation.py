@@ -157,7 +157,7 @@ class ParseGenerationTests(unittest.TestCase):
         )
 
     def test_nested_literal_limit_keeps_other_overloads_and_fallback(self) -> None:
-        nested = "query Deep { " + "child { " * 150 + "id" + " }" * 150 + " }"
+        nested = "query Deep { " + "child { " * 200 + "id" + " }" * 200 + " }"
         safe = "query Safe { id }"
         modules = (
             ModuleSnapshot(
