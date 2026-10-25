@@ -1297,6 +1297,16 @@ class _Graph:
                         and isinstance(chain[0], ast.BinOp)
                         and isinstance(chain[0].op, ast.BitOr)
                     ):
+                        current = chain[0]
+                        if (
+                            isinstance(current.left, ast.BinOp)
+                            and isinstance(current.left.op, ast.BitOr)
+                            and module.span(current.left).start
+                            != module.span(current).start
+                        ):
+                            raise _Unresolved(
+                                "Parenthesized union groups are unsupported"
+                            )
                         chain[:1] = [chain[0].left, chain[0].right]
                     flat_operands.extend(chain)
                 else:

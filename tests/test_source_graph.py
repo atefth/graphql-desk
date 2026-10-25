@@ -1982,6 +1982,7 @@ class SourceGraphTests(unittest.TestCase):
             "Alias:TypeAlias=list[None]",
             "Alias:TypeAlias=list[None|None]",
             "Alias:TypeAlias=list[str|(int|None)]",
+            "Alias:TypeAlias=list[(str|int)|None]",
             "Alias:TypeAlias=list[str|list[int]]",
             "Alias:TypeAlias=list[Union[str]]",
             "Alias:TypeAlias=list[Union[None,None]]",
