@@ -292,6 +292,40 @@ class CLITests(unittest.TestCase):
         )
         self.assertNotIn("external mapping symbols unverified", err)
 
+    def test_doctor_resolves_local_type_with_external_stub_base(self) -> None:
+        self.schema.write_text(
+            "scalar Date\ntype Query { date: Date }", encoding="utf8"
+        )
+        (self.root / "local_types.py").write_text(
+            "from vendor_types import BaseModel\nclass Date(BaseModel): pass\n",
+            encoding="utf8",
+        )
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'scalars={Date="local_types.Date"}\n',
+            encoding="utf8",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            vendor = Path(directory) / "vendor_types"
+            vendor.mkdir()
+            (vendor / "__init__.pyi").write_text(
+                "from .models import BaseModel\n", encoding="utf8"
+            )
+            (vendor / "models.pyi").write_text(
+                "raise RuntimeError('must not execute')\nclass BaseModel: ...\n",
+                encoding="utf8",
+            )
+            with patch("graphql_desk.cli.sys.path", [directory, *sys.path]):
+                code, out, err = self.invoke(["doctor"])
+
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(
+            "interpreter mapping symbols resolved (static names only): 1", err
+        )
+        self.assertNotIn("mapping symbols unavailable", err)
+        self.assertNotIn("vendor_types", sys.modules)
+
     def test_doctor_does_not_verify_site_package_shadowed_by_unselected_project_module(
         self,
     ) -> None:
