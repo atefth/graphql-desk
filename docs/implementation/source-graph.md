@@ -74,14 +74,17 @@ never executed; dynamic arguments and using a NewType as a class base stay
 unresolved. Named or qualified type targets are supported. Unary collection aliases accept
 one existing named/qualified type operand. Trusted constructors include `list`, `set`,
 `frozenset`, `typing.List`, `typing.Set`, `typing.FrozenSet`, `typing.AbstractSet`,
-`typing.Sequence`, `collections.abc.Sequence` and `collections.abc.Set`.
+`typing.Sequence`, `collections.abc.Sequence`, and mutable counterparts
+`typing.MutableSequence`, `collections.abc.MutableSequence`,
+`typing.MutableSet`, and `collections.abc.MutableSet`.
 Variadic `tuple[N, ...]` retains its named/qualified element rule. Trusted `tuple` and `typing.Tuple` aliases also accept finite
 nonempty fixed tuples of named/qualified types, preserving variadic behavior,
 dependency/external propagation and valid class-base availability without element
 TypedDict provenance. Empty shapes, inline/nested expressions and misplaced
 ellipses remain unsupported. Mapping aliases support `dict[K, V]`, trusted `typing.Dict[K, V]`,
 `typing.Mapping[K, V]`
-and `collections.abc.Mapping[K, V]` with exactly two existing named/qualified types.
+and `collections.abc.Mapping[K, V]`, plus `typing.MutableMapping[K, V]` and
+`collections.abc.MutableMapping[K, V]`, with exactly two existing named/qualified types.
 They retain valid class-base availability and drop element TypedDict provenance;
 either external operand keeps the alias unverified. Captured or mutated namespace
 prefixes cannot establish a trusted external alias constructor. Supported builtin availability includes `bool`, while direct or

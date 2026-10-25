@@ -1191,9 +1191,13 @@ class _Graph:
             "builtins.set",
             "builtins.frozenset",
             "typing.List",
+            "typing.MutableSequence",
+            "typing.MutableSet",
             "typing.Set",
             "typing.FrozenSet",
             "typing.AbstractSet",
+            "collections.abc.MutableSequence",
+            "collections.abc.MutableSet",
             "collections.abc.Sequence",
             "collections.abc.Set",
             "typing.Dict",
@@ -1202,6 +1206,8 @@ class _Graph:
             "builtins.dict",
             "typing.Mapping",
             "collections.abc.Mapping",
+            "typing.MutableMapping",
+            "collections.abc.MutableMapping",
             "typing.Sequence",
             "typing.Optional",
             "typing.Union",
@@ -1228,6 +1234,8 @@ class _Graph:
             "typing.Dict",
             "typing.Mapping",
             "collections.abc.Mapping",
+            "typing.MutableMapping",
+            "collections.abc.MutableMapping",
         }:
             if not isinstance(argument, ast.Tuple) or len(argument.elts) != 2:
                 raise _Unresolved("Mapping aliases require two named types")
