@@ -668,6 +668,11 @@ BadResult() # error
                 True,
             ),
             ("from typing import TypeAlias\nText:TypeAlias=list[str]", True),
+            (
+                "from typing import TypeAlias,Annotated\n"
+                "Text:TypeAlias=Annotated[str,'graphql-desk']",
+                True,
+            ),
             ("from typing import TypeAlias\nText:TypeAlias=bool", True),
             ("from typing import TypeAlias\nText:TypeAlias=str|None", True),
             ("from typing import TypeAlias\nText:TypeAlias=str|int", True),
@@ -779,6 +784,11 @@ BadResult() # error
                             "for item in items:\n"
                             " assert graphql.scalar('String',item) is item",
                         )
+                elif "Annotated" in declaration:
+                    authored = source.replace(
+                        "value=Text('hello')", "value:Text='hello'"
+                    )
+                    authored += " bad=graphql.scalar('String',42)\n"
                 elif (
                     "|None" in declaration
                     or "None|" in declaration

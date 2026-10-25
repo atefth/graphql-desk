@@ -1752,6 +1752,78 @@ class SourceGraphTests(unittest.TestCase):
             ].dependencies,
         )
 
+    def test_annotated_aliases_resolve_only_the_underlying_named_type(self) -> None:
+        snapshots = (
+            module(
+                "models",
+                "from typing import Annotated, TypeAlias\n"
+                "import typing as t\n"
+                "from typing_extensions import Annotated as A\n"
+                "Text:TypeAlias=Annotated[str, object()]\n"
+                "Alias:TypeAlias=t.Annotated[Text, missing.metadata]\n"
+                "Extra:TypeAlias=A[Alias, another_call()]",
+            ),
+            module("exports", "from models import Extra as Public"),
+        )
+        symbols = ("models.Text", "models.Alias", "models.Extra", "exports.Public")
+        result = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
+        self.assertEqual([item.status for item in result], ["resolved"] * len(symbols))
+        self.assertEqual(
+            result,
+            resolve_type_symbols(
+                symbols, modules=tuple(reversed(snapshots)), project_id="app"
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(
+                ("bad.Bad",),
+                modules=(
+                    *snapshots,
+                    module("bad", "from models import Extra\nclass Bad(Extra): pass"),
+                ),
+                project_id="app",
+            )[0].status,
+            "unresolved",
+        )
+
+        for declaration in (
+            "Alias:TypeAlias=Annotated[str]",
+            "Alias:TypeAlias=Annotated[Missing, 'metadata']",
+            "Alias:TypeAlias=Annotated[42, 'metadata']",
+            "Annotated=object\nAlias:TypeAlias=Annotated[str,'metadata']",
+            "Alias:TypeAlias=Annotated[str,'metadata']\nAnnotated=object",
+        ):
+            with self.subTest(declaration=declaration):
+                self.assertEqual(
+                    resolve_type_symbols(
+                        ("bad.Alias",),
+                        modules=(
+                            module(
+                                "bad",
+                                "from typing import TypeAlias,Annotated\n"
+                                + declaration,
+                            ),
+                        ),
+                        project_id="app",
+                    )[0].status,
+                    "unresolved",
+                )
+
+        fake = (
+            module("typing", "class TypeAlias: pass\nclass Annotated: pass"),
+            module(
+                "bad",
+                "from typing import TypeAlias,Annotated\n"
+                "Alias:TypeAlias=Annotated[str,'metadata']",
+            ),
+        )
+        self.assertEqual(
+            resolve_type_symbols(("bad.Alias",), modules=fake, project_id="app")[
+                0
+            ].status,
+            "unresolved",
+        )
+
     def test_nullable_aliases_preserve_availability_without_base_capabilities(
         self,
     ) -> None:
