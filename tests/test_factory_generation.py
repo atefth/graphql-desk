@@ -1573,13 +1573,17 @@ if TYPE_CHECKING:
                         runtime.returncode, 0, runtime.stdout + runtime.stderr
                     )
 
-    def test_mutable_sequence_and_set_aliases_type_mapped_scalar_values(self) -> None:
+    def test_collection_abc_aliases_type_mapped_scalar_values(self) -> None:
         context = SchemaContext(
             "main",
             build_schema("scalar Custom type Query { value: Custom! }"),
-            "mutable-alias",
+            "collection-alias",
         )
         for constructor, value, invalid in (
+            ("typing.Iterable", "['value']", "[1]"),
+            ("collections.abc.Iterable", "['value']", "[1]"),
+            ("typing.Collection", "['value']", "[1]"),
+            ("collections.abc.Collection", "['value']", "[1]"),
             ("typing.MutableSequence", "['value']", "[1]"),
             ("collections.abc.MutableSequence", "['value']", "[1]"),
             ("typing.MutableSet", "{'value'}", "{1}"),

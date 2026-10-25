@@ -74,9 +74,11 @@ never executed; dynamic arguments and using a NewType as a class base stay
 unresolved. Named or qualified type targets are supported. Unary collection aliases accept
 one existing named/qualified type operand. Trusted constructors include `list`, `set`,
 `frozenset`, `typing.List`, `typing.Set`, `typing.FrozenSet`, `typing.AbstractSet`,
-`typing.Sequence`, `collections.abc.Sequence`, and mutable counterparts
-`typing.MutableSequence`, `collections.abc.MutableSequence`,
-`typing.MutableSet`, and `collections.abc.MutableSet`.
+`typing.Iterable`, `collections.abc.Iterable`, `typing.Collection`,
+`collections.abc.Collection`, `typing.Sequence`, and `collections.abc.Sequence`.
+Mutable counterparts include `typing.MutableSequence`,
+`collections.abc.MutableSequence`, `typing.MutableSet`, and
+`collections.abc.MutableSet`.
 Variadic `tuple[N, ...]` retains its named/qualified element rule. Trusted `tuple` and `typing.Tuple` aliases also accept finite
 nonempty fixed tuples of named/qualified types, preserving variadic behavior,
 dependency/external propagation and valid class-base availability without element
