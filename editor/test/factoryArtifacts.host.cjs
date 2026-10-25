@@ -186,7 +186,8 @@ exports.run = async () => {
       JSON.stringify(trace));
     const initialPublication = trace[publicationIndex];
     const publishedRoot = path.resolve(workspace, initialPublication.setting);
-    assert.equal(publishedRoot, selectedStubRoot());
+    const rootAtHover = trace.filter(item => item.stage === "pylance.stubPath.changed" && item.elapsedMs <= trace[hoverIndex].elapsedMs).at(-1)?.setting;
+    assert.equal(publishedRoot, path.resolve(workspace, rootAtHover));
     await Promise.all([
       fs.access(path.join(publishedRoot, "complete.json")),
       fs.access(path.join(publishedRoot, "graphql_desk_generated", "default.pyi")),

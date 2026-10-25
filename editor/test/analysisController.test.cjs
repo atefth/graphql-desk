@@ -522,12 +522,23 @@ test("workspace folder watchers follow additions and removals and refresh closed
   fixture.events.onDidChangeWorkspaceFolders.fire({ added: [], removed: [] });
   await refresh;
   assert.equal(broad().length, 2, "Unchanged folders keep their watcher");
-  const beforeGeneratedStub = invalidations;
+  let beforeGeneratedStub = invalidations;
   const generatedStub = path.join(added.root, ".graphql-desk", "typings", "graphql_desk_generated", "default.pyi");
   await fs.mkdir(path.dirname(generatedStub), { recursive: true });
   await fs.writeFile(generatedStub, renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "class Generated: ...\n"));
   addedWatch.fire(Uri.file(generatedStub));
   assert.equal(invalidations, beforeGeneratedStub, "Generated typing files must not invalidate the capture that produced them");
+  const generatedDocument = { uri: Uri.file(generatedStub) };
+  fixture.events.onDidOpenTextDocument.fire(generatedDocument);
+  fixture.events.onDidChangeTextDocument.fire({ document: generatedDocument, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
+  fixture.events.onDidSaveTextDocument.fire(generatedDocument);
+  fixture.events.onDidCloseTextDocument.fire(generatedDocument);
+  assert.equal(invalidations, beforeGeneratedStub, "Pylance opening generated typing files must not invalidate their own capture");
+  generatedDocument.isDirty = true;
+  fixture.events.onDidChangeTextDocument.fire({ document: generatedDocument, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
+  assert.equal(invalidations, beforeGeneratedStub + 1, "Editing a generated buffer still invalidates analysis");
+  await refresh;
+  beforeGeneratedStub = invalidations;
   await fs.unlink(generatedStub);
   addedWatch.fire(Uri.file(generatedStub));
   assert.equal(invalidations, beforeGeneratedStub, "Deleting an observed GraphQL Desk-owned stub must not invalidate its cleanup");
@@ -600,9 +611,12 @@ test("workspace folder watchers follow additions and removals and refresh closed
   await fs.writeFile(userStub, "class UserOwned: ...\n");
   addedWatch.fire(Uri.file(userStub));
   assert.equal(invalidations, beforeUserStub + 1, "User-owned typing stubs remain observed");
+  const beforeUserDocument = invalidations;
+  fixture.events.onDidOpenTextDocument.fire({ uri: Uri.file(userStub) });
+  assert.equal(invalidations, beforeUserDocument + 1, "Opening user-owned stubs still invalidates analysis");
   await fs.unlink(userStub);
   addedWatch.fire(Uri.file(userStub));
-  assert.equal(invalidations, beforeUserStub + 2, "Deleting a user-owned typing stub remains observed");
+  assert.equal(invalidations, beforeUserStub + 3, "Deleting a user-owned typing stub remains observed");
   const features = createLanguageFeatures(controller);
   const dependencySnapshot = bundle => {
     const module = bundle.request.modules.find(item => item.module === "dependency");
