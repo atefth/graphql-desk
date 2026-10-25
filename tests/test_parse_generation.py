@@ -443,10 +443,14 @@ assert_type(value.definitions[0].selection_set.selections[0].name.value, Literal
         fixture = f"""from typing import TYPE_CHECKING, Literal
 from typing_extensions import assert_type
 from graphql import DocumentNode, Source, GraphQLError
+from graphql.language import Location
 from graphql_desk import parse as root_parse
 from parser_companion import parse
 assert parse is root_parse
 exact = parse({source!r})
+assert_type(exact.loc, Location)
+assert_type(exact.loc.start, int)
+assert_type(exact.loc.end, int)
 assert_type(exact.kind, Literal["document"])
 assert_type(exact.definitions[0].name.value, Literal["Q"])
 assert_type(

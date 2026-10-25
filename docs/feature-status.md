@@ -22,7 +22,7 @@ generated inference remain open.
 
 | Area | Production status | Built evidence | Required remaining work |
 |---|---|---|---|
-| API-01 public API/client interoperability | Partial | Generic AST/result/variables carrier; runtime parse and untyped factories; exact executable literal AST declarations and editor-generated per-source parser companions with ordinary fallback; identity fragment references; pure retained-source factory artifact trees with nominal references, exact AST views and companion aliases; real sync/async/subscription client fixtures | Complete exact parser AST/error-location acceptance (#25), automatic exact parser typing for normal imports (#253), complete factory inference/source diagnostics, generated CLI publication/internal exports, complete helper/overload integration and supported-client matrix |
+| API-01 public API/client interoperability | Partial | Generic AST/result/variables carrier; runtime parse and untyped factories; exact executable literal AST declarations and editor-generated per-source parser companions with ordinary fallback; identity fragment references; pure retained-source factory artifact trees with nominal references, exact AST views and companion aliases; real sync/async/subscription client fixtures | Automatic exact parser typing for normal imports (#253), complete factory inference/source diagnostics, generated CLI publication/internal exports, complete helper/overload integration and supported-client matrix |
 | SRC-01 embedded Python | Partial | Conservative one-module extractor; explicit-snapshot module graph with factory/schema metadata, ordered fragment references and versions; exact decoded source maps; finite candidate source selection; read-only finite snapshot acquisition and JSON analysis bridge; incremental parsing/unchanged-project reuse and stable disk-source acquisition identities; explicit analyzer reuse in a bounded read-only worker | Complete candidate enumeration/worker invalidation acceptance, full scope integration, safe edit consumers, incomplete-buffer coverage and live indexing |
 | TYPE-01 schema/live operation types | Partial | Built-in scalar, Literal enum and recursive input declarations; operation renderer with abstract/conditional alternatives, directives, unmasked and masked indexed fragments, mapped aliases and closed oneOf inputs; pure literal factory artifacts with source companions/nominal references/exact AST views; snapshot/ticket stale-result guard; managed Pylance publication passes selected VS Code 1.141/1.142 host flows for results, variables, nullability and cross-file fragments; Pylance fixtures verify interface/union narrowing with canonical and aliased typename, optional type aids, and conditional/nullability regeneration after unsaved edits | Complete static mapping-symbol resolution, broad inference/source diagnostics, cancellation/interpreter changes, crash recovery, performance and the full live Pylance acceptance matrix |
 | EDIT-01 editor experience | Partial | Pure snapshot bridge and read-only diagnostics/completion/hover/definition/highlighting providers; isolated real VS Code1.141.0/1.142.0 provider/discovery host fixtures; local schema-path preflight and bounded Python worker/Node connection; trusted production activation/controller with captured dirty buffers, explicit remote refresh and final inventory/freshness checks; official selected-environment resolution with scoped worker invalidation | Complete acquisition and incremental freshness acceptance; after live typing: references/rename, outline, safe fixes, extract-to-fragment and persisted-ID actions |
@@ -70,7 +70,7 @@ These foundations do not complete the dependency-gated later-stage stories.
 Merged #150 adds simple captured PEP613 mapping aliases. #151 generates opt-in
 parser companions with exact default-mode executable literals and ordinary fallback
 for dynamic strings, Source objects, SDL and nondefault modes. Captured parser discovery and owner-specific opt-in companions now reuse static
-source facts; automatic import attachment and complete location acceptance remain open. The controller now resolves
+source facts; automatic import attachment remains open under #253. The controller now resolves
 the Python extension's selected executable when its override is blank; selection
 changes invalidate affected workers while explicit overrides remain independent.
 Both pinned hosts verify the selected executable with a blank GraphQL override.
@@ -120,7 +120,8 @@ Captured parser syntax diagnostics now reuse exact versioned contribution maps,
 including imported constants, escaped literals and legitimate EOF origins. Each
 call keeps its own source locations despite deduplicated parsing; unverifiable
 provenance and resource failures retain honest call-level fallbacks. Automatic
-import attachment, editor publication and full exact-location acceptance remain open.
+import attachment and automatic typing for ordinary `graphql_desk.parse` imports remain
+open under #253.
 
 Static authoring now admits direct ordinary/async function-body calls using literals
 or proven stable module globals. Whole-function local binding checks prevent
