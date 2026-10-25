@@ -1883,7 +1883,10 @@ class SourceGraphTests(unittest.TestCase):
                 "class Data(TypedDict):\n value: str\n"
                 "Maybe:TypeAlias=str|None\nReverse:TypeAlias=None|bool\n"
                 "Alias:TypeAlias=Maybe\nDataMaybe:TypeAlias=Data|None\n"
-                "Items:TypeAlias=list[Maybe]",
+                "Items:TypeAlias=list[Maybe]\n"
+                "NullableItems:TypeAlias=list[str|None]\n"
+                "MixedItems:TypeAlias=list[str|int]\n"
+                "TripleItems:TypeAlias=list[str|int|None]",
             ),
             module("exports", "from models import Alias as Public"),
         )
@@ -1893,6 +1896,9 @@ class SourceGraphTests(unittest.TestCase):
             "models.Alias",
             "models.DataMaybe",
             "models.Items",
+            "models.NullableItems",
+            "models.MixedItems",
+            "models.TripleItems",
             "exports.Public",
         )
         result = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
@@ -1929,6 +1935,10 @@ class SourceGraphTests(unittest.TestCase):
             "Alias:TypeAlias=(str|None)|None",
             "Alias:TypeAlias=list[str]|None",
             "Alias:TypeAlias=None|None",
+            "Alias:TypeAlias=list[None]",
+            "Alias:TypeAlias=list[None|None]",
+            "Alias:TypeAlias=list[str|(int|None)]",
+            "Alias:TypeAlias=list[str|list[int]]",
             "Marker=TypeAlias\nAlias:Marker=str|None",
         ):
             with self.subTest(declaration=declaration):

@@ -1567,6 +1567,88 @@ if TYPE_CHECKING:
                         runtime.returncode, 0, runtime.stdout + runtime.stderr
                     )
 
+    def test_container_alias_union_types_original_scalar_and_generated_values(
+        self,
+    ) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema(
+                "type Query { greeting: String! echo(value: String!): String! }"
+            ),
+            "container-union-alias",
+        )
+        source = """from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from generated.main import graphql
+from generated.sources.main import QueryResult,QueryVariables
+from local_types import ValueList
+query=graphql('query Read($value:String!){greeting echo(value:$value)}')
+value:ValueList=['hello',None]
+assert graphql.scalar('String',value) is value
+variables:QueryVariables={'value':value}
+if TYPE_CHECKING:
+ result:QueryResult={'greeting':value,'echo':value}
+ assert_type(result['greeting'],ValueList)
+ assert_type(result['echo'],ValueList)
+ assert_type(variables['value'],ValueList)
+ wrong: list[str] = result['greeting'] # error
+ bad_variables:QueryVariables={'value':[1]} # error
+ bad_scalar=graphql.scalar('String',[1]) # error
+"""
+        modules = (
+            ModuleSnapshot("p", "main", "file:///main.py", 1, source),
+            ModuleSnapshot(
+                "p",
+                "local_types",
+                "file:///local_types.py",
+                1,
+                "from typing import TypeAlias\nValueList:TypeAlias=list[str|None]\n",
+            ),
+        )
+        resolved = resolve_project(
+            modules,
+            bindings=(
+                ProjectBindings(
+                    "p",
+                    ("main",),
+                    factories=(FactoryBinding("generated.main", "graphql", "main"),),
+                ),
+            ),
+        )
+        self.assertEqual(resolved.diagnostics, ())
+        with patch(
+            "importlib.import_module", side_effect=AssertionError("No project import")
+        ):
+            artifacts = generate_factory_artifacts(
+                context,
+                index_fragments(resolved, schemas={("p", "main"): context}),
+                modules=modules,
+                project_id="p",
+                generated_package="generated",
+                scalars=(
+                    ScalarMapping(
+                        "String", "local_types.ValueList", "local_types.ValueList"
+                    ),
+                ),
+            )
+        self.assertEqual(artifacts.diagnostics, ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            errors = {
+                number
+                for number, line in enumerate(source.splitlines(), 1)
+                if "# error" in line
+            }
+            self.check(root, {"main.py": errors})
+            runtime = subprocess.run(
+                [sys.executable, "main.py"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+
     def test_alias_bases_preserve_checker_evidence_and_runtime_behavior(
         self,
     ) -> None:

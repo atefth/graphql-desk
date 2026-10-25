@@ -1232,19 +1232,42 @@ class _Graph:
             arguments = argument.elts
         elements: list[_Value] = []
         for argument in arguments:
-            if not isinstance(argument, (ast.Name, ast.Attribute)):
+            operands = [argument]
+            while (
+                operands
+                and isinstance(operands[0], ast.BinOp)
+                and isinstance(operands[0].op, ast.BitOr)
+            ):
+                operands[:1] = [operands[0].left, operands[0].right]
+            if len(operands) > 1 and not all(
+                isinstance(operand, (ast.Name, ast.Attribute))
+                or isinstance(operand, ast.Constant)
+                and operand.value is None
+                for operand in operands
+            ):
+                raise _Unresolved("Container union needs direct named types or None")
+            named = 0
+            for operand in operands:
+                if isinstance(operand, ast.Constant) and operand.value is None:
+                    continue
+                if not isinstance(operand, (ast.Name, ast.Attribute)):
+                    raise _Unresolved(
+                        "Subscribed type aliases require supported named types"
+                    )
+                element = self.expression(module, operand, before, active)
+                if element.kind not in {"type", "external"} or element.text in {
+                    "typing.TypeAlias",
+                    "typing_extensions.TypeAlias",
+                }:
+                    raise _Unresolved(
+                        "Subscribed type alias argument is not an established type"
+                    )
+                elements.append(element)
+                named += 1
+            if named == 0:
                 raise _Unresolved(
-                    "Subscribed type aliases require supported named types"
+                    "Container union arguments require at least one named type"
                 )
-            element = self.expression(module, argument, before, active)
-            if element.kind not in {"type", "external"} or element.text in {
-                "typing.TypeAlias",
-                "typing_extensions.TypeAlias",
-            }:
-                raise _Unresolved(
-                    "Subscribed type alias argument is not an established type"
-                )
-            elements.append(element)
         return _Value(
             "external"
             if any(element.kind == "external" for element in elements)
