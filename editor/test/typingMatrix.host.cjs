@@ -73,6 +73,30 @@ exports.run = async () => {
       .filter(item => item.range.start.line === position(name).line).map(item => item.message);
     const inferredType = (name, text) => text.match(new RegExp(`\\(variable\\) ${name}: ([^\\n]+)`))?.[1] || "";
     const observed = {};
+    if (process.env.GRAPHQL_DESK_TEST_SUITE === "externalMappings") {
+      const ready = await until(async () => {
+        observed.externalDate = await hover("mapped_date");
+        observed.externalColor = await hover("mapped_color");
+        observed.externalDateErrors = lineDiagnostics("mapped_date_bad");
+        observed.externalColorErrors = lineDiagnostics("mapped_color_bad");
+        observed.externalDateVariableErrors = lineDiagnostics("mapped_wrong_date");
+        observed.externalColorVariableErrors = lineDiagnostics("mapped_wrong_color");
+        observed.externalPositiveErrors = [...lineDiagnostics("mapped_date_ok"), ...lineDiagnostics("mapped_color_ok")];
+        observed.externalMappingDiagnostics = vscode.languages.getDiagnostics(uri)
+          .filter(item => item.source === "GraphQL Desk" && /mapping-(?:unresolved|unverified)/.test(String(item.code)));
+        return /DateOutput/.test(observed.externalDate) && /Color/.test(observed.externalColor) &&
+          observed.externalDateErrors.length > 0 && observed.externalColorErrors.length > 0 &&
+          observed.externalDateVariableErrors.length > 0 && observed.externalColorVariableErrors.length > 0 &&
+          observed.externalPositiveErrors.length === 0 && observed.externalMappingDiagnostics.length === 0;
+      }, "Pylance live typing for external scalar and enum mappings", 60000);
+      assert.ok(ready, JSON.stringify(observed));
+      results.pylance = { ...results.pylance, ...observed };
+      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      results.lifecycle.configuredStubPath = settings["python.analysis.stubPath"];
+      results.lifecycle.activeStubRoot = path.resolve(workspace, results.lifecycle.configuredStubPath);
+      results.outcome = "external-mappings-observed";
+      return;
+    }
     if (process.env.GRAPHQL_DESK_TEST_SUITE !== "parserOverlay") {
       const ready = await until(async () => {
         observed.nested = await hover("nested_value");
@@ -147,11 +171,13 @@ exports.run = async () => {
 
     const semanticsSchema = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(workspace, "schema.graphql")));
     await replace(semanticsSchema, [
+      "scalar ExternalDate",
+      "enum ExternalColor { RED BLUE }",
       "interface Node { id: ID! }",
       "type User implements Node { id: ID! name: String! }",
       "type Org implements Node { id: ID! title: String! }",
       "union Search = User | Org",
-      "type Query { selected: String! count(limit: Int!): Int! user: User! nested: [[String!]!]! nullable: [String] node: Node! search: [Search!]! }",
+      "type Query { selected: String! count(limit: Int!): Int! user: User! externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor! nested: [[String!]!]! nullable: [String] node: Node! search: [Search!]! }",
       "",
     ].join("\n"));
     const semanticPath = path.join(workspace, "operation_semantics.py");

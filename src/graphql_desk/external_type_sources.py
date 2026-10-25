@@ -4,6 +4,7 @@ import ast
 import keyword
 import sys
 import unicodedata
+from collections.abc import Iterable
 from pathlib import Path
 
 from .source_graph import ModuleSnapshot
@@ -12,11 +13,48 @@ _MAX_MODULES = 256
 _MAX_BYTES = 2_000_000
 
 
+def interpreter_type_roots(
+    search_path: Iterable[str], *, excluded_roots: tuple[Path, ...]
+) -> tuple[Path, ...]:
+    local_roots = tuple(root.resolve() for root in excluded_roots)
+    roots: list[Path] = []
+    for value in search_path:
+        if not value:
+            continue
+        try:
+            root = Path(value).resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if root.is_dir() and not any(
+            root == local or root.is_relative_to(local) for local in local_roots
+        ):
+            roots.append(root)
+    return tuple(dict.fromkeys(roots))
+
+
+def _has_local_import_candidate(symbol: str, roots: tuple[Path, ...]) -> bool:
+    parts = symbol.split(".")
+    for root in roots:
+        package = root / parts[0]
+        if any(
+            path.exists() or path.is_symlink()
+            for path in (
+                root / f"{parts[0]}.py",
+                root / f"{parts[0]}.pyi",
+                root / f"{parts[0]}-stubs",
+                package,
+            )
+        ):
+            return True
+    return False
+
+
 def capture_external_type_sources(
     symbols: tuple[str, ...],
     *,
     search_roots: tuple[Path, ...],
     project_id: str,
+    shadow_roots: tuple[Path, ...] = (),
 ) -> tuple[ModuleSnapshot, ...]:
     """Read only matching `.pyi`/`.py` sources; never import configured modules."""
     if not project_id or any(
@@ -130,6 +168,8 @@ def capture_external_type_sources(
             selected[module] = runtime_matches[0]
 
     for symbol in symbols:
+        if _has_local_import_candidate(symbol, shadow_roots):
+            continue
         imported, _, _ = symbol.rpartition(".")
         parts = imported.split(".")
         for end in range(1, len(parts) + 1):

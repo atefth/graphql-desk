@@ -123,7 +123,10 @@ def analyze_editor_json(text: str) -> str:
 
 
 def analyze_editor_snapshot(
-    request: object, *, resolver: IncrementalResolver | None = None
+    request: object,
+    *,
+    resolver: IncrementalResolver | None = None,
+    external_mapping_modules: tuple[ModuleSnapshot, ...] = (),
 ) -> dict[str, object]:
     """Resolve supplied facts without reading files or executing project Python.
 
@@ -132,7 +135,11 @@ def analyze_editor_snapshot(
     Invalid GraphQL leaves resolved source maps available for online completion.
     An explicit serialized resolver reuses source facts only, not schema/index work.
     """
-    return analyze_editor_snapshot_details(request, resolver=resolver).response
+    return analyze_editor_snapshot_details(
+        request,
+        resolver=resolver,
+        external_mapping_modules=external_mapping_modules,
+    ).response
 
 
 @dataclass(frozen=True)
@@ -162,7 +169,10 @@ def editor_diagnostic(
 
 
 def analyze_editor_snapshot_details(
-    request: object, *, resolver: IncrementalResolver | None = None
+    request: object,
+    *,
+    resolver: IncrementalResolver | None = None,
+    external_mapping_modules: tuple[ModuleSnapshot, ...] = (),
 ) -> EditorAnalysis:
     payload = _object(
         request, {"request_id", "modules", "bindings", "schemas"}, "request"
@@ -369,6 +379,24 @@ def analyze_editor_snapshot_details(
                     symbols, modules=tuple(modules), project_id=project
                 )
             }
+            external_project = project + "#interpreter"
+            external_modules = tuple(
+                module
+                for module in external_mapping_modules
+                if module.project == external_project
+            )
+            external_resolutions = (
+                {
+                    result.symbol: result
+                    for result in resolve_type_symbols(
+                        symbols,
+                        modules=external_modules,
+                        project_id=external_project,
+                    )
+                }
+                if external_modules
+                else {}
+            )
             statuses: list[tuple[str, str, str]] = []
             for scalar_mapping in scalar_facts:
                 statuses.extend(
@@ -381,6 +409,8 @@ def analyze_editor_snapshot_details(
             )
             for name, direction, symbol in statuses:
                 resolution = resolutions[symbol]
+                if resolution.status == "external":
+                    resolution = external_resolutions.get(symbol, resolution)
                 if resolution.status == "resolved" or symbol == "typing.Any":
                     continue
                 if resolution.status == "external":

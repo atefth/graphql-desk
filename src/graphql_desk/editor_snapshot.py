@@ -4,12 +4,17 @@ import hashlib
 import json
 import os
 import re
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import astuple, dataclass, field, replace
 from pathlib import Path
 from typing import cast
 
 from .config import ProjectConfig, SchemaOrigin
+from .external_type_sources import (
+    capture_external_type_sources,
+    interpreter_type_roots,
+)
 from .project import (
     ProjectConfigDiagnosticError,
     effective_project,
@@ -129,6 +134,7 @@ class EditorSnapshot:
     _saved_modules: tuple[ModuleSnapshot, ...] = field(repr=False)
     _remote_schemas: tuple[RemoteSchemaSnapshot, ...] = field(default=(), repr=False)
     project_configs: tuple[ProjectConfig, ...] = field(default=(), repr=False)
+    external_mapping_modules: tuple[ModuleSnapshot, ...] = field(default=(), repr=False)
 
     @property
     def request(self) -> dict[str, object]:
@@ -536,6 +542,7 @@ def acquire_editor_snapshot(
     bindings: list[dict[str, object]] = []
     schemas: list[dict[str, object]] = []
     unavailable: list[tuple[str, str]] = []
+    external_mapping_modules: list[ModuleSnapshot] = []
 
     def contents(path: Path) -> tuple[str, int]:
         key = _identity(path)
@@ -551,6 +558,34 @@ def acquire_editor_snapshot(
 
     for config, selected_files in captured.projects:
         project_id = config.path.as_uri()
+        mapping_symbols = tuple(
+            sorted(
+                {
+                    symbol
+                    for schema in config.schemas
+                    for mapping in schema.scalars
+                    for symbol in (mapping.input, mapping.output)
+                }
+                | {symbol for schema in config.schemas for _, symbol in schema.enums}
+            )
+        )
+        if mapping_symbols:
+            try:
+                roots = interpreter_type_roots(
+                    sys.path,
+                    excluded_roots=(base, config.root, *config.source_roots),
+                )
+                external_mapping_modules.extend(
+                    capture_external_type_sources(
+                        mapping_symbols,
+                        search_roots=roots,
+                        project_id=project_id + "#interpreter",
+                        shadow_roots=(base, config.root, *config.source_roots),
+                    )
+                )
+            except (OSError, RuntimeError, ValueError):
+                # Missing, ambiguous, or oversized external packages stay unverified.
+                pass
         facts = project_bindings(config, project_id=project_id)
         bindings.append(
             {
@@ -701,6 +736,7 @@ def acquire_editor_snapshot(
         tuple(saved_modules),
         remote_schemas,
         tuple(config for config, _ in captured.projects),
+        tuple(external_mapping_modules),
     )
     return snapshot.reuse_disk_sources(previous) if previous is not None else snapshot
 

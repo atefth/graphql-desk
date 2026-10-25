@@ -1,5 +1,6 @@
 "use strict";
 const assert = require("node:assert/strict");
+const { randomUUID } = require("node:crypto");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const os = require("node:os");
@@ -7,6 +8,7 @@ const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
 const { runTests, runVSCodeCommand } = require("@vscode/test-electron");
+let mappingFixtureCleanup;
 
 function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix) {
   const base = { workspace, candidates: [sourcePath], buffers: [], documents: [], editor_fallback: null };
@@ -32,14 +34,16 @@ function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix) {
     const result = JSON.parse(child.stdout);
     assert.equal(result.ok, true, JSON.stringify(result));
     const files = result.projects[0].files.filter(file => file.relative_path.endsWith(".pyi"));
-    assert.ok(files.length > 1, "The host proof needs the real multi-file generator output");
+    assert.ok(files.length > 1, JSON.stringify(result.projects[0]));
     return files;
   }
   const initial = generate();
   const shapeFields = typingMatrix ? " nested: [[String!]!]! nullable: [String]" : "";
-  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), `type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User!${shapeFields} }\n`);
+  const mappedSchema = typingMatrix ? "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" : "";
+  const mappedFields = typingMatrix ? " externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor!" : "";
+  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), `${mappedSchema}type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User!${mappedFields}${shapeFields} }\n`);
   const nullable = generate();
-  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), `type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${shapeFields} }\n`);
+  fsSync.writeFileSync(path.join(workspace, "schema.graphql"), `${mappedSchema}type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${mappedFields}${shapeFields} }\n`);
   return { initial, nullable };
 }
 
@@ -57,6 +61,38 @@ async function readStubFiles(root) {
   }
   await visit(root);
   return files.sort(([left], [right]) => left.localeCompare(right));
+}
+
+async function installMappingStub(python) {
+  const site = spawnSync(python, ["-I", "-X", "utf8", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], { encoding: "utf8" });
+  assert.equal(site.status, 0, site.stderr);
+  const purelib = path.resolve(site.stdout.trim());
+  assert.ok(path.isAbsolute(purelib), "Selected interpreter must report an absolute purelib path");
+  const packageName = `graphql_desk_mapping_fixture_${randomUUID().replaceAll("-", "")}`;
+  const directory = path.join(purelib, `${packageName}-stubs`);
+  assert.equal(path.dirname(directory), purelib, "The fixture must be directly under the selected interpreter's purelib");
+  const file = path.join(directory, "__init__.pyi");
+  const text = "class DateInput: ...\nclass DateOutput: ...\nclass Color: ...\n";
+  await fs.mkdir(directory);
+  try {
+    await fs.writeFile(file, text, { flag: "wx" });
+  } catch (error) {
+    try {
+      if (await fs.readFile(file, "utf8") === text) await fs.unlink(file);
+      await fs.rmdir(directory);
+    } catch { /* Preserve anything that is not the exact fixture created above. */ }
+    throw error;
+  }
+  const fixture = {
+    packageName,
+    async cleanup() {
+      assert.equal(await fs.readFile(file, "utf8"), text, "Do not remove a changed mapping fixture");
+      await fs.unlink(file);
+      await fs.rmdir(directory);
+    },
+  };
+  mappingFixtureCleanup = fixture.cleanup;
+  return fixture;
 }
 
 async function crashDuringPublication(workspace, stubRoot, temporary) {
@@ -101,8 +137,8 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
-  const factorySuite = ["factoryArtifacts", "typingMatrix", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
+  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
+  const factorySuite = ["factoryArtifacts", "typingMatrix", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
   assert.deepEqual(await fs.readdir(temporary), [], "Every host run starts from a new temporary root");
   const workspace = path.join(temporary, "workspace");
@@ -117,6 +153,7 @@ async function main() {
   const stubRoot = factorySuite ? path.join(workspace, ".graphql-desk", "typings") : path.join(workspace, "owned_analysis_stubs");
   const python = process.env.GRAPHQL_DESK_PYTHON || path.resolve(__dirname, "..", "..", ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
   assert.ok(path.isAbsolute(python), "Choose an absolute trusted Python interpreter");
+  const mappingFixture = suite === "externalMappings" ? await installMappingStub(python) : null;
   await fs.mkdir(path.join(workspace, ".vscode"), { recursive: true });
   await fs.writeFile(path.join(workspace, ".vscode", "settings.json"), JSON.stringify({
     "extensions.autoUpdate": false,
@@ -159,6 +196,19 @@ async function main() {
       "count = result['count']",
       "needs_str: str = selected",
       "wrong = execute(doc, {'limit': 'bad'})",
+      ...(suite === "externalMappings" ? [
+        `from ${mappingFixture.packageName} import DateInput, DateOutput, Color`,
+        "mapped_doc = graphql('query Mapped($date: ExternalDate!, $color: ExternalColor!) { externalDate(value: $date) externalColor(value: $color) }')",
+        "mapped_result = execute(mapped_doc, {'date': DateInput(), 'color': Color()})",
+        "mapped_date = mapped_result['externalDate']",
+        "mapped_color = mapped_result['externalColor']",
+        "mapped_date_ok: DateOutput = mapped_date",
+        "mapped_color_ok: Color = mapped_color",
+        "mapped_date_bad: str = mapped_date",
+        "mapped_color_bad: str = mapped_color",
+        "mapped_wrong_date = execute(mapped_doc, {'date': DateOutput(), 'color': Color()})",
+        "mapped_wrong_color = execute(mapped_doc, {'date': DateInput(), 'color': 'RED'})",
+      ] : []),
       "other_doc = graphql('query Other { user { id } }')",
       "other_result = execute(other_doc, {})",
       "other_id = other_result['user']['id']",
@@ -180,8 +230,8 @@ async function main() {
     ].join("\n");
     const shapeFields = suite === "typingMatrix" ? " nested: [[String!]!]! nullable: [String]" : "";
     await Promise.all([
-      fs.writeFile(path.join(workspace, "pyproject.toml"), '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n'),
-      fs.writeFile(path.join(workspace, "schema.graphql"), `type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${shapeFields} }\n`),
+      fs.writeFile(path.join(workspace, "pyproject.toml"), '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n' + (suite === "externalMappings" ? `scalars = { ExternalDate = { input = "${mappingFixture.packageName}.DateInput", output = "${mappingFixture.packageName}.DateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.Color" }\n` : "")),
+      fs.writeFile(path.join(workspace, "schema.graphql"), `${suite === "externalMappings" ? "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" : ""}type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${suite === "externalMappings" ? " externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor!" : ""}${shapeFields} }\n`),
       fs.writeFile(sourcePath, source),
       ...(["typingMatrix", "parserOverlay"].includes(suite) ? [fs.writeFile(path.join(workspace, "parser_consumer.py"),
         "from graphql_desk import parse\ndocument = parse('query ParserQuery { selected }')\nparsed_name = document.definitions[0].name.value\n")] : []),
@@ -202,7 +252,7 @@ async function main() {
         "",
       ].join("\n")),
     ]);
-    const generated = generatedFactoryFiles(python, workspace, sourcePath, suite === "typingMatrix");
+    const generated = generatedFactoryFiles(python, workspace, sourcePath, ["typingMatrix", "externalMappings"].includes(suite));
     await fs.writeFile(artifacts, JSON.stringify(generated));
     console.log(`Captured ${generated.initial.length} initial and ${generated.nullable.length} nullable factory stub files.`);
   }
@@ -225,7 +275,7 @@ async function main() {
   const options = {
     version,
     extensionDevelopmentPath: path.resolve(__dirname, ".."),
-    extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : suite === "parserOverlay" ? "typingMatrix" : suite}.host.cjs`),
+    extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["parserOverlay", "externalMappings"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
     extensionTestsEnv: {
       GRAPHQL_DESK_TEST_WORKSPACE: workspace,
       GRAPHQL_DESK_RESULT_PATH: result,
@@ -249,7 +299,14 @@ async function main() {
   let userFilesBeforeInterruption;
   for (const phase of sessions) {
     const sessionEnv = phase ? { ...options.extensionTestsEnv, GRAPHQL_DESK_RESTART_PHASE: phase } : options.extensionTestsEnv;
-    await runTests({ ...options, extensionTestsEnv: sessionEnv });
+    try {
+      await runTests({ ...options, extensionTestsEnv: sessionEnv });
+    } finally {
+      if (mappingFixtureCleanup) {
+        await mappingFixtureCleanup();
+        mappingFixtureCleanup = undefined;
+      }
+    }
     if (phase === "before-restart") {
       beforeRestart = JSON.parse(await fs.readFile(result, "utf8"));
       assert.equal(beforeRestart.outcome, "owned-output-restart-observed");
@@ -332,7 +389,7 @@ async function main() {
     observed.lifecycle.userFilePreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (factorySuite) {
-    if (suite === "typingMatrix" || suite === "malformedRecovery") {
+    if (["typingMatrix", "externalMappings", "malformedRecovery"].includes(suite)) {
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "complete.json"));
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated", "default.pyi"));
     } else if (suite === "parserOverlay") {
@@ -370,7 +427,7 @@ async function main() {
       if (persistedStubPath !== observed.lifecycle.configuredStubPath) {
         observed.lifecycle.persistedStubPath = persistedStubPath;
       }
-    } else if ((suite === "typingMatrix" || suite === "malformedRecovery") && persistedStubPath !== observed.lifecycle.configuredStubPath) {
+    } else if ((suite === "typingMatrix" || suite === "externalMappings" || suite === "malformedRecovery") && persistedStubPath !== observed.lifecycle.configuredStubPath) {
       assert.match(persistedStubPath.replaceAll("\\", "/"), /^\.graphql-desk\/typings\/generations\/g-\d+-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i,
         "A later typing refresh may select another managed generation before shutdown");
       const persistedRoot = path.resolve(workspace, persistedStubPath);
@@ -389,8 +446,13 @@ async function main() {
     observed.lifecycle.userConfigurationPreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   }
-  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : `read-only-${suite}-observed`);
+  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "externalMappings" ? "external-mappings-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : `read-only-${suite}-observed`);
   console.log(`${suite} evidence: ${result}`);
 }
 
-main().catch(error => { console.error(error); process.exitCode = 1; });
+main().catch(async error => {
+  try { await mappingFixtureCleanup?.(); }
+  catch (cleanupError) { console.error(`Mapping fixture cleanup failed safely: ${String(cleanupError)}`); }
+  console.error(error);
+  process.exitCode = 1;
+});
