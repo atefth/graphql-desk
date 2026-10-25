@@ -40,7 +40,12 @@ from .parse_generation import (
 )
 from .quarantine import quarantine_generated_stubs
 from .schema_url import load_from_url
-from .source_graph import DocumentIdentity, IncrementalResolver, ModuleDependency
+from .source_graph import (
+    DocumentIdentity,
+    IncrementalResolver,
+    ModuleDependency,
+    ModuleSnapshot,
+)
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
 _CAPTURE_KEYS = {"workspace", "candidates", "buffers", "documents", "editor_fallback"}
@@ -701,6 +706,20 @@ class EditorWorker:
                 project_modules = tuple(
                     module for module in facts.modules if module.project == project
                 )
+                project_module_names = {module.module for module in project_modules}
+                mapping_modules = tuple(
+                    ModuleSnapshot(
+                        project,
+                        module.module,
+                        module.uri,
+                        module.version,
+                        module.source,
+                        module.is_package,
+                    )
+                    for module in self._snapshot.external_mapping_modules
+                    if module.project == project + "#interpreter"
+                    and module.module not in project_module_names
+                )
                 index = FragmentIndex(
                     tuple(
                         document
@@ -736,7 +755,7 @@ class EditorWorker:
                             for schema in config.schemas
                         ),
                         index,
-                        modules=project_modules,
+                        modules=(*project_modules, *mapping_modules),
                         project_id=project,
                     )
                 )

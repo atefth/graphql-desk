@@ -313,15 +313,29 @@ exports.run = async () => {
       "The active generation does not retain the stale selected-field type");
     await fs.access(path.join(path.resolve(workspace, failedQuarantineGeneration.stubPath), "complete.json"));
     let failedRefreshHover;
-    await until(async () => {
+    const unavailableHover = /Never|NoReturn|Unknown|object/;
+    const unavailableDeadline = Date.now() + 45000;
+    do {
       failedRefreshHover = await selectedHover();
-      return /Never|NoReturn|Unknown|object|\bAny\b/.test(failedRefreshHover);
-    },
-      "Pylance consumes the unavailable type after worker failure");
+      if (unavailableHover.test(failedRefreshHover)) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < unavailableDeadline);
     results.lifecycle.workerFailureQuarantineRequests = workerRequests.filter(request => request.op === "quarantine")
       .map(({ ok, error }) => ({ ok: Boolean(ok), ...(error ? { error } : {}) }));
-    assert.match(failedRefreshHover, /Never|NoReturn|Unknown|object/,
-      "Worker failure must leave the affected operation unavailable, never untyped Any");
+    const workerFailureProbe = {
+      hover: failedRefreshHover,
+      generation: { path: failedGeneration.stubPath, analysisId: failedGeneration.manifest?.analysisId,
+        operations: failedGeneration.manifest?.operationManifest.flatMap(group => group.operations
+          .map(({ binding, status, declaration_path }) => ({ binding, status, declaration_path }))),
+        stubs: failedGeneration.files.map(([file]) => path.relative(workspace, file).replaceAll("\\", "/")) },
+      quarantineRequests: results.lifecycle.workerFailureQuarantineRequests,
+      pylanceDiagnostics: vscode.languages.getDiagnostics(sourceUri).slice(0, 10)
+        .map(({ source, message }) => ({ source, message: message.slice(0, 500) })),
+      output: outputMessages.filter(message => /quarantine|publish|error/i.test(message)).slice(-10)
+        .map(message => message.slice(0, 500)),
+    };
+    assert.match(failedRefreshHover, unavailableHover,
+      `Worker failure must leave the affected operation unavailable, never untyped Any: ${JSON.stringify(workerFailureProbe)}`);
     results.lifecycle.workerFailureKeepsAffectedTypingUnavailable = true;
 
     await replaceSelectedSchemaType("Boolean", "Int");
@@ -436,8 +450,27 @@ exports.run = async () => {
     assert.equal(configDocument.isDirty, false, "Saving the restored config clears only the test's own temporary edit");
     assert.equal(await fs.readFile(configPath, "utf8"), originalConfig,
       "Saving the restored config leaves the user's on-disk config unchanged");
-    await until(async () => /selected:\s*(?:str|String)\b/.test(await selectedHover()),
-      "restoring the original config restores the schema's original typing");
+    let restoredConfigHover;
+    const configRestoreDeadline = Date.now() + 45000;
+    do {
+      restoredConfigHover = await selectedHover();
+      if (/selected:\s*(?:str|String)\b/.test(restoredConfigHover)) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < configRestoreDeadline);
+    let restoredConfigGeneration;
+    try { restoredConfigGeneration = await readGeneration(); } catch { /* Keep the hover and path even if the generation is incomplete. */ }
+    const restoredConfigProbe = {
+      hover: restoredConfigHover,
+      stubPath: stubPath(),
+      analysisId: restoredConfigGeneration?.manifest?.analysisId,
+      operations: restoredConfigGeneration?.manifest?.operationManifest.flatMap(group => group.operations
+        .map(({ binding, status, declaration_path }) => ({ binding, status, declaration_path }))),
+      stubs: restoredConfigGeneration?.files.map(([file]) => path.relative(workspace, file).replaceAll("\\", "/")),
+      configDirty: configDocument.isDirty,
+      configRestored: configDocument.getText() === originalConfig,
+    };
+    assert.match(restoredConfigHover, /selected:\s*(?:str|String)\b/,
+      `Restoring the original config should restore schema typing: ${JSON.stringify(restoredConfigProbe).slice(0, 2000)}`);
     const settingsAfterRace = JSON.parse(await fs.readFile(settingsPath, "utf8"));
     const settingsWithoutManagedPath = { ...settingsAfterRace };
     const managedStubPath = settingsWithoutManagedPath["python.analysis.stubPath"];

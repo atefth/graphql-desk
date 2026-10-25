@@ -238,6 +238,11 @@ exports.run = async () => {
       const generated = path.join(root, ...resultModule.split(".")) + ".pyi";
       let stub;
       try { stub = await fs.readFile(generated, "utf8"); } catch { return false; }
+      const sourceExcerpt = sourceDeclarations.split("\n").filter(line => /GraphqlDeskResult|def graphql/.test(line)).join("\n");
+      const resultExcerpt = stub.split("\n").filter(line => /TypedDict|Literal\[|GraphqlDeskResult|__graphql_desk_variant/.test(line)).slice(0, 40).join("\n");
+      results.pylance.abstractArtifacts = { root, resultModule, sourceExcerpt, resultExcerpt,
+        hasExpectedAlternatives: stub.includes("Literal['User']") && stub.includes("Literal['Org']"),
+        hasExpectedAlias: stub.includes("'kind': \"Literal['User']\"") };
       results.pylance.abstractGenerated = stub.includes("Literal['User']") && stub.includes("Literal['Org']") &&
         stub.includes("'kind': \"Literal['User']\"") && stub.includes("'__typename': NotRequired");
       return /: str\b|: String\b/.test(results.pylance.abstractName) &&
@@ -247,6 +252,21 @@ exports.run = async () => {
         results.pylance.abstractAliasNegative.length > 0 &&
         results.pylance.abstractNoFabricatedKeyErrors.length === 0 && results.pylance.abstractGenerated;
     }, "Pylance consumes abstract alternatives, both typename discriminators and optional type aids", 60000);
+    if (!semanticReady) {
+      try {
+        await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
+        results.pylance.abstractRecoveredAfterRestart = await until(async () => {
+          results.pylance.abstractNameAfterRestart = await semanticHover("user_name");
+          results.pylance.abstractTitleAfterRestart = await semanticHover("org_title");
+          results.pylance.abstractErrorsAfterRestart = semanticErrors("wrong_title");
+          return /: str\b|: String\b/.test(results.pylance.abstractNameAfterRestart) &&
+            /: str\b|: String\b/.test(results.pylance.abstractTitleAfterRestart) &&
+            results.pylance.abstractErrorsAfterRestart.length > 0;
+        }, "diagnose whether Pylance restart recovers abstract result typing", 30000);
+      } catch (error) {
+        results.pylance.abstractRestartError = String(error);
+      }
+    }
     assert.ok(semanticReady, JSON.stringify(results.pylance));
     results.pylance.abstractLiveTyping = true;
     const conditionalSource = [
