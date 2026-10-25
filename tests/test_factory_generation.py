@@ -1481,7 +1481,13 @@ if TYPE_CHECKING:
         self,
     ) -> None:
         context = self.context()
-        for constructor in ("dict", "typing.Mapping", "collections.abc.Mapping"):
+        for constructor in (
+            "dict",
+            "typing.Mapping",
+            "collections.abc.Mapping",
+            "typing.MutableMapping",
+            "collections.abc.MutableMapping",
+        ):
             with self.subTest(constructor=constructor):
                 imports = "from typing import TypeAlias\n"
                 expression = constructor
@@ -1554,6 +1560,96 @@ if TYPE_CHECKING:
                     errors = {
                         n
                         for n, line in enumerate(source.splitlines(), 1)
+                        if "# error" in line
+                    }
+                    self.check(root, {"main.py": errors})
+                    runtime = subprocess.run(
+                        [sys.executable, "main.py"],
+                        cwd=root,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(
+                        runtime.returncode, 0, runtime.stdout + runtime.stderr
+                    )
+
+    def test_mutable_sequence_and_set_aliases_type_mapped_scalar_values(self) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema("scalar Custom type Query { value: Custom! }"),
+            "mutable-alias",
+        )
+        for constructor, value, invalid in (
+            ("typing.MutableSequence", "['value']", "[1]"),
+            ("collections.abc.MutableSequence", "['value']", "[1]"),
+            ("typing.MutableSet", "{'value'}", "{1}"),
+            ("collections.abc.MutableSet", "{'value'}", "{1}"),
+        ):
+            with self.subTest(constructor=constructor):
+                namespace, name = constructor.rsplit(".", 1)
+                declaration = (
+                    "from typing import TypeAlias\n"
+                    f"from {namespace} import {name}\n"
+                    f"ValueType:TypeAlias={name}[str]\n"
+                )
+                source = f"""from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from generated.main import graphql
+from generated.sources.main import QueryResult
+from local_types import ValueType
+query=graphql('{{value}}')
+value:ValueType={value}
+assert graphql.scalar('Custom',value) is value
+if TYPE_CHECKING:
+ result:QueryResult={{'value':value}}
+ assert_type(result['value'],ValueType)
+ wrong: str=result['value'] # error
+ invalid:ValueType={invalid} # error
+"""
+                modules = (
+                    ModuleSnapshot("p", "main", "file:///main.py", 1, source),
+                    ModuleSnapshot(
+                        "p", "local_types", "file:///local_types.py", 1, declaration
+                    ),
+                )
+                resolved = resolve_project(
+                    modules,
+                    bindings=(
+                        ProjectBindings(
+                            "p",
+                            ("main",),
+                            factories=(
+                                FactoryBinding("generated.main", "graphql", "main"),
+                            ),
+                        ),
+                    ),
+                )
+                self.assertEqual(resolved.diagnostics, ())
+                with patch(
+                    "importlib.import_module",
+                    side_effect=AssertionError("No project import"),
+                ):
+                    artifacts = generate_factory_artifacts(
+                        context,
+                        index_fragments(resolved, schemas={("p", "main"): context}),
+                        modules=modules,
+                        project_id="p",
+                        generated_package="generated",
+                        scalars=(
+                            ScalarMapping(
+                                "Custom",
+                                "local_types.ValueType",
+                                "local_types.ValueType",
+                            ),
+                        ),
+                    )
+                self.assertEqual(artifacts.diagnostics, ())
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.write(root, artifacts, modules)
+                    errors = {
+                        number
+                        for number, line in enumerate(source.splitlines(), 1)
                         if "# error" in line
                     }
                     self.check(root, {"main.py": errors})

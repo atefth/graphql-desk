@@ -986,18 +986,33 @@ class SourceGraphTests(unittest.TestCase):
             "set",
             "frozenset",
             "typing.List",
+            "typing.MutableSequence",
+            "typing.MutableSet",
             "typing.Set",
             "typing.FrozenSet",
             "typing.AbstractSet",
+            "collections.abc.MutableSequence",
+            "collections.abc.MutableSet",
             "collections.abc.Sequence",
             "collections.abc.Set",
             "typing.Dict",
+            "typing.MutableMapping",
+            "collections.abc.MutableMapping",
         ):
             with self.subTest(spelling=spelling):
                 namespace, _, constructor = spelling.rpartition(".")
                 namespace = namespace or "builtins"
                 imports = f"from {namespace} import {constructor}\n"
-                arguments = "str,Known" if spelling == "typing.Dict" else "Known"
+                arguments = (
+                    "str,Known"
+                    if spelling
+                    in {
+                        "typing.Dict",
+                        "typing.MutableMapping",
+                        "collections.abc.MutableMapping",
+                    }
+                    else "Known"
+                )
                 declaration = (
                     "from typing_extensions import TypeAlias\nfrom base import Known\n"
                     + (imports if "." in spelling else "")
