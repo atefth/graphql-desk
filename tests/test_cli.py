@@ -261,6 +261,60 @@ class CLITests(unittest.TestCase):
             err,
         )
 
+    def test_doctor_resolves_interpreter_stub_types_without_importing_them(
+        self,
+    ) -> None:
+        self.schema.write_text(
+            "scalar Date\ntype Query { date: Date }", encoding="utf8"
+        )
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'scalars={Date="vendor_types.Date"}\n',
+            encoding="utf8",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory) / "vendor_types"
+            package.mkdir()
+            (package / "__init__.pyi").write_text(
+                "from .types import Date\n", encoding="utf8"
+            )
+            (package / "types.pyi").write_text(
+                "raise RuntimeError('must not execute')\nclass Date: ...\n",
+                encoding="utf8",
+            )
+            with patch("graphql_desk.cli.sys.path", [directory, *sys.path]):
+                code, out, err = self.invoke(["doctor"])
+
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(
+            "interpreter mapping symbols resolved (static names only): 1", err
+        )
+        self.assertNotIn("external mapping symbols unverified", err)
+
+    def test_doctor_reports_external_non_type_without_claiming_verification(
+        self,
+    ) -> None:
+        self.schema.write_text(
+            "scalar Date\ntype Query { date: Date }", encoding="utf8"
+        )
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'scalars={Date="vendor_types.Date"}\n',
+            encoding="utf8",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "vendor_types.py").write_text(
+                "raise RuntimeError('must not execute')\nDate = 1\n", encoding="utf8"
+            )
+            with patch("graphql_desk.cli.sys.path", [directory, *sys.path]):
+                code, out, err = self.invoke(["doctor"])
+
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("interpreter mapping symbols unavailable: not-type=1", err)
+        self.assertNotIn("interpreter mapping symbols resolved", err)
+
     def test_doctor_resolves_stub_only_mapping_symbols_and_package_reexports(
         self,
     ) -> None:
