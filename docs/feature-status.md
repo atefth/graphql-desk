@@ -13,9 +13,9 @@ root and generated fragment readers. #143 adds explicit trusted-worker refresh;
 #146 supplies installed read-only doctor diagnostics with degraded health reporting.
 #248 adds incomplete-buffer escape-aware highlighting and pinned-host source-range
 checks. #251 adds provider-level lexical-to-resolved decoration recovery on both
-pinned hosts and an actual activated-extension diagnostic recovery path. The
-activation host does not yet prove that edit events refresh/clear decorations, and
-the full #40 grammar/recovery matrix remains open.
+pinned hosts and an actual activated-extension diagnostic recovery path. The scoped
+#40 grammar, escape/Unicode, conservative incomplete-buffer and recovery acceptance
+is complete; broader editor and live-typing requirements remain open.
 #147/#148 retain explicitly refreshed schemas through safe new captures and activate
 the read-only editor controller. Complete workflows, reader precision and live
 generated inference remain open.
