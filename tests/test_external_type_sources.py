@@ -81,7 +81,10 @@ class ExternalTypeSourcesTests(unittest.TestCase):
         self.assertEqual({item.module for item in modules}, {"foo", "foo.bar"})
         self.assertEqual(
             {item.module: item.uri for item in modules},
-            {"foo": stub_init.as_uri(), "foo.bar": stub_module.as_uri()},
+            {
+                "foo": stub_init.resolve().as_uri(),
+                "foo.bar": stub_module.resolve().as_uri(),
+            },
         )
         self.assertIn("stub_marker: str", modules[1].source)
         self.assertNotIn("runtime_marker", "\n".join(item.source for item in modules))
@@ -109,7 +112,10 @@ class ExternalTypeSourcesTests(unittest.TestCase):
 
         self.assertEqual(
             {item.module: item.uri for item in modules},
-            {"foo": root_init.as_uri(), "foo.bar": nested_init.as_uri()},
+            {
+                "foo": root_init.resolve().as_uri(),
+                "foo.bar": nested_init.resolve().as_uri(),
+            },
         )
         self.assertEqual(
             resolve_type_symbols(
@@ -161,7 +167,7 @@ class ExternalTypeSourcesTests(unittest.TestCase):
 
         self.assertEqual(
             {item.module: item.uri for item in modules}["foo.bar"],
-            runtime_module.as_uri(),
+            runtime_module.resolve().as_uri(),
         )
         self.assertIn("runtime_marker: int", modules[1].source)
 
