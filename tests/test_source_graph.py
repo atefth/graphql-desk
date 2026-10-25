@@ -330,6 +330,54 @@ class SourceGraphTests(unittest.TestCase):
             source_graph.IncrementalResolver().resolve(snapshots),
         )
 
+    def test_unique_decorator_resolves_only_trusted_enum_classes(self) -> None:
+        models = module(
+            "models",
+            "import enum\n"
+            "from enum import Enum,unique as mark_unique\n"
+            "@enum.unique\n"
+            "class Qualified(enum.Enum):\n ONE='one'\n TWO='two'\n"
+            "@mark_unique\n"
+            "class Imported(Enum):\n ONE='one'\n TWO='two'\n"
+            "@enum.unique()\n"
+            "class Called(enum.Enum):\n ONE='one'\n"
+            "@enum.unique\n"
+            "class Plain: pass\n",
+        )
+
+        results = resolve_type_symbols(
+            tuple(
+                f"models.{name}"
+                for name in ("Qualified", "Imported", "Called", "Plain")
+            ),
+            modules=(models,),
+            project_id="app",
+        )
+
+        self.assertEqual(
+            {item.symbol: (item.status, item.target) for item in results},
+            {
+                "models.Qualified": ("resolved", "models.Qualified"),
+                "models.Imported": ("resolved", "models.Imported"),
+                "models.Called": ("unresolved", None),
+                "models.Plain": ("unresolved", None),
+            },
+        )
+        mutated = module(
+            "mutated",
+            "import enum\n"
+            "from enum import Enum\n"
+            "@enum.unique\n"
+            "class Choice(Enum):\n ONE='one'\n TWO='two'\n"
+            "enum.unique=replace\n",
+        )
+        self.assertEqual(
+            resolve_type_symbols(
+                ("mutated.Choice",), modules=(mutated,), project_id="app"
+            )[0].status,
+            "unresolved",
+        )
+
     def test_explicit_type_aliases_reuse_captured_class_and_reexport_resolution(
         self,
     ) -> None:

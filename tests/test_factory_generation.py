@@ -1210,6 +1210,79 @@ if TYPE_CHECKING:
                         runtime.returncode, 0, runtime.stdout + runtime.stderr
                     )
 
+    def test_unique_enum_mapping_preserves_generated_types_and_runtime_identity(
+        self,
+    ) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema("enum Color { RED BLUE } type Query { color:Color! }"),
+            "unique-enum-mapping",
+        )
+        source = """from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from enum_types import Color
+from generated.main import graphql
+from generated.sources.main import QueryResult
+query=graphql('query Read { color }')
+value=Color.RED
+assert graphql.scalar('Color',value) is value
+if TYPE_CHECKING:
+ result:QueryResult={'color':value}
+ assert_type(result['color'],Color)
+ bad=graphql.scalar('Color','RED') # error
+"""
+        modules = (
+            ModuleSnapshot("p", "main", "file:///main.py", 1, source),
+            ModuleSnapshot(
+                "p",
+                "enum_types",
+                "file:///enum_types.py",
+                1,
+                "import enum\n"
+                "@enum.unique\n"
+                "class Color(enum.Enum):\n RED='red'\n BLUE='blue'\n",
+            ),
+        )
+        resolved = resolve_project(
+            modules,
+            bindings=(
+                ProjectBindings(
+                    "p",
+                    ("main",),
+                    factories=(FactoryBinding("generated.main", "graphql", "main"),),
+                ),
+            ),
+        )
+        self.assertEqual(resolved.diagnostics, ())
+        with patch(
+            "importlib.import_module", side_effect=AssertionError("No project imports")
+        ):
+            artifacts = generate_factory_artifacts(
+                context,
+                index_fragments(resolved, schemas={("p", "main"): context}),
+                modules=modules,
+                project_id="p",
+                generated_package="generated",
+                enums=(("Color", "enum_types.Color"),),
+            )
+        self.assertEqual(artifacts.diagnostics, ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            errors = {
+                number
+                for number, line in enumerate(source.splitlines(), 1)
+                if "# error" in line
+            }
+            self.check(root, {"main.py": errors})
+            runtime = subprocess.run(
+                [sys.executable, "main.py"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+
     def test_standard_collection_aliases_check_original_values_and_class_bases(
         self,
     ) -> None:

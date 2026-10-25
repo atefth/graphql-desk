@@ -17,7 +17,7 @@ _REFLECTION = frozenset(
     f"builtins.{name}" for name in ("globals", "locals", "vars", "exec", "eval")
 )
 _SETTERS = frozenset({"builtins.setattr", "builtins.delattr"})
-_CLASS_DECORATORS = frozenset({"dataclasses.dataclass", "typing.final"})
+_CLASS_DECORATORS = frozenset({"dataclasses.dataclass", "enum.unique", "typing.final"})
 _CLASS_DECORATOR_NAMESPACES = {
     identity + suffix: identity.rsplit(".", 1)[0]
     for identity in _CLASS_DECORATORS
@@ -945,7 +945,7 @@ class _Graph:
                                 )
                             ):
                                 raise _Unresolved(
-                                    "Dataclass options require literal booleans"
+                                    "Class decorator arguments are unsupported"
                                 )
                             decorators.add(resolved.text)
                             decorator_dependencies |= resolved.dependencies
@@ -973,10 +973,14 @@ class _Graph:
                             raise _Unresolved(
                                 "TypedDict bases cannot mix with ordinary class bases"
                             )
-                        if decorators and (typed_dict or enum_class):
+                        if (typed_dict and decorators) or (
+                            enum_class and decorators and decorators != {"enum.unique"}
+                        ):
                             raise _Unresolved(
                                 "Decorated special classes are unsupported"
                             )
+                        if "enum.unique" in decorators and not enum_class:
+                            raise _Unresolved("enum.unique requires an enum class")
                         # shortcut: inherited dataclasses stay blocked until frozen/
                         # mutable base compatibility is proven in both checkers.
                         if "dataclasses.dataclass" in decorators and any(
