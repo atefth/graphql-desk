@@ -14,7 +14,7 @@ to this same renderer. Neither entry point mutates the supplied runtime AST.
 
 Variable defaults and variable-directive arguments use const-required checker bases. The pinned parser actually returns ordinary list/object/directive classes there, while its annotations require corresponding `Const*` types. These refinements follow the real node attributes without claiming the runtime object changed class.
 
-Location presence is precise (`Location` or `None`), but numeric offsets, tokens and source metadata keep ordinary mutable types. Narrowing mutable `Location.start` to a numeric literal is rejected by Pyright and becomes false after legal mutation through a normal `Location` consumer. This limitation remains explicit rather than publishing unsound precision.
+Runtime location values and spans are preserved exactly. The generated type records location presence (`Location` for ordinary parsing and `None` with `no_location=True`); offset, token and source fields keep their ordinary mutable types. A literal `Location.start` would become false after legal mutation through a normal `Location` consumer, so it is not narrowed. The pinned gql.tada `parseDocument` type returns only `{ kind, definitions }` and omits `loc`; GraphQL Desk retains more safe location information without promising mutable offsets as literals.
 
 `graphql_desk.parse_generation.render_parse_companion(sources)` accepts explicitly
 supplied literal strings and returns runtime/stub text without writing files.
@@ -24,9 +24,9 @@ renderer. Dynamic strings, `Source` objects, SDL and nondefault options retain t
 ordinary `DocumentNode` return. Sources deduplicate deterministically; invalid
 syntax raises the original parser error, and unknown schema fields still parse.
 
-This is a retained-source opt-in companion foundation for #25. Attachment to original imports and
-complete exact-location acceptance remain open. API-01 and the live-typing gate
-have not passed. Tests cover actual generated imports and exact positive/negative
+This is a retained-source opt-in companion foundation for #25. Automatic typing
+for ordinary `graphql_desk.parse` imports is tracked separately in #253. API-01
+and the live-typing gate have not passed. Tests cover actual generated imports and exact positive/negative
 bindings in both strict checkers, runtime identity, fallback/options, schema-independent
 parsing, syntax errors, complex defaults, unsafe names and excessive nesting.
 
@@ -42,7 +42,7 @@ Independent valid literals survive invalid parser syntax. Sources deduplicate
 deterministically and remain schema-independent. Callers still own publication and
 explicit companion imports; neither function rewrites original imports or writes
 files. Explicit import attachment remains caller-owned; automatic import assistance
-and exact-location acceptance remain open.
+remains open under #253.
 
 The trusted editor artifact response now includes these captured companions under
 `<generated_package>.parsers.<source_module>` and publishes their stubs in the same managed
@@ -53,7 +53,7 @@ a project's schema is unavailable. Importing that generated module is recognized
 subsequent captures so its literal overloads stay current. The runtime companion
 re-exports the exact `graphql_desk.parse` function. The editor does not rewrite the
 user's source import; automatic import assistance and two-host Pylance verification
-remain open under #25.
+remain open under #253.
 
 Captured parser syntax errors use the existing versioned source map to locate the
 actual contributing Python literals, including imported constants, concatenation,
@@ -61,7 +61,8 @@ escapes, Unicode and EOF boundaries. Diagnostic module identities can therefore
 differ from the selected call owner. Each call maps its own provenance even when
 parsing is deduplicated by decoded source. Unavailable or unverifiable maps retain
 an honest whole-call diagnostic; resource fallbacks also remain on the call.
-This does not attach companions to original imports or complete location acceptance.
+This does not attach companions to original imports; automatic import assistance
+remains open under #253.
 
 Captured parser discovery also accepts direct ordinary/async function-body calls
 when inputs are literals or proven stable module globals. Whole-function local
