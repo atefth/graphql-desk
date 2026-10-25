@@ -313,15 +313,29 @@ exports.run = async () => {
       "The active generation does not retain the stale selected-field type");
     await fs.access(path.join(path.resolve(workspace, failedQuarantineGeneration.stubPath), "complete.json"));
     let failedRefreshHover;
-    await until(async () => {
+    const unavailableHover = /Never|NoReturn|Unknown|object/;
+    const unavailableDeadline = Date.now() + 45000;
+    do {
       failedRefreshHover = await selectedHover();
-      return /Never|NoReturn|Unknown|object|\bAny\b/.test(failedRefreshHover);
-    },
-      "Pylance consumes the unavailable type after worker failure");
+      if (unavailableHover.test(failedRefreshHover)) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < unavailableDeadline);
     results.lifecycle.workerFailureQuarantineRequests = workerRequests.filter(request => request.op === "quarantine")
       .map(({ ok, error }) => ({ ok: Boolean(ok), ...(error ? { error } : {}) }));
-    assert.match(failedRefreshHover, /Never|NoReturn|Unknown|object/,
-      "Worker failure must leave the affected operation unavailable, never untyped Any");
+    const workerFailureProbe = {
+      hover: failedRefreshHover,
+      generation: { path: failedGeneration.stubPath, analysisId: failedGeneration.manifest?.analysisId,
+        operations: failedGeneration.manifest?.operationManifest.flatMap(group => group.operations
+          .map(({ binding, status, declaration_path }) => ({ binding, status, declaration_path }))),
+        stubs: failedGeneration.files.map(([file]) => path.relative(workspace, file).replaceAll("\\", "/")) },
+      quarantineRequests: results.lifecycle.workerFailureQuarantineRequests,
+      pylanceDiagnostics: vscode.languages.getDiagnostics(sourceUri).slice(0, 10)
+        .map(({ source, message }) => ({ source, message: message.slice(0, 500) })),
+      output: outputMessages.filter(message => /quarantine|publish|error/i.test(message)).slice(-10)
+        .map(message => message.slice(0, 500)),
+    };
+    assert.match(failedRefreshHover, unavailableHover,
+      `Worker failure must leave the affected operation unavailable, never untyped Any: ${JSON.stringify(workerFailureProbe)}`);
     results.lifecycle.workerFailureKeepsAffectedTypingUnavailable = true;
 
     await replaceSelectedSchemaType("Boolean", "Int");
