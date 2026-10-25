@@ -12,7 +12,9 @@ async function until(action, accept, message) {
   const deadline = Date.now() + 30000;
   let value;
   do { value = await action(); if (accept(value)) return value; await new Promise(resolve => setTimeout(resolve, 100)); } while (Date.now() < deadline);
-  assert.fail(message);
+  let lastValue;
+  try { lastValue = JSON.stringify(value)?.slice(0, 2000); } catch { lastValue = String(value).slice(0, 2000); }
+  assert.fail(`${message}: last observed ${lastValue}`);
 }
 async function replace(document, text) {
   const edit = new vscode.WorkspaceEdit();

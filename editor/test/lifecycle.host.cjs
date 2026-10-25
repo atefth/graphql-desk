@@ -450,8 +450,15 @@ exports.run = async () => {
     assert.equal(configDocument.isDirty, false, "Saving the restored config clears only the test's own temporary edit");
     assert.equal(await fs.readFile(configPath, "utf8"), originalConfig,
       "Saving the restored config leaves the user's on-disk config unchanged");
-    await until(async () => /selected:\s*(?:str|String)\b/.test(await selectedHover()),
-      "restoring the original config restores the schema's original typing");
+    let restoredConfigHover;
+    const configRestoreDeadline = Date.now() + 45000;
+    do {
+      restoredConfigHover = await selectedHover();
+      if (/selected:\s*(?:str|String)\b/.test(restoredConfigHover)) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < configRestoreDeadline);
+    assert.match(restoredConfigHover, /selected:\s*(?:str|String)\b/,
+      `Restoring the original config should restore schema typing: ${String(restoredConfigHover).slice(0, 2000)}`);
     const settingsAfterRace = JSON.parse(await fs.readFile(settingsPath, "utf8"));
     const settingsWithoutManagedPath = { ...settingsAfterRace };
     const managedStubPath = settingsWithoutManagedPath["python.analysis.stubPath"];
