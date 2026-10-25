@@ -1,0 +1,37 @@
+{
+  "host": "VS Code 1.141.0",
+  "platform": "Windows x64",
+  "extensions": {
+    "ms-python.python": "2026.10.0",
+    "ms-python.vscode-pylance": "2026.4.1"
+  },
+  "scenario": "Managed generated typing across editor lifecycle changes and worker recovery.",
+  "workerFailure": {
+    "affectedTypingUnavailable": true,
+    "freshEditRestoresTyping": true,
+    "unaffectedSiblingKeepsId": true
+  },
+  "delayedResult": {
+    "newerTypeRemainsSelected": true,
+    "stalePublicationCount": 0,
+    "dirtyUserBufferPreserved": true,
+    "preExistingUserFilePreserved": true,
+    "unrelatedWorkspaceSettingsPreserved": true
+  },
+  "editorLifecycle": {
+    "unsavedEdit": true,
+    "undo": true,
+    "redo": true,
+    "save": true,
+    "discard": true,
+    "closeAndReopen": true,
+    "sourceRename": true,
+    "sourceDelete": true,
+    "ownedArtifactCleanup": true
+  },
+  "outcome": "passed",
+  "limits": [
+    "This records one isolated VS Code 1.141.0 host run with Python 2026.10.0 and Pylance 2026.4.1.",
+    "This does not complete the full issue #42 matrix or pass any broad parity gate."
+  ]
+}
