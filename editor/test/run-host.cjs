@@ -71,20 +71,25 @@ async function installMappingStub(python) {
   const packageName = `graphql_desk_mapping_fixture_${randomUUID().replaceAll("-", "")}`;
   const directory = path.join(purelib, `${packageName}-stubs`);
   assert.equal(path.dirname(directory), purelib, "The fixture must be directly under the selected interpreter's purelib");
-  const file = path.join(directory, "__init__.pyi");
-  const modelsFile = path.join(directory, "models.pyi");
-  const text = "from .models import BaseModel as BaseModel, Color as Color\n";
-  const modelsText = "from enum import Enum\nclass BaseModel: ...\nclass Color(Enum):\n    RED = ...\n    BLUE = ...\n";
+  const files = new Map([
+    ["__init__.pyi", ""],
+    ["alpha.pyi", "from enum import Enum\nclass AlphaDateInput: ...\nclass AlphaDateOutput: ...\nclass AlphaColor(Enum):\n    RED = ...\n    BLUE = ...\n"],
+    ["beta.pyi", "from enum import Enum\nclass BetaDateInput: ...\nclass BetaDateOutput: ...\nclass BetaColor(Enum):\n    RED = ...\n    BLUE = ...\n"],
+  ]);
   await fs.mkdir(directory);
-  let modelsCreated = false;
+  const created = [];
   try {
-    await fs.writeFile(file, text, { flag: "wx" });
-    await fs.writeFile(modelsFile, modelsText, { flag: "wx" });
-    modelsCreated = true;
+    for (const [name, text] of files) {
+      await fs.writeFile(path.join(directory, name), text, { flag: "wx" });
+      created.push(name);
+    }
   } catch (error) {
     try {
-      if (await fs.readFile(file, "utf8") === text) await fs.unlink(file);
-      if (modelsCreated && await fs.readFile(modelsFile, "utf8") === modelsText) await fs.unlink(modelsFile);
+      for (const name of created) {
+        if (await fs.readFile(path.join(directory, name), "utf8") === files.get(name)) {
+          await fs.unlink(path.join(directory, name));
+        }
+      }
       await fs.rmdir(directory);
     } catch { /* Preserve anything that is not the exact fixture created above. */ }
     throw error;
@@ -92,11 +97,11 @@ async function installMappingStub(python) {
   const fixture = {
     packageName,
     async cleanup() {
-      assert.equal(await fs.readFile(file, "utf8"), text, "Do not remove a changed mapping fixture");
-      assert.equal(await fs.readFile(modelsFile, "utf8"), modelsText,
-        "Do not remove a changed external base fixture");
-      await fs.unlink(modelsFile);
-      await fs.unlink(file);
+      for (const [name, text] of files) {
+        assert.equal(await fs.readFile(path.join(directory, name), "utf8"), text,
+          "Do not remove a changed mapping fixture");
+      }
+      for (const name of [...files.keys()].reverse()) await fs.unlink(path.join(directory, name));
       await fs.rmdir(directory);
     },
   };
@@ -196,6 +201,11 @@ async function main() {
       "from graphql_desk import TypedDocument",
       "from graphql_desk_generated.default import graphql",
       "from typing import TypeVar",
+      ...(suite === "externalMappings" ? [
+        "from graphql_desk_generated.beta import graphql as beta",
+        `from ${mappingFixture.packageName}.alpha import AlphaDateInput, AlphaDateOutput, AlphaColor`,
+        `from ${mappingFixture.packageName}.beta import BetaDateInput, BetaDateOutput, BetaColor`,
+      ] : []),
       "R = TypeVar('R')",
       "V = TypeVar('V')",
       "def execute(document: TypedDocument[R, V], variables: V) -> R: ...",
@@ -206,18 +216,30 @@ async function main() {
       "needs_str: str = selected",
       "wrong = execute(doc, {'limit': 'bad'})",
       ...(suite === "externalMappings" ? [
-        "from models import DateInput, DateOutput",
-        `from ${mappingFixture.packageName} import Color`,
         "mapped_doc = graphql('query Mapped($date: ExternalDate!, $color: ExternalColor!) { externalDate(value: $date) externalColor(value: $color) }')",
-        "mapped_result = execute(mapped_doc, {'date': DateInput(), 'color': Color()})",
+        "mapped_result = execute(mapped_doc, {'date': AlphaDateInput(), 'color': AlphaColor.RED})",
         "mapped_date = mapped_result['externalDate']",
         "mapped_color = mapped_result['externalColor']",
-        "mapped_date_ok: DateOutput = mapped_date",
-        "mapped_color_ok: Color = mapped_color",
+        "mapped_date_ok: AlphaDateOutput = mapped_date",
+        "mapped_color_ok: AlphaColor = mapped_color",
         "mapped_date_bad: str = mapped_date",
         "mapped_color_bad: str = mapped_color",
-        "mapped_wrong_date = execute(mapped_doc, {'date': DateOutput(), 'color': Color()})",
-        "mapped_wrong_color = execute(mapped_doc, {'date': DateInput(), 'color': 'RED'})",
+        "mapped_wrong_date = execute(mapped_doc, {'date': AlphaDateOutput(), 'color': AlphaColor.RED})",
+        "mapped_wrong_color = execute(mapped_doc, {'date': AlphaDateInput(), 'color': 'RED'})",
+        "beta_mapped_doc = beta('query BetaMapped($date: ExternalDate!, $color: ExternalColor!) { externalDate(value: $date) externalColor(value: $color) }')",
+        "beta_mapped_result = execute(beta_mapped_doc, {'date': BetaDateInput(), 'color': BetaColor.BLUE})",
+        "beta_mapped_date = beta_mapped_result['externalDate']",
+        "beta_mapped_color = beta_mapped_result['externalColor']",
+        "beta_mapped_date_ok: BetaDateOutput = beta_mapped_date",
+        "beta_mapped_color_ok: BetaColor = beta_mapped_color",
+        "beta_mapped_date_bad: str = beta_mapped_date",
+        "beta_mapped_color_bad: str = beta_mapped_color",
+        "mapped_cross_input = execute(mapped_doc, {'date': BetaDateInput(), 'color': BetaColor.RED})",
+        "beta_cross_input = execute(beta_mapped_doc, {'date': AlphaDateInput(), 'color': AlphaColor.RED})",
+        "mapped_cross_date_result: AlphaDateOutput = beta_mapped_date",
+        "beta_cross_date_result: BetaDateOutput = mapped_date",
+        "mapped_cross_color_result: AlphaColor = beta_mapped_color",
+        "beta_cross_color_result: BetaColor = mapped_color",
       ] : []),
       "other_doc = graphql('query Other { user { id } }')",
       "other_result = execute(other_doc, {})",
@@ -240,10 +262,16 @@ async function main() {
     ].join("\n");
     const shapeFields = suite === "typingMatrix" ? " nested: [[String!]!]! nullable: [String]" : "";
     await Promise.all([
-      ...(suite === "externalMappings" ? [fs.writeFile(path.join(workspace, "models.py"),
-        `from ${mappingFixture.packageName} import BaseModel\nclass DateInput(BaseModel): ...\nclass DateOutput(BaseModel): ...\n`)] : []),
-      fs.writeFile(path.join(workspace, "pyproject.toml"), '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n' + (suite === "externalMappings" ? `scalars = { ExternalDate = { input = "models.DateInput", output = "models.DateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.Color" }\n` : "")),
+      fs.writeFile(path.join(workspace, "pyproject.toml"), suite === "externalMappings"
+        ? `[tool.graphql-desk]\ngenerated_package = "graphql_desk_generated"\n[[tool.graphql-desk.schemas]]\nname = "default"\nschema = "schema.graphql"\nschema_output = "graphql_desk_generated/default.pyi"\nscalars = { ExternalDate = { input = "${mappingFixture.packageName}.alpha.AlphaDateInput", output = "${mappingFixture.packageName}.alpha.AlphaDateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.alpha.AlphaColor" }\n[[tool.graphql-desk.schemas]]\nname = "beta"\nschema = "beta.graphql"\nschema_output = "graphql_desk_generated/beta.pyi"\nscalars = { ExternalDate = { input = "${mappingFixture.packageName}.beta.BetaDateInput", output = "${mappingFixture.packageName}.beta.BetaDateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.beta.BetaColor" }\n`
+        : '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n'),
       fs.writeFile(path.join(workspace, "schema.graphql"), `${suite === "externalMappings" ? "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" : ""}type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${suite === "externalMappings" ? " externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor!" : ""}${shapeFields} }\n`),
+      ...(suite === "externalMappings" ? [fs.writeFile(path.join(workspace, "beta.graphql"),
+        "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" +
+        "type User { id: ID! name: String! }\n" +
+        "type Query { selected: String! count(limit: Int!): Int! user: User! " +
+        "externalDate(value: ExternalDate!): ExternalDate! " +
+        "externalColor(value: ExternalColor!): ExternalColor! }\n") ] : []),
       fs.writeFile(sourcePath, source),
       ...(["typingMatrix", "parserOverlay"].includes(suite) ? [fs.writeFile(path.join(workspace, "parser_consumer.py"),
         "from graphql_desk import parse\ndocument = parse('query ParserQuery { selected }')\nparsed_name = document.definitions[0].name.value\n")] : []),
@@ -256,6 +284,8 @@ async function main() {
     await Promise.all([
       fs.writeFile(path.join(runtimePackage, "__init__.py"), ""),
       fs.writeFile(path.join(runtimePackage, "default.py"), 'from graphql_desk import init_graphql\ngraphql = init_graphql("default")\n'),
+      ...(suite === "externalMappings" ? [fs.writeFile(path.join(runtimePackage, "beta.py"),
+        'from graphql_desk import init_graphql\ngraphql = init_graphql("beta")\n')] : []),
       fs.writeFile(path.join(runtimePackage, "sources", "__init__.py"), ""),
       fs.writeFile(path.join(runtimePackage, "sources", "fragments.py"), [
         "from graphql_desk_generated.default import graphql",
