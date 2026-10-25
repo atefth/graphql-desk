@@ -10,7 +10,7 @@ const { once } = require("node:events");
 const { runTests, runVSCodeCommand } = require("@vscode/test-electron");
 let mappingFixtureCleanup;
 
-function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix) {
+function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix, externalMappings) {
   const base = { workspace, candidates: [sourcePath], buffers: [], documents: [], editor_fallback: null };
   const script = [
     "import json, sys",
@@ -39,8 +39,8 @@ function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix) {
   }
   const initial = generate();
   const shapeFields = typingMatrix ? " nested: [[String!]!]! nullable: [String]" : "";
-  const mappedSchema = typingMatrix ? "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" : "";
-  const mappedFields = typingMatrix ? " externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor!" : "";
+  const mappedSchema = externalMappings ? "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" : "";
+  const mappedFields = externalMappings ? " externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor!" : "";
   fsSync.writeFileSync(path.join(workspace, "schema.graphql"), `${mappedSchema}type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User!${mappedFields}${shapeFields} }\n`);
   const nullable = generate();
   fsSync.writeFileSync(path.join(workspace, "schema.graphql"), `${mappedSchema}type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${mappedFields}${shapeFields} }\n`);
@@ -252,7 +252,7 @@ async function main() {
         "",
       ].join("\n")),
     ]);
-    const generated = generatedFactoryFiles(python, workspace, sourcePath, ["typingMatrix", "externalMappings"].includes(suite));
+    const generated = generatedFactoryFiles(python, workspace, sourcePath, suite === "typingMatrix", suite === "externalMappings");
     await fs.writeFile(artifacts, JSON.stringify(generated));
     console.log(`Captured ${generated.initial.length} initial and ${generated.nullable.length} nullable factory stub files.`);
   }

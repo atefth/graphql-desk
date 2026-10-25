@@ -171,13 +171,11 @@ exports.run = async () => {
 
     const semanticsSchema = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(workspace, "schema.graphql")));
     await replace(semanticsSchema, [
-      "scalar ExternalDate",
-      "enum ExternalColor { RED BLUE }",
       "interface Node { id: ID! }",
       "type User implements Node { id: ID! name: String! }",
       "type Org implements Node { id: ID! title: String! }",
       "union Search = User | Org",
-      "type Query { selected: String! count(limit: Int!): Int! user: User! externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor! nested: [[String!]!]! nullable: [String] node: Node! search: [Search!]! }",
+      "type Query { selected: String! count(limit: Int!): Int! user: User! nested: [[String!]!]! nullable: [String] node: Node! search: [Search!]! }",
       "",
     ].join("\n"));
     const semanticPath = path.join(workspace, "operation_semantics.py");
