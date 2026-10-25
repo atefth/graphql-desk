@@ -686,6 +686,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           const configuredPath = explicitlyConfigured ? pythonConfig.get("analysis.stubPath", "") : "";
           const selectedPath = typeof configuredPath === "string" ? configuredPath.trim() : "";
           const selectedRoot = path.resolve(canonical(folder.uri.fsPath), selectedPath || (explicitlyConfigured ? "typings" : ".graphql-desk/typings"));
+          if (stagedArtifact && inside(selectedRoot, filename) && /^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.basename(filename))) return;
           let descriptor;
           let missing = false;
           try {
