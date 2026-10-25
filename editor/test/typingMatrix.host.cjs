@@ -60,6 +60,7 @@ exports.run = async () => {
 
     const uri = consumerUri;
     const document = consumer;
+    const originalConsumerSource = document.getText();
     const position = name => {
       const offset = document.getText().indexOf(name) + 1;
       assert.ok(offset > 0, `Expected fixture variable ${name}`);
@@ -197,6 +198,62 @@ exports.run = async () => {
       results.outcome = "parser-overlay-observed";
       return;
     }
+
+    const multiSource = [
+      "from graphql_desk import TypedDocument",
+      "from graphql_desk_generated.default import graphql",
+      "from typing import TypeVar",
+      "R = TypeVar('R')",
+      "V = TypeVar('V')",
+      "def execute(document: TypedDocument[R, V], variables: V) -> R: ...",
+      "text_doc = graphql('query Text { selected } query Count($limit: Int!) { count(limit: $limit) }', operation='Text')",
+      "count_doc = graphql('query Text { selected } query Count($limit: Int!) { count(limit: $limit) }', operation='Count')",
+      "text_name = text_doc.operation_name",
+      "count_name = count_doc.operation_name",
+      "text_result = execute(text_doc, {})",
+      "text_value = text_result['selected']",
+      "count_result = execute(count_doc, {'limit': 1})",
+      "count_value = count_result['count']",
+      "text_bad_variables = execute(text_doc, {'limit': 1})",
+      "count_bad_variables = execute(count_doc, {})",
+      "text_bad_field = text_result['count']",
+      "count_bad_field = count_result['selected']",
+      "",
+    ].join("\n");
+    await replace(document, multiSource);
+    const multiUri = uri;
+    const multiDocument = document;
+    const multiPosition = marker => multiDocument.positionAt(multiSource.indexOf(marker) + 1);
+    const multiHover = async marker => {
+      const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", multiUri, multiPosition(marker)) || [];
+      return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
+    };
+    const multiLine = marker => multiSource.slice(0, multiSource.indexOf(marker)).split("\n").length - 1;
+    const multiDiagnostics = marker => vscode.languages.getDiagnostics(multiUri)
+      .filter(item => item.range.start.line === multiLine(marker));
+    const multiProbe = {};
+    const multiReady = await until(async () => {
+      multiProbe.textName = await multiHover("text_name");
+      multiProbe.countName = await multiHover("count_name");
+      multiProbe.textValue = await multiHover("text_value");
+      multiProbe.countValue = await multiHover("count_value");
+      multiProbe.textVariableErrors = multiDiagnostics("text_bad_variables").map(item => item.message);
+      multiProbe.countVariableErrors = multiDiagnostics("count_bad_variables").map(item => item.message);
+      multiProbe.textFieldErrors = multiDiagnostics("text_bad_field").map(item => item.message);
+      multiProbe.countFieldErrors = multiDiagnostics("count_bad_field").map(item => item.message);
+      return /Text/.test(multiProbe.textName) && /Count/.test(multiProbe.countName) &&
+        /String|str/.test(multiProbe.textValue) && /Int|int/.test(multiProbe.countValue) &&
+        multiProbe.textVariableErrors.length > 0 && multiProbe.countVariableErrors.length > 0 &&
+        multiProbe.textFieldErrors.length > 0 && multiProbe.countFieldErrors.length > 0;
+    }, "Pylance infers isolated results and variables for same-source operation selectors", 60000);
+    assert.ok(multiReady, JSON.stringify(multiProbe));
+    results.pylance.multiOperationIsolation = multiProbe;
+    await replace(document, originalConsumerSource);
+    const multiRestoreReady = await until(async () => {
+      results.pylance.multiOperationRestore = await hover("other_id");
+      return /\bID\b/.test(results.pylance.multiOperationRestore);
+    }, "Pylance restores prior document typing after the multi-operation edit", 60000);
+    assert.ok(multiRestoreReady, JSON.stringify(results.pylance.multiOperationRestore));
 
     const semanticsSchema = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(workspace, "schema.graphql")));
     await replace(semanticsSchema, [
