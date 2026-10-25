@@ -1909,9 +1909,12 @@ class SourceGraphTests(unittest.TestCase):
                 "MixedItems:TypeAlias=list[str|int]\n"
                 "TripleItems:TypeAlias=list[str|int|None]\n"
                 "LegacyItems:TypeAlias=list[Union[str,None]]\n"
+                "NestedLegacyItems:TypeAlias=list[Union[str|int,None]]\n"
                 "ExtLegacyItems:TypeAlias=list[ExtUnion[bool,None]]\n"
+                "NestedExtLegacyItems:TypeAlias=list[ExtUnion[bool|int,None]]\n"
                 "QualifiedLegacyItems:TypeAlias=list[typing.Union[str,int,None]]\n"
-                "LegacyScalar:TypeAlias=Union[str,int,None]",
+                "LegacyScalar:TypeAlias=Union[str,int,None]\n"
+                "NestedLegacyScalar:TypeAlias=Union[str|int,None]",
             ),
             module("exports", "from models import Alias as Public"),
         )
@@ -1925,9 +1928,12 @@ class SourceGraphTests(unittest.TestCase):
             "models.MixedItems",
             "models.TripleItems",
             "models.LegacyItems",
+            "models.NestedLegacyItems",
             "models.ExtLegacyItems",
+            "models.NestedExtLegacyItems",
             "models.QualifiedLegacyItems",
             "models.LegacyScalar",
+            "models.NestedLegacyScalar",
             "exports.Public",
         )
         result = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
@@ -1973,12 +1979,10 @@ class SourceGraphTests(unittest.TestCase):
             "Alias:TypeAlias=list[Union[None,None]]",
             "Alias:TypeAlias=list[Union[str,list[int]]]",
             "Alias:TypeAlias=list[Union[str,'int']]",
-            "Alias:TypeAlias=list[Union[str|int,None]]",
             "Alias:TypeAlias=Union[str]",
             "Alias:TypeAlias=Union[None,None]",
             "Alias:TypeAlias=Union[str,list[int]]",
             "Alias:TypeAlias=Union['str',None]",
-            "Alias:TypeAlias=Union[str|int,None]",
             "Alias:TypeAlias=Union[Union[str,int],None]",
             "import typing\ntyping.Union=object\n"
             "Alias:TypeAlias=list[typing.Union[str,None]]",

@@ -1268,11 +1268,6 @@ class _Graph:
                     if (
                         not isinstance(nested_arguments, ast.Tuple)
                         or len(nested_arguments.elts) < 2
-                        or any(
-                            isinstance(item, ast.BinOp)
-                            and isinstance(item.op, ast.BitOr)
-                            for item in nested_arguments.elts
-                        )
                     ):
                         raise _Unresolved(
                             "Union aliases require direct named type arguments"
@@ -1280,11 +1275,7 @@ class _Graph:
                     operands = list(nested_arguments.elts)
             flat_operands: list[ast.expr] = []
             for operand in operands:
-                if (
-                    constructor.text not in union_constructors
-                    and isinstance(operand, ast.BinOp)
-                    and isinstance(operand.op, ast.BitOr)
-                ):
+                if isinstance(operand, ast.BinOp) and isinstance(operand.op, ast.BitOr):
                     chain: list[ast.expr] = [operand]
                     while (
                         chain

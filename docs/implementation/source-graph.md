@@ -97,12 +97,15 @@ Explicit binary unions accept two direct named/qualified type operands or litera
 None, with at least one named operand: `N | M`, `N | None` or `None | N`. Flat
 `typing.Union[...]` and `typing_extensions.Union[...]` aliases use direct named
 operands or literal None, and may appear inside a supported container alias.
+Those operands may include a flat PEP 604 union, such as
+`Union[str | int, None]` or `list[Union[str | int, None]]`; its leaves follow
+the same direct-name rule.
 Trusted external `typing.Optional[N]` retains its one named/qualified operand.
 Aliases retain their own identity and never confer class-base or TypedDict
 capabilities through aliases or reexports. External operands remain unverified.
 Duplicate union operands also retain the conservative non-base policy: runtime
 and Pyright allow the tested reduced class base, while pinned mypy rejects it.
-Nested PEP 604 unions, nested Union arguments, and general recursive Union
+Nested PEP 604 union groups, nested Union arguments, and general recursive Union
 evaluation remain unsupported.
 Trusted external `typing.Literal` and `typing_extensions.Literal` aliases accept
 one or more flat string, bytes, integer, boolean or None constants, plus one unary
