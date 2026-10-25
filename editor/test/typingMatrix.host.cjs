@@ -77,18 +77,47 @@ exports.run = async () => {
       const ready = await until(async () => {
         observed.externalDate = await hover("mapped_date");
         observed.externalColor = await hover("mapped_color");
+        observed.betaExternalDate = await hover("beta_mapped_date");
+        observed.betaExternalColor = await hover("beta_mapped_color");
         observed.externalDateErrors = lineDiagnostics("mapped_date_bad");
         observed.externalColorErrors = lineDiagnostics("mapped_color_bad");
         observed.externalDateVariableErrors = lineDiagnostics("mapped_wrong_date");
         observed.externalColorVariableErrors = lineDiagnostics("mapped_wrong_color");
-        observed.externalPositiveErrors = [...lineDiagnostics("mapped_date_ok"), ...lineDiagnostics("mapped_color_ok")];
+        observed.betaExternalDateErrors = lineDiagnostics("beta_mapped_date_bad");
+        observed.betaExternalColorErrors = lineDiagnostics("beta_mapped_color_bad");
+        observed.crossSchemaInputDiagnostics = {
+          alphaFromBeta: lineDiagnostics("mapped_cross_input"),
+          betaFromAlpha: lineDiagnostics("beta_cross_input"),
+        };
+        observed.crossSchemaResultDiagnostics = {
+          alphaDateFromBeta: lineDiagnostics("mapped_cross_date_result"),
+          betaDateFromAlpha: lineDiagnostics("beta_cross_date_result"),
+          alphaColorFromBeta: lineDiagnostics("mapped_cross_color_result"),
+          betaColorFromAlpha: lineDiagnostics("beta_cross_color_result"),
+        };
+        observed.externalPositiveErrors = [
+          ...lineDiagnostics("mapped_date_ok"),
+          ...lineDiagnostics("mapped_color_ok"),
+          ...lineDiagnostics("beta_mapped_date_ok"),
+          ...lineDiagnostics("beta_mapped_color_ok"),
+          ...lineDiagnostics("mapped_result"),
+          ...lineDiagnostics("beta_mapped_result"),
+        ];
         observed.externalMappingDiagnostics = vscode.languages.getDiagnostics(uri)
           .filter(item => item.source === "GraphQL Desk" && /mapping-(?:unresolved|unverified)/.test(String(item.code)));
-        return /DateOutput/.test(observed.externalDate) && /Color/.test(observed.externalColor) &&
+        return /ExternalDateOutput/.test(observed.externalDate) && /ExternalColor/.test(observed.externalColor) &&
+          /ExternalDateOutput/.test(observed.betaExternalDate) && /ExternalColor/.test(observed.betaExternalColor) &&
           observed.externalDateErrors.length > 0 && observed.externalColorErrors.length > 0 &&
+          observed.externalDateErrors.some(message => /AlphaDateOutput/.test(message)) &&
+          observed.externalColorErrors.some(message => /AlphaColor/.test(message)) &&
           observed.externalDateVariableErrors.length > 0 && observed.externalColorVariableErrors.length > 0 &&
+          observed.betaExternalDateErrors.length > 0 && observed.betaExternalColorErrors.length > 0 &&
+          observed.betaExternalDateErrors.some(message => /BetaDateOutput/.test(message)) &&
+          observed.betaExternalColorErrors.some(message => /BetaColor/.test(message)) &&
+          Object.values(observed.crossSchemaInputDiagnostics).every(errors => errors.length > 0) &&
+          Object.values(observed.crossSchemaResultDiagnostics).every(errors => errors.length > 0) &&
           observed.externalPositiveErrors.length === 0 && observed.externalMappingDiagnostics.length === 0;
-      }, "Pylance live typing for external scalar and enum mappings", 60000);
+      }, "Pylance keeps external scalar and enum mappings isolated between schemas", 60000);
       assert.ok(ready, JSON.stringify(observed));
       results.pylance = { ...results.pylance, ...observed };
       const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
