@@ -86,6 +86,7 @@ The private project uses matching **Stage**, **Scope** and **Status** fields and
 | [#86](https://github.com/atefth/graphql-desk/issues/86) | Optional other-editor and browser/remote compatibility evaluation | Optional extras | Optional extra | Optional |
 | [#87](https://github.com/atefth/graphql-desk/issues/87) | Implement schema-bound scalar enum and input identity helpers | 1 Live typing | Required parity | SCALAR-01 |
 | [#88](https://github.com/atefth/graphql-desk/issues/88) | Reconcile every parity capability with staged GitHub tracking | Cross-stage tracking | Planning and evidence | Research/planning only |
+| [#253](https://github.com/atefth/graphql-desk/issues/253) | Attach exact parser types to normal parse imports | 1 Live typing | Required parity | API-01 |
 
 ## Coverage and counting rules
 
