@@ -60,12 +60,10 @@ report degraded health rather than invent editor/bridge/ownership evidence. #249
 adds import-free resolution of configured local mapping names from `.py` and `.pyi`
 files reachable under configured source roots, and reports the results from doctor.
 It does not scan unrelated files or impose a numeric file cap; unusually large
-reachable import closures can make doctor slow. External installed-package symbol
-verification and checker-level type compatibility remain open.
-One checker fixture now verifies mapped input/output/enum compatibility against an
-external stub-only package with both mypy and Pyright. This is bounded evidence;
-doctor still reports external symbols as unverified and runtime exports are not
-validated.
+reachable import closures can make doctor slow. #265 adds bounded selected-
+interpreter source lookup for external mapping names and imported class bases in
+doctor and editor preflight, without importing package code. Checker compatibility
+beyond the covered external-stub fixture and runtime exports remain unverified.
 These foundations do not complete the dependency-gated later-stage stories.
 
 Merged #150 adds simple captured PEP613 mapping aliases. #151 generates opt-in
