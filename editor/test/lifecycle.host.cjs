@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
+const { spawn } = require("node:child_process");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const vscode = require("vscode");
@@ -15,9 +16,23 @@ const artifactCalls = [];
 const skipReasons = [];
 let crashArtifactsRemaining = 0;
 let delayedArtifact = null;
+let pendingWorkerArtifact = null;
 const createWorker = workerModule.createAnalysisWorker;
 workerModule.createAnalysisWorker = options => {
-  const worker = createWorker(options);
+  const worker = createWorker({ ...options, spawn: (...args) => {
+    const process = spawn(...args);
+    const write = process.stdin.write.bind(process.stdin);
+    process.stdin.write = (chunk, ...writeArgs) => {
+      if (pendingWorkerArtifact && Buffer.from(chunk).includes(Buffer.from('"op":"artifacts"'))) {
+        const held = pendingWorkerArtifact;
+        pendingWorkerArtifact = null;
+        process.stdout.pause();
+        held.started({ id: JSON.parse(String(chunk)).id, signal: held.signal });
+      }
+      return write(chunk, ...writeArgs);
+    };
+    return process;
+  } });
   return new Proxy(worker, { get(target, property) {
     if (property === "request") return async (message, requestOptions) => {
       const record = { op: message.op, id: message.id, buffers: message.buffers?.map(item => ({
@@ -27,6 +42,10 @@ workerModule.createAnalysisWorker = options => {
         dirty: item.is_dirty, mapsStringToInt: item.text?.includes('String = { input = "builtins.str", output = "builtins.int" }'),
       })), schemas: message.schema_buffers?.map(item => ({ path: item.path, hasBoolean: item.text?.includes("selected: Boolean!") })) };
       try {
+        if (message.op === "artifacts" && pendingWorkerArtifact) {
+          pendingWorkerArtifact.signal = requestOptions?.signal;
+          target.invalidate();
+        }
         if (message.op === "artifacts" && crashArtifactsRemaining > 0) {
           crashArtifactsRemaining -= 1;
           const pending = target.request(message, requestOptions);
@@ -367,6 +386,38 @@ exports.run = async () => {
     results.lifecycle.workerRecoveryOperations = recoveryRequests.filter(request => ["prepare", "analyze", "artifacts"].includes(request.op))
       .map(({ op, ok, error }) => ({ op, ok: Boolean(ok), ...(error ? { error } : {}) }));
 
+    let pendingWorkerStarted;
+    const pendingWorkerReady = new Promise(resolve => { pendingWorkerStarted = resolve; });
+    const pendingWorkerTimer = setTimeout(() => pendingWorkerStarted(null), 45000);
+    pendingWorkerArtifact = { signal: null, started: pendingWorkerStarted };
+    const cancelBaseline = await readGeneration();
+    await replaceSelectedSchemaType("Int", "Boolean");
+    let cancelledWorker;
+    try { cancelledWorker = await pendingWorkerReady; }
+    finally { clearTimeout(pendingWorkerTimer); }
+    assert.ok(cancelledWorker?.signal, "The held live worker request has an abort signal");
+    assert.notEqual(cancelledWorker.id, undefined);
+    assert.equal(cancelledWorker.signal.aborted, false, "The worker request is pending before invalidation");
+    await replaceSelectedSchemaType("Boolean", "String");
+    await until(() => cancelledWorker.signal.aborted, "schema invalidation aborts the pending worker request");
+    await until(async () => {
+      const current = await readGeneration();
+      return current.stubPath !== cancelBaseline.stubPath &&
+        current.files.some(([, text]) => /'selected': 'String'/.test(text)) &&
+        /selected:\s*(?:str|String)\b/.test(await selectedHover());
+    }, "Pylance receives the replacement type after cancelling stale worker work");
+    const cancelledRecord = workerRequests.find(request => request.op === "artifacts" && request.id === cancelledWorker.id);
+    assert.match(cancelledRecord?.error ?? "", /failed/,
+      "The aborted worker request cannot return its stale artifact response");
+    assert.equal(await fs.readFile(sourcePath, "utf8"), source,
+      "Cancellation does not write GraphQL edits to the user's Python source");
+    assert.equal(document.isDirty, false, "Cancellation does not dirty the user's Python document");
+    results.lifecycle.pendingWorkerRequestAborted = true;
+    results.lifecycle.cancelledWorkerRequests = workerRequests.filter(request => request.op === "artifacts").slice(-3);
+    await replaceSelectedSchemaType("String", "Int");
+    await until(async () => /selected:\s*Int\b/.test(await selectedHover()),
+      "restoring the schema baseline after cancellation restores Pylance typing");
+
     let delayedArtifactStarted;
     let rejectDelayedArtifact;
     const delayedArtifactReady = new Promise((resolve, reject) => {
@@ -580,6 +631,7 @@ exports.run = async () => {
     throw error;
   } finally {
     if (delayedArtifactTimer) clearTimeout(delayedArtifactTimer);
+    pendingWorkerArtifact = null;
     releaseDelayedArtifact?.();
     changedSubscription.dispose();
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
