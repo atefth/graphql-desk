@@ -18,7 +18,7 @@ function bundle(source, extra = {}) {
   const request = {
     request_id: "features-1",
     modules: [{ project: "p", module: "main", uri: extra.uri ?? "file:///workspace/main.py", version: extra.version ?? 1, source, is_package: false }, ...(extra.modules ?? [])],
-    bindings: [{ project: "p", schemas: ["default"], default_schema: "default", factories: [] }],
+    bindings: [{ project: "p", schemas: ["default"], default_schema: "default", factories: [], type_mappings: [] }],
     schemas: [{ project: "p", schema_name: "default", uri: extra.schemaUri ?? "file:///workspace/schema.graphql", version: extra.schemaVersion ?? 2,
       token: extra.schemaToken ?? "schema-2", format: extra.schemaFormat ?? "sdl", text: extra.schema ?? schema }],
   };

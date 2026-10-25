@@ -39,6 +39,7 @@ def request(
                 "schemas": ["default"],
                 "default_schema": "default",
                 "factories": [],
+                "type_mappings": [],
             }
         ],
         "schemas": [
@@ -66,6 +67,41 @@ def array(value: object) -> list[object]:
 
 
 class EditorAnalysisTests(unittest.TestCase):
+    def test_type_mapping_status_uses_captured_symbols_only(self) -> None:
+        payload = request("from graphql_desk import gql\nq=gql('{ date }')")
+        schema = object_(array(payload["schemas"])[0])
+        schema["text"] = "scalar Date\ntype Query { date: Date }"
+        binding = object_(array(payload["bindings"])[0])
+        binding["type_mappings"] = [
+            {
+                "schema_name": "default",
+                "scalars": [
+                    {
+                        "name": "Date",
+                        "input": "local_types.DateValue",
+                        "output": "vendor_dates.DateValue",
+                    }
+                ],
+                "enums": [],
+            }
+        ]
+        array(payload["modules"]).append(module("local_types", "class DateValue: ..."))
+        response = analyze_editor_snapshot(payload)
+        diagnostics = [object_(item) for item in array(response["diagnostics"])]
+        self.assertEqual([item["code"] for item in diagnostics], ["mapping-unverified"])
+        self.assertIn(
+            "outside the captured project snapshot",
+            cast(str, diagnostics[0]["message"]),
+        )
+
+        mappings = cast(list[dict[str, object]], binding["type_mappings"])
+        scalar_mappings = cast(list[dict[str, object]], mappings[0]["scalars"])
+        scalar_mappings[0]["output"] = "local_types.Missing"
+        response = analyze_editor_snapshot(payload)
+        diagnostics = [object_(item) for item in array(response["diagnostics"])]
+        self.assertEqual([item["code"] for item in diagnostics], ["mapping-unresolved"])
+        self.assertIn("Missing", cast(str, diagnostics[0]["message"]))
+
     def test_explicit_resolver_reuses_only_source_facts(self) -> None:
         payload = request()
         resolver = IncrementalResolver()

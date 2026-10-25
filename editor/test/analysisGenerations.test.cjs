@@ -34,6 +34,9 @@ const files = text => new Map([["graphql_desk_generated", [
   { relative_path: "graphql_desk_generated/default.py", text: "from graphql import parse\n" },
   { relative_path: "graphql_desk_generated/default.pyi", text: `selected: ${text}\n` },
   { relative_path: "graphql_desk_generated/_documents/default/d0.pyi", text: `class Result: value: ${text}\n` },
+]], ["graphql_desk-stubs", [
+  { relative_path: "graphql_desk-stubs/__init__.pyi", text: "from graphql import DocumentNode as _DocumentNode\ndef parse(source: str) -> _DocumentNode: ...\n" },
+  { relative_path: "graphql_desk-stubs/py.typed", text: "partial\n" },
 ]]]);
 const fingerprint = packages => createHash("sha256").update(JSON.stringify(
   [...packages].flatMap(([, values]) => values.map(({ relative_path, text }) => [relative_path, text])).sort(([a], [b]) => a.localeCompare(b)),

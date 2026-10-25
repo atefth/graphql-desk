@@ -392,7 +392,9 @@ test("extended preparation validates redacted preferences, environment names and
 });
 
 test("analysis artifacts require captured live and saved-source fingerprints", async t => {
-  const valid = { ok: true, id: "job", input_fingerprint: "a".repeat(64), saved_source_fingerprint: "b".repeat(64), projects: [], unavailable_schemas: [] };
+  const valid = { ok: true, id: "job", input_fingerprint: "a".repeat(64), saved_source_fingerprint: "b".repeat(64), projects: [],
+    parser_overlay: [{ relative_path: "graphql_desk-stubs/__init__.pyi", text: "from graphql import DocumentNode as _DocumentNode, Source as _Source\n" },
+      { relative_path: "graphql_desk-stubs/py.typed", text: "partial\n" }], unavailable_schemas: [] };
   for (const reply of [valid, { ...valid, input_fingerprint: "private" }, { ...valid, saved_source_fingerprint: "private" }]) {
     const fake = fakeSpawn(child => child.stdout.write(JSON.stringify(reply) + "\n"));
     const { worker, workspace } = setup(t, fake);
@@ -415,7 +417,9 @@ test("analysis artifacts validate operation provenance at the worker boundary", 
   const project = { project: "p", generated_package: "graphql_desk_generated", files: [
     { relative_path: "graphql_desk_generated/_documents/default/d0.pyi", text: "" },
   ], diagnostics: [], provenance: [record] };
-  const valid = { ok: true, id: "job", input_fingerprint: "a".repeat(64), saved_source_fingerprint: "b".repeat(64), projects: [project], unavailable_schemas: [] };
+  const valid = { ok: true, id: "job", input_fingerprint: "a".repeat(64), saved_source_fingerprint: "b".repeat(64), projects: [project],
+    parser_overlay: [{ relative_path: "graphql_desk-stubs/__init__.pyi", text: "from graphql import DocumentNode as _DocumentNode, Source as _Source\n" },
+      { relative_path: "graphql_desk-stubs/py.typed", text: "partial\n" }], unavailable_schemas: [] };
   const malformed = [
     { ...record, owner: { ...identity, utf16: { start: 9, end: 8 } } },
     { ...record, declaration_path: "../outside.pyi" },
@@ -439,5 +443,19 @@ test("analysis artifacts validate operation provenance at the worker boundary", 
     const request = { ...message(workspace), op: "artifacts", id: "job", schema_buffers: [] };
     if (reply === valid) assert.deepEqual(await worker.request(request), valid);
     else await assert.rejects(worker.request(request), generic);
+  }
+});
+
+test("parser overlay accepts only the fixed PEP 561 partial package paths", async t => {
+  const valid = { ok: true, id: "job", input_fingerprint: "a".repeat(64), saved_source_fingerprint: "b".repeat(64), projects: [],
+    parser_overlay: [{ relative_path: "graphql_desk-stubs/__init__.pyi", text: "from graphql import DocumentNode as _DocumentNode\n" },
+      { relative_path: "graphql_desk-stubs/py.typed", text: "partial\n" }], unavailable_schemas: [] };
+  for (const value of [
+    [{ relative_path: "other/__init__.pyi", text: "" }, valid.parser_overlay[1]],
+    [valid.parser_overlay[0], { relative_path: "graphql_desk-stubs/extra.pyi", text: "" }],
+  ]) {
+    const fake = fakeSpawn(child => child.stdout.write(JSON.stringify({ ...valid, parser_overlay: value }) + "\n"));
+    const { worker, workspace } = setup(t, fake);
+    await assert.rejects(worker.request({ ...message(workspace), op: "artifacts", id: "job", schema_buffers: [] }), generic);
   }
 });

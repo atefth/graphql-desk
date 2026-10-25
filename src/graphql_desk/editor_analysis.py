@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit
 
+from .config import ScalarMapping
 from .fragments import DefinitionFact, FragmentIndex, SchemaContext, index_fragments
 from .schema_loading import load_from_introspection, load_from_sdl
+from .schema_types import mapped_type_declarations
 from .source import Span
 from .source_graph import (
     DocumentIdentity,
@@ -17,6 +19,7 @@ from .source_graph import (
     ModuleSnapshot,
     ProjectBindings,
     resolve_project,
+    resolve_type_symbols,
 )
 from .source_maps import build_source_map, convert_offset
 
@@ -166,9 +169,12 @@ def analyze_editor_snapshot_details(
     )
     request_id = _string(payload["request_id"], "Request identity")
     bindings: list[ProjectBindings] = []
+    type_mappings: dict[str, list[dict[str, object]]] = {}
     for value in _array(payload["bindings"], "bindings"):
         item = _object(
-            value, {"project", "schemas", "default_schema", "factories"}, "binding"
+            value,
+            {"project", "schemas", "default_schema", "factories", "type_mappings"},
+            "binding",
         )
         factories: list[FactoryBinding] = []
         for factory in _array(item["factories"], "factories"):
@@ -180,9 +186,55 @@ def analyze_editor_snapshot_details(
                     _optional_string(record["schema_name"], "Factory schema"),
                 )
             )
+        mapping_facts: list[dict[str, object]] = []
+        project_id = _string(item["project"], "Project identity")
+        schema_names = {
+            _string(name, "Schema name")
+            for name in _array(item["schemas"], "Schema names")
+        }
+        mapped_schemas: set[str] = set()
+        for raw_mapping in _array(item["type_mappings"], "type mappings"):
+            mapping = _object(
+                raw_mapping, {"schema_name", "scalars", "enums"}, "schema type mapping"
+            )
+            scalars: list[dict[str, str]] = []
+            for raw_scalar in _array(mapping["scalars"], "scalar mappings"):
+                scalar = _object(
+                    raw_scalar, {"name", "input", "output"}, "scalar mapping"
+                )
+                scalars.append(
+                    {
+                        "name": _string(scalar["name"], "Scalar name"),
+                        "input": _string(scalar["input"], "Scalar input type"),
+                        "output": _string(scalar["output"], "Scalar output type"),
+                    }
+                )
+            enums: list[dict[str, str]] = []
+            for raw_enum in _array(mapping["enums"], "enum mappings"):
+                enum = _object(raw_enum, {"name", "type"}, "enum mapping")
+                enums.append(
+                    {
+                        "name": _string(enum["name"], "Enum name"),
+                        "type": _string(enum["type"], "Enum type"),
+                    }
+                )
+            schema_name = _string(mapping["schema_name"], "Schema mapping name")
+            if schema_name not in schema_names or schema_name in mapped_schemas:
+                raise ValueError("Type mappings must uniquely match configured schemas")
+            mapped_schemas.add(schema_name)
+            mapping_facts.append(
+                {
+                    "schema_name": schema_name,
+                    "scalars": scalars,
+                    "enums": enums,
+                }
+            )
+        if project_id in type_mappings:
+            raise ValueError("Type mappings must uniquely match configured schemas")
+        type_mappings[project_id] = mapping_facts
         bindings.append(
             ProjectBindings(
-                _string(item["project"], "Project identity"),
+                project_id,
                 tuple(
                     _string(name, "Schema name")
                     for name in _array(item["schemas"], "Schema names")
@@ -275,6 +327,82 @@ def analyze_editor_snapshot_details(
             }
         )
     index = index_fragments(sources, schemas=schemas)
+    mapping_diagnostics: list[GraphDiagnostic] = []
+    for project, project_mappings in type_mappings.items():
+        for mapping_record in project_mappings:
+            schema_name = cast(str, mapping_record["schema_name"])
+            schema_context = schemas.get((project, schema_name))
+            if schema_context is None:
+                continue
+            scalar_facts = cast(list[dict[str, str]], mapping_record["scalars"])
+            enum_facts = cast(list[dict[str, str]], mapping_record["enums"])
+            try:
+                mapped_type_declarations(
+                    schema_context.schema,
+                    tuple(
+                        ScalarMapping(item["name"], item["input"], item["output"])
+                        for item in scalar_facts
+                    ),
+                    tuple((item["name"], item["type"]) for item in enum_facts),
+                )
+            except ValueError as error:
+                message = f"Configured type mapping is invalid: {error}"
+                for call in sources.calls:
+                    if (
+                        call.module.project == project
+                        and call.schema_name == schema_name
+                    ):
+                        mapping_diagnostics.append(
+                            GraphDiagnostic(
+                                call.module, "mapping-invalid", message, call.range
+                            )
+                        )
+                continue
+            symbols = tuple(
+                symbol
+                for item in scalar_facts
+                for symbol in (item["input"], item["output"])
+            ) + tuple(item["type"] for item in enum_facts)
+            resolutions = {
+                result.symbol: result
+                for result in resolve_type_symbols(
+                    symbols, modules=tuple(modules), project_id=project
+                )
+            }
+            statuses: list[tuple[str, str, str]] = []
+            for scalar_mapping in scalar_facts:
+                statuses.extend(
+                    (scalar_mapping["name"], direction, scalar_mapping[direction])
+                    for direction in ("input", "output")
+                )
+            statuses.extend(
+                (enum_mapping["name"], "enum", enum_mapping["type"])
+                for enum_mapping in enum_facts
+            )
+            for name, direction, symbol in statuses:
+                resolution = resolutions[symbol]
+                if resolution.status == "resolved" or symbol == "typing.Any":
+                    continue
+                if resolution.status == "external":
+                    code = "mapping-unverified"
+                    detail = (
+                        "is outside the captured project snapshot; "
+                        "static verification was skipped"
+                    )
+                else:
+                    code = "mapping-unresolved"
+                    detail = resolution.message or f"has status {resolution.status}"
+                message = (
+                    f"Configured {direction} mapping for {name} to {symbol!r} {detail}."
+                )
+                for call in sources.calls:
+                    if (
+                        call.module.project == project
+                        and call.schema_name == schema_name
+                    ):
+                        mapping_diagnostics.append(
+                            GraphDiagnostic(call.module, code, message, call.range)
+                        )
     indexed = {
         DocumentIdentity(item.call.module, item.call.range): item
         for item in index.documents
@@ -291,9 +419,9 @@ def analyze_editor_snapshot_details(
     def require(module: ModuleDependency, span: Span) -> None:
         points[module].update((span.start, span.end))
 
-    for call, mapping in mappings:
+    for call, source_map in mappings:
         require(call.module, call.range)
-        for atom in mapping.atoms:
+        for atom in source_map.atoms:
             require(atom.host.module, atom.host.range)
         for reference in call.fragments:
             require(reference.target.module, reference.target.call_range)
@@ -336,19 +464,19 @@ def analyze_editor_snapshot_details(
         }
 
     calls: list[dict[str, object]] = []
-    for call, mapping in mappings:
+    for call, source_map in mappings:
         call_identity = DocumentIdentity(call.module, call.range)
         decoded_offsets = utf16_points(
             call.source,
             {
                 point
-                for atom in mapping.atoms
+                for atom in source_map.atoms
                 for point in (atom.decoded.start, atom.decoded.end)
             },
         )
         codepoint: list[dict[str, object]] = []
         utf16: list[dict[str, object]] = []
-        for atom in mapping.atoms:
+        for atom in source_map.atoms:
             codepoint.append(
                 {
                     "decoded": _span(atom.decoded),
@@ -410,6 +538,7 @@ def analyze_editor_snapshot_details(
         "calls": calls,
         "diagnostics": [
             editor_diagnostic(item, snapshots) for item in index.diagnostics
-        ],
+        ]
+        + [editor_diagnostic(item, snapshots) for item in mapping_diagnostics],
     }
     return EditorAnalysis(response, tuple(modules), schemas, index)

@@ -175,6 +175,11 @@ class EditorSnapshotTests(unittest.TestCase):
         self.assertEqual(modules[0]["version"], 7)
         self.assertEqual(modules[0]["module"], "q")
         self.assertEqual(modules[0]["uri"], source.as_uri())
+        binding = cast(list[dict[str, object]], request["bindings"])[0]
+        self.assertEqual(
+            binding["type_mappings"],
+            [{"schema_name": "default", "scalars": [], "enums": []}],
+        )
         self.assertEqual(set(request), {"request_id", "modules", "schemas", "bindings"})
         modules.clear()
         self.assertTrue(snapshot.request["modules"])

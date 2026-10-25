@@ -358,3 +358,19 @@ test("replacement inodes and non-files are rejected without reading foreign cont
     else assert.deepEqual(fs.readdirSync(file), []);
   }
 });
+
+test("owns only the fixed parser partial-stub package and its PEP 561 marker", async t => {
+  const f = fixture(t);
+  const files = [
+    { relative_path: "graphql_desk-stubs/__init__.pyi", text: "from graphql import DocumentNode as _DocumentNode\n" },
+    { relative_path: "graphql_desk-stubs/py.typed", text: "partial\n" },
+  ];
+  const handle = createOwnedAnalysisArtifacts(f.vscode, f.workspace, f.root, "graphql_desk-stubs", files);
+  assert.match(fs.readFileSync(path.join(f.root, "graphql_desk-stubs", "__init__.pyi"), "utf8"), /DocumentNode/);
+  assert.match(fs.readFileSync(path.join(f.root, "graphql_desk-stubs", "py.typed"), "utf8"), /partial/);
+  await handle.cleanup();
+  assert.equal(fs.existsSync(path.join(f.root, "graphql_desk-stubs")), false);
+  assert.throws(() => createOwnedAnalysisArtifacts(f.vscode, f.workspace, f.root, "graphql_desk-stubs", [
+    { relative_path: "graphql_desk-stubs/foreign.pyi", text: "" },
+  ]), /Invalid analysis artifact/);
+});
