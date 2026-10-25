@@ -1093,8 +1093,23 @@ class _Graph:
         if isinstance(node, ast.BinOp):
             if not isinstance(node.op, ast.BitOr):
                 raise _Unresolved("Union aliases require two direct type operands")
+            arguments: list[ast.expr] = []
+            current: ast.BinOp = node
+            while isinstance(current.op, ast.BitOr):
+                arguments.append(current.right)
+                left = current.left
+                if (
+                    isinstance(left, ast.BinOp)
+                    and isinstance(left.op, ast.BitOr)
+                    and module.span(left).start == module.span(current).start
+                ):
+                    current = left
+                    continue
+                arguments.append(left)
+                break
+            arguments.reverse()
             values: list[_Value] = []
-            for argument in (node.left, node.right):
+            for argument in arguments:
                 if isinstance(argument, ast.Constant) and argument.value is None:
                     continue
                 if not isinstance(argument, (ast.Name, ast.Attribute)):

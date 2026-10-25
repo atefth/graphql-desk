@@ -68,7 +68,7 @@ class SourceGraphTests(unittest.TestCase):
             ],
         )
 
-    def test_two_operand_unions_keep_availability_but_no_base_capabilities(
+    def test_flat_union_aliases_keep_availability_but_no_base_capabilities(
         self,
     ) -> None:
         base = module("base", "class Known: pass")
@@ -78,6 +78,9 @@ class SourceGraphTests(unittest.TestCase):
             "from typing_extensions import TypedDict\n"
             "class Data(TypedDict):\n value:str\n"
             "Text:TypeAlias=str|int\nReverse:TypeAlias=int|str\n"
+            "Nullable:TypeAlias=str|int|None\n"
+            "NullableReverse:TypeAlias=None|int|str\n"
+            "Long:TypeAlias=bytes|str|int|None\n"
             "Known:TypeAlias=base.Known|str\nAlias:TypeAlias=Text\n"
             "Duplicate:TypeAlias=Data|Data\n",
         )
@@ -89,6 +92,9 @@ class SourceGraphTests(unittest.TestCase):
             "models.Known",
             "models.Duplicate",
             "exports.Public",
+            "models.Nullable",
+            "models.NullableReverse",
+            "models.Long",
         )
         result = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
         self.assertEqual([r.status for r in result], ["resolved"] * len(symbols))
@@ -125,6 +131,8 @@ class SourceGraphTests(unittest.TestCase):
             "Alias:TypeAlias=str|'int'",
             "Alias:TypeAlias=str|list[int]",
             "Alias:TypeAlias=(str|int)|None",
+            "Alias:TypeAlias=str|(int|None)",
+            "Alias:TypeAlias=str|int|(None|str)",
             "value=42\nAlias:TypeAlias=str|value",
             "Alias:TypeAlias=str|int\nint=other",
         ):
