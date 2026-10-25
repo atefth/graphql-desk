@@ -136,10 +136,15 @@ dynamic type factories remain unresolved. Recognized namespace escapes invalidat
 facts; `sys.modules` reflection and captured `__builtins__` access or replacement
 conservatively prevent project type resolution. This type-only guard preserves
 ordinary document/parser facts and isolates other projects.
-External symbols remain explicitly unverified. This establishes bounded symbol
-availability, not full Python type compatibility or guaranteed runtime imports.
-Factory mapping preflight consumes these facts before emitting artifacts; checker,
-editor/doctor and complete external/stub search-path integration remain open.
+The selected-interpreter capture reads bounded external `.pyi`/`.py` declarations
+for configured mapping symbols and imported class bases used by captured project
+classes. Captured class declarations and reexports can establish a mapped local
+subclass without importing or executing package code. Missing, ambiguous,
+oversized, binary-only and unsupported namespace-only sources remain unverified.
+This proves static symbol availability, not runtime identity or full checker
+compatibility. Factory mapping preflight consumes these facts before emitting
+artifacts; the broader editor/doctor integration and type compatibility matrix
+remain open.
 
 Captured TypedDict subclasses retain trusted base provenance through name and
 qualified aliases, explicit supported TypeAlias targets and reexports. This permits
