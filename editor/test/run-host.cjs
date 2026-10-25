@@ -72,13 +72,19 @@ async function installMappingStub(python) {
   const directory = path.join(purelib, `${packageName}-stubs`);
   assert.equal(path.dirname(directory), purelib, "The fixture must be directly under the selected interpreter's purelib");
   const file = path.join(directory, "__init__.pyi");
-  const text = "class DateInput: ...\nclass DateOutput: ...\nclass Color: ...\n";
+  const modelsFile = path.join(directory, "models.pyi");
+  const text = "from .models import BaseModel as BaseModel, Color as Color\n";
+  const modelsText = "from enum import Enum\nclass BaseModel: ...\nclass Color(Enum):\n    RED = ...\n    BLUE = ...\n";
   await fs.mkdir(directory);
+  let modelsCreated = false;
   try {
     await fs.writeFile(file, text, { flag: "wx" });
+    await fs.writeFile(modelsFile, modelsText, { flag: "wx" });
+    modelsCreated = true;
   } catch (error) {
     try {
       if (await fs.readFile(file, "utf8") === text) await fs.unlink(file);
+      if (modelsCreated && await fs.readFile(modelsFile, "utf8") === modelsText) await fs.unlink(modelsFile);
       await fs.rmdir(directory);
     } catch { /* Preserve anything that is not the exact fixture created above. */ }
     throw error;
@@ -87,6 +93,9 @@ async function installMappingStub(python) {
     packageName,
     async cleanup() {
       assert.equal(await fs.readFile(file, "utf8"), text, "Do not remove a changed mapping fixture");
+      assert.equal(await fs.readFile(modelsFile, "utf8"), modelsText,
+        "Do not remove a changed external base fixture");
+      await fs.unlink(modelsFile);
       await fs.unlink(file);
       await fs.rmdir(directory);
     },
@@ -197,7 +206,8 @@ async function main() {
       "needs_str: str = selected",
       "wrong = execute(doc, {'limit': 'bad'})",
       ...(suite === "externalMappings" ? [
-        `from ${mappingFixture.packageName} import DateInput, DateOutput, Color`,
+        "from models import DateInput, DateOutput",
+        `from ${mappingFixture.packageName} import Color`,
         "mapped_doc = graphql('query Mapped($date: ExternalDate!, $color: ExternalColor!) { externalDate(value: $date) externalColor(value: $color) }')",
         "mapped_result = execute(mapped_doc, {'date': DateInput(), 'color': Color()})",
         "mapped_date = mapped_result['externalDate']",
@@ -230,7 +240,9 @@ async function main() {
     ].join("\n");
     const shapeFields = suite === "typingMatrix" ? " nested: [[String!]!]! nullable: [String]" : "";
     await Promise.all([
-      fs.writeFile(path.join(workspace, "pyproject.toml"), '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n' + (suite === "externalMappings" ? `scalars = { ExternalDate = { input = "${mappingFixture.packageName}.DateInput", output = "${mappingFixture.packageName}.DateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.Color" }\n` : "")),
+      ...(suite === "externalMappings" ? [fs.writeFile(path.join(workspace, "models.py"),
+        `from ${mappingFixture.packageName} import BaseModel\nclass DateInput(BaseModel): ...\nclass DateOutput(BaseModel): ...\n`)] : []),
+      fs.writeFile(path.join(workspace, "pyproject.toml"), '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n' + (suite === "externalMappings" ? `scalars = { ExternalDate = { input = "models.DateInput", output = "models.DateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.Color" }\n` : "")),
       fs.writeFile(path.join(workspace, "schema.graphql"), `${suite === "externalMappings" ? "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" : ""}type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${suite === "externalMappings" ? " externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor!" : ""}${shapeFields} }\n`),
       fs.writeFile(sourcePath, source),
       ...(["typingMatrix", "parserOverlay"].includes(suite) ? [fs.writeFile(path.join(workspace, "parser_consumer.py"),
