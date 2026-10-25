@@ -5,6 +5,16 @@ const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_FILES = 4096;
+async function replaceWithRetry(source, destination, validate) {
+  for (let attempt = 0; ; attempt += 1) {
+    validate();
+    try { fs.renameSync(source, destination); return; }
+    catch (error) {
+      if (attempt === 3 || !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+      await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
+}
 
 const normalized = value => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
 const same = (left, right) => left.dev === right.dev && left.ino === right.ino;
@@ -213,7 +223,7 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
   const serialize = action => { const result = queue.then(action); queue = result.catch(() => {}); return result; };
   return {
     publish(nextFiles, isCurrent) {
-      return serialize(() => {
+      return serialize(async () => {
         if (closing || stopped) return false;
         const next = artifactEntries(nextFiles, generatedPackage);
         verify();
@@ -240,12 +250,16 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
           verify(new Set([...staged.values()].map(stage => path.relative(packageRoot, stage.temporary).split(path.sep).join("/"))));
           for (const [relativePath, stage] of staged) {
             const file = target(relativePath);
-            if (isCurrent() !== true) throw new Error("Superseded analysis");
-            verify(new Set([...staged.values()].map(value => path.relative(packageRoot, value.temporary).split(path.sep).join("/"))));
-            checkDirty(file);
-            checkOwned(stage.temporary, stage);
             const previous = expected.get(relativePath);
-            fs.renameSync(stage.temporary, file);
+            const stagedPaths = new Set([...staged.values()].map(value => path.relative(packageRoot, value.temporary).split(path.sep).join("/")));
+            await replaceWithRetry(stage.temporary, file, () => {
+              if (isCurrent() !== true) throw new Error("Superseded analysis");
+              verify(stagedPaths);
+              checkDirty(file);
+              checkOwned(stage.temporary, stage);
+              if (previous) checkOwned(file, previous);
+              else if (fs.existsSync(file)) throw new Error("Foreign analysis artifact; preserved");
+            });
             const current = { bytes: stage.bytes, identity: stage.identity };
             expected.set(relativePath, current);
             updated.push({ relativePath, previous, current });
@@ -273,7 +287,16 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
                 checkDirectories();
                 checkOwned(file, current);
                 checkOwned(temporary, { bytes: previous.bytes, identity: identityValue });
-                fs.renameSync(temporary, file);
+                try {
+                  await replaceWithRetry(temporary, file, () => {
+                    checkDirectories();
+                    checkOwned(file, current);
+                    checkOwned(temporary, { bytes: previous.bytes, identity: identityValue });
+                  });
+                } finally {
+                  try { checkDirectories(); checkOwned(temporary, { bytes: previous.bytes, identity: identityValue }); fs.unlinkSync(temporary); }
+                  catch { /* Preserve any temporary file that is no longer verified as ours. */ }
+                }
                 expected.set(relativePath, { bytes: previous.bytes, identity: identityValue });
               }
             } catch { /* Preserve bytes that are no longer verified as ours. */ }
