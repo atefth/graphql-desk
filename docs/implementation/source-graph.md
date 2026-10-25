@@ -113,6 +113,8 @@ project, including negative lookups.
 
 Captured ordinary classes may use trusted external `dataclasses.dataclass` and
 `typing.final`, including aliases/reexports and one of each in either order.
+Captured enum classes may use bare trusted `enum.unique`, including import
+aliases. Its call is not executed during analysis.
 Dataclass calls accept only literal boolean `frozen`/`slots` options, with no
 positional or unpacked arguments. Dataclass-decorated declarations require no
 bases or trusted `object`; inherited decoration remains unsupported because
@@ -120,8 +122,9 @@ frozen and non-frozen combinations can fail at runtime. Ordinary undecorated
 subclasses of supported dataclasses retain existing base checks. Final classes
 remain valid mapping values but cannot establish class bases through aliases or
 reexports: both strict checkers reject the tested subclass although runtime permits
-it. Decorated TypedDict and enum classes remain unsupported, including inherited
-and reexported special bases. Supplied or mutated decorator namespaces, writes to
+it. Decorated TypedDict classes and enum classes with decorators other than
+`enum.unique` remain unsupported, including inherited and reexported special
+bases. Supplied or mutated decorator namespaces, writes to
 decorator functions and recognized capability escapes cannot establish trust.
 No decorators execute during analysis.
 
