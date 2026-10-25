@@ -529,6 +529,13 @@ exports.run = async () => {
       diagnostics: diagnostics().map(item => ({ line: item.range.start.line, message: item.message })),
       stubPath: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath"),
     };
+    if (!results.pylance.nullableRefresh) console.error("GRAPHQL_DESK_NULLABLE_REFRESH_FAILURE " + JSON.stringify({
+      probe: results.lifecycle.nullableProbe,
+      trace: results.lifecycle.coldTrace.filter(item => [
+        "generation.publish.started", "generation.publish.returned", "pylance.stubPath.changed",
+        "pylance.restart.started", "pylance.restart.returned", "pylance.restart.failed",
+      ].includes(item.stage)),
+    }));
     assert.ok(results.pylance.nullableRefresh);
     results.lifecycle.nullableArtifactsPublished = true;
     await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
