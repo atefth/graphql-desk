@@ -115,11 +115,16 @@ exports.run = async () => {
       const publisher = createGenerations(...args);
       return new Proxy(publisher, { get(target, property) {
         if (property === "recover" || property === "publish") return async (...methodArgs) => {
-          mark(`generation.${property}.started`);
+          mark(`generation.${property}.started`, {
+            analysisId: methodArgs[1], inputFingerprint: methodArgs[4], savedSourceFingerprint: methodArgs[5],
+          });
           try {
             const changed = await target[property](...methodArgs);
             mark(`generation.${property}.returned`, {
               changed: Boolean(changed),
+              analysisId: methodArgs[1],
+              inputFingerprint: methodArgs[4],
+              savedSourceFingerprint: methodArgs[5],
               setting: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""),
             });
             return changed;
@@ -200,18 +205,30 @@ exports.run = async () => {
     assert.match(results.pylance.countType, /Int|int/);
     assert.ok(results.pylance.variableError.length);
     results.lifecycle.publishedRealWorkerArtifacts = generated.initial.length;
-    const publicationsBeforeSecondEditor = trace.filter(item => item.stage === "generation.publish.started").length;
+    const snapshotKey = item => JSON.stringify([item.inputFingerprint, item.savedSourceFingerprint]);
+    const previousSnapshots = new Set(trace.filter(item => item.stage === "generation.publish.started").map(snapshotKey));
     const peerUri = vscode.Uri.file(path.join(workspace, "peer.py"));
     await fs.writeFile(peerUri.fsPath, "# second visible Python editor\n");
     const peer = await vscode.workspace.openTextDocument(peerUri);
     await vscode.window.showTextDocument(peer, { viewColumn: vscode.ViewColumn.Two, preview: false });
     assert.ok(await until(() => vscode.window.visibleTextEditors.some(editor => editor.document.uri.toString() === peerUri.toString()),
       "second Python editor becomes visible"));
-    assert.ok(await until(() => trace.filter(item => item.stage === "generation.publish.started").length > publicationsBeforeSecondEditor,
+    assert.ok(await until(() => trace.some(item => item.stage === "generation.publish.started" && !previousSnapshots.has(snapshotKey(item))),
       "visible-editor refresh republishes one workspace snapshot"));
-    await new Promise(resolve => setTimeout(resolve, 500));
-    const editorRefreshPublications = trace.filter(item => item.stage === "generation.publish.started").length - publicationsBeforeSecondEditor;
-    assert.equal(editorRefreshPublications, 1, "two visible Python editors publish one artifact generation per workspace refresh");
+    let refreshEventCount = 0;
+    let refreshQuietSince = Date.now();
+    const refreshSettled = await until(() => {
+      const starts = trace.filter(item => item.stage === "generation.publish.started" && !previousSnapshots.has(snapshotKey(item)));
+      const returns = trace.filter(item => item.stage === "generation.publish.returned" && !previousSnapshots.has(snapshotKey(item)));
+      const eventCount = starts.length + returns.length;
+      if (eventCount !== refreshEventCount) { refreshEventCount = eventCount; refreshQuietSince = Date.now(); }
+      return starts.length > 0 && starts.length === returns.length && Date.now() - refreshQuietSince >= 1000;
+    }, "visible-editor workspace publications settle", 60000);
+    assert.ok(refreshSettled);
+    const refreshSnapshots = trace.filter(item => item.stage === "generation.publish.started" && !previousSnapshots.has(snapshotKey(item)))
+      .map(snapshotKey);
+    assert.equal(new Set(refreshSnapshots).size, refreshSnapshots.length,
+      "one captured source snapshot is published once even when multiple Python editors are visible");
     results.lifecycle.onePublicationForMultipleVisibleEditors = true;
     await vscode.window.showTextDocument(peer, { preview: false });
     await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
