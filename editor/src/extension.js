@@ -526,10 +526,21 @@ function activate(context) {
     for (const document of vscode.workspace.textDocuments) language?.close(document.uri);
     timer = setTimeout(() => {
       if (disposed) return;
-      for (const editor of vscode.window.visibleTextEditors) {
-        if (editor.document.languageId !== "python") continue;
+      const editors = vscode.window.visibleTextEditors.filter(editor => editor.document.languageId === "python");
+      const publishers = new Set();
+      const workspaceRoots = new Set();
+      for (const editor of editors) {
+        const folder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+        if (!folder) continue;
+        const root = path.resolve(folder.uri.fsPath);
+        if (workspaceRoots.has(root)) continue;
+        workspaceRoots.add(root);
+        publishers.add(editor);
+      }
+      for (const editor of editors) {
         void Promise.allSettled([language.refresh(editor.document), highlighting.refresh(editor)]).then(() => {
-        if (!disposed && ticket === generation) return quarantine.then(() => publishTypes(editor, ticket, token, quarantineContext));
+          if (!publishers.has(editor) || disposed || ticket !== generation) return;
+          return quarantine.then(() => publishTypes(editor, ticket, token, quarantineContext));
         });
       }
     }, 100);
@@ -548,7 +559,8 @@ function activate(context) {
   highlighting = registerHighlighting(vscode, controller);
   const visible = vscode.window.onDidChangeVisibleTextEditors(() => refreshVisible());
   const configChanged = vscode.workspace.onDidChangeConfiguration(event => {
-    if (event.affectsConfiguration("python.analysis.stubPath")) {
+    if ((vscode.workspace.workspaceFolders ?? []).some(folder =>
+      event.affectsConfiguration("python.analysis.stubPath", folder.uri))) {
       // Our own generation switch selects already complete immutable output. Treat a
       // mismatch as an external setting edit and rebuild the manager around it.
       void managedStubPathsAreCurrent().then(ownedSelection => {

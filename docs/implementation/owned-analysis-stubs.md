@@ -125,13 +125,17 @@ restores `String` and clears the diagnostic. See
 This is bounded restart evidence; it does not complete issue #38 or live-typing
 gate #42.
 
-The full `factoryArtifacts` scenario now passes on VS Code 1.141.0 and 1.142.0
-with pinned Python 2026.10.0 / Pylance 2026.4.1. It verifies operation result
+The full `factoryArtifacts` scenario now runs in Windows CI on VS Code 1.141.0
+and 1.142.0 with pinned Python 2026.10.0 / Pylance 2026.4.1. Its cold-root
+trace records worker artifact completion, managed generation recovery/publication,
+the selected `stubPath`, and Pylance hover/diagnostic readiness; it checks that
+the active complete generation is the one Pylance typed. It verifies operation result
 and variable inference, unsaved operation and nullable refresh, cross-file
 fragment refresh, saved-tab close/reopen, undo/redo, rename/delete, settings
 preservation, and bounded restarts after fragment convergence. Earlier runs
-intermittently failed before initial publication; these two passes do not prove
-the broad cancellation, interpreter-change, crash-recovery, or edit-storm gates.
+intermittently failed before initial publication; passing bounded runs do not
+prove startup reliability or the broad cancellation, interpreter-change,
+crash-recovery, or edit-storm gates.
 
 ### Removed workspace folder (#23 / #24)
 

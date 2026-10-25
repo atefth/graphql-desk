@@ -1,6 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 const vscode = require("vscode");
 const fs = require("node:fs/promises");
 const artifactModule = require("../src/ownedAnalysisArtifacts");
@@ -21,6 +22,28 @@ exports.run = async () => {
   const results = { host: vscode.version, pylance: {}, generatedFiles: true, lifecycle: { coldTrace: [], skipTraces: [] } };
   const mark = (stage, details = {}) => results.lifecycle.coldTrace.push({ stage, elapsedMs: Date.now() - started, ...details });
   const workerCalls = new Map();
+  const consumerUri = vscode.Uri.file(path.join(process.env.GRAPHQL_DESK_TEST_WORKSPACE, "consumer.py"));
+  const settingChanges = vscode.workspace.onDidChangeConfiguration(event => {
+    if (event.affectsConfiguration("python.analysis.stubPath", consumerUri)) {
+      mark("pylance.stubPath.changed", {
+        setting: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""),
+        affectsWorkspaceFolder: event.affectsConfiguration("python.analysis.stubPath", vscode.workspace.getWorkspaceFolder(consumerUri)?.uri),
+      });
+    }
+  });
+  const executeCommand = vscode.commands.executeCommand.bind(vscode.commands);
+  vscode.commands.executeCommand = async (command, ...args) => {
+    if (command !== "python.analysis.restartLanguageServer") return executeCommand(command, ...args);
+    mark("pylance.restart.started", { setting: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", "") });
+    try {
+      const result = await executeCommand(command, ...args);
+      mark("pylance.restart.returned", { setting: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", "") });
+      return result;
+    } catch (error) {
+      mark("pylance.restart.failed", { error: String(error) });
+      throw error;
+    }
+  };
   const createOutputChannel = vscode.window.createOutputChannel.bind(vscode.window);
   vscode.window.createOutputChannel = (name, ...args) => {
     const channel = createOutputChannel(name, ...args);
@@ -54,14 +77,15 @@ exports.run = async () => {
         if (property === "request") return async (message, requestOptions) => {
           const count = (workerCalls.get(message.op) ?? 0) + 1;
           workerCalls.set(message.op, count);
-          if (count === 1) mark(`worker.${message.op}.started`, { candidates: message.candidates?.length, buffers: message.buffers?.length });
+          const traceCall = count === 1 || message.op === "artifacts";
+          if (traceCall) mark(`worker.${message.op}.started`, { candidates: message.candidates?.length, buffers: message.buffers?.length });
           try {
             const reply = await target.request(message, requestOptions);
-            if (count === 1) mark(`worker.${message.op}.returned`, { ok: reply.ok, projects: reply.projects?.length,
+            if (traceCall) mark(`worker.${message.op}.returned`, { ok: reply.ok, projects: reply.projects?.length,
               files: reply.projects?.reduce((total, project) => total + (project.files?.length ?? 0), 0),
               unavailableSchemas: reply.unavailable_schemas?.length });
             return reply;
-          } catch (error) { if (count === 1) mark(`worker.${message.op}.failed`, { error: String(error) }); throw error; }
+          } catch (error) { if (traceCall) mark(`worker.${message.op}.failed`, { error: String(error) }); throw error; }
         };
         const value = Reflect.get(target, property, target);
         return typeof value === "function" ? value.bind(target) : value;
@@ -69,16 +93,52 @@ exports.run = async () => {
     };
     const createArtifacts = artifactModule.createOwnedAnalysisArtifacts;
     artifactModule.createOwnedAnalysisArtifacts = (...args) => {
-      mark("publisher.create.started", { files: args[4]?.length });
+      mark("publisher.create.started", { files: args[4]?.length, root: args[2], generatedPackage: args[3] });
       try {
         const handle = createArtifacts(...args);
         mark("publisher.create.returned", { files: args[4]?.length });
-        return handle;
+        return new Proxy(handle, { get(target, property) {
+          if (property === "publish") return async (...publishArgs) => {
+            const changed = await target.publish(...publishArgs);
+            const signature = createHash("sha256").update(JSON.stringify(publishArgs[0])).digest("hex").slice(0, 12);
+            mark("publisher.publish.returned", { files: publishArgs[0]?.length, root: args[2], generatedPackage: args[3], changed, signature });
+            return changed;
+          };
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        } });
       } catch (error) { mark("publisher.create.failed", { error: String(error) }); throw error; }
+    };
+    const generationModule = require("../src/analysisGenerations");
+    const createGenerations = generationModule.createAnalysisGenerations;
+    generationModule.createAnalysisGenerations = (...args) => {
+      const publisher = createGenerations(...args);
+      return new Proxy(publisher, { get(target, property) {
+        if (property === "recover" || property === "publish") return async (...methodArgs) => {
+          mark(`generation.${property}.started`, {
+            analysisId: methodArgs[1], inputFingerprint: methodArgs[4], savedSourceFingerprint: methodArgs[5],
+          });
+          try {
+            const changed = await target[property](...methodArgs);
+            mark(`generation.${property}.returned`, {
+              changed: Boolean(changed),
+              analysisId: methodArgs[1],
+              inputFingerprint: methodArgs[4],
+              savedSourceFingerprint: methodArgs[5],
+              setting: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""),
+            });
+            return changed;
+          } catch (error) {
+            mark(`generation.${property}.failed`, { error: error?.name || "Error" });
+            throw error;
+          }
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
     };
     const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
     assert.ok(extension, "GraphQL Desk extension must be loaded in the host");
-    const consumerUri = vscode.Uri.file(path.join(process.env.GRAPHQL_DESK_TEST_WORKSPACE, "consumer.py"));
     const consumer = await vscode.workspace.openTextDocument(consumerUri);
     await vscode.window.showTextDocument(consumer, { preview: false });
     const selectedStubRoot = () => path.resolve(workspace, vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ".graphql-desk/typings"));
@@ -122,6 +182,23 @@ exports.run = async () => {
     }, "generated result and variable types");
     results.pylance = { ...results.pylance, ...observed };
     assert.ok(ready, JSON.stringify(observed));
+    const trace = results.lifecycle.coldTrace;
+    const artifactsIndex = trace.findIndex(item => item.stage === "worker.artifacts.returned" && item.ok && item.files > 0);
+    const publicationIndex = trace.findIndex((item, index) => index > artifactsIndex &&
+      item.stage === "generation.publish.returned" && item.changed && item.setting.includes("/generations/"));
+    const hoverIndex = trace.findIndex(item => item.stage === "pylance.hover.indexed");
+    assert.ok(artifactsIndex >= 0 && publicationIndex > artifactsIndex && hoverIndex > publicationIndex,
+      JSON.stringify(trace));
+    const hoverElapsedMs = trace[hoverIndex].elapsedMs;
+    const publicationAtHover = trace.filter(item => item.stage === "generation.publish.returned" && item.changed &&
+      item.setting.includes("/generations/") && item.elapsedMs <= hoverElapsedMs).at(-1);
+    const rootAtHover = trace.filter(item => item.stage === "pylance.stubPath.changed" && item.elapsedMs <= hoverElapsedMs).at(-1)?.setting;
+    assert.ok(publicationAtHover, JSON.stringify(trace));
+    assert.equal(path.resolve(workspace, publicationAtHover.setting), path.resolve(workspace, rootAtHover));
+    await Promise.all([
+      fs.access(path.join(workspace, publicationAtHover.setting, "complete.json")),
+      fs.access(path.join(workspace, publicationAtHover.setting, "graphql_desk_generated", "default.pyi")),
+    ]);
     results.pylance.resultType = observed.result;
     results.pylance.selectedType = observed.selected;
     results.pylance.countType = observed.count;
@@ -130,6 +207,36 @@ exports.run = async () => {
     assert.match(results.pylance.countType, /Int|int/);
     assert.ok(results.pylance.variableError.length);
     results.lifecycle.publishedRealWorkerArtifacts = generated.initial.length;
+    const snapshotKey = item => JSON.stringify([item.inputFingerprint, item.savedSourceFingerprint]);
+    const previousSnapshots = new Set(trace.filter(item => item.stage === "generation.publish.started").map(snapshotKey));
+    const peerUri = vscode.Uri.file(path.join(workspace, "peer.py"));
+    await fs.writeFile(peerUri.fsPath, "# second visible Python editor\n");
+    const peer = await vscode.workspace.openTextDocument(peerUri);
+    await vscode.window.showTextDocument(peer, { viewColumn: vscode.ViewColumn.Two, preview: false });
+    assert.ok(await until(() => vscode.window.visibleTextEditors.some(editor => editor.document.uri.toString() === peerUri.toString()),
+      "second Python editor becomes visible"));
+    assert.ok(await until(() => trace.some(item => item.stage === "generation.publish.started" && !previousSnapshots.has(snapshotKey(item))),
+      "visible-editor refresh republishes one workspace snapshot"));
+    let refreshEventCount = 0;
+    let refreshQuietSince = Date.now();
+    const refreshSettled = await until(() => {
+      const starts = trace.filter(item => item.stage === "generation.publish.started" && !previousSnapshots.has(snapshotKey(item)));
+      const returns = trace.filter(item => item.stage === "generation.publish.returned" && !previousSnapshots.has(snapshotKey(item)));
+      const eventCount = starts.length + returns.length;
+      if (eventCount !== refreshEventCount) { refreshEventCount = eventCount; refreshQuietSince = Date.now(); }
+      return starts.length > 0 && starts.length === returns.length && Date.now() - refreshQuietSince >= 1000;
+    }, "visible-editor workspace publications settle", 60000);
+    assert.ok(refreshSettled);
+    const refreshSnapshots = trace.filter(item => item.stage === "generation.publish.started" && !previousSnapshots.has(snapshotKey(item)))
+      .map(snapshotKey);
+    assert.equal(new Set(refreshSnapshots).size, refreshSnapshots.length,
+      "one captured source snapshot is published once even when multiple Python editors are visible");
+    results.lifecycle.onePublicationForMultipleVisibleEditors = true;
+    await vscode.window.showTextDocument(peer, { preview: false });
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    assert.ok(await until(() => !vscode.window.visibleTextEditors.some(editor => editor.document.uri.toString() === peerUri.toString()),
+      "second Python editor closes after the multi-editor publication check"));
+    await vscode.window.showTextDocument(consumer, { preview: false });
     const consumerOnDisk = await fs.readFile(consumerUri.fsPath, "utf8");
     const originalSource = consumer.getText();
     const selectedPosition = consumer.positionAt(originalSource.indexOf("selected = ") + 2);
@@ -391,12 +498,16 @@ exports.run = async () => {
     assert.equal(settings["files.autoSave"], "off", "Automatic stub setup must preserve unrelated workspace settings");
     results.lifecycle.settingsPreserved = true;
     const customRoot = path.join(workspace, "custom_stubs");
-    await vscode.workspace.getConfiguration("python", consumerUri).update("analysis.stubPath", "custom_stubs", vscode.ConfigurationTarget.WorkspaceFolder);
     const previouslySelected = selectedStubRoot();
+    await vscode.workspace.getConfiguration("python", consumerUri).update("analysis.stubPath", "custom_stubs", vscode.ConfigurationTarget.WorkspaceFolder);
     const moved = await until(async () => {
       const exists = async target => fs.access(target).then(() => true, () => false);
-      return await exists(path.join(customRoot, "graphql_desk_generated", "default.pyi")) &&
-        selectedStubRoot() === customRoot && await exists(path.join(previouslySelected, "graphql_desk_generated", "default.pyi")) && (await hover(8, 2)).includes("String");
+      const customArtifact = await exists(path.join(customRoot, "graphql_desk_generated", "default.pyi"));
+      const previousArtifact = await exists(path.join(previouslySelected, "graphql_desk_generated", "default.pyi"));
+      const currentRoot = selectedStubRoot();
+      const currentHover = await hover(8, 2);
+      results.lifecycle.stubPathMoveProbe = { customArtifact, previousArtifact, currentRoot, customRoot, currentHover };
+      return customArtifact && currentRoot === customRoot && previousArtifact && currentHover.includes("String");
     }, "runtime workspace stubPath change republishes into the new managed root");
     assert.ok(moved);
     stubRoot = customRoot;
@@ -492,6 +603,7 @@ exports.run = async () => {
     results.outcome = "generated-factory-artifacts-failed";
     throw error;
   } finally {
+    settingChanges.dispose();
     require("node:fs").writeFileSync(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
     console.log(`GRAPHQL_DESK_FACTORY_ARTIFACTS ${JSON.stringify(results)}`);
   }

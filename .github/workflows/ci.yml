@@ -202,6 +202,12 @@ jobs:
         run: node test/run-host.cjs 1.142.0 externalMappings
         working-directory: editor
       - if: runner.os == 'Windows'
+        run: node test/run-host.cjs 1.141.0 factoryArtifacts
+        working-directory: editor
+      - if: runner.os == 'Windows'
+        run: node test/run-host.cjs 1.142.0 factoryArtifacts
+        working-directory: editor
+      - if: runner.os == 'Windows'
         run: node test/run-host.cjs 1.142.0 malformedRecovery
         working-directory: editor
       - if: runner.os == 'Windows'

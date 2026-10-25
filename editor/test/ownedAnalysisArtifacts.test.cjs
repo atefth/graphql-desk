@@ -154,6 +154,27 @@ test("refuses existing packages and rolls back an interrupted multi-file update"
   assert.deepEqual(fs.readdirSync(base).sort(), ["default.pyi", "default_ast.pyi"]);
 });
 
+test("retries transient Windows file locks without replacing unverified artifacts", async t => {
+  const f = fixture(t);
+  const handle = f.make(original);
+  const rename = fs.renameSync;
+  let locked = false;
+  fs.renameSync = (...args) => {
+    if (!locked && args[1].endsWith("default.pyi")) {
+      locked = true;
+      const error = new Error("file is temporarily locked");
+      error.code = "EPERM";
+      throw error;
+    }
+    return rename(...args);
+  };
+  try {
+    assert.equal(await handle.publish(original.map(file => ({ ...file, text: "changed\n" })), () => true), true);
+  } finally { fs.renameSync = rename; }
+  assert.equal(locked, true);
+  assert.match(fs.readFileSync(path.join(f.root, "graphql_desk_generated", "default.pyi"), "utf8"), /changed/);
+});
+
 test("an empty fresh generation removes only this manager's artifacts", async t => {
   const f = fixture(t);
   const handle = f.make(original);

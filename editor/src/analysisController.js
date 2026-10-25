@@ -686,6 +686,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           const configuredPath = explicitlyConfigured ? pythonConfig.get("analysis.stubPath", "") : "";
           const selectedPath = typeof configuredPath === "string" ? configuredPath.trim() : "";
           const selectedRoot = path.resolve(canonical(folder.uri.fsPath), selectedPath || (explicitlyConfigured ? "typings" : ".graphql-desk/typings"));
+          if (stagedArtifact && inside(selectedRoot, filename) && /^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.basename(filename))) return;
           let descriptor;
           let missing = false;
           try {
@@ -722,6 +723,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (vscode.workspace[event]) subscriptions.push(vscode.workspace[event](change => {
       const document = change?.document ?? (["onDidOpenTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument"].includes(event) ? change : null);
       if (event !== "onDidChangeConfiguration" && extensionSettingsDocument(document)) return;
+      if (event !== "onDidChangeConfiguration" && document?.uri?.scheme === "file" &&
+          ownedAnalysisPaths.has(canonical(document.uri.fsPath)) && !(event === "onDidChangeTextDocument" && document.isDirty)) return;
       if (event === "onDidChangeConfiguration" && change?.affectsConfiguration &&
           !change.affectsConfiguration("graphqlDesk") &&
           !(change.affectsConfiguration("python") && !change.affectsConfiguration("python.analysis.stubPath"))) return;
