@@ -1084,6 +1084,150 @@ if TYPE_CHECKING:
             )
             self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
 
+    def test_external_mappings_are_isolated_between_project_schemas(self) -> None:
+        config, _, _, _ = self.multi_schema()
+        config = replace(
+            config,
+            schemas=(
+                replace(
+                    config.schemas[0],
+                    scalars=(
+                        ScalarMapping(
+                            "Token", "alpha_types.TokenInput", "alpha_types.TokenOutput"
+                        ),
+                    ),
+                    enums=(("Shade", "alpha_types.Shade"),),
+                ),
+                replace(
+                    config.schemas[1],
+                    scalars=(
+                        ScalarMapping(
+                            "Token", "beta_types.TokenInput", "beta_types.TokenOutput"
+                        ),
+                    ),
+                    enums=(("Shade", "beta_types.Shade"),),
+                ),
+            ),
+        )
+        schema = build_schema(
+            "scalar Token enum Shade { LIGHT DARK } "
+            "type Item { value: Token! shade: Shade! } "
+            "type Query { item(token: Token!, shade: Shade!): Item! }"
+        )
+        contexts = tuple(
+            SchemaContext(name, schema, "external:" + name)
+            for name in ("alpha", "beta")
+        )
+        source = """from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from alpha_types import (
+ Shade as AlphaShade,
+ TokenInput as AlphaInput,
+ TokenOutput as AlphaOutput,
+)
+from beta_types import (
+ Shade as BetaShade,
+ TokenInput as BetaInput,
+ TokenOutput as BetaOutput,
+)
+from generated.alpha import graphql as alpha
+from generated.beta import graphql as beta
+from generated.sources.main import (
+ AlphaDocResult, AlphaDocVariables, BetaDocResult, BetaDocVariables
+)
+from graphql_desk import TypedDocument
+
+alpha_doc = alpha(
+ 'query Alpha($token:Token!, $shade:Shade!) '
+ '{item(token:$token, shade:$shade) {value shade}}'
+)
+beta_doc = beta(
+ 'query Beta($token:Token!, $shade:Shade!) '
+ '{item(token:$token, shade:$shade) {value shade}}'
+)
+alpha_typed: TypedDocument[AlphaDocResult, AlphaDocVariables] = alpha_doc
+beta_typed: TypedDocument[BetaDocResult, BetaDocVariables] = beta_doc
+alpha_input: AlphaInput = AlphaInput()
+beta_input: BetaInput = BetaInput()
+assert alpha.scalar('Token', alpha_input) is alpha_input
+assert beta.scalar('Token', beta_input) is beta_input
+assert alpha.scalar('Shade', AlphaShade.LIGHT) is AlphaShade.LIGHT
+assert beta.scalar('Shade', BetaShade.LIGHT) is BetaShade.LIGHT
+alpha_variables: AlphaDocVariables = {'token': alpha_input, 'shade': AlphaShade.LIGHT}
+beta_variables: BetaDocVariables = {'token': beta_input, 'shade': BetaShade.DARK}
+assert_type(alpha_variables['token'], AlphaInput)
+assert_type(beta_variables['token'], BetaInput)
+if TYPE_CHECKING:
+ def inspect(a: AlphaDocResult, b: BetaDocResult) -> None:
+  assert_type(a['item']['value'], AlphaOutput)
+  assert_type(a['item']['shade'], AlphaShade)
+  assert_type(b['item']['value'], BetaOutput)
+  assert_type(b['item']['shade'], BetaShade)
+ bad_alpha: AlphaDocVariables = {'token': beta_input, 'shade': BetaShade.LIGHT} # error
+ bad_beta: BetaDocVariables = {'token': alpha_input, 'shade': AlphaShade.LIGHT} # error
+ alpha.scalar('Token', beta_input) # error
+ beta.scalar('Token', alpha_input) # error
+ alpha.scalar('Shade', BetaShade.LIGHT) # error
+ beta.scalar('Shade', AlphaShade.LIGHT) # error
+ wrong_schema: TypedDocument[AlphaDocResult, AlphaDocVariables] = beta_doc # error
+"""
+        modules = (
+            ModuleSnapshot("p", "main", "file:///main.py", 1, source),
+            ModuleSnapshot(
+                "p",
+                "alpha_types",
+                "file:///alpha_types.py",
+                1,
+                "from enum import Enum\n"
+                "class TokenInput: pass\nclass TokenOutput: pass\n"
+                "class Shade(Enum):\n LIGHT = 1\n DARK = 2\n",
+            ),
+            ModuleSnapshot(
+                "p",
+                "beta_types",
+                "file:///beta_types.py",
+                1,
+                "from enum import Enum\n"
+                "class TokenInput: pass\nclass TokenOutput: pass\n"
+                "class Shade(Enum):\n LIGHT = 1\n DARK = 2\n",
+            ),
+        )
+        resolved = resolve_project(
+            modules, bindings=(project_bindings(config, project_id="p"),)
+        )
+        self.assertEqual(resolved.diagnostics, ())
+        index = index_fragments(
+            resolved, schemas={("p", item.schema_name): item for item in contexts}
+        )
+        self.assertEqual(index.diagnostics, ())
+        with patch(
+            "importlib.import_module", side_effect=AssertionError("No project imports")
+        ):
+            artifacts = generate_project_factory_artifacts(
+                config, contexts, index, modules=modules, project_id="p"
+            )
+        self.assertEqual(artifacts.diagnostics, ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            for module in ("alpha_types", "beta_types"):
+                (root / f"{module}.pyi").write_text(
+                    "from enum import Enum\n"
+                    "class TokenInput: ...\nclass TokenOutput: ...\n"
+                    "class Shade(Enum):\n    LIGHT = ...\n    DARK = ...\n",
+                    encoding="utf8",
+                )
+            errors = {
+                number
+                for number, line in enumerate(source.splitlines(), 1)
+                if "# error" in line
+            }
+            self.check(root, {"main.py": errors})
+            runtime = subprocess.run(
+                [sys.executable, "main.py"], cwd=root, capture_output=True, text=True
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+
     def test_standard_decorated_mappings_check_factory_values_and_final_bases(
         self,
     ) -> None:
