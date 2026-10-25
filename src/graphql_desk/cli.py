@@ -12,6 +12,7 @@ from typing import NoReturn
 from .config import ProjectConfig, SchemaConfig
 from .external_type_sources import (
     capture_external_type_sources,
+    external_class_base_symbols,
     interpreter_type_roots,
 )
 from .project import effective_project, select_schema, validate_project_ownership
@@ -51,9 +52,9 @@ def _mapping_symbols(schema: SchemaConfig) -> tuple[str, ...]:
 
 def _resolve_local_mapping_symbols(
     config: ProjectConfig, symbols: tuple[str, ...]
-) -> tuple[TypeSymbolResolution, ...]:
+) -> tuple[tuple[TypeSymbolResolution, ...], tuple[ModuleSnapshot, ...]]:
     if not symbols:
-        return ()
+        return (), ()
     candidates: set[Path] = set()
 
     def add_module(module: str) -> None:
@@ -133,11 +134,13 @@ def _resolve_local_mapping_symbols(
     modules = tuple(sources_by_path.values())
     return resolve_type_symbols(
         symbols, modules=modules, project_id=config.path.as_uri()
-    )
+    ), modules
 
 
 def _resolve_interpreter_mapping_symbols(
-    config: ProjectConfig, symbols: tuple[str, ...]
+    config: ProjectConfig,
+    symbols: tuple[str, ...],
+    local_modules: tuple[ModuleSnapshot, ...],
 ) -> tuple[TypeSymbolResolution, ...]:
     roots = interpreter_type_roots(
         sys.path, excluded_roots=(config.root, *config.source_roots)
@@ -149,7 +152,40 @@ def _resolve_interpreter_mapping_symbols(
         project_id=project_id,
         shadow_roots=(config.root, *config.source_roots),
     )
-    return resolve_type_symbols(symbols, modules=modules, project_id=project_id)
+    base_symbols = external_class_base_symbols(local_modules)
+    if base_symbols:
+        try:
+            external_bases = capture_external_type_sources(
+                base_symbols,
+                search_roots=roots,
+                project_id=project_id,
+                shadow_roots=(config.root, *config.source_roots),
+            )
+        except (OSError, RuntimeError, ValueError):
+            external_bases = ()
+        captured = {module.module for module in modules}
+        modules = (
+            *modules,
+            *(item for item in external_bases if item.module not in captured),
+        )
+    local_project = config.path.as_uri()
+    local_module_names = {module.module for module in local_modules}
+    type_modules = (
+        *local_modules,
+        *(
+            ModuleSnapshot(
+                local_project,
+                module.module,
+                module.uri,
+                module.version,
+                module.source,
+                module.is_package,
+            )
+            for module in modules
+            if module.module not in local_module_names
+        ),
+    )
+    return resolve_type_symbols(symbols, modules=type_modules, project_id=local_project)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -259,7 +295,9 @@ def _doctor(
                 )
                 continue
             try:
-                resolutions = _resolve_local_mapping_symbols(config, symbols)
+                local_resolutions, local_modules = _resolve_local_mapping_symbols(
+                    config, symbols
+                )
             except (OSError, ValueError, RuntimeError, UnicodeError):
                 print(
                     f"schema {schema.name}: local mapping symbols unavailable; "
@@ -267,44 +305,44 @@ def _doctor(
                     file=sys.stderr,
                 )
                 continue
-            resolved = sum(item.status == "resolved" for item in resolutions)
-            external = sum(item.status == "external" for item in resolutions)
-            unavailable = [
-                item
-                for item in resolutions
-                if item.status not in {"resolved", "external"}
-            ]
+            local_by_symbol = {item.symbol: item for item in local_resolutions}
+            resolutions = dict(local_by_symbol)
+            resolved = sum(item.status == "resolved" for item in local_resolutions)
             if resolved:
                 print(
                     f"schema {schema.name}: captured local mapping symbols resolved "
                     f"(static names only): {resolved}",
                     file=sys.stderr,
                 )
-            if external:
-                external_symbols = tuple(
-                    item.symbol for item in resolutions if item.status == "external"
-                )
+            if any(item.status != "resolved" for item in local_resolutions):
                 try:
                     environment_resolutions = _resolve_interpreter_mapping_symbols(
-                        config, external_symbols
+                        config, symbols, local_modules
                     )
                 except (OSError, ValueError, RuntimeError, UnicodeError):
+                    environment_resolutions = ()
                     print(
                         f"schema {schema.name}: interpreter mapping symbols "
-                        f"unverified: {external}",
+                        "unavailable; source capture failed",
                         file=sys.stderr,
                     )
                 else:
+                    for item in environment_resolutions:
+                        if local_by_symbol[item.symbol].status != "resolved":
+                            resolutions[item.symbol] = item
                     interpreter_resolved = sum(
-                        item.status == "resolved" for item in environment_resolutions
+                        resolutions[symbol].status == "resolved"
+                        and local_by_symbol[symbol].status != "resolved"
+                        for symbol in symbols
                     )
                     interpreter_unverified = sum(
-                        item.status == "external" for item in environment_resolutions
+                        resolutions[symbol].status == "external" for symbol in symbols
                     )
                     interpreter_unavailable = [
-                        item
-                        for item in environment_resolutions
-                        if item.status not in {"resolved", "external"}
+                        resolutions[symbol]
+                        for symbol in symbols
+                        if local_by_symbol[symbol].status == "external"
+                        and resolutions[symbol].status not in {"resolved", "external"}
                     ]
                     if interpreter_resolved:
                         print(
@@ -333,6 +371,12 @@ def _doctor(
                             f"unavailable: {summary}",
                             file=sys.stderr,
                         )
+            unavailable = [
+                resolutions[symbol]
+                for symbol in symbols
+                if local_by_symbol[symbol].status not in {"resolved", "external"}
+                and resolutions[symbol].status not in {"resolved", "external"}
+            ]
             if unavailable:
                 statuses: dict[str, int] = {}
                 for item in unavailable:

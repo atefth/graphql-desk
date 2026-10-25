@@ -13,6 +13,7 @@ from typing import cast
 from .config import ProjectConfig, SchemaOrigin
 from .external_type_sources import (
     capture_external_type_sources,
+    external_class_base_symbols,
     interpreter_type_roots,
 )
 from .project import (
@@ -558,6 +559,7 @@ def acquire_editor_snapshot(
 
     for config, selected_files in captured.projects:
         project_id = config.path.as_uri()
+        project_type_sources: list[ModuleSnapshot] = []
         mapping_symbols = tuple(
             sorted(
                 {
@@ -569,23 +571,6 @@ def acquire_editor_snapshot(
                 | {symbol for schema in config.schemas for _, symbol in schema.enums}
             )
         )
-        if mapping_symbols:
-            try:
-                roots = interpreter_type_roots(
-                    sys.path,
-                    excluded_roots=(base, config.root, *config.source_roots),
-                )
-                external_mapping_modules.extend(
-                    capture_external_type_sources(
-                        mapping_symbols,
-                        search_roots=roots,
-                        project_id=project_id + "#interpreter",
-                        shadow_roots=(base, config.root, *config.source_roots),
-                    )
-                )
-            except (OSError, RuntimeError, ValueError):
-                # Missing, ambiguous, or oversized external packages stay unverified.
-                pass
         facts = project_bindings(config, project_id=project_id)
         bindings.append(
             {
@@ -655,15 +640,16 @@ def acquire_editor_snapshot(
                         source.is_package,
                     )
                 )
+            module_fact = ModuleSnapshot(
+                project_id,
+                source.module,
+                source.path.as_uri(),
+                version,
+                text,
+                source.is_package,
+            )
+            project_type_sources.append(module_fact)
             if observation.origin == "disk":
-                module_fact = ModuleSnapshot(
-                    project_id,
-                    source.module,
-                    source.path.as_uri(),
-                    version,
-                    text,
-                    source.is_package,
-                )
                 disk_modules.append(module_fact)
             modules.append(
                 {
@@ -675,6 +661,47 @@ def acquire_editor_snapshot(
                     "is_package": source.is_package,
                 }
             )
+        if mapping_symbols:
+            shadow_roots = (base, config.root, *config.source_roots)
+            try:
+                roots = interpreter_type_roots(
+                    sys.path,
+                    excluded_roots=(base, config.root, *config.source_roots),
+                )
+                external_mapping_modules.extend(
+                    capture_external_type_sources(
+                        mapping_symbols,
+                        search_roots=roots,
+                        project_id=project_id + "#interpreter",
+                        shadow_roots=shadow_roots,
+                    )
+                )
+            except (OSError, RuntimeError, ValueError):
+                # Missing, ambiguous, or oversized external packages stay unverified.
+                roots = ()
+            base_symbols = external_class_base_symbols(tuple(project_type_sources))
+            if base_symbols and roots:
+                try:
+                    external_bases = capture_external_type_sources(
+                        base_symbols,
+                        search_roots=roots,
+                        project_id=project_id + "#interpreter",
+                        shadow_roots=shadow_roots,
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    # An oversized unrelated base graph must not erase mapping facts.
+                    pass
+                else:
+                    captured_external_names = {
+                        item.module
+                        for item in external_mapping_modules
+                        if item.project == project_id + "#interpreter"
+                    }
+                    external_mapping_modules.extend(
+                        item
+                        for item in external_bases
+                        if item.module not in captured_external_names
+                    )
         for schema in config.schemas:
             if schema.origin.local_path is None:
                 supplied = remote.get((project_id, schema.name))

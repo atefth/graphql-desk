@@ -373,30 +373,36 @@ def analyze_editor_snapshot_details(
                 for item in scalar_facts
                 for symbol in (item["input"], item["output"])
             ) + tuple(item["type"] for item in enum_facts)
-            resolutions = {
-                result.symbol: result
-                for result in resolve_type_symbols(
-                    symbols, modules=tuple(modules), project_id=project
-                )
-            }
             external_project = project + "#interpreter"
             external_modules = tuple(
                 module
                 for module in external_mapping_modules
                 if module.project == external_project
             )
-            external_resolutions = (
-                {
-                    result.symbol: result
-                    for result in resolve_type_symbols(
-                        symbols,
-                        modules=external_modules,
-                        project_id=external_project,
+            local_module_names = {
+                module.module for module in modules if module.project == project
+            }
+            type_modules = (
+                *modules,
+                *(
+                    ModuleSnapshot(
+                        project,
+                        module.module,
+                        module.uri,
+                        module.version,
+                        module.source,
+                        module.is_package,
                     )
-                }
-                if external_modules
-                else {}
+                    for module in external_modules
+                    if module.module not in local_module_names
+                ),
             )
+            resolutions = {
+                result.symbol: result
+                for result in resolve_type_symbols(
+                    symbols, modules=type_modules, project_id=project
+                )
+            }
             statuses: list[tuple[str, str, str]] = []
             for scalar_mapping in scalar_facts:
                 statuses.extend(
@@ -409,8 +415,6 @@ def analyze_editor_snapshot_details(
             )
             for name, direction, symbol in statuses:
                 resolution = resolutions[symbol]
-                if resolution.status == "external":
-                    resolution = external_resolutions.get(symbol, resolution)
                 if resolution.status == "resolved" or symbol == "typing.Any":
                     continue
                 if resolution.status == "external":

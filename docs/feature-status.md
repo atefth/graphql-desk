@@ -9,7 +9,8 @@ fragment dependents while retaining independent valid declarations. Syntax/sourc
 recovery, owned publication and full invalid-buffer lifecycle acceptance remain
 open. Merged #140 supplies explicit bounded URL introspection loading. #141 adds bounded
 root and generated fragment readers. #143 adds explicit trusted-worker refresh;
-#144 captured-local mapping-symbol preflight; #145 bounded unsafe fixture inputs.
+#144 captured-local and bounded selected-interpreter mapping-symbol preflight;
+#145 bounded unsafe fixture inputs.
 #146 supplies installed read-only doctor diagnostics with degraded health reporting.
 #248 adds incomplete-buffer escape-aware highlighting and pinned-host source-range
 checks. #251 adds provider-level lexical-to-resolved decoration recovery on both
@@ -52,19 +53,17 @@ Merged #143/#147 add explicit remote refresh and safe retention across source ca
 private credential fingerprints and explicit interpreter selection. Final two-host
 activation observations cover dirty source/configuration/fragment/schema buffers,
 associated untitled documents, native Pylance coexistence, explicit refresh and zero
-HTTP during typing. #144 preflights captured-local mapping symbols without imports;
-external and richer type facts remain unverified. #145 adds bounded unsafe fixture
+HTTP during typing. #144 preflights captured local and bounded selected-interpreter
+mapping symbols without imports; broader external compatibility and richer type facts remain unverified. #145 adds bounded unsafe fixture
 input typing and identity helpers. #146 adds read-only doctor entrypoints that
 report degraded health rather than invent editor/bridge/ownership evidence. #249
 adds import-free resolution of configured local mapping names from `.py` and `.pyi`
 files reachable under configured source roots, and reports the results from doctor.
 It does not scan unrelated files or impose a numeric file cap; unusually large
-reachable import closures can make doctor slow. External installed-package symbol
-verification and checker-level type compatibility remain open.
-One checker fixture now verifies mapped input/output/enum compatibility against an
-external stub-only package with both mypy and Pyright. This is bounded evidence;
-doctor still reports external symbols as unverified and runtime exports are not
-validated.
+reachable import closures can make doctor slow. #265 adds bounded selected-
+interpreter source lookup for external mapping names and imported class bases in
+doctor and editor preflight, without importing package code. Checker compatibility
+beyond the covered external-stub fixture and runtime exports remain unverified.
 These foundations do not complete the dependency-gated later-stage stories.
 
 Merged #150 adds simple captured PEP613 mapping aliases. #151 generates opt-in
@@ -106,9 +105,10 @@ supported-platform acceptance.
 
 Captured mapping preflight now preserves inherited TypedDict provenance through
 aliases and reexports, allowing proven inherited total keywords. Mixed ordinary
-bases and unsupported inherited-only closed semantics remain unresolved. Existing
-actual-source factory fixtures cover both strict checkers and runtime behavior;
-full Python type compatibility and external-symbol verification remain open.
+bases and unsupported inherited-only closed semantics remain unresolved. Bounded
+selected-interpreter source capture now resolves external mapping declarations and
+class bases without imports; the wider Python type compatibility matrix and runtime
+export verification remain open.
 
 Local schema watchers now belong to each worker state and retire with it. Successful
 preparation reconciles changed schema paths; missing paths remain repair targets,

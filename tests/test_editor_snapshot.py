@@ -127,6 +127,107 @@ class EditorSnapshotTests(unittest.TestCase):
             diagnostic = diagnostics[0]
             self.assertEqual(diagnostic["code"], "mapping-unverified")
 
+    def test_interpreter_stub_class_bases_resolve_local_mapped_types(self) -> None:
+        self.project(
+            text=(
+                _BASE
+                + 'scalars={Date={input="local_types.Date", '
+                + 'output="local_types.Date"}}\n'
+            )
+        )
+        self.write("schema.graphql", "scalar Date\ntype Query { date: Date }")
+        local = self.write(
+            "local_types.py",
+            "from vendor_types import BaseModel\nclass Date(BaseModel): pass\n",
+        )
+        source = self.write(
+            "main.py",
+            "from graphql_desk import gql\nfrom local_types import Date\n"
+            'q=gql("{ date }")\n',
+        )
+        external_root = self.root / "interpreter" / "site-packages"
+        vendor = external_root / "vendor_types"
+        vendor.mkdir(parents=True)
+        (vendor / "__init__.pyi").write_text(
+            "from .models import BaseModel\n", encoding="utf8"
+        )
+        (vendor / "models.pyi").write_text(
+            "raise RuntimeError('must not execute')\nclass BaseModel: ...\n",
+            encoding="utf8",
+        )
+        with patch(
+            "graphql_desk.editor_snapshot.interpreter_type_roots",
+            return_value=(external_root,),
+        ):
+            snapshot = acquire_editor_snapshot(
+                workspace=self.root, candidates=(source, local), generation=1
+            )
+        self.assertIn(local.as_uri(), {item.uri for item in snapshot.disk_modules})
+        self.assertEqual(
+            {item.module for item in snapshot.external_mapping_modules},
+            {"vendor_types", "vendor_types.models"},
+        )
+        result = analyze_editor_snapshot(
+            snapshot.request,
+            external_mapping_modules=snapshot.external_mapping_modules,
+        )
+        self.assertEqual(result["diagnostics"], [])
+
+    def test_large_class_base_capture_does_not_drop_mapped_type_capture(self) -> None:
+        self.project(
+            text=(
+                _BASE
+                + 'scalars={Date="direct_types.Date", '
+                + 'Other="local_types.Other"}\n'
+            )
+        )
+        self.write(
+            "schema.graphql",
+            "scalar Date\nscalar Other\ntype Query { date: Date other: Other }",
+        )
+        local = self.write(
+            "local_types.py",
+            "from largepkg import BaseModel\nclass Other(BaseModel): pass\n",
+        )
+        source = self.write(
+            "main.py", 'from graphql_desk import gql\nq=gql("{ date other }")\n'
+        )
+        external_root = self.root / "interpreter" / "site-packages"
+        external_root.mkdir(parents=True)
+        (external_root / "direct_types.pyi").write_text(
+            "class Date: ...\n", encoding="utf8"
+        )
+        large = external_root / "largepkg"
+        large.mkdir()
+        (large / "__init__.pyi").write_text(
+            "from .models import BaseModel\n", encoding="utf8"
+        )
+        (large / "models.pyi").write_text("class BaseModel: ...\n", encoding="utf8")
+        with (
+            patch(
+                "graphql_desk.editor_snapshot.interpreter_type_roots",
+                return_value=(external_root,),
+            ),
+            patch("graphql_desk.external_type_sources._MAX_MODULES", 1),
+        ):
+            snapshot = acquire_editor_snapshot(
+                workspace=self.root, candidates=(source, local), generation=1
+            )
+
+        self.assertEqual(
+            {item.module for item in snapshot.external_mapping_modules},
+            {"direct_types"},
+        )
+        result = analyze_editor_snapshot(
+            snapshot.request,
+            external_mapping_modules=snapshot.external_mapping_modules,
+        )
+        diagnostics = cast(list[dict[str, object]], result["diagnostics"])
+        self.assertEqual(
+            [item["code"] for item in diagnostics],
+            ["mapping-unresolved", "mapping-unresolved"],
+        )
+
     def test_supplied_remote_facts_are_explicit_current_and_stale_safe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -13,6 +13,56 @@ _MAX_MODULES = 256
 _MAX_BYTES = 2_000_000
 
 
+def external_class_base_symbols(
+    modules: tuple[ModuleSnapshot, ...],
+) -> tuple[str, ...]:
+    """Return imported external names used directly as module-level class bases."""
+    symbols: set[str] = set()
+    captured = {(module.project, module.module) for module in modules}
+    for module in modules:
+        try:
+            tree = ast.parse(module.source)
+        except (SyntaxError, ValueError, UnicodeError, RecursionError):
+            continue
+        imported: dict[str, str] = {}
+        for statement in tree.body:
+            if isinstance(statement, ast.Import):
+                for alias in statement.names:
+                    bound = alias.asname or alias.name.split(".", 1)[0]
+                    imported[bound] = alias.name if alias.asname else bound
+            elif isinstance(statement, ast.ImportFrom) and not statement.level:
+                for alias in statement.names:
+                    if alias.name != "*" and statement.module:
+                        imported[alias.asname or alias.name] = (
+                            f"{statement.module}.{alias.name}"
+                        )
+
+        def resolve(node: ast.expr) -> str | None:
+            attributes: list[str] = []
+            while isinstance(node, ast.Attribute):
+                attributes.append(node.attr)
+                node = node.value
+            if not isinstance(node, ast.Name) or node.id not in imported:
+                return None
+            return ".".join((imported[node.id], *reversed(attributes)))
+
+        for statement in tree.body:
+            if isinstance(statement, ast.ClassDef):
+                for base in statement.bases:
+                    symbol = resolve(base)
+                    if (
+                        symbol
+                        and symbol.split(".", 1)[0] not in sys.stdlib_module_names
+                        and not any(
+                            (module.project, ".".join(symbol.split(".")[:length]))
+                            in captured
+                            for length in range(1, len(symbol.split(".")))
+                        )
+                    ):
+                        symbols.add(symbol)
+    return tuple(sorted(symbols))
+
+
 def interpreter_type_roots(
     search_path: Iterable[str], *, excluded_roots: tuple[Path, ...]
 ) -> tuple[Path, ...]:
