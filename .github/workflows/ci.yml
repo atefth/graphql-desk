@@ -205,6 +205,9 @@ jobs:
         run: node test/run-host.cjs 1.142.0 malformedRecovery
         working-directory: editor
       - if: runner.os == 'Windows'
+        run: node test/run-host.cjs 1.141.0 lifecycle
+        working-directory: editor
+      - if: runner.os == 'Windows'
         run: node test/run-host.cjs 1.142.0 lifecycle
         working-directory: editor
       - if: runner.os == 'Windows'

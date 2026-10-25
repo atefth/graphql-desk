@@ -248,3 +248,18 @@ last-known `String` hover remains visible during the failed refresh, so this
 does not prove a no-stale interval or cancellation/supersession safety. See
 [`issue-38-worker-crash-recovery-1.142.0.json`](../../editor/test/observations/issue-38-worker-crash-recovery-1.142.0.json).
 This bounded recovery result does not close #38 or gate #42.
+
+### Issue #42 lifecycle host coverage on VS Code 1.141
+
+The existing managed-output lifecycle host suite also passed locally on
+Windows x64 with VS Code 1.141.0, Python 2026.10.0, and Pylance 2026.4.1.
+Pylance observed unavailable typing during a worker failure, recovery after a
+fresh edit, rejection of a delayed stale result, and correct updates through
+unsaved edit, undo/redo, save/discard, close/reopen, source rename, and source
+delete. The scenario preserved the dirty Python buffer, pre-existing user file,
+and unrelated workspace settings. A sanitized assertion summary is in
+[`issue-42-lifecycle-1.141.0.json`](../../editor/test/observations/issue-42-lifecycle-1.141.0.json).
+The Windows editor CI job now repeats this scenario alongside the existing
+1.142 host run. This remains one bounded host proof: restart, crash, editor
+cancellation, interpreter/schema/config combinations, and the full #42 matrix
+remain open.
