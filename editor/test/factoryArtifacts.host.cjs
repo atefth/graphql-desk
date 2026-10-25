@@ -199,6 +199,24 @@ exports.run = async () => {
     assert.match(results.pylance.countType, /Int|int/);
     assert.ok(results.pylance.variableError.length);
     results.lifecycle.publishedRealWorkerArtifacts = generated.initial.length;
+    const publicationsBeforeSecondEditor = trace.filter(item => item.stage === "generation.publish.started").length;
+    const peerUri = vscode.Uri.file(path.join(workspace, "peer.py"));
+    await fs.writeFile(peerUri.fsPath, "# second visible Python editor\n");
+    const peer = await vscode.workspace.openTextDocument(peerUri);
+    await vscode.window.showTextDocument(peer, { viewColumn: vscode.ViewColumn.Two, preview: false });
+    assert.ok(await until(() => vscode.window.visibleTextEditors.some(editor => editor.document.uri.toString() === peerUri.toString()),
+      "second Python editor becomes visible"));
+    assert.ok(await until(() => trace.filter(item => item.stage === "generation.publish.started").length > publicationsBeforeSecondEditor,
+      "visible-editor refresh republishes one workspace snapshot"));
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const editorRefreshPublications = trace.filter(item => item.stage === "generation.publish.started").length - publicationsBeforeSecondEditor;
+    assert.equal(editorRefreshPublications, 1, "two visible Python editors publish one artifact generation per workspace refresh");
+    results.lifecycle.onePublicationForMultipleVisibleEditors = true;
+    await vscode.window.showTextDocument(peer, { preview: false });
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    assert.ok(await until(() => !vscode.window.visibleTextEditors.some(editor => editor.document.uri.toString() === peerUri.toString()),
+      "second Python editor closes after the multi-editor publication check"));
+    await vscode.window.showTextDocument(consumer, { preview: false });
     const consumerOnDisk = await fs.readFile(consumerUri.fsPath, "utf8");
     const originalSource = consumer.getText();
     const selectedPosition = consumer.positionAt(originalSource.indexOf("selected = ") + 2);
