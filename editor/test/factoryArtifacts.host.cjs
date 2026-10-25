@@ -26,6 +26,7 @@ exports.run = async () => {
     if (event.affectsConfiguration("python.analysis.stubPath", consumerUri)) {
       mark("pylance.stubPath.changed", {
         setting: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""),
+        affectsWorkspaceFolder: event.affectsConfiguration("python.analysis.stubPath", vscode.workspace.getWorkspaceFolder(consumerUri)?.uri),
       });
     }
   });
@@ -78,7 +79,7 @@ exports.run = async () => {
     };
     const createArtifacts = artifactModule.createOwnedAnalysisArtifacts;
     artifactModule.createOwnedAnalysisArtifacts = (...args) => {
-      mark("publisher.create.started", { files: args[4]?.length });
+      mark("publisher.create.started", { files: args[4]?.length, root: args[2], generatedPackage: args[3] });
       try {
         const handle = createArtifacts(...args);
         mark("publisher.create.returned", { files: args[4]?.length });
@@ -440,8 +441,12 @@ exports.run = async () => {
     await vscode.workspace.getConfiguration("python", consumerUri).update("analysis.stubPath", "custom_stubs", vscode.ConfigurationTarget.WorkspaceFolder);
     const moved = await until(async () => {
       const exists = async target => fs.access(target).then(() => true, () => false);
-      return await exists(path.join(customRoot, "graphql_desk_generated", "default.pyi")) &&
-        selectedStubRoot() === customRoot && await exists(path.join(previouslySelected, "graphql_desk_generated", "default.pyi")) && (await hover(8, 2)).includes("String");
+      const customArtifact = await exists(path.join(customRoot, "graphql_desk_generated", "default.pyi"));
+      const previousArtifact = await exists(path.join(previouslySelected, "graphql_desk_generated", "default.pyi"));
+      const currentRoot = selectedStubRoot();
+      const currentHover = await hover(8, 2);
+      results.lifecycle.stubPathMoveProbe = { customArtifact, previousArtifact, currentRoot, customRoot, currentHover };
+      return customArtifact && currentRoot === customRoot && previousArtifact && currentHover.includes("String");
     }, "runtime workspace stubPath change republishes into the new managed root");
     assert.ok(moved);
     stubRoot = customRoot;

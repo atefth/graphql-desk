@@ -99,8 +99,13 @@ async function run() {
     value => Array.isArray(value) && value.map(target).some(item => item.uri.toString() === schemaUri),
     "Schema definition should resolve to schema.graphql",
   );
-  const fragments = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", selected.uri, selected.positionAt(selected.getText().indexOf("...Card") + 4));
-  assert.ok(fragments.map(target).some(value => value.uri.toString() === documents.get("fragments.py").uri.toString()));
+  const fragmentDocument = documents.get("fragments.py");
+  await until(
+    () => vscode.commands.executeCommand("vscode.executeDefinitionProvider", selected.uri, selected.positionAt(selected.getText().indexOf("...Card") + 4)),
+    values => Array.isArray(values) && values.map(target).some(value =>
+      value.uri.toString() === fragmentDocument.uri.toString() && fragmentDocument.getText(value.range) === "Card"),
+    "Fragment definition should resolve to fragments.py",
+  );
   await until(() => diagnostics(selected), values => !values.some(item => /Unknown directive/.test(item.message)), "Configured client directive must survive production capture");
   const directiveCompletion = await until(() => vscode.commands.executeCommand("vscode.executeCompletionItemProvider", selected.uri,
     selected.positionAt(selected.getText().indexOf("@local") + 3)), value => value.items.some(item => item.label === "local"),
