@@ -436,8 +436,8 @@ exports.run = async () => {
     assert.equal(settings["files.autoSave"], "off", "Automatic stub setup must preserve unrelated workspace settings");
     results.lifecycle.settingsPreserved = true;
     const customRoot = path.join(workspace, "custom_stubs");
-    await vscode.workspace.getConfiguration("python", consumerUri).update("analysis.stubPath", "custom_stubs", vscode.ConfigurationTarget.WorkspaceFolder);
     const previouslySelected = selectedStubRoot();
+    await vscode.workspace.getConfiguration("python", consumerUri).update("analysis.stubPath", "custom_stubs", vscode.ConfigurationTarget.WorkspaceFolder);
     const moved = await until(async () => {
       const exists = async target => fs.access(target).then(() => true, () => false);
       return await exists(path.join(customRoot, "graphql_desk_generated", "default.pyi")) &&

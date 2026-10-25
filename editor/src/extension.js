@@ -548,7 +548,8 @@ function activate(context) {
   highlighting = registerHighlighting(vscode, controller);
   const visible = vscode.window.onDidChangeVisibleTextEditors(() => refreshVisible());
   const configChanged = vscode.workspace.onDidChangeConfiguration(event => {
-    if (event.affectsConfiguration("python.analysis.stubPath")) {
+    if ((vscode.workspace.workspaceFolders ?? []).some(folder =>
+      event.affectsConfiguration("python.analysis.stubPath", folder.uri))) {
       // Our own generation switch selects already complete immutable output. Treat a
       // mismatch as an external setting edit and rebuild the manager around it.
       void managedStubPathsAreCurrent().then(ownedSelection => {
