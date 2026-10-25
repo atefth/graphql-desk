@@ -13,6 +13,8 @@
   "dirtyConfiguration": true,
   "dirtyFragment": true,
   "sourceRepair": true,
+  "incompleteGraphqlRecovery": true,
+  "recoveryDirtyBufferPreserved": true,
   "dirtySchema": true,
   "associatedUntitled": true,
   "explicitRemoteRefresh": true,

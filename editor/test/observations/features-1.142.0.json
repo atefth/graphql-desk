@@ -14,5 +14,7 @@
   "untrustedNoAnalysis": true,
   "diskUnchanged": true,
   "cleanBuffers": true,
-  "escapedLexicalHighlighting": true
+  "escapedLexicalHighlighting": true,
+  "highlightRecovery": true,
+  "recoveryDirtyBufferPreserved": true
 }

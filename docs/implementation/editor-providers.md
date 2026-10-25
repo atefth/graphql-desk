@@ -26,6 +26,13 @@ commands, diagnostics, decorations, native Python hover coexistence, trust
 revocation and disposal while preserving fixture disk bytes and clean buffers.
 Both pinned hosts also assert that lexical decorations for an escaped, incomplete
 Python string cover the exact VS Code ranges for its GraphQL keyword and string token.
+They also exercise one dirty-buffer recovery cycle: incomplete Python receives only
+lexical highlights, repaired Python exposes mapped GraphQL validation/highlighting,
+and a corrected field clears validation without changing the source file on disk.
+The feature host calls the registered providers directly for exact decoration
+ranges. A separate real activated-extension host observes the diagnostic transition
+through its document-change path; it does not inspect decorations. The edited test
+buffer intentionally remains dirty.
 The feature suites also verify an exact empty insertion range on a blank CRLF
 GraphQL line with preceding Unicode through the registered completion provider.
 They also reject arbitrary navigation for duplicate local and conflicting imported

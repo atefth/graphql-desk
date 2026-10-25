@@ -5,7 +5,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const vscode = require("vscode");
 const { registerLanguageFeatures } = require("../src/languageFeatures");
-const { registerHighlighting } = require("../src/highlighting");
+const { createHighlighting, registerHighlighting } = require("../src/highlighting");
 const { bundle, schema } = require("./featureFixtures.cjs");
 
 function hoverText(hovers) {
@@ -30,6 +30,7 @@ async function run() {
     "blank.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''\r\n\r\n''')\r\n",
     "lexical.py": "from graphql_desk import gql\nq=gql('''query Read { user { name",
     "lexicalEscaped.py": ["# 😀", "from graphql_desk import gql", String.raw`q=gql("query Q { user(name: \"m\u0061😀\") { name`].join("\r\n"),
+    "recovery.py": ["# 😀", "from graphql_desk import gql", String.raw`q=gql("query Read { user(id: \"m\u0061😀\") { name`].join("\r\n"),
     "selected.py": "outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql('{ user { name ...Card } }',[card])\n",
     "fragments.py": "from graphql_desk import gql\ncard=gql('fragment Card on User { id }')\n",
     "other.py": "# 😀\r\nfrom graphql_desk import gql\r\ncard=gql('fragment Card on User { name }')\r\n",
@@ -78,7 +79,7 @@ async function run() {
   });
   const observations = { outcome: "read-only-features-observed", vscode: vscode.version, diagnostics: false, completion: false, boundaryCompletion: false, hover: false,
     schemaDefinition: false, fragmentDefinition: false, ambiguousFragmentDefinition: false, nativeCoexistence: false,
-    highlighting: false, lexicalHighlighting: false, escapedLexicalHighlighting: false,
+    highlighting: false, lexicalHighlighting: false, escapedLexicalHighlighting: false, highlightRecovery: false,
     nativePythonHover: false, untrustedNoAnalysis: false, diskUnchanged: false, cleanBuffers: false };
   try {
     const invalid = documents.get("main.py");
@@ -192,6 +193,56 @@ async function run() {
     assert.ok(escapedRanges.some(range => range.isEqual(expectedQueryRange)), "Lexical keyword decoration must use the exact UTF-16 host range");
     assert.ok(escapedRanges.some(range => range.isEqual(expectedStringRange)), "Escaped GraphQL string decoration must cover the exact Python source escape span");
     observations.escapedLexicalHighlighting = true;
+    const recovery = documents.get("recovery.py");
+    await vscode.window.showTextDocument(recovery);
+    const decoratedRanges = async () => {
+      const ranges = [];
+      await highlighting.refresh({ document: recovery, setDecorations(_type, values) { ranges.push(...values); } });
+      return ranges;
+    };
+    const highlightService = createHighlighting(options);
+    const observeRecovery = async () => highlightService.highlight({
+      uri: recovery.uri.toString(), version: recovery.version, text: recovery.getText(),
+    });
+    await registration.refresh(recovery);
+    assert.equal(vscode.languages.getDiagnostics(recovery.uri).some(item => item.code === "graphql.validation"), false);
+    const incompleteItems = await observeRecovery();
+    assert.ok(incompleteItems.length && incompleteItems.every(item => item.mode === "lexical"));
+    const incompleteDecorations = await decoratedRanges();
+    const queryStart = recovery.getText().indexOf("query");
+    assert.ok(incompleteDecorations.some(range => range.isEqual(new vscode.Range(
+      recovery.positionAt(queryStart), recovery.positionAt(queryStart + 5),
+    ))));
+    const incompleteEscape = recovery.getText().indexOf(String.raw`\u0061`);
+    assert.ok(incompleteItems.some(item => item.start <= incompleteEscape && item.end > incompleteEscape));
+    const resolvedSource = ["# 😀", "from graphql_desk import gql", String.raw`q=gql("query Read { user(id: \"m\u0061😀\") { missing } }")`].join("\r\n");
+    const recoveryEdit = new vscode.WorkspaceEdit();
+    recoveryEdit.replace(recovery.uri, new vscode.Range(recovery.positionAt(0), recovery.positionAt(recovery.getText().length)), resolvedSource);
+    assert.equal(await vscode.workspace.applyEdit(recoveryEdit), true);
+    await registration.refresh(recovery);
+    const invalidItems = await observeRecovery();
+    const invalidDecorations = await decoratedRanges();
+    const missingStart = recovery.getText().indexOf("missing");
+    assert.ok(invalidItems.some(item => item.mode === "resolved" && item.start === missingStart && item.end === missingStart + 7));
+    assert.ok(invalidDecorations.some(range => range.isEqual(new vscode.Range(
+      recovery.positionAt(missingStart), recovery.positionAt(missingStart + 7),
+    ))));
+    assert.ok(vscode.languages.getDiagnostics(recovery.uri).some(item => item.code === "graphql.validation" && recovery.getText(item.range) === "missing"));
+    const repairedSource = resolvedSource.replace("missing", "name");
+    const repairEdit = new vscode.WorkspaceEdit();
+    repairEdit.replace(recovery.uri, new vscode.Range(recovery.positionAt(0), recovery.positionAt(recovery.getText().length)), repairedSource);
+    assert.equal(await vscode.workspace.applyEdit(repairEdit), true);
+    await registration.refresh(recovery);
+    const repairedItems = await observeRecovery();
+    assert.ok(repairedItems.length && repairedItems.every(item => item.mode === "resolved"));
+    const repairedDecorations = await decoratedRanges();
+    const nameStart = recovery.getText().indexOf("name");
+    assert.ok(repairedDecorations.some(range => range.isEqual(new vscode.Range(
+      recovery.positionAt(nameStart), recovery.positionAt(nameStart + 4),
+    ))));
+    assert.equal(vscode.languages.getDiagnostics(recovery.uri).some(item => item.code === "graphql.validation"), false);
+    assert.equal(recovery.isDirty, true);
+    observations.highlightRecovery = true;
     trusted = false;
     const before = analyses;
     await registration.refresh(invalid);
@@ -206,10 +257,11 @@ async function run() {
   }
   for (const [name, text] of Object.entries(fixtures)) {
     assert.equal(await fs.readFile(path.join(workspace, name), "utf8"), text);
-    assert.equal(documents.get(name).isDirty, false);
+    assert.equal(documents.get(name).isDirty, name === "recovery.py");
   }
   observations.diskUnchanged = true;
-  observations.cleanBuffers = true;
+  observations.recoveryDirtyBufferPreserved = documents.get("recovery.py").isDirty;
+  observations.cleanBuffers = [...documents].filter(([name]) => name !== "recovery.py").every(([, document]) => !document.isDirty);
   await fs.writeFile(resultPath, JSON.stringify(observations, null, 2), "utf8");
 }
 
