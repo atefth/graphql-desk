@@ -156,6 +156,34 @@ class ParseGenerationTests(unittest.TestCase):
             overlay, render_captured_parse_overlay(tuple(reversed(modules))).stub
         )
 
+    def test_nested_literal_limit_keeps_other_overloads_and_fallback(self) -> None:
+        nested = "query Deep { " + "child { " * 150 + "id" + " }" * 150 + " }"
+        safe = "query Safe { id }"
+        modules = (
+            ModuleSnapshot(
+                "p",
+                "main",
+                "file:///main.py",
+                1,
+                "from graphql_desk import parse\n"
+                f"deep=parse({nested!r})\nsafe=parse({safe!r})",
+            ),
+        )
+
+        overlay = render_captured_parse_overlay(modules).stub
+        self.assertNotIn(nested, overlay)
+        self.assertIn(repr(safe), overlay)
+        self.assertIn("def parse(source: str | _Source", overlay)
+
+        companion = render_captured_parse_companion(
+            modules, project_id="p", module="main"
+        )
+        self.assertNotIn(nested, companion.companion.stub)
+        self.assertIn(repr(safe), companion.companion.stub)
+        self.assertTrue(
+            any(item.code == "parse-fallback" for item in companion.diagnostics)
+        )
+
     def test_pure_deterministic_deduplicated_schema_agnostic_declarations(self) -> None:
         sources = ("query Q { nonexistent }", "fragment F on Unknown { id }")
         with patch("builtins.open", side_effect=AssertionError("No writes")):

@@ -224,18 +224,17 @@ def _render_parse_companion(
     for source, document in parsed:
         if _executable(document):
             index = len(documents)
-            documents.append(
-                (
-                    source,
-                    (
-                        render_document_ast_types(document, name=f"Parse{index}"),
-                        render_document_ast_types(
-                            parse(source, no_location=True),
-                            name=f"Parse{index}NoLocation",
-                        ),
+            try:
+                declarations = (
+                    render_document_ast_types(document, name=f"Parse{index}"),
+                    render_document_ast_types(
+                        parse(source, no_location=True),
+                        name=f"Parse{index}NoLocation",
                     ),
                 )
-            )
+            except (RecursionError, ValueError):
+                continue
+            documents.append((source, declarations))
     return _assemble_parse_companion(tuple(documents))
 
 
