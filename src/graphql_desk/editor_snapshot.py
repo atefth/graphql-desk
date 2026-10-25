@@ -565,6 +565,24 @@ def acquire_editor_snapshot(
                     }
                     for f in facts.factories
                 ],
+                "type_mappings": [
+                    {
+                        "schema_name": schema.name,
+                        "scalars": [
+                            {
+                                "name": item.name,
+                                "input": item.input,
+                                "output": item.output,
+                            }
+                            for item in schema.scalars
+                        ],
+                        "enums": [
+                            {"name": name, "type": symbol}
+                            for name, symbol in schema.enums
+                        ],
+                    }
+                    for schema in config.schemas
+                ],
             }
         )
         for source in selected_files:

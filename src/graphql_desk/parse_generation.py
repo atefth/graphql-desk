@@ -40,6 +40,60 @@ def render_parse_companion(sources: tuple[str, ...]) -> ParseCompanion:
     )
 
 
+def render_captured_parse_overlay(
+    modules: tuple[ModuleSnapshot, ...],
+) -> ParseCompanion:
+    """Render workspace overloads for normal ``graphql_desk.parse`` imports."""
+    facts = resolve_parse_sources(modules)
+    sources = sorted({call.source for call in facts.calls})
+    parsed: list[tuple[str, DocumentNode]] = []
+    for source in sources:
+        try:
+            document = parse(source)
+        except (GraphQLError, RecursionError, ValueError):
+            continue
+        if _executable(document):
+            parsed.append((source, document))
+    companion = _render_parse_companion(tuple(parsed))
+    graphql_import = (
+        "from graphql import DocumentNode as _DocumentNode, Source as _Source\n"
+    )
+    if not companion.stub.startswith(graphql_import):
+        raise ValueError("Parser overlay is missing its GraphQL imports")
+    return ParseCompanion(
+        companion.runtime,
+        "\n".join(
+            (
+                "from dataclasses import dataclass as _dataclass, field as _field",
+                "from typing import Generic as _Generic, TypeVar as _TypeVar",
+                "from graphql import DocumentNode as _DocumentNode, Source as _Source",
+                "_Result = _TypeVar('_Result')",
+                "_Variables = _TypeVar('_Variables')",
+                "",
+                "@_dataclass(frozen=True)",
+                "class TypedDocument(_Generic[_Result, _Variables]):",
+                "    ast: _DocumentNode",
+                "    operation_name: str | None = None",
+                "    schema_name: str | None = _field(default=None, kw_only=True)",
+                "",
+                companion.stub[len(graphql_import) :].rstrip(),
+                "",
+                "from .fragment_helpers import read_fragment, "
+                "read_fragment_passthrough",
+                "from .runtime import gql, graphql, init_graphql",
+                "from .testing import unsafe_read_result",
+                "",
+                "__all__ = [",
+                "    'TypedDocument', 'gql', 'graphql', 'init_graphql', 'parse',",
+                "    'read_fragment', 'read_fragment_passthrough',",
+                "    'unsafe_read_result',",
+                "]",
+            )
+        )
+        + "\n",
+    )
+
+
 @dataclass(frozen=True)
 class CapturedParseCompanion:
     module: ModuleDependency

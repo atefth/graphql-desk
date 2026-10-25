@@ -1,5 +1,7 @@
 """Real parser companion imports and checker inference without casts."""
 
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,6 +16,7 @@ from graphql_desk.literal_ast import render_document_ast_types
 from graphql_desk.parse_generation import (
     render_captured_parse_companion,
     render_captured_parse_companions,
+    render_captured_parse_overlay,
     render_parse_companion,
 )
 from graphql_desk.source_graph import (
@@ -25,6 +28,134 @@ from tests import test_factory_generation as factory_tests
 
 
 class ParseGenerationTests(unittest.TestCase):
+    def test_normal_import_overlay_types_literals_and_preserves_fallbacks(self) -> None:
+        source = (
+            "from graphql import DocumentNode\n"
+            "from graphql_desk import TypedDocument, gql, parse\n"
+            "from typing import Literal\n"
+            "from typing_extensions import assert_type\n"
+            "doc = parse('query Q { field }')\n"
+            "assert_type(doc.definitions[0].name.value, Literal['Q'])\n"
+            "assert_type(\n"
+            "    doc.definitions[0].selection_set.selections[0].name.value,\n"
+            "    Literal['field'],\n"
+            ")\n"
+            "typed: TypedDocument[object, object] = gql('query G { field }')\n"
+            "def dynamic_source() -> str: return input()\n"
+            "dynamic = parse(dynamic_source())\n"
+            "assert_type(dynamic, DocumentNode)\n"
+            "options = parse('query WithMax { field }', max_tokens=10)\n"
+            "assert_type(options, DocumentNode)\n"
+            "sdl = parse('type SDL { field: String }')\n"
+            "assert_type(sdl, DocumentNode)\n"
+            "wrong: Literal['Wrong'] = doc.definitions[0].name.value\n"
+        )
+        modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+        overlay = render_captured_parse_overlay(modules)
+        self.assertIn("from .runtime import gql, graphql, init_graphql", overlay.stub)
+        self.assertIn("class TypedDocument", overlay.stub)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "main.py"
+            source_path.write_text(source, encoding="utf8")
+            for base in (root / "typings", root / "site-packages"):
+                package = base / "graphql_desk-stubs"
+                package.mkdir(parents=True)
+                (package / "__init__.pyi").write_text(overlay.stub, encoding="utf8")
+                (package / "py.typed").write_text("partial\n", encoding="utf8")
+            (root / "pyrightconfig.json").write_text(
+                json.dumps(
+                    {
+                        "include": ["."],
+                        "typeCheckingMode": "strict",
+                        "pythonVersion": "3.10",
+                        "stubPath": "typings",
+                    }
+                ),
+                encoding="utf8",
+            )
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = (
+                str(root / "site-packages")
+                + os.pathsep
+                + environment.get("PYTHONPATH", "")
+            )
+            mypy = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "mypy",
+                    "--strict",
+                    "--no-incremental",
+                    "main.py",
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
+            wrong_line = (
+                source.splitlines().index(
+                    "wrong: Literal['Wrong'] = doc.definitions[0].name.value"
+                )
+                + 1
+            )
+            self.assertRegex(mypy.stdout, rf"main\.py:{wrong_line}: error:")
+            pyright = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyright",
+                    "--project",
+                    str(root),
+                    "--pythonpath",
+                    sys.executable,
+                    "--outputjson",
+                ],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            report = json.loads(pyright.stdout)
+            self.assertEqual(pyright.returncode, 1, pyright.stdout + pyright.stderr)
+            self.assertEqual(report["summary"]["errorCount"], 1, pyright.stdout)
+            self.assertEqual(
+                report["generalDiagnostics"][0]["range"]["start"]["line"],
+                wrong_line - 1,
+            )
+
+    def test_workspace_parser_overlay_aggregates_normal_imports(self) -> None:
+        modules = (
+            ModuleSnapshot(
+                "p",
+                "main",
+                "file:///main.py",
+                1,
+                "from graphql_desk import parse as gql_parse\n"
+                "a=gql_parse('query Q { id }')",
+            ),
+            ModuleSnapshot(
+                "p",
+                "other",
+                "file:///other.py",
+                1,
+                "from graphql_desk import parse\n"
+                "b=parse('fragment F on User { name }')",
+            ),
+        )
+        overlay = render_captured_parse_overlay(modules).stub
+        self.assertIn("Literal['query Q { id }']", overlay)
+        self.assertIn("Literal['fragment F on User { name }']", overlay)
+        self.assertIn("def parse(source: str | _Source", overlay)
+        self.assertEqual(
+            overlay, render_captured_parse_overlay(tuple(reversed(modules))).stub
+        )
+
     def test_pure_deterministic_deduplicated_schema_agnostic_declarations(self) -> None:
         sources = ("query Q { nonexistent }", "fragment F on Unknown { id }")
         with patch("builtins.open", side_effect=AssertionError("No writes")):

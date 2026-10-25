@@ -34,7 +34,10 @@ from .factory_generation import (
     generate_project_factory_artifacts,
 )
 from .fragments import FragmentIndex
-from .parse_generation import render_captured_parse_companions
+from .parse_generation import (
+    render_captured_parse_companions,
+    render_captured_parse_overlay,
+)
 from .quarantine import quarantine_generated_stubs
 from .schema_url import load_from_url
 from .source_graph import DocumentIdentity, IncrementalResolver, ModuleDependency
@@ -785,12 +788,23 @@ class EditorWorker:
                         ),
                     }
                 )
+            overlay = render_captured_parse_overlay(facts.modules)
             return {
                 "ok": True,
                 "id": self._identity,
                 "input_fingerprint": _analysis_input_fingerprint(self._snapshot),
                 "saved_source_fingerprint": _saved_source_fingerprint(self._snapshot),
                 "projects": projects,
+                "parser_overlay": [
+                    {
+                        "relative_path": "graphql_desk-stubs/__init__.pyi",
+                        "text": overlay.stub,
+                    },
+                    {
+                        "relative_path": "graphql_desk-stubs/py.typed",
+                        "text": "partial\n",
+                    },
+                ],
                 "unavailable_schemas": self._snapshot.unavailable_schemas,
             }
         if self._snapshot is not None:

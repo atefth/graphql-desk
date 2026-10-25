@@ -861,7 +861,9 @@ if TYPE_CHECKING:
             "from typing import Literal\n"
             "from typing_extensions import assert_type\n"
             "from graphql_desk_generated.parsers.main import parse\n"
+            "from graphql_desk import parse as root_parse\n"
             "document = parse('query Q { disk }')\n"
+            "root_document = root_parse('query Root { root }')\n"
             "assert_type(document.definitions[0].name.value, Literal['Q'])\n"
             "assert_type(\n"
             "    document.definitions[0].selection_set.selections[0].name.value,\n"
@@ -876,6 +878,12 @@ if TYPE_CHECKING:
             {"op": "artifacts", **capture, "id": identity, "schema_buffers": []}
         )
         self.assertTrue(result["ok"], result)
+        overlay_items = cast(list[dict[str, str]], result["parser_overlay"])
+        overlay = {item["relative_path"]: item["text"] for item in overlay_items}
+        self.assertIn(
+            "Literal['query Root { root }']", overlay["graphql_desk-stubs/__init__.pyi"]
+        )
+        self.assertEqual(overlay["graphql_desk-stubs/py.typed"], "partial\n")
         project = cast(list[dict[str, object]], result["projects"])[0]
         self.assertEqual(project["diagnostics"], [])
         files = cast(list[dict[str, str]], project["files"])

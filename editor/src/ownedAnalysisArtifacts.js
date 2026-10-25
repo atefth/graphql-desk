@@ -9,6 +9,7 @@ const MAX_FILES = 4096;
 const normalized = value => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
 const same = (left, right) => left.dev === right.dev && left.ino === right.ino;
 function renderOwnedAnalysisArtifact(generatedPackage, relativePath, text) {
+  if (generatedPackage === "graphql_desk-stubs" && relativePath === "py.typed") return Buffer.from("partial\n", "utf8");
   const fingerprint = createHash("sha256").update(JSON.stringify({
     format: 1,
     generatedPackage,
@@ -23,6 +24,7 @@ function identity(file) {
   return stat;
 }
 function packageParts(value) {
+  if (value === "graphql_desk-stubs") return [value];
   return typeof value === "string" && value.split(".").every(part => /^[A-Za-z_][A-Za-z_0-9]*$/.test(part))
     ? value.split(".") : null;
 }
@@ -37,8 +39,8 @@ function artifactEntries(files, generatedPackage) {
       ? file.relative_path.slice(prefix.length) : "";
     const parts = relativePath.split("/");
     const bytes = typeof file.text === "string" ? Buffer.byteLength(file.text, "utf8") : MAX_FILE_BYTES + 1;
-    if (!relativePath || parts.some((part, index) => index === parts.length - 1
-      ? !/^[A-Za-z_][A-Za-z_0-9]*\.pyi?$/.test(part)
+    if (!relativePath || generatedPackage === "graphql_desk-stubs" && !["__init__.pyi", "py.typed"].includes(relativePath) || parts.some((part, index) => index === parts.length - 1
+      ? !(generatedPackage === "graphql_desk-stubs" && part === "py.typed") && !/^[A-Za-z_][A-Za-z_0-9]*\.pyi?$/.test(part)
       : !/^[A-Za-z_][A-Za-z_0-9]*$/.test(part)) ||
         bytes > MAX_FILE_BYTES || result.has(relativePath)) {
       throw new Error("Invalid analysis artifact");

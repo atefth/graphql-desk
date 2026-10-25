@@ -73,22 +73,24 @@ exports.run = async () => {
       .filter(item => item.range.start.line === position(name).line).map(item => item.message);
     const inferredType = (name, text) => text.match(new RegExp(`\\(variable\\) ${name}: ([^\\n]+)`))?.[1] || "";
     const observed = {};
-    const ready = await until(async () => {
-      observed.nested = await hover("nested_value");
-      observed.nullable = await hover("nullable_value");
-      observed.nestedType = inferredType("nested_value", observed.nested);
-      observed.nullableType = inferredType("nullable_value", observed.nullable);
-      observed.nestedErrors = lineDiagnostics("nested_bad");
-      observed.nullableErrors = lineDiagnostics("nullable_bad");
-      observed.defaultsErrors = lineDiagnostics("defaults_bad");
-      observed.defaultAcceptedErrors = lineDiagnostics("defaults_result");
-      return observed.nestedType === "list[list[String]]" &&
-        observed.nullableType === "list[String | None] | None" &&
-        observed.nestedErrors.length > 0 && observed.nullableErrors.length > 0 &&
-        observed.defaultsErrors.length > 0 && observed.defaultAcceptedErrors.length === 0;
-    }, "Pylance live typing for aliases, nested list wrappers, nullable lists and defaulted variables", 60000);
-    assert.ok(ready, JSON.stringify(observed));
-    results.pylance = { ...results.pylance, ...observed };
+    if (process.env.GRAPHQL_DESK_TEST_SUITE !== "parserOverlay") {
+      const ready = await until(async () => {
+        observed.nested = await hover("nested_value");
+        observed.nullable = await hover("nullable_value");
+        observed.nestedType = inferredType("nested_value", observed.nested);
+        observed.nullableType = inferredType("nullable_value", observed.nullable);
+        observed.nestedErrors = lineDiagnostics("nested_bad");
+        observed.nullableErrors = lineDiagnostics("nullable_bad");
+        observed.defaultsErrors = lineDiagnostics("defaults_bad");
+        observed.defaultAcceptedErrors = lineDiagnostics("defaults_result");
+        return observed.nestedType === "list[list[String]]" &&
+          observed.nullableType === "list[String | None] | None" &&
+          observed.nestedErrors.length > 0 && observed.nullableErrors.length > 0 &&
+          observed.defaultsErrors.length > 0 && observed.defaultAcceptedErrors.length === 0;
+      }, "Pylance live typing for aliases, nested list wrappers, nullable lists and defaulted variables", 60000);
+      assert.ok(ready, JSON.stringify(observed));
+      results.pylance = { ...results.pylance, ...observed };
+    }
 
     const parserUri = vscode.Uri.file(path.join(workspace, "parser_consumer.py"));
     const parserDocument = await vscode.workspace.openTextDocument(parserUri);
@@ -102,22 +104,46 @@ exports.run = async () => {
       let settings;
       try { settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")); }
       catch { return false; }
+      if (typeof settings["python.analysis.stubPath"] !== "string") return false;
       const root = path.resolve(workspace, settings["python.analysis.stubPath"]);
-      return fs.access(path.join(root, "graphql_desk_generated", "parsers", "parser_consumer.pyi")).then(() => true, () => false);
+      return Promise.all([
+        fs.access(path.join(root, "graphql_desk-stubs", "__init__.pyi")),
+        fs.readFile(path.join(root, "graphql_desk-stubs", "py.typed"), "utf8").then(text => assert.equal(text, "partial\n")),
+      ]).then(() => true, () => false);
     }, "the worker publishes a schema-independent parser companion");
-    await replaceText(parserDocument, "from graphql_desk import parse",
-      "from graphql_desk_generated.parsers.parser_consumer import parse");
+    assert.match(parserDocument.getText(), /^from graphql_desk import parse/m);
     const parserTyped = await until(async () => {
       const hover = await parserHover();
       results.pylance.parserName = hover;
       return /Literal\[['\"]ParserQuery['\"]\]/.test(hover);
-    }, "generated parser imports provide exact Pylance AST literal inference", 60000);
+    }, "ordinary graphql_desk.parse imports provide exact Pylance AST literal inference", 60000);
     assert.ok(parserTyped, results.pylance.parserName);
-    assert.equal(parserDocument.isDirty, true, "GraphQL Desk preserves the user's unsaved import edit");
+    assert.equal(parserDocument.isDirty, false, "GraphQL Desk does not rewrite the user's source");
     assert.equal(await fs.readFile(parserUri.fsPath, "utf8"),
       "from graphql_desk import parse\ndocument = parse('query ParserQuery { selected }')\nparsed_name = document.definitions[0].name.value\n");
+    const packageExportsUri = vscode.Uri.file(path.join(workspace, "package_exports.py"));
+    await fs.writeFile(packageExportsUri.fsPath, "from graphql_desk import gql, TypedDocument, parse\n");
+    const packageExports = await vscode.workspace.openTextDocument(packageExportsUri);
+    await vscode.window.showTextDocument(packageExports, { preview: false });
+    const packageExportsReady = await until(async () => {
+      const diagnostics = vscode.languages.getDiagnostics(packageExportsUri)
+        .filter(item => /cannot import|unknown import symbol/i.test(item.message));
+      const gqlOffset = packageExports.getText().indexOf("gql") + 1;
+      const hovers = await vscode.commands.executeCommand("vscode.executeHoverProvider", packageExportsUri,
+        packageExports.positionAt(gqlOffset)) || [];
+      results.pylance.packageExports = { diagnostics: diagnostics.map(item => item.message), hoverCount: hovers.length };
+      return diagnostics.length === 0 && hovers.length > 0;
+    }, "partial parser stub preserves existing GraphQL Desk root exports", 30000);
+    assert.ok(packageExportsReady, JSON.stringify(results.pylance.packageExports));
     results.pylance.parserLiteralInference = true;
     await vscode.window.showTextDocument(document, { preview: false });
+    if (process.env.GRAPHQL_DESK_TEST_SUITE === "parserOverlay") {
+      const configuration = vscode.workspace.getConfiguration("python", uri);
+      results.lifecycle.configuredStubPath = configuration.get("analysis.stubPath");
+      results.lifecycle.activeStubRoot = path.resolve(workspace, results.lifecycle.configuredStubPath);
+      results.outcome = "parser-overlay-observed";
+      return;
+    }
 
     const semanticsSchema = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(workspace, "schema.graphql")));
     await replace(semanticsSchema, [
