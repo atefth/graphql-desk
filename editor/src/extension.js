@@ -149,6 +149,7 @@ function activate(context) {
   let language;
   let highlighting;
   let timer;
+  let pylanceRestartTimer;
   let disposed = false;
   let generation = 0;
   let refreshCancellation;
@@ -183,6 +184,15 @@ function activate(context) {
     }
   }
   const output = vscode.window.createOutputChannel("GraphQL Desk");
+  // This command returns before Pylance finishes restarting, so coalesce adjacent writes.
+  function schedulePylanceRestart() {
+    clearTimeout(pylanceRestartTimer);
+    pylanceRestartTimer = setTimeout(() => {
+      pylanceRestartTimer = undefined;
+      void vscode.commands.executeCommand("python.analysis.restartLanguageServer")
+        .catch(error => output.appendLine(`Pylance restart failed: ${String(error)}`));
+    }, 250);
+  }
   function traceSkip(reason) {
     if (reason === lastSkipReason) return;
     lastSkipReason = reason;
@@ -404,7 +414,7 @@ function activate(context) {
           const handle = outputs.get(key);
           if (handle) await handle.publish(files, isCurrent);
         }
-        await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
+        schedulePylanceRestart();
       }
       if (isCurrent()) {
         latestArtifacts.set(folderRoot, { ...previous, selectedSetting: managed.selectedSetting,
@@ -488,7 +498,7 @@ function activate(context) {
           } else if (handle) changedArtifacts = (await handle.publish(files, result.isCurrent)) || changedArtifacts;
         }
       }
-      if (changedArtifacts && !managed.ownsSetting) await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
+      if (changedArtifacts && !managed.ownsSetting) schedulePylanceRestart();
       latestArtifacts.set(folderRoot, { managedRoot: managed.root, selectedSetting: managed.selectedSetting,
         operationManifest, projects: result.projects.map(({ project, generated_package, provenance, files }) =>
           ({ project, generated_package, provenance, files })),
@@ -585,7 +595,7 @@ function activate(context) {
   const command = vscode.commands.registerCommand("graphqlDesk.refreshSchema", () => controller.refresh());
   const lifecycle = { async dispose() {
     if (disposed) return;
-    disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); command.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
+    disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
     configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose(); output.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
     outputs.clear();
