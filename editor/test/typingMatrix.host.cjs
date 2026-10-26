@@ -405,7 +405,6 @@ exports.run = async () => {
     const semanticUri = vscode.Uri.file(semanticPath);
     const semanticDocument = await vscode.workspace.openTextDocument(semanticUri);
     await vscode.window.showTextDocument(semanticDocument, { preview: false });
-    await replace(semanticDocument, semanticSource);
     const semanticPosition = name => {
       const offset = semanticDocument.getText().indexOf(name) + 1;
       assert.ok(offset > 0, `Expected semantic fixture variable ${name}`);
@@ -417,6 +416,10 @@ exports.run = async () => {
     };
     const semanticErrors = name => vscode.languages.getDiagnostics(semanticUri)
       .filter(item => item.range.start.line === semanticPosition(name).line).map(item => item.message);
+    const seedReady = await until(async () => /GraphqlDeskDocument|TypedDocument/.test(await semanticHover("seed")),
+      "Pylance indexes the seed operation before the unsaved source edit", 60000);
+    assert.ok(seedReady, JSON.stringify({ seed: await semanticHover("seed") }));
+    await replace(semanticDocument, semanticSource);
     const inputContractReady = await until(async () => {
       results.pylance.inputName = await semanticHover("input_name");
       results.pylance.inputPositiveErrors = semanticErrors("input_name_ok");
