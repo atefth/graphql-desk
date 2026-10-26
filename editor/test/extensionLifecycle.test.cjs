@@ -5,7 +5,22 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { operationDependencyImpact, reconfigureWorkspaceRoots } = require("../src/extension");
+const { operationDependencyImpact, reconfigureWorkspaceRoots, typingFingerprint } = require("../src/extension");
+
+test("typing fingerprint follows Pylance stub inputs and ignores runtime-only changes", () => {
+  const files = [
+    { relative_path: "graphql_desk_generated/default.py", text: "runtime = 1" },
+    { relative_path: "graphql_desk_generated/default.pyi", text: "value: str" },
+    { relative_path: "graphql_desk-stubs/py.typed", text: "partial\n" },
+  ];
+  const baseline = typingFingerprint([["graphql_desk_generated", files.slice(0, 2)], ["graphql_desk-stubs", files.slice(2)]]);
+  assert.equal(typingFingerprint([["graphql_desk-stubs", files.slice(2)], ["graphql_desk_generated", [...files.slice(0, 2)].reverse()]]), baseline,
+    "group and file order do not trigger a language-server restart");
+  assert.notEqual(typingFingerprint([["graphql_desk_generated", [files[0], { ...files[1], text: "value: int" }]], ["graphql_desk-stubs", files.slice(2)]]), baseline,
+    "a changed typed declaration does trigger a restart");
+  assert.notEqual(typingFingerprint([["graphql_desk_generated", files.slice(0, 2)], ["graphql_desk-stubs", [{ ...files[2], text: "full\n" }]]]), baseline,
+    "the partial stub marker is a Pylance input");
+});
 
 test("schema and config deltas target only operations with changed provenance facts", () => {
   const operation = (binding, coordinate, fingerprint, config = []) => ({
