@@ -39,6 +39,18 @@ function pythonVersion(python) {
 exports.run = async () => {
   const suite = process.env.GRAPHQL_DESK_TEST_SUITE;
   const results = { host: vscode.version, pylance: {}, lifecycle: { invalidationAndRepair: {} } };
+  const skipTraces = [];
+  const originalCreateOutputChannel = vscode.window.createOutputChannel;
+  const createOutputChannel = originalCreateOutputChannel.bind(vscode.window);
+  vscode.window.createOutputChannel = (name, ...args) => {
+    const channel = createOutputChannel(name, ...args);
+    if (name !== "GraphQL Desk") return channel;
+    return new Proxy(channel, { get(target, property) {
+      if (property === "appendLine") return value => { skipTraces.push(value); return target.appendLine(value); };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+  };
   let settingChanges;
   let diagnosticChanges;
   try {
@@ -271,6 +283,7 @@ exports.run = async () => {
       const source = await fs.readFile(path.join(generatedRoot, "sources", "operation_semantics.pyi"), "utf8").catch(() => "");
       return {
         generation: { id: complete.id, sequence: complete.sequence, analysisId: complete.analysisId },
+        skipTraces: skipTraces.slice(-30),
         operationManifest: complete.operationManifest.map(project => ({
           project: project.project,
           operations: project.operations.map(({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports }) =>
@@ -920,6 +933,7 @@ exports.run = async () => {
   } finally {
     settingChanges?.dispose();
     diagnosticChanges?.dispose();
+    vscode.window.createOutputChannel = originalCreateOutputChannel;
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
     console.log(`GRAPHQL_DESK_TYPING_MATRIX ${JSON.stringify(results)}`);
   }
