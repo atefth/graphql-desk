@@ -39,18 +39,6 @@ function pythonVersion(python) {
 exports.run = async () => {
   const suite = process.env.GRAPHQL_DESK_TEST_SUITE;
   const results = { host: vscode.version, pylance: {}, lifecycle: { invalidationAndRepair: {} } };
-  const skipTraces = [];
-  const originalCreateOutputChannel = vscode.window.createOutputChannel;
-  const createOutputChannel = originalCreateOutputChannel.bind(vscode.window);
-  vscode.window.createOutputChannel = (name, ...args) => {
-    const channel = createOutputChannel(name, ...args);
-    if (name !== "GraphQL Desk") return channel;
-    return new Proxy(channel, { get(target, property) {
-      if (property === "appendLine") return value => { skipTraces.push(value); return target.appendLine(value); };
-      const value = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    } });
-  };
   let settingChanges;
   let diagnosticChanges;
   try {
@@ -283,7 +271,6 @@ exports.run = async () => {
       const source = await fs.readFile(path.join(generatedRoot, "sources", "operation_semantics.pyi"), "utf8").catch(() => "");
       return {
         generation: { id: complete.id, sequence: complete.sequence, analysisId: complete.analysisId },
-        skipTraces: skipTraces.slice(-30),
         operationManifest: complete.operationManifest.map(project => ({
           project: project.project,
           operations: project.operations.map(({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports }) =>
@@ -351,6 +338,8 @@ exports.run = async () => {
       "",
     ].join("\n"));
     const semanticPath = path.join(workspace, "operation_semantics.py");
+    const semanticDiskBaseline = await fs.readFile(semanticPath, "utf8");
+    assert.equal(semanticDiskBaseline, "", "The semantic fixture exists before live typing edits it");
     const semanticSource = [
       "from graphql_desk import TypedDocument",
       "from graphql_desk_generated.default import graphql",
@@ -412,10 +401,10 @@ exports.run = async () => {
       "directive_optional_alias_bad: str = directive_optional_alias",
       "",
     ].join("\n");
-    await fs.writeFile(semanticPath, semanticSource);
     const semanticUri = vscode.Uri.file(semanticPath);
     const semanticDocument = await vscode.workspace.openTextDocument(semanticUri);
     await vscode.window.showTextDocument(semanticDocument, { preview: false });
+    await replace(semanticDocument, semanticSource);
     const semanticPosition = name => {
       const offset = semanticDocument.getText().indexOf(name) + 1;
       assert.ok(offset > 0, `Expected semantic fixture variable ${name}`);
@@ -602,7 +591,7 @@ exports.run = async () => {
     }, "an unsaved GraphQL edit publishes conditional-presence and nullable-list types", 60000);
     assert.ok(conditionalReady, JSON.stringify(results.pylance));
     assert.equal(semanticDocument.isDirty, true, "GraphQL Desk preserves the unsaved Python source edit");
-    assert.equal(await fs.readFile(semanticPath, "utf8"), semanticSource,
+    assert.equal(await fs.readFile(semanticPath, "utf8"), semanticDiskBaseline,
       "Live operation typing does not write the user's Python source file");
     results.pylance.conditionalLiveTyping = true;
     const semanticSettings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
@@ -620,7 +609,7 @@ exports.run = async () => {
     });
     assert.equal(runtimeCheck.status, 0, runtimeCheck.stderr);
     results.pylance.aliasedTypenamePreservesRuntimeIdentity = true;
-    await replace(semanticDocument, semanticSource);
+    await replace(semanticDocument, semanticDiskBaseline);
     assert.equal(await semanticDocument.save(), true, "The temporary typing fixture returns to its saved baseline");
     await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
     await fs.unlink(semanticPath);
@@ -933,7 +922,6 @@ exports.run = async () => {
   } finally {
     settingChanges?.dispose();
     diagnosticChanges?.dispose();
-    vscode.window.createOutputChannel = originalCreateOutputChannel;
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
     console.log(`GRAPHQL_DESK_TYPING_MATRIX ${JSON.stringify(results)}`);
   }
