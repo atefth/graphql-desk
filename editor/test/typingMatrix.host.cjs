@@ -98,6 +98,24 @@ exports.run = async () => {
       results.outcome = "mixed-list-nullability-observed";
       return;
     }
+    if (process.env.GRAPHQL_DESK_TEST_SUITE === "fragmentTyping") {
+      const ready = await until(async () => {
+        observed.visibleName = await hover("visible_name");
+        observed.visibleNameType = inferredType("visible_name", observed.visibleName);
+        observed.hiddenNameErrors = lineDiagnostics("hidden_name");
+        observed.hiddenNameRejected = observed.hiddenNameErrors.some(message => /"name" is not a defined key/.test(message));
+        observed.positiveErrors = lineDiagnostics("fragment_name_ok");
+        return observed.visibleNameType === "String" && observed.hiddenNameRejected &&
+          observed.positiveErrors.length === 0;
+      }, "Pylance masks spread-only fragment fields until the generated reader is used", 60000);
+      assert.ok(ready, JSON.stringify(observed));
+      results.pylance = { ...results.pylance, ...observed };
+      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      results.lifecycle.configuredStubPath = settings["python.analysis.stubPath"];
+      results.lifecycle.activeStubRoot = path.resolve(workspace, results.lifecycle.configuredStubPath);
+      results.outcome = "fragment-masking-live-typing-observed";
+      return;
+    }
     if (process.env.GRAPHQL_DESK_TEST_SUITE === "externalMappings") {
       const ready = await until(async () => {
         observed.externalDate = await hover("mapped_date");
@@ -244,6 +262,25 @@ exports.run = async () => {
       "count_bad_field = count_result['selected']",
       "",
     ].join("\n");
+    const capturePublisherSnapshot = async () => {
+      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      const generationRoot = path.resolve(workspace, settings["python.analysis.stubPath"]);
+      const complete = JSON.parse(await fs.readFile(path.join(generationRoot, "complete.json"), "utf8"));
+      const generatedRoot = path.join(generationRoot, "graphql_desk_generated");
+      const factory = await fs.readFile(path.join(generatedRoot, "default.pyi"), "utf8").catch(() => "");
+      const source = await fs.readFile(path.join(generatedRoot, "sources", "operation_semantics.pyi"), "utf8").catch(() => "");
+      return {
+        generation: { id: complete.id, sequence: complete.sequence, analysisId: complete.analysisId },
+        operationManifest: complete.operationManifest.map(project => ({
+          project: project.project,
+          operations: project.operations.map(({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports }) =>
+            ({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports })),
+        })),
+        sourceArtifacts: complete.files.map(file => file.path).filter(file => file.includes("/sources/") || file.endsWith("/default.pyi")),
+        factoryOverloads: factory.split("\n").filter(line => /Text|Count|Inputs/.test(line)),
+        sourceDeclarations: source.split("\n").filter(line => /Text|Count|Inputs|Filter|Choice/.test(line)),
+      };
+    };
     await replace(document, multiSource);
     const multiUri = uri;
     const multiDocument = document;
@@ -270,7 +307,11 @@ exports.run = async () => {
         multiProbe.textVariableErrors.length > 0 && multiProbe.countVariableErrors.length > 0 &&
         multiProbe.textFieldErrors.length > 0 && multiProbe.countFieldErrors.length > 0;
     }, "Pylance infers isolated results and variables for same-source operation selectors", 60000);
-    assert.ok(multiReady, JSON.stringify(multiProbe));
+    if (!multiReady) {
+      try { results.pylance.publisherSnapshot = await capturePublisherSnapshot(); }
+      catch (error) { results.pylance.publisherSnapshotError = String(error); }
+    }
+    assert.ok(multiReady, JSON.stringify({ ...multiProbe, publisherSnapshot: results.pylance.publisherSnapshot }));
     results.pylance.multiOperationIsolation = multiProbe;
     await replace(document, originalConsumerSource);
     const multiRestoreReady = await until(async () => {
@@ -297,6 +338,9 @@ exports.run = async () => {
       "",
     ].join("\n"));
     const semanticPath = path.join(workspace, "operation_semantics.py");
+    const semanticDiskBaseline = await fs.readFile(semanticPath, "utf8");
+    assert.match(semanticDiskBaseline, /seed = graphql\('query Seed \{ selected \}'\)/,
+      "The semantic source module is indexed before live typing edits it");
     const semanticSource = [
       "from graphql_desk import TypedDocument",
       "from graphql_desk_generated.default import graphql",
@@ -358,7 +402,6 @@ exports.run = async () => {
       "directive_optional_alias_bad: str = directive_optional_alias",
       "",
     ].join("\n");
-    await fs.writeFile(semanticPath, semanticSource);
     const semanticUri = vscode.Uri.file(semanticPath);
     const semanticDocument = await vscode.workspace.openTextDocument(semanticUri);
     await vscode.window.showTextDocument(semanticDocument, { preview: false });
@@ -373,6 +416,10 @@ exports.run = async () => {
     };
     const semanticErrors = name => vscode.languages.getDiagnostics(semanticUri)
       .filter(item => item.range.start.line === semanticPosition(name).line).map(item => item.message);
+    const seedReady = await until(async () => /GraphqlDeskDocument|TypedDocument/.test(await semanticHover("seed")),
+      "Pylance indexes the seed operation before the unsaved source edit", 60000);
+    assert.ok(seedReady, JSON.stringify({ seed: await semanticHover("seed") }));
+    await replace(semanticDocument, semanticSource);
     const inputContractReady = await until(async () => {
       results.pylance.inputName = await semanticHover("input_name");
       results.pylance.inputPositiveErrors = semanticErrors("input_name_ok");
@@ -397,6 +444,10 @@ exports.run = async () => {
         results.pylance.inputLiteralExtraErrors.some(message => /unknown|not defined|field/i.test(message)) &&
         Object.values(results.pylance.inputNegativeErrors).every(errors => errors.length > 0);
     }, "Pylance checks recursive inputs, defaults, enums, oneOf alternatives and schema-bound scalar helpers", 60000);
+    if (!inputContractReady) {
+      try { results.pylance.publisherSnapshot = await capturePublisherSnapshot(); }
+      catch (error) { results.pylance.publisherSnapshotError = String(error); }
+    }
     assert.ok(inputContractReady, JSON.stringify(results.pylance));
     results.pylance.inputContracts = true;
     const directiveReady = await until(async () => {
@@ -544,7 +595,7 @@ exports.run = async () => {
     }, "an unsaved GraphQL edit publishes conditional-presence and nullable-list types", 60000);
     assert.ok(conditionalReady, JSON.stringify(results.pylance));
     assert.equal(semanticDocument.isDirty, true, "GraphQL Desk preserves the unsaved Python source edit");
-    assert.equal(await fs.readFile(semanticPath, "utf8"), semanticSource,
+    assert.equal(await fs.readFile(semanticPath, "utf8"), semanticDiskBaseline,
       "Live operation typing does not write the user's Python source file");
     results.pylance.conditionalLiveTyping = true;
     const semanticSettings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
@@ -562,7 +613,7 @@ exports.run = async () => {
     });
     assert.equal(runtimeCheck.status, 0, runtimeCheck.stderr);
     results.pylance.aliasedTypenamePreservesRuntimeIdentity = true;
-    await replace(semanticDocument, semanticSource);
+    await replace(semanticDocument, semanticDiskBaseline);
     assert.equal(await semanticDocument.save(), true, "The temporary typing fixture returns to its saved baseline");
     await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
     await fs.unlink(semanticPath);

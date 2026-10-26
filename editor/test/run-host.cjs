@@ -10,8 +10,8 @@ const { once } = require("node:events");
 const { runTests, runVSCodeCommand } = require("@vscode/test-electron");
 let mappingFixtureCleanup;
 
-function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix, externalMappings, mixedLists = false) {
-  const base = { workspace, candidates: [sourcePath], buffers: [], documents: [], editor_fallback: null };
+function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix, externalMappings, mixedLists = false, fragmentSourcePath = null) {
+  const base = { workspace, candidates: [sourcePath, ...(fragmentSourcePath ? [fragmentSourcePath] : [])], buffers: [], documents: [], editor_fallback: null };
   const script = [
     "import json, sys",
     "from graphql_desk.editor_worker import EditorWorker",
@@ -151,8 +151,8 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
-  const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
+  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
+  const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
   assert.deepEqual(await fs.readdir(temporary), [], "Every host run starts from a new temporary root");
   const workspace = path.join(temporary, "workspace");
@@ -200,6 +200,7 @@ async function main() {
     const source = [
       "from graphql_desk import TypedDocument",
       "from graphql_desk_generated.default import graphql",
+      ...(suite === "fragmentTyping" ? ["from fragments import card"] : []),
       "from typing import TypeVar",
       ...(suite === "externalMappings" ? [
         "from graphql_desk_generated.beta import graphql as beta",
@@ -270,6 +271,14 @@ async function main() {
         "nullable_items_ok: list[str | None] = nullable_items_value",
         "nullable_items_bad: list[str] = nullable_items_value",
       ] : []),
+      ...(suite === "fragmentTyping" ? [
+        "fragment_doc = graphql('query FragmentRead { user { id ...Card } }', (card,))",
+        "fragment_result = execute(fragment_doc, {})",
+        "hidden_name = fragment_result['user']['name']",
+        "from graphql_desk_generated.sources.fragments import read_card",
+        "visible_name = read_card(fragment_result['user'])['name']",
+        "fragment_name_ok: str = visible_name",
+      ] : []),
       "",
     ].join("\n");
     const shapeFields = ["typingMatrix", "mixedLists"].includes(suite)
@@ -286,6 +295,8 @@ async function main() {
         "externalDate(value: ExternalDate!): ExternalDate! " +
         "externalColor(value: ExternalColor!): ExternalColor! }\n") ] : []),
       fs.writeFile(sourcePath, source),
+      ...(suite === "typingMatrix" ? [fs.writeFile(path.join(workspace, "operation_semantics.py"),
+        "from graphql_desk_generated.default import graphql\nseed = graphql('query Seed { selected }')\n")] : []),
       ...(["typingMatrix", "parserOverlay"].includes(suite) ? [fs.writeFile(path.join(workspace, "parser_consumer.py"),
         "from graphql_desk import parse\ndocument = parse('query ParserQuery { selected }')\nparsed_name = document.definitions[0].name.value\n")] : []),
       fs.writeFile(path.join(workspace, "fragments.py"), "from graphql_desk_generated.default import graphql\ncard = graphql('fragment Card on User { name }')\n"),
@@ -308,7 +319,8 @@ async function main() {
       ].join("\n")),
     ]);
     const generated = generatedFactoryFiles(python, workspace, sourcePath,
-      ["typingMatrix", "mixedLists"].includes(suite), suite === "externalMappings", suite === "mixedLists");
+      ["typingMatrix", "mixedLists", "fragmentTyping"].includes(suite), suite === "externalMappings", suite === "mixedLists",
+      suite === "fragmentTyping" ? path.join(workspace, "fragments.py") : null);
     await fs.writeFile(artifacts, JSON.stringify(generated));
     console.log(`Captured ${generated.initial.length} initial and ${generated.nullable.length} nullable factory stub files.`);
   }
@@ -331,7 +343,7 @@ async function main() {
   const options = {
     version,
     extensionDevelopmentPath: path.resolve(__dirname, ".."),
-    extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["parserOverlay", "externalMappings", "mixedLists"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
+    extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["parserOverlay", "externalMappings", "mixedLists", "fragmentTyping"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
     extensionTestsEnv: {
       GRAPHQL_DESK_TEST_WORKSPACE: workspace,
       GRAPHQL_DESK_RESULT_PATH: result,
@@ -467,7 +479,7 @@ async function main() {
     observed.lifecycle.userFilePreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (factorySuite) {
-    if (["typingMatrix", "mixedLists", "externalMappings", "malformedRecovery"].includes(suite)) {
+    if (["typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "malformedRecovery"].includes(suite)) {
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "complete.json"));
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated", "default.pyi"));
     } else if (suite === "parserOverlay") {
@@ -527,7 +539,7 @@ async function main() {
     observed.lifecycle.userConfigurationPreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   }
-  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "mixedLists" ? "mixed-list-nullability-observed" : suite === "externalMappings" ? "external-mappings-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : `read-only-${suite}-observed`);
+  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "mixedLists" ? "mixed-list-nullability-observed" : suite === "fragmentTyping" ? "fragment-masking-live-typing-observed" : suite === "externalMappings" ? "external-mappings-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : `read-only-${suite}-observed`);
   console.log(`${suite} evidence: ${result}`);
 }
 
