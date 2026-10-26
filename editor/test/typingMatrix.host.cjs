@@ -75,6 +75,29 @@ exports.run = async () => {
       .filter(item => item.range.start.line === position(name).line).map(item => item.message);
     const inferredType = (name, text) => text.match(new RegExp(`\\(variable\\) ${name}: ([^\\n]+)`))?.[1] || "";
     const observed = {};
+    if (process.env.GRAPHQL_DESK_TEST_SUITE === "mixedLists") {
+      const ready = await until(async () => {
+        observed.nullableList = await hover("nullable_list_value");
+        observed.nullableItems = await hover("nullable_items_value");
+        observed.nullableListType = inferredType("nullable_list_value", observed.nullableList);
+        observed.nullableItemsType = inferredType("nullable_items_value", observed.nullableItems);
+        observed.nullableListPositiveErrors = lineDiagnostics("nullable_list_ok");
+        observed.nullableItemsPositiveErrors = lineDiagnostics("nullable_items_ok");
+        observed.nullableListNegativeErrors = lineDiagnostics("nullable_list_bad");
+        observed.nullableItemsNegativeErrors = lineDiagnostics("nullable_items_bad");
+        return observed.nullableListType === "list[String] | None" &&
+          observed.nullableItemsType === "list[String | None]" &&
+          observed.nullableListPositiveErrors.length === 0 && observed.nullableItemsPositiveErrors.length === 0 &&
+          observed.nullableListNegativeErrors.length > 0 && observed.nullableItemsNegativeErrors.length > 0;
+      }, "Pylance distinguishes nullable list containers from nullable list items", 60000);
+      assert.ok(ready, JSON.stringify(observed));
+      results.pylance = { ...results.pylance, ...observed };
+      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      results.lifecycle.configuredStubPath = settings["python.analysis.stubPath"];
+      results.lifecycle.activeStubRoot = path.resolve(workspace, results.lifecycle.configuredStubPath);
+      results.outcome = "mixed-list-nullability-observed";
+      return;
+    }
     if (process.env.GRAPHQL_DESK_TEST_SUITE === "externalMappings") {
       const ready = await until(async () => {
         observed.externalDate = await hover("mapped_date");

@@ -10,7 +10,7 @@ const { once } = require("node:events");
 const { runTests, runVSCodeCommand } = require("@vscode/test-electron");
 let mappingFixtureCleanup;
 
-function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix, externalMappings) {
+function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix, externalMappings, mixedLists = false) {
   const base = { workspace, candidates: [sourcePath], buffers: [], documents: [], editor_fallback: null };
   const script = [
     "import json, sys",
@@ -38,7 +38,7 @@ function generatedFactoryFiles(python, workspace, sourcePath, typingMatrix, exte
     return files;
   }
   const initial = generate();
-  const shapeFields = typingMatrix ? " nested: [[String!]!]! nullable: [String]" : "";
+  const shapeFields = typingMatrix ? ` nested: [[String!]!]! nullable: [String]${mixedLists ? " nullableList: [String!] nullableItems: [String]!" : ""}` : "";
   const mappedSchema = externalMappings ? "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" : "";
   const mappedFields = externalMappings ? " externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor!" : "";
   fsSync.writeFileSync(path.join(workspace, "schema.graphql"), `${mappedSchema}type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User!${mappedFields}${shapeFields} }\n`);
@@ -151,8 +151,8 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
-  const factorySuite = ["factoryArtifacts", "typingMatrix", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
+  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
+  const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
   assert.deepEqual(await fs.readdir(temporary), [], "Every host run starts from a new temporary root");
   const workspace = path.join(temporary, "workspace");
@@ -258,9 +258,22 @@ async function main() {
         "defaults_result = execute(defaults_doc, {})",
         "defaults_bad = execute(defaults_doc, {'limit': None})",
       ] : []),
+      ...(suite === "mixedLists" ? [
+        "nullable_list_doc = graphql('query NullableList { nullableList }')",
+        "nullable_list_result = execute(nullable_list_doc, {})",
+        "nullable_list_value = nullable_list_result['nullableList']",
+        "nullable_list_ok: list[str] | None = nullable_list_value",
+        "nullable_list_bad: list[str] = nullable_list_value",
+        "nullable_items_doc = graphql('query NullableItems { nullableItems }')",
+        "nullable_items_result = execute(nullable_items_doc, {})",
+        "nullable_items_value = nullable_items_result['nullableItems']",
+        "nullable_items_ok: list[str | None] = nullable_items_value",
+        "nullable_items_bad: list[str] = nullable_items_value",
+      ] : []),
       "",
     ].join("\n");
-    const shapeFields = suite === "typingMatrix" ? " nested: [[String!]!]! nullable: [String]" : "";
+    const shapeFields = ["typingMatrix", "mixedLists"].includes(suite)
+      ? ` nested: [[String!]!]! nullable: [String]${suite === "mixedLists" ? " nullableList: [String!] nullableItems: [String]!" : ""}` : "";
     await Promise.all([
       fs.writeFile(path.join(workspace, "pyproject.toml"), suite === "externalMappings"
         ? `[tool.graphql-desk]\ngenerated_package = "graphql_desk_generated"\n[[tool.graphql-desk.schemas]]\nname = "default"\nschema = "schema.graphql"\nschema_output = "graphql_desk_generated/default.pyi"\nscalars = { ExternalDate = { input = "${mappingFixture.packageName}.alpha.AlphaDateInput", output = "${mappingFixture.packageName}.alpha.AlphaDateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.alpha.AlphaColor" }\n[[tool.graphql-desk.schemas]]\nname = "beta"\nschema = "beta.graphql"\nschema_output = "graphql_desk_generated/beta.pyi"\nscalars = { ExternalDate = { input = "${mappingFixture.packageName}.beta.BetaDateInput", output = "${mappingFixture.packageName}.beta.BetaDateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.beta.BetaColor" }\n`
@@ -294,7 +307,8 @@ async function main() {
         "",
       ].join("\n")),
     ]);
-    const generated = generatedFactoryFiles(python, workspace, sourcePath, suite === "typingMatrix", suite === "externalMappings");
+    const generated = generatedFactoryFiles(python, workspace, sourcePath,
+      ["typingMatrix", "mixedLists"].includes(suite), suite === "externalMappings", suite === "mixedLists");
     await fs.writeFile(artifacts, JSON.stringify(generated));
     console.log(`Captured ${generated.initial.length} initial and ${generated.nullable.length} nullable factory stub files.`);
   }
@@ -317,7 +331,7 @@ async function main() {
   const options = {
     version,
     extensionDevelopmentPath: path.resolve(__dirname, ".."),
-    extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["parserOverlay", "externalMappings"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
+    extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["parserOverlay", "externalMappings", "mixedLists"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
     extensionTestsEnv: {
       GRAPHQL_DESK_TEST_WORKSPACE: workspace,
       GRAPHQL_DESK_RESULT_PATH: result,
@@ -453,7 +467,7 @@ async function main() {
     observed.lifecycle.userFilePreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (factorySuite) {
-    if (["typingMatrix", "externalMappings", "malformedRecovery"].includes(suite)) {
+    if (["typingMatrix", "mixedLists", "externalMappings", "malformedRecovery"].includes(suite)) {
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "complete.json"));
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated", "default.pyi"));
     } else if (suite === "parserOverlay") {
@@ -513,7 +527,7 @@ async function main() {
     observed.lifecycle.userConfigurationPreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   }
-  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "externalMappings" ? "external-mappings-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : `read-only-${suite}-observed`);
+  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "mixedLists" ? "mixed-list-nullability-observed" : suite === "externalMappings" ? "external-mappings-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : `read-only-${suite}-observed`);
   console.log(`${suite} evidence: ${result}`);
 }
 

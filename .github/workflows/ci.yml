@@ -232,6 +232,8 @@ jobs:
           - version: "1.142.0"
             suite: typingMatrix
           - version: "1.142.0"
+            suite: mixedLists
+          - version: "1.142.0"
             suite: externalMappings
           - version: "1.141.0"
             suite: factoryArtifacts
