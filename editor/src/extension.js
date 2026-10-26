@@ -310,10 +310,6 @@ function activate(context) {
             inputFingerprint: selected.manifest.inputFingerprint,
             savedSourceFingerprint: selected.manifest.savedSourceFingerprint,
             analysisId: selected.manifest.analysisId };
-          previous.typingFingerprint = typingFingerprint(new Map([
-            ...previous.projects.map(project => [project.generated_package, project.files]),
-            ["graphql_desk-stubs", previous.parserOverlay],
-          ]));
           latestArtifacts.set(folderRoot, previous);
         }
       }
@@ -415,11 +411,9 @@ function activate(context) {
       for (const group of operationManifest) packages.set(group.generated_package, []);
       nextProjects = previous.projects.map(project => ({ ...project, files: [] }));
     }
-    const nextTypingFingerprint = typingFingerprint(packages);
-    let quarantineChanged = false;
     try {
       if (managed.ownsSetting) {
-        quarantineChanged = await publisher.publish(packages, `quarantine-${Date.now()}`, isCurrent, managed,
+        await publisher.publish(packages, `quarantine-${Date.now()}`, isCurrent, managed,
           previous.inputFingerprint, previous.savedSourceFingerprint, nextManifest);
       } else {
         for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !packages.has(key.split("\0")[2])) {
@@ -434,8 +428,7 @@ function activate(context) {
       }
       if (isCurrent()) {
         latestArtifacts.set(folderRoot, { ...previous, selectedSetting: managed.selectedSetting,
-          operationManifest: nextManifest, projects: nextProjects, typingFingerprint: nextTypingFingerprint });
-        if (quarantineChanged && previous.typingFingerprint !== nextTypingFingerprint) schedulePylanceRestart();
+          operationManifest: nextManifest, projects: nextProjects });
         setInvalidatedDiagnostics(folderRoot, reply?.ok ? quarantinedOwners : operationManifest.flatMap(group => group.operations));
       }
     } catch (error) {
@@ -517,7 +510,7 @@ function activate(context) {
           } else if (handle) changedArtifacts = (await handle.publish(files, result.isCurrent)) || changedArtifacts;
         }
       }
-      if (changedArtifacts && typingChanged) schedulePylanceRestart();
+      if (changedArtifacts && !managed.ownsSetting && typingChanged) schedulePylanceRestart();
       latestArtifacts.set(folderRoot, { managedRoot: managed.root, selectedSetting: managed.selectedSetting,
         operationManifest, projects: result.projects.map(({ project, generated_package, provenance, files }) =>
           ({ project, generated_package, provenance, files })),
