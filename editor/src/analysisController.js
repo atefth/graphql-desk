@@ -52,7 +52,7 @@ function isVerifiedGenerationFile(filename, generationRoot) {
     const stat = fs.lstatSync(manifestPath);
     if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 2 * 1024 * 1024) return false;
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    if (manifest?.owner !== "graphql-desk-analysis-generation" || manifest.format !== 1 || !Array.isArray(manifest.files)) return false;
+    if (manifest?.owner !== "graphql-desk-analysis-generation" || manifest.format !== 2 || !Array.isArray(manifest.files)) return false;
     const relative = path.relative(generationRoot, filename).split(path.sep).join("/");
     const entry = manifest.files.find(item => item?.path === relative);
     if (!entry || typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256)) return false;

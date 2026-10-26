@@ -115,16 +115,31 @@ exports.run = async () => {
       const publisher = createGenerations(...args);
       return new Proxy(publisher, { get(target, property) {
         if (property === "recover" || property === "publish") return async (...methodArgs) => {
+          const publishing = property === "publish";
+          const inputFingerprint = methodArgs[publishing ? 4 : 2];
+          const savedSourceFingerprint = methodArgs[publishing ? 5 : 3];
+          const operationManifest = methodArgs[publishing ? 6 : 4];
+          const operationManifestSignature = createHash("sha256").update(JSON.stringify(operationManifest)).digest("hex");
+          const outputFiles = publishing ? [...methodArgs[0]].flatMap(([packageName, files]) => files.map(file => {
+            const prefix = `${packageName.replaceAll(".", "/")}/`;
+            return { path: file.relative_path, sha256: createHash("sha256").update(
+              artifactModule.renderOwnedAnalysisArtifact(packageName, file.relative_path.slice(prefix.length), file.text),
+            ).digest("hex") };
+          })).sort((left, right) => left.path.localeCompare(right.path)) : [];
+          const packagesSignature = createHash("sha256").update(JSON.stringify(outputFiles)).digest("hex");
+          const selectedSetting = vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", "");
           mark(`generation.${property}.started`, {
-            analysisId: methodArgs[1], inputFingerprint: methodArgs[4], savedSourceFingerprint: methodArgs[5],
+            analysisId: methodArgs[1], inputFingerprint, savedSourceFingerprint,
+            operationManifestSignature, packagesSignature, selectedSetting,
           });
           try {
             const changed = await target[property](...methodArgs);
             mark(`generation.${property}.returned`, {
               changed: Boolean(changed),
               analysisId: methodArgs[1],
-              inputFingerprint: methodArgs[4],
-              savedSourceFingerprint: methodArgs[5],
+              inputFingerprint,
+              savedSourceFingerprint,
+              operationManifestSignature, packagesSignature, selectedSetting,
               setting: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""),
             });
             return changed;
@@ -207,7 +222,8 @@ exports.run = async () => {
     assert.match(results.pylance.countType, /Int|int/);
     assert.ok(results.pylance.variableError.length);
     results.lifecycle.publishedRealWorkerArtifacts = generated.initial.length;
-    const snapshotKey = item => JSON.stringify([item.inputFingerprint, item.savedSourceFingerprint]);
+    const snapshotKey = item => JSON.stringify([item.inputFingerprint, item.savedSourceFingerprint,
+      item.operationManifestSignature, item.packagesSignature, item.selectedSetting]);
     const previousSnapshots = new Set(trace.filter(item => item.stage === "generation.publish.started").map(snapshotKey));
     const peerUri = vscode.Uri.file(path.join(workspace, "peer.py"));
     await fs.writeFile(peerUri.fsPath, "# second visible Python editor\n");
@@ -227,8 +243,8 @@ exports.run = async () => {
       return starts.length > 0 && starts.length === returns.length && Date.now() - refreshQuietSince >= 1000;
     }, "visible-editor workspace publications settle", 60000);
     assert.ok(refreshSettled);
-    const refreshSnapshots = trace.filter(item => item.stage === "generation.publish.started" && !previousSnapshots.has(snapshotKey(item)))
-      .map(snapshotKey);
+    const refreshSnapshots = trace.filter(item => item.stage === "generation.publish.returned" && item.changed === true &&
+      !previousSnapshots.has(snapshotKey(item))).map(snapshotKey);
     assert.equal(new Set(refreshSnapshots).size, refreshSnapshots.length,
       "one captured source snapshot is published once even when multiple Python editors are visible");
     results.lifecycle.onePublicationForMultipleVisibleEditors = true;
@@ -437,7 +453,8 @@ exports.run = async () => {
       assert.ok(await until(async () => /String/.test(await hover(8, 2)) && !/None/.test(await hover(8, 2)), "fragment fixture cleanup restores original operation typing"));
     }
     const lifecycleUri = vscode.Uri.file(path.join(workspace, "lifecycle_source.py"));
-    const renamedUri = vscode.Uri.file(path.join(workspace, "lifecycle_renamed.py"));
+    const diskUri = vscode.Uri.file(path.join(workspace, "lifecycle_disk.py"));
+    const diskRenamedUri = vscode.Uri.file(path.join(workspace, "lifecycle_disk_renamed.py"));
     const lifecycleSource = "from graphql_desk_generated.default import graphql\ndoc = graphql('query Lifecycle { selected }')\n";
     await fs.writeFile(lifecycleUri.fsPath, lifecycleSource);
     const sourceAlias = name => path.join(selectedStubRoot(), "graphql_desk_generated", "sources", `${name}.pyi`);
@@ -477,19 +494,32 @@ exports.run = async () => {
     assert.equal(await vscode.workspace.applyEdit(restoreLifecycle), true);
     assert.equal(await reopenedLifecycle.save(), true);
     assert.ok(await until(async () => (await factoryText()).includes("query Lifecycle { selected }"), "saving the restored source republishes its companion"));
-    await fs.writeFile(lifecycleUri.fsPath, lifecycleSource.replace("{ selected }", "{ count(limit: 1) }"));
-    assert.ok(await until(async () => (await factoryText()).includes("query Lifecycle { count(limit: 1) }"), "closed source disk edit refreshes its operation"));
-    await fs.rename(lifecycleUri.fsPath, renamedUri.fsPath);
-    const renamed = await until(async () => await exists(sourceAlias("lifecycle_renamed")) && !await exists(sourceAlias("lifecycle_source")), "rename replaces only the owned obsolete companion");
+    await vscode.window.showTextDocument(reopenedLifecycle, { preview: false });
+    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
+    const diskSource = "from graphql_desk_generated.default import graphql\ndoc = graphql('query LifecycleDisk { selected }')\n";
+    const diskEditedSource = diskSource.replace("{ selected }", "{ count(limit: 1) }");
+    const diskAlias = name => sourceAlias(name);
+    await fs.writeFile(diskUri.fsPath, diskSource);
+    assert.equal(vscode.workspace.textDocuments.some(document => document.uri.toString() === diskUri.toString()), false,
+      "the external source remains unopened before disk-only lifecycle checks");
+    assert.ok(await until(async () => await exists(diskAlias("lifecycle_disk")) && (await factoryText()).includes("query LifecycleDisk { selected }"),
+      "new unopened source publishes its companion"));
+    await fs.writeFile(diskUri.fsPath, diskEditedSource);
+    assert.ok(await until(async () => (await factoryText()).includes("query LifecycleDisk { count(limit: 1) }"), "unopened source disk edit refreshes its operation"));
+    assert.equal(vscode.workspace.textDocuments.some(document => document.uri.toString() === diskUri.toString()), false);
+    await fs.rename(diskUri.fsPath, diskRenamedUri.fsPath);
+    const renamed = await until(async () => await exists(diskAlias("lifecycle_disk_renamed")) && !await exists(diskAlias("lifecycle_disk")), "rename replaces only the owned obsolete companion");
     if (!renamed) results.lifecycle.renameProbe = {
       documents: vscode.workspace.textDocuments.map(document => ({ uri: document.uri.toString(), dirty: document.isDirty, closed: document.isClosed })),
-      aliases: await fs.readdir(path.dirname(sourceAlias("lifecycle_source"))),
+      aliases: await fs.readdir(path.dirname(diskAlias("lifecycle_disk"))),
       factory: await factoryText(),
     };
     assert.ok(renamed);
+    assert.equal(vscode.workspace.textDocuments.some(document => document.uri.toString() === diskUri.toString() || document.uri.toString() === diskRenamedUri.toString()), false);
     assert.ok(await until(async () => /String/.test(await hover(8, 2)), "unaffected consumer converges after source rename"));
-    await fs.unlink(renamedUri.fsPath);
-    assert.ok(await until(async () => !await exists(sourceAlias("lifecycle_renamed")) && !(await factoryText()).includes("query Lifecycle"), "deletion removes the owned companion and overload"));
+    await fs.unlink(diskRenamedUri.fsPath);
+    assert.ok(await until(async () => !await exists(diskAlias("lifecycle_disk_renamed")) && !(await factoryText()).includes("query LifecycleDisk"), "deletion removes the owned companion and overload"));
+    assert.equal(vscode.workspace.textDocuments.some(document => document.uri.toString() === diskUri.toString() || document.uri.toString() === diskRenamedUri.toString()), false);
     assert.ok(await until(async () => /String/.test(await hover(8, 2)), "unaffected consumer converges after source deletion"));
     results.lifecycle.sourceUndoRedoCloseRenameDelete = true;
     const settingsPath = path.join(workspace, ".vscode", "settings.json");

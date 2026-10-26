@@ -343,6 +343,28 @@ async function main() {
     const sessionEnv = phase ? { ...options.extensionTestsEnv, GRAPHQL_DESK_RESTART_PHASE: phase } : options.extensionTestsEnv;
     try {
       await runTests({ ...options, extensionTestsEnv: sessionEnv });
+    } catch (error) {
+      try {
+        const observed = JSON.parse(await fs.readFile(result, "utf8"));
+        const debug = observed.lifecycle?.debug;
+        console.error(`Host test evidence: ${JSON.stringify({
+          outcome: observed.outcome,
+          error: observed.error,
+          probes: Object.fromEntries(Object.entries(observed.lifecycle || {}).filter(([key]) => /probe/i.test(key))),
+          debug: debug && {
+            sourceChanges: debug.sourceChanges,
+            stubPath: debug.stubPath,
+            readError: debug.readError,
+            types: debug.types,
+            requests: debug.requests?.slice(-8),
+            publications: debug.publications?.slice(-8),
+            refreshCallbacks: debug.refreshCallbacks?.slice(-8),
+            artifactCalls: debug.artifactCalls?.slice(-8),
+            skipReasons: debug.skipReasons?.slice(-16),
+          },
+        })}`);
+      } catch { /* The extension host may fail before it writes its result file. */ }
+      throw error;
     } finally {
       if (mappingFixtureCleanup) {
         await mappingFixtureCleanup();
