@@ -258,6 +258,11 @@ exports.run = async () => {
 
     const semanticsSchema = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(workspace, "schema.graphql")));
     await replace(semanticsSchema, [
+      "directive @defer(if: Boolean = true) on INLINE_FRAGMENT | FRAGMENT_SPREAD",
+      "directive @required on FIELD",
+      "directive @_required on FIELD",
+      "directive @optional on FIELD",
+      "directive @_optional on FIELD",
       "interface Node { id: ID! }",
       "type User implements Node { id: ID! name: String! }",
       "type Org implements Node { id: ID! title: String! }",
@@ -311,6 +316,23 @@ exports.run = async () => {
       "scalar_value = graphql.scalar('String', 'identity')",
       "scalar_value_ok: str = scalar_value",
       "scalar_bad = graphql.scalar('String', 1.5)",
+      "directives = graphql('query DirectiveSemantics($show: Boolean!) { required: nullable @required required_alias: nullable @_required optional: selected @optional optional_alias: selected @_optional user { id ... @defer(if: $show) { name } } }')",
+      "directives_result = execute(directives, {'show': True})",
+      "directive_required = directives_result['required']",
+      "directive_required_alias = directives_result['required_alias']",
+      "directive_optional = directives_result['optional']",
+      "directive_optional_alias = directives_result['optional_alias']",
+      "directive_user = directives_result['user']",
+      "directive_required_ok: list[str | None] = directive_required",
+      "directive_required_alias_ok: list[str | None] = directive_required_alias",
+      "directive_optional_ok: str | None = directive_optional",
+      "directive_optional_alias_ok: str | None = directive_optional_alias",
+      "if 'name' in directive_user:",
+      "    directive_user_name = directive_user['name']",
+      "directive_required_bad: None = directive_required",
+      "directive_required_alias_bad: None = directive_required_alias",
+      "directive_optional_bad: str = directive_optional",
+      "directive_optional_alias_bad: str = directive_optional_alias",
       "",
     ].join("\n");
     await fs.writeFile(semanticPath, semanticSource);
@@ -354,6 +376,51 @@ exports.run = async () => {
     }, "Pylance checks recursive inputs, defaults, enums, oneOf alternatives and schema-bound scalar helpers", 60000);
     assert.ok(inputContractReady, JSON.stringify(results.pylance));
     results.pylance.inputContracts = true;
+    const directiveReady = await until(async () => {
+      results.pylance.directiveTypes = {
+        required: await semanticHover("directive_required"),
+        requiredAlias: await semanticHover("directive_required_alias"),
+        optional: await semanticHover("directive_optional"),
+        optionalAlias: await semanticHover("directive_optional_alias"),
+        deferredName: await semanticHover("directive_user_name"),
+      };
+      results.pylance.directivePositiveErrors = [
+        "directive_required_ok", "directive_required_alias_ok",
+        "directive_optional_ok", "directive_optional_alias_ok",
+      ].flatMap(semanticErrors);
+      results.pylance.directiveNegativeErrors = [
+        "directive_required_bad", "directive_required_alias_bad",
+        "directive_optional_bad", "directive_optional_alias_bad",
+      ].map(name => [name, semanticErrors(name)]);
+      let settings;
+      try { settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")); }
+      catch { return false; }
+      const root = path.resolve(workspace, settings["python.analysis.stubPath"]);
+      let sourceDeclarations = "";
+      try { sourceDeclarations = await fs.readFile(path.join(root, "graphql_desk_generated", "sources", "operation_semantics.pyi"), "utf8"); }
+      catch { return false; }
+      const resultModule = sourceDeclarations.match(/^from ([\w.]+) import GraphqlDeskResult as DirectivesResult$/m)?.[1];
+      if (!resultModule) return false;
+      let stub = "";
+      try { stub = await fs.readFile(path.join(root, ...resultModule.split(".")) + ".pyi", "utf8"); }
+      catch { return false; }
+      const deferredVariantNames = stub.match(/^GraphqlDeskResult_user = (.+)$/m)?.[1].split(" | ") ?? [];
+      const deferredVariants = deferredVariantNames.map(name =>
+        stub.match(new RegExp(`^${name} = TypedDict\\([\\s\\S]*?\\}, closed=True\\)`, "m"))?.[0] ?? "");
+      results.pylance.deferredPresenceVariants = deferredVariants;
+      return /list\[(?:str|String) \| None\]/.test(results.pylance.directiveTypes.required) &&
+        /list\[(?:str|String) \| None\]/.test(results.pylance.directiveTypes.requiredAlias) &&
+        /(?:str|String) \| None/.test(results.pylance.directiveTypes.optional) &&
+        /(?:str|String) \| None/.test(results.pylance.directiveTypes.optionalAlias) &&
+        /: str\b|: String\b/.test(results.pylance.directiveTypes.deferredName) &&
+        deferredVariants.length === 2 && deferredVariants.every(variant => variant.includes("'id': 'ID'")) &&
+        deferredVariants.some(variant => variant.includes("'name': 'String'")) &&
+        deferredVariants.some(variant => !variant.includes("'name': 'String'")) &&
+        results.pylance.directivePositiveErrors.length === 0 &&
+        results.pylance.directiveNegativeErrors.every(([, errors]) => errors.length > 0);
+    }, "Pylance honors @defer and required/optional nullability overrides", 60000);
+    assert.ok(directiveReady, JSON.stringify(results.pylance));
+    results.pylance.directiveSemantics = true;
     const semanticReady = await until(async () => {
       results.pylance.abstractName = await semanticHover("user_name");
       results.pylance.abstractTitle = await semanticHover("org_title");
