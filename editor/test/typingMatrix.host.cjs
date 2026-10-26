@@ -262,7 +262,10 @@ exports.run = async () => {
       "type User implements Node { id: ID! name: String! }",
       "type Org implements Node { id: ID! title: String! }",
       "union Search = User | Org",
-      "type Query { selected: String! count(limit: Int!): Int! user: User! nested: [[String!]!]! nullable: [String] node: Node! search: [Search!]! }",
+      "enum Color { RED BLUE }",
+      "input Filter { term: String! nested: Filter tags: [String!]! limit: Int! = 5 color: Color }",
+      "input Choice @oneOf { byId: ID byName: String }",
+      "type Query { selected: String! count(limit: Int!): Int! user: User! nested: [[String!]!]! nullable: [String] node: Node! search: [Search!]! filtered(filter: Filter!, choice: Choice!): [User!]! }",
       "",
     ].join("\n"));
     const semanticPath = path.join(workspace, "operation_semantics.py");
@@ -288,6 +291,26 @@ exports.run = async () => {
       "    aliased_user_name = search_item['name']",
       "    aliased_wrong_title = search_item['title']",
       "without_implicit_typename: AbstractResult = {'node': {'__typename': 'User', 'name': 'x'}, 'search': [{'kind': 'User', 'name': 'x'}]}",
+      "inputs = graphql('query Inputs($filter: Filter!, $choice: Choice!) { filtered(filter: $filter, choice: $choice) { name } }')",
+      "inputs_result = execute(inputs, {'filter': {'term': 'x', 'tags': ['a'], 'nested': {'term': 'y', 'tags': []}, 'color': 'RED'}, 'choice': {'byId': '1'}})",
+      "input_name = inputs_result['filtered'][0]['name']",
+      "input_name_ok: str = input_name",
+      "valid_input_literal = graphql('query ValidInputLiteral { filtered(filter: {term: \\\"x\\\", tags: []}, choice: {byName: \\\"x\\\"}) { name } }')",
+      "invalid_input_literal = graphql('query InvalidInputLiteral { filtered(filter: {term: \\\"x\\\", tags: []}, choice: {}) { name } }')",
+      "invalid_input_extra_literal = graphql('query InvalidInputExtraLiteral { filtered(filter: {term: \\\"x\\\", tags: []}, choice: {byId: \\\"1\\\", unknown: \\\"x\\\"}) { name } }')",
+      "input_choice_empty = execute(inputs, {'filter': {'term': 'x', 'tags': []}, 'choice': {}})",
+      "input_choice_multiple = execute(inputs, {'filter': {'term': 'x', 'tags': []}, 'choice': {'byId': '1', 'byName': 'x'}})",
+      "input_choice_extra = execute(inputs, {'filter': {'term': 'x', 'tags': []}, 'choice': {'byId': '1', 'extra': 'x'}})",
+      "input_choice_null = execute(inputs, {'filter': {'term': 'x', 'tags': []}, 'choice': {'byId': None}})",
+      "input_filter_missing = execute(inputs, {'filter': {'tags': []}, 'choice': {'byId': '1'}})",
+      "input_filter_extra = execute(inputs, {'filter': {'term': 'x', 'tags': [], 'unknown': 1}, 'choice': {'byId': '1'}})",
+      "input_filter_bad_list = execute(inputs, {'filter': {'term': 'x', 'tags': [None]}, 'choice': {'byId': '1'}})",
+      "input_filter_default_null = execute(inputs, {'filter': {'term': 'x', 'tags': [], 'limit': None}, 'choice': {'byId': '1'}})",
+      "input_filter_nullable_none = execute(inputs, {'filter': {'term': 'x', 'tags': [], 'nested': None}, 'choice': {'byName': 'x'}})",
+      "input_filter_bad_enum = execute(inputs, {'filter': {'term': 'x', 'tags': [], 'color': 'GREEN'}, 'choice': {'byId': '1'}})",
+      "scalar_value = graphql.scalar('String', 'identity')",
+      "scalar_value_ok: str = scalar_value",
+      "scalar_bad = graphql.scalar('String', 1.5)",
       "",
     ].join("\n");
     await fs.writeFile(semanticPath, semanticSource);
@@ -305,6 +328,32 @@ exports.run = async () => {
     };
     const semanticErrors = name => vscode.languages.getDiagnostics(semanticUri)
       .filter(item => item.range.start.line === semanticPosition(name).line).map(item => item.message);
+    const inputContractReady = await until(async () => {
+      results.pylance.inputName = await semanticHover("input_name");
+      results.pylance.inputPositiveErrors = semanticErrors("input_name_ok");
+      results.pylance.inputDefaultNullErrors = semanticErrors("input_filter_default_null");
+      results.pylance.inputNullableNoneErrors = semanticErrors("input_filter_nullable_none");
+      results.pylance.inputScalarPositiveErrors = semanticErrors("scalar_value_ok");
+      results.pylance.inputLiteralPositiveErrors = semanticErrors("valid_input_literal");
+      results.pylance.inputLiteralNegativeErrors = semanticErrors("invalid_input_literal");
+      results.pylance.inputLiteralExtraErrors = semanticErrors("invalid_input_extra_literal");
+      results.pylance.inputNegativeErrors = Object.fromEntries([
+        "input_choice_empty", "input_choice_multiple", "input_choice_extra", "input_choice_null", "input_filter_missing",
+        "input_filter_extra", "input_filter_bad_list", "input_filter_bad_enum",
+        "scalar_bad",
+      ].map(name => [name, semanticErrors(name)]));
+      return /: str\b|: String\b/.test(results.pylance.inputName) &&
+        results.pylance.inputPositiveErrors.length === 0 &&
+        results.pylance.inputDefaultNullErrors.length === 0 &&
+        results.pylance.inputNullableNoneErrors.length === 0 &&
+        results.pylance.inputScalarPositiveErrors.length === 0 &&
+        results.pylance.inputLiteralPositiveErrors.length === 0 &&
+        results.pylance.inputLiteralNegativeErrors.some(message => /oneof|one of|exactly one/i.test(message)) &&
+        results.pylance.inputLiteralExtraErrors.some(message => /unknown|not defined|field/i.test(message)) &&
+        Object.values(results.pylance.inputNegativeErrors).every(errors => errors.length > 0);
+    }, "Pylance checks recursive inputs, defaults, enums, oneOf alternatives and schema-bound scalar helpers", 60000);
+    assert.ok(inputContractReady, JSON.stringify(results.pylance));
+    results.pylance.inputContracts = true;
     const semanticReady = await until(async () => {
       results.pylance.abstractName = await semanticHover("user_name");
       results.pylance.abstractTitle = await semanticHover("org_title");
