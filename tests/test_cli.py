@@ -468,6 +468,31 @@ class CLITests(unittest.TestCase):
         self.assertIn("static string", stderr)
         self.assertEqual(output.read_text(encoding="utf8"), "previous manifest\n")
 
+    def test_fail_on_warn_preserves_output_for_unrelated_dynamic_document(self) -> None:
+        self.schema.write_text("type Query { title: String }", encoding="utf8")
+        output = self.root / "graphql_desk_generated" / "persisted" / "default.json"
+        output.parent.mkdir(parents=True)
+        output.write_text("previous manifest\n", encoding="utf8")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'persisted_output="graphql_desk_generated/persisted/default.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { title }")\n'
+            'graphql.persisted("valid-id", query)\n'
+            "graphql(load_query())\n",
+            encoding="utf8",
+        )
+
+        code, stdout, stderr = self.invoke(["generate-persisted", "--fail-on-warn"])
+
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertIn("Source warnings prevent persisted output", stderr)
+        self.assertEqual(output.read_text(encoding="utf8"), "previous manifest\n")
+
     def test_invalid_python_preserves_existing_persisted_output(self) -> None:
         output = self.root / "graphql_desk_generated" / "persisted" / "default.json"
         output.parent.mkdir(parents=True)
