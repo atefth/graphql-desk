@@ -422,8 +422,6 @@ exports.run = async () => {
         const complete = JSON.parse(await fs.readFile(path.join(generationRoot, "complete.json"), "utf8"));
         const operation = complete.operationManifest.flatMap(project => project.operations)
           .find(item => item.binding === "inputs" || item.operation_name === "Inputs");
-        const factory = await fs.readFile(path.join(generationRoot, "graphql_desk_generated", "default.pyi"), "utf8");
-        const declarations = await fs.readFile(path.join(generationRoot, "graphql_desk_generated", "sources", "operation_semantics.pyi"), "utf8");
         results.pylance.publisherSnapshot = {
           generation: { id: complete.id, sequence: complete.sequence, analysisId: complete.analysisId },
           operation: operation && {
@@ -432,9 +430,18 @@ exports.run = async () => {
             declarationSymbol: operation.declaration_symbol,
             sourceExports: operation.source_exports,
           },
-          factoryOverloads: factory.split("\n").filter(line => line.includes("Inputs")),
-          inputDeclarations: declarations.split("\n").filter(line => /Inputs|Filter|Choice/.test(line)),
+          generationEntries: await fs.readdir(generationRoot),
         };
+        const generatedRoot = path.join(generationRoot, "graphql_desk_generated");
+        results.pylance.publisherSnapshot.generatedEntries = await fs.readdir(generatedRoot).catch(error => [String(error)]);
+        const factory = await fs.readFile(path.join(generatedRoot, "default.pyi"), "utf8").catch(error => null);
+        results.pylance.publisherSnapshot.factoryOverloads = factory
+          ? factory.split("\n").filter(line => line.includes("Inputs"))
+          : "missing graphql_desk_generated/default.pyi";
+        const declarations = await fs.readFile(path.join(generatedRoot, "sources", "operation_semantics.pyi"), "utf8").catch(error => null);
+        results.pylance.publisherSnapshot.inputDeclarations = declarations
+          ? declarations.split("\n").filter(line => /Inputs|Filter|Choice/.test(line))
+          : "missing sources/operation_semantics.pyi";
       } catch (error) {
         results.pylance.publisherSnapshotError = String(error);
       }
