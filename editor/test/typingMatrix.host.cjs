@@ -38,9 +38,11 @@ function pythonVersion(python) {
 
 exports.run = async () => {
   const suite = process.env.GRAPHQL_DESK_TEST_SUITE;
-  const results = { host: vscode.version, pylance: {}, lifecycle: { invalidationAndRepair: {} } };
+  const results = { host: vscode.version, pylance: {}, lifecycle: { invalidationAndRepair: {}, skipTraces: [], stubPathSelections: [] } };
   let settingChanges;
   let diagnosticChanges;
+  let selectionChanges;
+  let originalCreateOutputChannel;
   try {
     for (const id of ["ms-python.python", "ms-python.vscode-pylance"]) {
       const extension = vscode.extensions.getExtension(id);
@@ -53,6 +55,25 @@ exports.run = async () => {
 
     const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
     const consumerUri = vscode.Uri.file(path.join(workspace, "consumer.py"));
+    originalCreateOutputChannel = vscode.window.createOutputChannel;
+    vscode.window.createOutputChannel = (name, ...args) => {
+      const channel = originalCreateOutputChannel.call(vscode.window, name, ...args);
+      if (name !== "GraphQL Desk") return channel;
+      return new Proxy(channel, { get(target, property) {
+        if (property === "appendLine") return value => {
+          if (typeof value === "string" && value.startsWith("Live typing skipped: ") &&
+              results.lifecycle.skipTraces.length < 80) results.lifecycle.skipTraces.push(value);
+          return target.appendLine(value);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    };
+    selectionChanges = vscode.workspace.onDidChangeConfiguration(event => {
+      if (event.affectsConfiguration("python.analysis.stubPath", vscode.workspace.getWorkspaceFolder(consumerUri)?.uri)) {
+        results.lifecycle.stubPathSelections.push(vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""));
+      }
+    });
     const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
     assert.ok(extension, "GraphQL Desk extension must be loaded in the host");
     await extension.activate();
@@ -932,13 +953,23 @@ exports.run = async () => {
     results.lifecycle.activeStubRoot = path.resolve(workspace, results.lifecycle.configuredStubPath || ".graphql-desk/typings");
     assert.ok(results.lifecycle.configuredStubPath);
     results.outcome = "live-typing-matrix-observed";
+    results.lifecycle.skipTraces = [];
+    results.lifecycle.stubPathSelections = [];
   } catch (error) {
     results.error = String(error.stack || error);
     results.outcome = "live-typing-matrix-failed";
     throw error;
   } finally {
+    results.lifecycle.stubPathSelections = results.lifecycle.stubPathSelections.map(setting => {
+      const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
+      const relative = path.relative(workspace, path.resolve(workspace, setting));
+      return path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)
+        ? "<external>" : relative;
+    });
+    selectionChanges?.dispose();
     settingChanges?.dispose();
     diagnosticChanges?.dispose();
+    if (originalCreateOutputChannel) vscode.window.createOutputChannel = originalCreateOutputChannel;
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
     console.log(`GRAPHQL_DESK_TYPING_MATRIX ${JSON.stringify(results)}`);
   }
