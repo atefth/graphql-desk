@@ -27,7 +27,7 @@ class ReleaseArtifactTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        # Match ProjectConfig.root, which is canonicalized before output paths are built.
+        # Production canonicalizes roots before building output paths.
         self.root = Path(temporary.name).resolve()
         config = parse_project_config(
             '[tool.graphql-desk]\nschema="schema.graphql"\n'
