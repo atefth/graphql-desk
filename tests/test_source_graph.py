@@ -2885,6 +2885,100 @@ alias('{ id }')
                 (),
             )
 
+    def test_persisted_declarations_resolve_schema_document_and_exact_spans(
+        self,
+    ) -> None:
+        factory = module(
+            "factory",
+            "from graphql_desk import init_graphql\n"
+            "main=init_graphql('main')\nother=init_graphql('other')",
+        )
+        documents = module(
+            "documents",
+            "from factory import main as graphql, other as other_graphql\n"
+            "query=graphql('query Q { id }')\n"
+            "persist=graphql.persisted\n"
+            "registered=persist('opaque-id', query)\n"
+            "other_query=other_graphql('query Other { id }')\n"
+            "other_registered=other_graphql.persisted("
+            "id='sha256:abc', document=other_query)",
+        )
+        bindings = ProjectBindings("app", ("main", "other"), "main")
+        result = resolve_project((factory, documents), bindings=(bindings,))
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual(len(result.persisted), 2)
+        query = next(call for call in result.calls if call.binding == "query")
+        other_query = next(
+            call for call in result.calls if call.binding == "other_query"
+        )
+        first, second = result.persisted
+        self.assertEqual(first.id, "opaque-id")
+        self.assertEqual(first.schema_name, "main")
+        self.assertEqual(first.document, DocumentIdentity(query.module, query.range))
+        self.assertEqual(
+            documents.source[first.id_range.start : first.id_range.end],
+            "'opaque-id'",
+        )
+        self.assertEqual(
+            documents.source[first.range.start : first.range.end],
+            "persist('opaque-id', query)",
+        )
+        self.assertEqual(second.id, "sha256:abc")
+        self.assertEqual(second.schema_name, "other")
+        self.assertEqual(
+            second.document, DocumentIdentity(other_query.module, other_query.range)
+        )
+        self.assertEqual(
+            documents.source[second.id_range.start : second.id_range.end],
+            "'sha256:abc'",
+        )
+        self.assertEqual(
+            result,
+            IncrementalResolver().resolve((factory, documents), bindings=(bindings,)),
+        )
+
+    def test_persisted_declarations_reject_dynamic_ids_documents_and_schema_mismatch(
+        self,
+    ) -> None:
+        source = (
+            "from graphql_desk import init_graphql\n"
+            "main=init_graphql('main')\nother=init_graphql('other')\n"
+            "query=main('query Q { id }')\n"
+            "other_query=other('query Other { id }')\n"
+            "dynamic_id=make_id()\n"
+            "bad_id=main.persisted(dynamic_id, query)\n"
+            "bad_document=main.persisted('id', make_document())\n"
+            "bad_schema=main.persisted('id', other_query)"
+        )
+        result = resolve_project(
+            (module("main", source),),
+            bindings=(ProjectBindings("app", ("main", "other"), "main"),),
+        )
+        self.assertEqual(result.persisted, ())
+        diagnostics = [
+            item for item in result.diagnostics if item.code == "persisted-not-static"
+        ]
+        self.assertEqual(len(diagnostics), 3)
+        self.assertEqual(
+            [source[item.range.start : item.range.end] for item in diagnostics],
+            ["dynamic_id", "make_document()", "other_query"],
+        )
+
+    def test_untrusted_persisted_lookalikes_are_not_collected(self) -> None:
+        result = resolve_project(
+            (
+                module(
+                    "main",
+                    "class Fake:\n"
+                    " def persisted(self, id, document): return None\n"
+                    "fake=Fake()\n"
+                    "query=unknown('query Q { id }')\n"
+                    "fake.persisted('id', query)",
+                ),
+            )
+        )
+        self.assertEqual(result.persisted, ())
+
     def test_unicode_crlf_and_opaque_code_are_not_executed(self) -> None:
         source = (
             'from graphql_desk import gql\r\nraise RuntimeError("never execute")\r\n'

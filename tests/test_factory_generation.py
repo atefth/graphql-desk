@@ -148,6 +148,47 @@ if TYPE_CHECKING:
         self.assertIn("generated/_documents/beta/d0.pyi", paths)
         self.assertIn("generated/sources/first/shared.pyi", paths)
         self.assertIn("generated/sources/second/shared.pyi", paths)
+
+    def test_persisted_factories_preserve_typed_documents_per_schema(self) -> None:
+        config, contexts, base_modules, _ = self.multi_schema()
+        source = (
+            base_modules[0].source
+            + """
+persisted_alpha=alpha.persisted('alpha-id',alpha_query)
+persisted_beta=beta.persisted('beta-id',beta_query)
+assert_type(persisted_alpha.schema_name,Literal['alpha'])
+assert_type(persisted_beta.schema_name,Literal['beta'])
+"""
+        )
+        modules = (replace(base_modules[0], source=source), *base_modules[1:])
+        resolved = resolve_project(
+            modules, bindings=(project_bindings(config, project_id="p"),)
+        )
+        self.assertEqual(resolved.diagnostics, ())
+        index = index_fragments(
+            resolved, schemas={("p", item.schema_name): item for item in contexts}
+        )
+        self.assertEqual(index.diagnostics, ())
+        artifacts = generate_project_factory_artifacts(
+            config, contexts, index, modules=modules, project_id="p"
+        )
+        self.assertEqual(artifacts.diagnostics, ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            negative = """from generated.alpha import graphql as alpha
+from generated.beta import graphql as beta
+from main import alpha_query,beta_query
+alpha.persisted('bad-id',beta_query) # error
+beta.persisted('bad-id',alpha_query) # error
+"""
+            (root / "bad.py").write_text(negative, encoding="utf8")
+            errors = {
+                number
+                for number, line in enumerate(negative.splitlines(), 1)
+                if "# error" in line
+            }
+            self.check(root, {"bad.py": errors})
         main = next(
             item.text
             for item in artifacts.files
@@ -346,6 +387,11 @@ read:TypedDocument[AlphaQueryResult,dict[str,str]]=beta_query # error
 from generated.main import graphql, Filter
 from typing_extensions import assert_type
 q = graphql('query Q { greeting }')
+persisted_q = graphql.persisted('custom-id', q)
+assert_type(persisted_q.ast.definitions[0].name.value, Literal['Q'])
+assert_type(persisted_q.operation_name, Literal['Q'])
+assert_type(persisted_q.schema_name, Literal['main'])
+assert_type(persisted_q.persisted_id, str | None)
 assert_type(q.operation_name, Literal['Q'])
 value: Filter = {'id':'1','date':'today'}
 assert_type(graphql.scalar('Filter',value),Filter)

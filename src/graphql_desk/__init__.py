@@ -36,3 +36,4 @@ class TypedDocument(Generic[_Result, _Variables]):
     ast: DocumentNode
     operation_name: str | None = None
     schema_name: str | None = field(default=None, kw_only=True)
+    persisted_id: str | None = field(default=None, kw_only=True)

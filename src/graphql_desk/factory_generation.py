@@ -1295,7 +1295,9 @@ def _generate_factory_artifacts(
             "__graphql_desk_UnresolvedDocument: ...\n"
         )
         typing_import = (
-            "from typing import Protocol as __graphql_desk_Protocol, "
+            "from typing import "
+            "Protocol as __graphql_desk_Protocol, "
+            "TypeVar as __graphql_desk_TypeVar, "
             "Literal as __graphql_desk_Literal, "
             "overload as __graphql_desk_overload"
         )
@@ -1316,12 +1318,29 @@ def _generate_factory_artifacts(
             "    def operation_name(self) -> str | None: ...\n"
             "    @property\n"
             "    def schema_name(self) -> str | None: ...\n\n"
+            "class __graphql_desk_PersistedDocument(__graphql_desk_Protocol):\n"
+            "    @property\n"
+            "    def ast(self) -> __graphql_desk_DocumentNode: ...\n"
+            "    @property\n"
+            "    def operation_name(self) -> str | None: ...\n"
+            "    @property\n"
+            f"    def schema_name(self) -> __graphql_desk_Literal["
+            f"{context.schema_name!r}]: ...\n"
+            "    @property\n"
+            "    def persisted_id(self) -> str | None: ...\n\n"
+            "__graphql_desk_PersistedType = __graphql_desk_TypeVar(\n"
+            "    '__graphql_desk_PersistedType', bound="
+            "__graphql_desk_PersistedDocument)\n\n"
             "class __graphql_desk_Factory(__graphql_desk_Protocol):\n"
             + "\n".join(overloads)
         )
         stub += (
             ("    @__graphql_desk_overload\n" if overloads else "")
             + fallback
+            + "\n"
+            + "    def persisted(self, id: str, document: "
+            "__graphql_desk_PersistedType) -> "
+            "__graphql_desk_PersistedType: ...\n"
             + "\n"
             + render_scalar_method(context.schema, scalars=scalars, enums=enums)
             + "\ngraphql: __graphql_desk_Factory\n"

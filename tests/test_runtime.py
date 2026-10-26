@@ -21,6 +21,37 @@ from graphql_desk.runtime import scalar
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_persisted_preserves_typed_document_and_ast_identity(self) -> None:
+        document: TypedDocument[dict[str, str], dict[str, str]] = TypedDocument(
+            core_parse("query Read { greeting }"),
+            "Read",
+            schema_name="main",
+        )
+        self.assertIs(graphql.persisted, runtime.persisted)
+        persisted = graphql.persisted("opaque: λ", document)
+        assert_type(
+            persisted,
+            TypedDocument[dict[str, str], dict[str, str]],
+        )
+        self.assertIsNot(persisted, document)
+        self.assertIs(persisted.ast, document.ast)
+        self.assertEqual(persisted.operation_name, document.operation_name)
+        self.assertEqual(persisted.schema_name, document.schema_name)
+        self.assertEqual(persisted.persisted_id, "opaque: λ")
+        with self.assertRaises(FrozenInstanceError):
+            setattr(persisted, "persisted_id", "changed")
+
+        factory = init_graphql("main")
+        bound = factory.persisted("custom-id", document)
+        self.assertIs(bound.ast, document.ast)
+        self.assertEqual(bound.persisted_id, "custom-id")
+        with self.assertRaisesRegex(ValueError, "different schema"):
+            init_graphql("other").persisted("id", document)
+        with self.assertRaises(TypeError):
+            graphql.persisted("id", object())  # type: ignore[type-var]  # pyright: ignore[reportArgumentType]
+        with self.assertRaisesRegex(TypeError, "Persisted ID must be a string"):
+            graphql.persisted(123, document)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+
     def test_root_scalar_retains_function_alias_and_call_signatures(self) -> None:
         self.assertIs(graphql, gql)
         self.assertIs(graphql, runtime.graphql)
@@ -216,4 +247,6 @@ if TYPE_CHECKING:
     graphql("{ x }", operation=1)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
     graphql("{ x }", (), "Read")  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
     graphql.scalar(1, None)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+    graphql.persisted(1, graphql("{ x }"))  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+    graphql.persisted("id", "not a document")  # type: ignore[type-var]  # pyright: ignore[reportArgumentType]
     gql.scalar("String")  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
