@@ -483,8 +483,9 @@ function activate(context) {
         groups.get(project.generated_package).push(...files);
       }
       groups.set("graphql_desk-stubs", result.parser_overlay);
-      const artifactTypingFingerprint = typingFingerprint(groups);
-      const typingChanged = latestArtifacts.get(folderRoot)?.typingFingerprint !== artifactTypingFingerprint;
+      const artifactTypingFingerprint = managed.ownsSetting ? undefined : typingFingerprint(groups);
+      const typingChanged = artifactTypingFingerprint !== undefined &&
+        latestArtifacts.get(folderRoot)?.typingFingerprint !== artifactTypingFingerprint;
       let changedArtifacts = false;
       if (managed.ownsSetting) {
         const key = `${folderRoot}\0${managed.root}`;
@@ -514,7 +515,8 @@ function activate(context) {
       latestArtifacts.set(folderRoot, { managedRoot: managed.root, selectedSetting: managed.selectedSetting,
         operationManifest, projects: result.projects.map(({ project, generated_package, provenance, files }) =>
           ({ project, generated_package, provenance, files })),
-        parserOverlay: result.parser_overlay, typingFingerprint: artifactTypingFingerprint,
+        parserOverlay: result.parser_overlay,
+        ...(artifactTypingFingerprint === undefined ? {} : { typingFingerprint: artifactTypingFingerprint }),
         inputFingerprint: result.input_fingerprint, savedSourceFingerprint: result.saved_source_fingerprint, analysisId: result.id });
       if (![...groups.values()].some(files => files.length)) traceSkip("no-generated-stub-files");
       else lastSkipReason = undefined;
