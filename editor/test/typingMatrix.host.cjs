@@ -262,6 +262,25 @@ exports.run = async () => {
       "count_bad_field = count_result['selected']",
       "",
     ].join("\n");
+    const capturePublisherSnapshot = async () => {
+      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      const generationRoot = path.resolve(workspace, settings["python.analysis.stubPath"]);
+      const complete = JSON.parse(await fs.readFile(path.join(generationRoot, "complete.json"), "utf8"));
+      const generatedRoot = path.join(generationRoot, "graphql_desk_generated");
+      const factory = await fs.readFile(path.join(generatedRoot, "default.pyi"), "utf8").catch(() => "");
+      const source = await fs.readFile(path.join(generatedRoot, "sources", "operation_semantics.pyi"), "utf8").catch(() => "");
+      return {
+        generation: { id: complete.id, sequence: complete.sequence, analysisId: complete.analysisId },
+        operationManifest: complete.operationManifest.map(project => ({
+          project: project.project,
+          operations: project.operations.map(({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports }) =>
+            ({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports })),
+        })),
+        sourceArtifacts: complete.files.map(file => file.path).filter(file => file.includes("/sources/") || file.endsWith("/default.pyi")),
+        factoryOverloads: factory.split("\n").filter(line => /Text|Count|Inputs/.test(line)),
+        sourceDeclarations: source.split("\n").filter(line => /Text|Count|Inputs|Filter|Choice/.test(line)),
+      };
+    };
     await replace(document, multiSource);
     const multiUri = uri;
     const multiDocument = document;
@@ -288,7 +307,11 @@ exports.run = async () => {
         multiProbe.textVariableErrors.length > 0 && multiProbe.countVariableErrors.length > 0 &&
         multiProbe.textFieldErrors.length > 0 && multiProbe.countFieldErrors.length > 0;
     }, "Pylance infers isolated results and variables for same-source operation selectors", 60000);
-    assert.ok(multiReady, JSON.stringify(multiProbe));
+    if (!multiReady) {
+      try { results.pylance.publisherSnapshot = await capturePublisherSnapshot(); }
+      catch (error) { results.pylance.publisherSnapshotError = String(error); }
+    }
+    assert.ok(multiReady, JSON.stringify({ ...multiProbe, publisherSnapshot: results.pylance.publisherSnapshot }));
     results.pylance.multiOperationIsolation = multiProbe;
     await replace(document, originalConsumerSource);
     const multiRestoreReady = await until(async () => {
@@ -416,33 +439,8 @@ exports.run = async () => {
         Object.values(results.pylance.inputNegativeErrors).every(errors => errors.length > 0);
     }, "Pylance checks recursive inputs, defaults, enums, oneOf alternatives and schema-bound scalar helpers", 60000);
     if (!inputContractReady) {
-      try {
-        const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
-        const generationRoot = path.resolve(workspace, settings["python.analysis.stubPath"]);
-        const complete = JSON.parse(await fs.readFile(path.join(generationRoot, "complete.json"), "utf8"));
-        results.pylance.publisherSnapshot = {
-          generation: { id: complete.id, sequence: complete.sequence, analysisId: complete.analysisId },
-          operationManifest: complete.operationManifest.map(project => ({
-            project: project.project,
-            operations: project.operations.map(({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports }) =>
-              ({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports })),
-          })),
-          sourceArtifacts: complete.files.map(file => file.path).filter(file => file.includes("/sources/") || file.endsWith("/default.pyi")),
-          generationEntries: await fs.readdir(generationRoot),
-        };
-        const generatedRoot = path.join(generationRoot, "graphql_desk_generated");
-        results.pylance.publisherSnapshot.generatedEntries = await fs.readdir(generatedRoot).catch(error => [String(error)]);
-        const factory = await fs.readFile(path.join(generatedRoot, "default.pyi"), "utf8").catch(error => null);
-        results.pylance.publisherSnapshot.factoryOverloads = factory
-          ? factory.split("\n").filter(line => line.includes("Inputs"))
-          : "missing graphql_desk_generated/default.pyi";
-        const declarations = await fs.readFile(path.join(generatedRoot, "sources", "operation_semantics.pyi"), "utf8").catch(error => null);
-        results.pylance.publisherSnapshot.inputDeclarations = declarations
-          ? declarations.split("\n").filter(line => /Inputs|Filter|Choice/.test(line))
-          : "missing sources/operation_semantics.pyi";
-      } catch (error) {
-        results.pylance.publisherSnapshotError = String(error);
-      }
+      try { results.pylance.publisherSnapshot = await capturePublisherSnapshot(); }
+      catch (error) { results.pylance.publisherSnapshotError = String(error); }
     }
     assert.ok(inputContractReady, JSON.stringify(results.pylance));
     results.pylance.inputContracts = true;
