@@ -30,6 +30,13 @@ from .project import (
     select_schema,
     validate_project_ownership,
 )
+from .release_artifacts import (
+    check_wheel,
+    publish_omitted_tree,
+    render_omitted_files,
+    validate_authoring_separation,
+    validate_omitted_tree,
+)
 from .schema_loading import load_local_schema
 from .schema_types import render_schema_types
 from .schema_url import load_from_url
@@ -261,6 +268,16 @@ def _parser() -> argparse.ArgumentParser:
     persisted.add_argument(
         "--fail-on-warn", action="store_true", help="Do not write when warnings occur"
     )
+    persisted.add_argument(
+        "--omit-runtime-source",
+        action="store_true",
+        help="Stage a source-free package tree for persisted-only releases",
+    )
+    check = commands.add_parser("check", help="Verify a GraphQL Desk wheel artifact")
+    check.add_argument(
+        "-c", "--config", default=argparse.SUPPRESS, help="Select pyproject.toml"
+    )
+    check.add_argument("--artifact", required=True, help="Wheel file to inspect")
     return parser
 
 
@@ -440,6 +457,7 @@ def _generate_persisted(
     *,
     disable_normalization: bool,
     fail_on_warn: bool,
+    omit_runtime_source: bool,
     environment: Mapping[str, str],
     stdout_is_terminal: bool,
 ) -> int:
@@ -459,6 +477,13 @@ def _generate_persisted(
         include_stubs=False,
         validate_entrypoints=False,
     )
+    authoring_modules: tuple[str, ...] = ()
+    if omit_runtime_source:
+        if not config.authoring_roots:
+            raise ValueError("authoring_roots are required for source omission")
+        authoring_modules = validate_authoring_separation(
+            selected_files, config.authoring_roots
+        )
     modules = tuple(
         ModuleSnapshot(
             project_id,
@@ -558,6 +583,7 @@ def _generate_persisted(
     manifests = collection.manifests
     output_text: dict[Path, str] = {}
     stdout_text: str | None = None
+    omitted_bindings: dict[str, tuple[str, str]] = {}
     package = config.root.joinpath(*config.generated_package.split("."))
     persisted_package = package / "persisted"
     for schema, destination in destinations:
@@ -583,6 +609,7 @@ def _generate_persisted(
             index,
             client_directives=config.client_directives,
         )
+        omitted_bindings[schema.name] = (runtime, stub)
         for path, generated in (
             (persisted_package / f"{schema.name}.py", runtime),
             (persisted_package / f"{schema.name}.pyi", stub),
@@ -602,8 +629,33 @@ def _generate_persisted(
             if path.resolve() in output_text:
                 raise ValueError("Persisted manifest and binding outputs collide")
             output_text[path.resolve()] = generated
+    omitted_root: Path | None = None
+    omitted_files: dict[str, str] | None = None
+    if omit_runtime_source:
+        if any(
+            item.module.module not in authoring_modules for item in sources.persisted
+        ):
+            raise ValueError("Persisted declarations must live in authoring_roots")
+        release_config = replace(config, schemas=selected_schemas)
+        omitted_files = render_omitted_files(
+            release_config,
+            omitted_bindings,
+            schemas={
+                name: schema_contexts[(project_id, name)].schema
+                for name in omitted_bindings
+            },
+        )
+        omitted_root = config.root / "build" / "graphql-desk" / "omitted"
+        validate_omitted_tree(omitted_root)
     if output_text:
         _stage_outputs(output_text)
+    if omitted_root is not None and omitted_files is not None:
+        publish_omitted_tree(
+            omitted_root,
+            omitted_files,
+            authoring_modules,
+            config.generated_package,
+        )
     if stdout_text is not None:
         print(stdout_text, end="")
     return 0
@@ -616,6 +668,7 @@ def generate_persisted(
     output: Path | str | None = None,
     disable_normalization: bool = False,
     fail_on_warn: bool = False,
+    omit_runtime_source: bool = False,
     environment: Mapping[str, str] | None = None,
 ) -> None:
     """Generate manifests and ID-only typed bindings from shared project facts."""
@@ -628,6 +681,7 @@ def generate_persisted(
                 str(output) if output is not None else None,
                 disable_normalization=disable_normalization,
                 fail_on_warn=fail_on_warn,
+                omit_runtime_source=omit_runtime_source,
                 environment=os.environ if environment is None else environment,
                 stdout_is_terminal=True,
             )
@@ -861,9 +915,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.output,
                 disable_normalization=arguments.disable_normalization,
                 fail_on_warn=arguments.fail_on_warn,
+                omit_runtime_source=arguments.omit_runtime_source,
                 environment=dict(os.environ),
                 stdout_is_terminal=sys.stdout.isatty(),
             )
+        if arguments.command == "check":
+            selected = effective_project(Path.cwd(), explicit_config=config_path)
+            if selected is None:
+                raise ValueError("No GraphQL Desk project configuration was found")
+            check_wheel(
+                Path(arguments.artifact),
+                selected.config.root
+                / "build"
+                / "graphql-desk"
+                / "omitted"
+                / "manifest.json",
+            )
+            print("Wheel matches the source-free GraphQL Desk release manifest.")
+            return 0
         return _doctor(config_path, schema_name, environment=dict(os.environ))
     except KeyboardInterrupt:
         message = (
