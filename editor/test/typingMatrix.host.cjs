@@ -415,6 +415,30 @@ exports.run = async () => {
         results.pylance.inputLiteralExtraErrors.some(message => /unknown|not defined|field/i.test(message)) &&
         Object.values(results.pylance.inputNegativeErrors).every(errors => errors.length > 0);
     }, "Pylance checks recursive inputs, defaults, enums, oneOf alternatives and schema-bound scalar helpers", 60000);
+    if (!inputContractReady) {
+      try {
+        const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+        const generationRoot = path.resolve(workspace, settings["python.analysis.stubPath"]);
+        const complete = JSON.parse(await fs.readFile(path.join(generationRoot, "complete.json"), "utf8"));
+        const operation = complete.operationManifest.flatMap(project => project.operations)
+          .find(item => item.binding === "inputs" || item.operation_name === "Inputs");
+        const factory = await fs.readFile(path.join(generationRoot, "graphql_desk_generated", "default.pyi"), "utf8");
+        const declarations = await fs.readFile(path.join(generationRoot, "graphql_desk_generated", "sources", "operation_semantics.pyi"), "utf8");
+        results.pylance.publisherSnapshot = {
+          generation: { id: complete.id, sequence: complete.sequence, analysisId: complete.analysisId },
+          operation: operation && {
+            status: operation.status,
+            declarationPath: operation.declaration_path,
+            declarationSymbol: operation.declaration_symbol,
+            sourceExports: operation.source_exports,
+          },
+          factoryOverloads: factory.split("\n").filter(line => line.includes("Inputs")),
+          inputDeclarations: declarations.split("\n").filter(line => /Inputs|Filter|Choice/.test(line)),
+        };
+      } catch (error) {
+        results.pylance.publisherSnapshotError = String(error);
+      }
+    }
     assert.ok(inputContractReady, JSON.stringify(results.pylance));
     results.pylance.inputContracts = true;
     const directiveReady = await until(async () => {
