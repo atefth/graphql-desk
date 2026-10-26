@@ -365,6 +365,15 @@ def generated_output_paths(
         )
         _inside(runtime, package, "generated runtime companion")
         paths.extend((output, runtime))
+        persisted = package / "persisted"
+        for suffix in (".py", ".pyi"):
+            paths.append(
+                _path(
+                    str(persisted / f"{schema.name}{suffix}"),
+                    root,
+                    "generated persisted binding",
+                )
+            )
         for destination in (schema.persisted_output, schema.cache_output):
             if destination is not None:
                 paths.append(_path(str(destination), root, "generated output"))

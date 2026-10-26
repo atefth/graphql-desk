@@ -16,11 +16,28 @@ from graphql import (
 from typing_extensions import assert_type
 
 import graphql_desk.runtime as runtime
-from graphql_desk import TypedDocument, gql, graphql, init_graphql, parse
+from graphql_desk import (
+    PersistedDocument,
+    TypedDocument,
+    gql,
+    graphql,
+    init_graphql,
+    parse,
+    persisted_id,
+)
 from graphql_desk.runtime import scalar
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_id_only_persisted_reference_has_no_document_source(self) -> None:
+        document = persisted_id("public-id")
+        assert_type(document, PersistedDocument[Any, Any])
+        self.assertEqual(document.persisted_id, "public-id")
+        self.assertFalse(hasattr(document, "ast"))
+        self.assertFalse(hasattr(document, "operation_name"))
+        with self.assertRaisesRegex(TypeError, "Persisted ID must be a string"):
+            persisted_id(42)  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+
     def test_persisted_preserves_typed_document_and_ast_identity(self) -> None:
         document: TypedDocument[dict[str, str], dict[str, str]] = TypedDocument(
             core_parse("query Read { greeting }"),

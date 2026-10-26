@@ -181,6 +181,210 @@ class CLITests(unittest.TestCase):
             '{\n  "public-id": "query Q {\\n  user {\\n    id\\n  }\\n}"\n}\n',
         )
 
+    def test_generate_persisted_writes_source_free_typed_bindings(self) -> None:
+        self.schema.write_text(
+            "type User { id: ID! name: String! } type Query { user(id: ID!): User }",
+            encoding="utf8",
+        )
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'persisted_output="graphql_desk_generated/persisted/default.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query GetUser($id: ID!) { user(id: $id) { id name } }")\n'
+            'saved_user = graphql.persisted("public-id", query)\n'
+            'name_query = graphql("query GetUserName($id: ID!) '
+            '{ user(id: $id) { name } }")\n'
+            'saved_name = graphql.persisted("name-id", name_query)\n',
+            encoding="utf8",
+        )
+
+        code, stdout, stderr = self.invoke(["generate-persisted"])
+
+        self.assertEqual((code, stdout, stderr), (0, "", ""))
+        package = self.root / "graphql_desk_generated" / "persisted"
+        runtime = (package / "default.py").read_text(encoding="utf8")
+        stub = (package / "default.pyi").read_text(encoding="utf8")
+        self.assertIn("saved_user = __graphql_desk_persisted_id('public-id')", runtime)
+        self.assertNotIn("query GetUser", runtime)
+        self.assertNotIn("query GetUser", stub)
+        self.assertIn(
+            "saved_user: __graphql_desk_PersistedDocument["
+            "saved_userResult, saved_userVariables]",
+            stub,
+        )
+        self.assertIn("saved_userResult = TypedDict", stub)
+        self.assertIn("saved_userVariables", stub)
+        self.assertIn("saved_nameResult = TypedDict", stub)
+        self.assertIn("saved_nameVariables", stub)
+        imported = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from graphql_desk_generated.persisted.default import "
+                "saved_user, saved_name; "
+                "assert saved_user.persisted_id == 'public-id'; "
+                "assert saved_name.persisted_id == 'name-id'; "
+                "assert not hasattr(saved_user, 'ast')",
+            ],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            encoding="utf8",
+        )
+        self.assertEqual(imported.returncode, 0, imported.stdout + imported.stderr)
+
+        (self.root / "graphql_desk_generated" / "__init__.py").write_text(
+            "", encoding="utf8"
+        )
+        (self.root / "consumer.py").write_text(
+            "from typing import TypeVar\n"
+            "from typing_extensions import assert_type\n"
+            "from graphql_desk import PersistedDocument\n"
+            "from graphql_desk_generated.persisted.default import (\n"
+            " saved_user, saved_userResult, saved_userVariables,\n"
+            " saved_name, saved_nameResult, saved_nameVariables)\n"
+            "R = TypeVar('R')\nV = TypeVar('V')\n"
+            "def execute(document: PersistedDocument[R, V], variables: V) -> R:\n"
+            " raise NotImplementedError\n"
+            "assert_type(execute(saved_user, "
+            "saved_userVariables(id='1')), saved_userResult)\n"
+            "assert_type(execute(saved_name, "
+            "saved_nameVariables(id='2')), saved_nameResult)\n",
+            encoding="utf8",
+        )
+        (self.root / "pyrightconfig.json").write_text(
+            '{"include":["consumer.py"],"typeCheckingMode":"strict",'
+            '"pythonVersion":"3.10"}',
+            encoding="utf8",
+        )
+        for args in (
+            [
+                sys.executable,
+                "-m",
+                "mypy",
+                "--strict",
+                "--no-incremental",
+                "consumer.py",
+            ],
+            [
+                sys.executable,
+                "-m",
+                "pyright",
+                "--project",
+                "pyrightconfig.json",
+                "--pythonpath",
+                sys.executable,
+            ],
+        ):
+            result = subprocess.run(
+                args,
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        (self.root / "bad_consumer.py").write_text(
+            "from typing import TypeVar\n"
+            "from graphql_desk import PersistedDocument\n"
+            "from graphql_desk_generated.persisted.default import saved_user\n"
+            "R = TypeVar('R')\nV = TypeVar('V')\n"
+            "def execute(document: PersistedDocument[R, V], variables: V) -> R:\n"
+            " raise NotImplementedError\n"
+            "execute(saved_user, {'id': 1})\n",
+            encoding="utf8",
+        )
+        (self.root / "pyrightconfig.json").write_text(
+            '{"include":["bad_consumer.py"],"typeCheckingMode":"strict",'
+            '"pythonVersion":"3.10"}',
+            encoding="utf8",
+        )
+        for args in (
+            [
+                sys.executable,
+                "-m",
+                "mypy",
+                "--strict",
+                "--no-incremental",
+                "bad_consumer.py",
+            ],
+            [
+                sys.executable,
+                "-m",
+                "pyright",
+                "--project",
+                "pyrightconfig.json",
+                "--pythonpath",
+                sys.executable,
+            ],
+        ):
+            result = subprocess.run(
+                args,
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                encoding="utf8",
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_persisted_bindings_preserve_unowned_existing_files(self) -> None:
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'persisted_output="manifest.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { title }")\n'
+            'saved = graphql.persisted("id", query)\n',
+            encoding="utf8",
+        )
+        binding = self.root / "graphql_desk_generated" / "persisted" / "default.py"
+        binding.parent.mkdir(parents=True)
+        binding.write_text("handwritten module\n", encoding="utf8")
+
+        code, stdout, stderr = self.invoke(["generate-persisted"])
+
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertIn("command failed", stderr)
+        self.assertEqual(binding.read_text(encoding="utf8"), "handwritten module\n")
+        self.assertFalse((self.root / "manifest.json").exists())
+
+    def test_persisted_binding_rejects_schema_type_name_collision(self) -> None:
+        self.schema.write_text(
+            "enum savedResult { OK } type Query { result: savedResult }",
+            encoding="utf8",
+        )
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'persisted_output="manifest.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { result }")\n'
+            'saved = graphql.persisted("id", query)\n',
+            encoding="utf8",
+        )
+
+        code, stdout, stderr = self.invoke(["generate-persisted"])
+
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertIn("command failed", stderr)
+        self.assertFalse((self.root / "manifest.json").exists())
+        self.assertFalse(
+            (
+                self.root / "graphql_desk_generated" / "persisted" / "default.pyi"
+            ).exists()
+        )
+
     def test_persisted_callable_uses_cli_facts_and_raises_structured_errors(
         self,
     ) -> None:

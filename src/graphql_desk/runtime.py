@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast
 
 from graphql import (
     DocumentNode,
@@ -23,7 +23,24 @@ if TYPE_CHECKING:
     from . import TypedDocument
 
 _Value = TypeVar("_Value")
+_Result = TypeVar("_Result")
+_Variables = TypeVar("_Variables")
 _PersistedDocument = TypeVar("_PersistedDocument", bound="TypedDocument[Any, Any]")
+
+
+@dataclass(frozen=True)
+class PersistedDocument(Generic[_Result, _Variables]):
+    """ID-only reference whose generated companion supplies result and variables."""
+
+    persisted_id: str
+
+
+def persisted_id(id: str) -> PersistedDocument[Any, Any]:
+    """Construct an ID-only document reference without retaining query text."""
+    # Keep runtime validation for callers that bypass the static signature.
+    if not isinstance(cast(object, id), str):
+        raise TypeError("Persisted ID must be a string")
+    return PersistedDocument(id)
 
 
 def persisted(id: object, document: _PersistedDocument) -> _PersistedDocument:

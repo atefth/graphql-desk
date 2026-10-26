@@ -22,6 +22,7 @@ from .external_type_sources import (
     interpreter_type_roots,
 )
 from .fragments import SchemaContext, index_fragments
+from .persisted_bindings import generated_header, render_persisted_bindings
 from .persisted_manifest import collect_persisted_manifests
 from .project import (
     effective_project,
@@ -244,7 +245,8 @@ def _parser() -> argparse.ArgumentParser:
         "--schema", default=argparse.SUPPRESS, help="Select one configured schema"
     )
     persisted = commands.add_parser(
-        "generate-persisted", help="Generate persisted operation manifests"
+        "generate-persisted",
+        help="Generate persisted operation manifests and typed bindings",
     )
     persisted.add_argument(
         "-c", "--config", default=argparse.SUPPRESS, help="Select pyproject.toml"
@@ -556,6 +558,8 @@ def _generate_persisted(
     manifests = collection.manifests
     output_text: dict[Path, str] = {}
     stdout_text: str | None = None
+    package = config.root.joinpath(*config.generated_package.split("."))
+    persisted_package = package / "persisted"
     for schema, destination in destinations:
         entries = manifests.get((project_id, schema.name), ())
         text = (
@@ -572,10 +576,36 @@ def _generate_persisted(
             stdout_text = text
         else:
             output_text[destination] = text
-    if stdout_text is not None:
-        print(stdout_text, end="")
+        runtime, stub = render_persisted_bindings(
+            schema,
+            schema_contexts[(project_id, schema.name)],
+            sources.persisted,
+            index,
+            client_directives=config.client_directives,
+        )
+        for path, generated in (
+            (persisted_package / f"{schema.name}.py", runtime),
+            (persisted_package / f"{schema.name}.pyi", stub),
+        ):
+            resolved_parent = path.parent.resolve()
+            if not resolved_parent.is_relative_to(package.resolve()):
+                raise ValueError("Generated persisted binding escapes its package")
+            if path.is_symlink():
+                raise ValueError("Generated persisted binding cannot replace a symlink")
+            if path.exists():
+                if not path.is_file() or not path.read_text(
+                    encoding="utf-8"
+                ).startswith(generated_header()):
+                    raise ValueError(
+                        "Generated persisted binding is not GraphQL Desk-owned"
+                    )
+            if path.resolve() in output_text:
+                raise ValueError("Persisted manifest and binding outputs collide")
+            output_text[path.resolve()] = generated
     if output_text:
         _stage_outputs(output_text)
+    if stdout_text is not None:
+        print(stdout_text, end="")
     return 0
 
 
@@ -588,7 +618,7 @@ def generate_persisted(
     fail_on_warn: bool = False,
     environment: Mapping[str, str] | None = None,
 ) -> None:
-    """Generate manifests through the same project facts as the CLI."""
+    """Generate manifests and ID-only typed bindings from shared project facts."""
     diagnostics = StringIO()
     try:
         with redirect_stderr(diagnostics):
