@@ -30,6 +30,8 @@ _TYPE_BASES = frozenset(
         "builtins.int",
         "builtins.float",
         "builtins.bytes",
+        "typing.Protocol",
+        "typing_extensions.Protocol",
         "typing.TypedDict",
         "typing_extensions.TypedDict",
         "enum.Enum",

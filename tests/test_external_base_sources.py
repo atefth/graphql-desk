@@ -133,6 +133,7 @@ from graphql_desk import TypedDocument
 from graphql_desk_generated.main import graphql
 from graphql_desk_generated.sources.main import QueryResult, QueryVariables
 from models import DateInput, DateOutput
+from vendor import BaseModel
 R = TypeVar("R")
 V = TypeVar("V")
 def execute(document: TypedDocument[R, V], variables: V) -> R: raise RuntimeError
@@ -142,6 +143,10 @@ result: QueryResult = execute(query, variables)
 assert_type(result["when"], DateOutput)
 wrong_variables: QueryVariables = {"value": DateOutput()}  # error
 wrong_output: str = result["when"]  # error
+class StructuralDate:
+    def isoformat(self) -> str: return ""
+valid_protocol: BaseModel = StructuralDate()
+invalid_protocol: BaseModel = object()  # error
 """
         main = ModuleSnapshot("app", "main", "file:///main.py", 1, source)
         models = ModuleSnapshot(
@@ -150,8 +155,11 @@ wrong_output: str = result["when"]  # error
             "file:///models.py",
             1,
             "from vendor import BaseModel\n"
-            "class DateInput(BaseModel): ...\n"
-            "class DateOutput(BaseModel): ...\n",
+            "from vendor import ExtensionModel\n"
+            "class DateInput(BaseModel):\n"
+            "    def isoformat(self) -> str: ...\n"
+            "class DateOutput(ExtensionModel):\n"
+            "    def timestamp(self) -> int: ...\n",
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -159,7 +167,14 @@ wrong_output: str = result["when"]  # error
             packages = root / "packages"
             vendor_stub = packages / "vendor-stubs"
             vendor_stub.mkdir(parents=True)
-            external_base = "class BaseModel: ...\n"
+            external_base = (
+                "from typing import Protocol\n"
+                "from typing_extensions import Protocol as ExtensionProtocol\n"
+                "class BaseModel(Protocol):\n"
+                "    def isoformat(self) -> str: ...\n"
+                "class ExtensionModel(ExtensionProtocol):\n"
+                "    def timestamp(self) -> int: ...\n"
+            )
             (vendor_stub / "__init__.pyi").write_text(external_base, encoding="utf8")
             (vendor_stub / "py.typed").write_text("", encoding="utf8")
             checker_stubs = packages / "checker"
