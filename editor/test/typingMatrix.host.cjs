@@ -98,6 +98,24 @@ exports.run = async () => {
       results.outcome = "mixed-list-nullability-observed";
       return;
     }
+    if (process.env.GRAPHQL_DESK_TEST_SUITE === "fragmentTyping") {
+      const ready = await until(async () => {
+        observed.visibleName = await hover("visible_name");
+        observed.visibleNameType = inferredType("visible_name", observed.visibleName);
+        observed.hiddenNameErrors = lineDiagnostics("hidden_name");
+        observed.hiddenNameRejected = observed.hiddenNameErrors.some(message => /"name" is not a defined key/.test(message));
+        observed.positiveErrors = lineDiagnostics("fragment_name_ok");
+        return observed.visibleNameType === "String" && observed.hiddenNameRejected &&
+          observed.positiveErrors.length === 0;
+      }, "Pylance masks spread-only fragment fields until the generated reader is used", 60000);
+      assert.ok(ready, JSON.stringify(observed));
+      results.pylance = { ...results.pylance, ...observed };
+      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+      results.lifecycle.configuredStubPath = settings["python.analysis.stubPath"];
+      results.lifecycle.activeStubRoot = path.resolve(workspace, results.lifecycle.configuredStubPath);
+      results.outcome = "fragment-masking-live-typing-observed";
+      return;
+    }
     if (process.env.GRAPHQL_DESK_TEST_SUITE === "externalMappings") {
       const ready = await until(async () => {
         observed.externalDate = await hover("mapped_date");
