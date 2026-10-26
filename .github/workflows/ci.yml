@@ -138,11 +138,7 @@ jobs:
   editor:
     needs: changes
     if: needs.changes.outputs.code_changed == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-2025]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
@@ -153,11 +149,6 @@ jobs:
         with:
           node-version: "22"
       - run: uv sync --locked
-      - if: runner.os == 'Windows'
-        run: |
-          uv python install 3.12
-          uv venv --python 3.12 .venv-alt
-          uv pip install --python .venv-alt/Scripts/python.exe -e .
       - run: npm ci --ignore-scripts
         working-directory: editor
       - run: npm test
@@ -178,54 +169,108 @@ jobs:
         working-directory: editor
       - run: node --check test/lifecycle.host.cjs
         working-directory: editor
-      - if: runner.os == 'Linux'
-        run: xvfb-run -a node test/run-host.cjs 1.141.0 features
+      - run: xvfb-run -a node test/run-host.cjs 1.141.0 features
         working-directory: editor
-      - if: runner.os == 'Linux'
-        run: xvfb-run -a node test/run-host.cjs 1.141.0 activation
+      - run: xvfb-run -a node test/run-host.cjs 1.141.0 activation
         working-directory: editor
-      - if: runner.os == 'Linux'
-        run: xvfb-run -a node test/run-host.cjs 1.142.0 discovery
+      - run: xvfb-run -a node test/run-host.cjs 1.142.0 discovery
         working-directory: editor
-      - if: runner.os == 'Linux'
-        run: xvfb-run -a node test/run-host.cjs 1.142.0 features
+      - run: xvfb-run -a node test/run-host.cjs 1.142.0 features
         working-directory: editor
-      - if: runner.os == 'Linux'
-        run: xvfb-run -a node test/run-host.cjs 1.142.0 activation
-        working-directory: editor
-      - if: runner.os == 'Windows'
-        env:
-          GRAPHQL_DESK_ALTERNATE_PYTHON: ${{ github.workspace }}/.venv-alt/Scripts/python.exe
-        run: node test/run-host.cjs 1.142.0 typingMatrix
-        working-directory: editor
-      - if: runner.os == 'Windows'
-        run: node test/run-host.cjs 1.142.0 externalMappings
-        working-directory: editor
-      - if: runner.os == 'Windows'
-        run: node test/run-host.cjs 1.141.0 factoryArtifacts
-        working-directory: editor
-      - if: runner.os == 'Windows'
-        run: node test/run-host.cjs 1.142.0 factoryArtifacts
-        working-directory: editor
-      - if: runner.os == 'Windows'
-        run: node test/run-host.cjs 1.142.0 malformedRecovery
-        working-directory: editor
-      - if: runner.os == 'Windows'
-        run: node test/run-host.cjs 1.141.0 lifecycle
-        working-directory: editor
-      - if: runner.os == 'Windows'
-        run: node test/run-host.cjs 1.142.0 lifecycle
-        working-directory: editor
-      - if: runner.os == 'Windows'
-        run: node test/run-host.cjs 1.142.0 restartRecoveryChangedInputs
+      - run: xvfb-run -a node test/run-host.cjs 1.142.0 activation
         working-directory: editor
       - run: npm audit
+        working-directory: editor
+
+  editor-windows-unit:
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true'
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.2"
+          python-version: "3.10"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+      - run: uv sync --locked
+      - run: npm ci --ignore-scripts
+        working-directory: editor
+      - run: npm test
+        working-directory: editor
+      - run: node --check test/run-host.cjs
+        working-directory: editor
+      - run: node --check test/features.host.cjs
+        working-directory: editor
+      - run: node --check test/discovery.host.cjs
+        working-directory: editor
+      - run: node --check test/restartRecovery.host.cjs
+        working-directory: editor
+      - run: node --check test/crashDuringGeneration.cjs
+        working-directory: editor
+      - run: node --check test/typingMatrix.host.cjs
+        working-directory: editor
+      - run: node --check test/malformedRecovery.host.cjs
+        working-directory: editor
+      - run: node --check test/lifecycle.host.cjs
+        working-directory: editor
+      - run: npm audit
+        working-directory: editor
+
+  editor-windows-host:
+    needs: [changes, editor-windows-unit]
+    if: needs.changes.outputs.code_changed == 'true'
+    name: editor Windows host (${{ matrix.suite }}, VS Code ${{ matrix.version }})
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - version: "1.142.0"
+            suite: typingMatrix
+          - version: "1.142.0"
+            suite: externalMappings
+          - version: "1.141.0"
+            suite: factoryArtifacts
+          - version: "1.142.0"
+            suite: factoryArtifacts
+          - version: "1.142.0"
+            suite: malformedRecovery
+          - version: "1.141.0"
+            suite: lifecycle
+          - version: "1.142.0"
+            suite: lifecycle
+          - version: "1.142.0"
+            suite: restartRecoveryChangedInputs
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.2"
+          python-version: "3.10"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+      - run: uv sync --locked
+      - if: matrix.suite == 'typingMatrix'
+        run: |
+          uv python install 3.12
+          uv venv --python 3.12 .venv-alt
+          uv pip install --python .venv-alt/Scripts/python.exe -e .
+      - run: npm ci --ignore-scripts
+        working-directory: editor
+      - run: node test/run-host.cjs "${{ matrix.version }}" "${{ matrix.suite }}"
+        env:
+          GRAPHQL_DESK_ALTERNATE_PYTHON: ${{ matrix.suite == 'typingMatrix' && format('{0}/.venv-alt/Scripts/python.exe', github.workspace) || '' }}
         working-directory: editor
 
   required:
     name: CI
     if: always()
-    needs: [changes, quality, dependencies, smoke, editor]
+    needs: [changes, quality, dependencies, smoke, editor, editor-windows-unit, editor-windows-host]
     runs-on: ubuntu-24.04
     steps:
       - name: Require all checks
@@ -236,6 +281,8 @@ jobs:
           DEPENDENCIES: ${{ needs.dependencies.result }}
           SMOKE: ${{ needs.smoke.result }}
           EDITOR: ${{ needs.editor.result }}
+          EDITOR_WINDOWS_UNIT: ${{ needs.editor-windows-unit.result }}
+          EDITOR_WINDOWS_HOST: ${{ needs.editor-windows-host.result }}
         run: |
           if [ "$CHANGES" != "success" ]; then
             echo "Could not classify changed files."
@@ -245,4 +292,4 @@ jobs:
             echo "Markdown-only change: full CI checks skipped."
             exit 0
           fi
-          test "$QUALITY" = success && test "$DEPENDENCIES" = success && test "$SMOKE" = success && test "$EDITOR" = success
+          test "$QUALITY" = success && test "$DEPENDENCIES" = success && test "$SMOKE" = success && test "$EDITOR" = success && test "$EDITOR_WINDOWS_UNIT" = success && test "$EDITOR_WINDOWS_HOST" = success
