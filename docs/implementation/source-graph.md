@@ -95,10 +95,10 @@ aliased `bool` class bases remain rejected as non-subclassable. Constructors mus
 unverified, and containers do not inherit TypedDict provenance from their element.
 Explicit type aliases accept flat PEP 604 chains of direct named/qualified type
 operands and literal None, with at least one named operand: `N | M`, `N | None`,
-`None | N` or `N | M | None`. Parenthesized or right-nested union groups remain
-unsupported. `typing.Union[...]` and `typing_extensions.Union[...]` aliases use
-direct named operands or literal None, and may appear inside a supported
-container alias.
+`None | N`, `N | M | None`, or parenthesized forms such as `N | (M | None)`.
+Groups are flattened only when every leaf is a direct named/qualified type or
+literal None. `typing.Union[...]` and `typing_extensions.Union[...]` aliases use
+the same flat operands and may appear inside a supported container alias.
 Those operands may include a flat PEP 604 union, such as
 `Union[str | int, None]` or `list[Union[str | int, None]]`; its leaves follow
 the same direct-name rule.
@@ -107,8 +107,8 @@ Aliases retain their own identity and never confer class-base or TypedDict
 capabilities through aliases or reexports. External operands remain unverified.
 Duplicate union operands also retain the conservative non-base policy: runtime
 and Pyright allow the tested reduced class base, while pinned mypy rejects it.
-Nested PEP 604 union groups, nested Union arguments, and general recursive Union
-evaluation remain unsupported.
+Nested Union subscriptions and general recursive Union evaluation remain
+unsupported.
 Trusted external `typing.Literal` and `typing_extensions.Literal` aliases accept
 one or more flat string, bytes, integer, boolean or None constants, plus one unary
 minus on an exact integer. They retain their own identity without class-base or

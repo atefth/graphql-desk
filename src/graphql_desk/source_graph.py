@@ -1082,22 +1082,17 @@ class _Graph:
             )
         )
 
-    def flat_union_operands(self, module: _Module, node: ast.BinOp) -> list[ast.expr]:
+    def flat_union_operands(self, node: ast.BinOp) -> list[ast.expr]:
         if not isinstance(node.op, ast.BitOr):
             raise _Unresolved("Union aliases require the PEP 604 | operator")
         arguments: list[ast.expr] = []
-        current = node
-        while isinstance(current.op, ast.BitOr):
-            arguments.append(current.right)
-            left = current.left
-            if isinstance(left, ast.BinOp) and isinstance(left.op, ast.BitOr):
-                if module.span(left).start != module.span(current).start:
-                    raise _Unresolved("Parenthesized union groups are unsupported")
-                current = left
-                continue
-            arguments.append(left)
-            break
-        arguments.reverse()
+        pending: list[ast.expr] = [node]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, ast.BinOp) and isinstance(current.op, ast.BitOr):
+                pending.extend((current.right, current.left))
+            else:
+                arguments.append(current)
         return arguments
 
     def alias_target(
@@ -1109,7 +1104,7 @@ class _Graph:
         active: set[tuple[str, str, str]],
     ) -> _Value:
         if isinstance(node, ast.BinOp):
-            arguments = self.flat_union_operands(module, node)
+            arguments = self.flat_union_operands(node)
             values: list[_Value] = []
             for argument in arguments:
                 if isinstance(argument, ast.Constant) and argument.value is None:
@@ -1293,7 +1288,7 @@ class _Graph:
             flat_operands: list[ast.expr] = []
             for operand in operands:
                 if isinstance(operand, ast.BinOp) and isinstance(operand.op, ast.BitOr):
-                    flat_operands.extend(self.flat_union_operands(module, operand))
+                    flat_operands.extend(self.flat_union_operands(operand))
                 else:
                     flat_operands.append(operand)
             operands = flat_operands
