@@ -2,24 +2,44 @@
 
 import argparse
 import ast
+import json
 import os
 import sys
+import tempfile
 from collections.abc import Mapping, Sequence
+from contextlib import redirect_stderr
+from dataclasses import replace
 from importlib import metadata
+from io import StringIO
 from pathlib import Path
 from typing import NoReturn
 
 from .config import ProjectConfig, SchemaConfig
+from .document_validation import validate_indexed_document
 from .external_type_sources import (
     capture_external_type_sources,
     external_class_base_symbols,
     interpreter_type_roots,
 )
-from .project import effective_project, select_schema, validate_project_ownership
+from .fragments import SchemaContext, index_fragments
+from .persisted_manifest import collect_persisted_manifests
+from .project import (
+    effective_project,
+    project_bindings,
+    select_schema,
+    validate_project_ownership,
+)
 from .schema_loading import load_local_schema
 from .schema_types import render_schema_types
 from .schema_url import load_from_url
-from .source_graph import ModuleSnapshot, TypeSymbolResolution, resolve_type_symbols
+from .source_graph import (
+    DocumentIdentity,
+    GraphDiagnostic,
+    ModuleSnapshot,
+    TypeSymbolResolution,
+    resolve_project,
+    resolve_type_symbols,
+)
 from .source_selection import select_project_sources
 
 
@@ -27,6 +47,14 @@ class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         # argparse otherwise repeats arbitrary argument values, including secrets.
         raise ValueError("Invalid arguments; use --help.")
+
+
+class PersistedGenerationError(ValueError):
+    """Sanitized persisted-generation failure with collected diagnostics."""
+
+    def __init__(self, diagnostics: Sequence[str]) -> None:
+        self.diagnostics = tuple(diagnostics)
+        super().__init__("Persisted generation failed")
 
 
 def _version(distribution: str) -> str:
@@ -215,7 +243,376 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument(
         "--schema", default=argparse.SUPPRESS, help="Select one configured schema"
     )
+    persisted = commands.add_parser(
+        "generate-persisted", help="Generate persisted operation manifests"
+    )
+    persisted.add_argument(
+        "-c", "--config", default=argparse.SUPPRESS, help="Select pyproject.toml"
+    )
+    persisted.add_argument(
+        "--schema", default=argparse.SUPPRESS, help="Select one configured schema"
+    )
+    persisted.add_argument("-o", "--output", help="Write one manifest to this path")
+    persisted.add_argument(
+        "--disable-normalization", action="store_true", help="Keep authored text"
+    )
+    persisted.add_argument(
+        "--fail-on-warn", action="store_true", help="Do not write when warnings occur"
+    )
     return parser
+
+
+def _python_candidates(config: ProjectConfig) -> tuple[Path, ...]:
+    ignored = {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "node_modules",
+        "site-packages",
+        "build",
+        "dist",
+    }
+    candidates: list[Path] = []
+    for root in config.source_roots:
+        if not root.is_dir():
+            continue
+        for directory, names, files in os.walk(root, followlinks=False):
+            names[:] = sorted(
+                name
+                for name in names
+                if name not in ignored and not (Path(directory) / name).is_symlink()
+            )
+            candidates.extend(
+                Path(directory) / name for name in files if name.endswith(".py")
+            )
+    return tuple(sorted(candidates, key=lambda item: item.as_posix()))
+
+
+def _persisted_outputs(
+    config: ProjectConfig,
+    schema_name: str | None,
+    explicit_output: str | None,
+    *,
+    stdout_is_terminal: bool,
+) -> tuple[tuple[SchemaConfig, Path | None], ...]:
+    schemas = (
+        (select_schema(config, binding=schema_name),)
+        if schema_name is not None
+        else config.schemas
+    )
+    if explicit_output is not None:
+        if len(schemas) != 1:
+            raise ValueError("Select one schema when using --output")
+        path = Path(explicit_output)
+        destination = path if path.is_absolute() else Path.cwd() / path
+        return ((schemas[0], destination.resolve()),)
+    destinations = tuple((item, item.persisted_output) for item in schemas)
+    if all(path is not None for _, path in destinations):
+        return tuple((item, path) for item, path in destinations)
+    if len(schemas) != 1:
+        raise ValueError("Configure persisted_output for each schema or select one")
+    if not stdout_is_terminal:
+        return ((schemas[0], None),)
+    raise ValueError("Select --output, configure persisted_output, or redirect stdout")
+
+
+def _stage_outputs(outputs: Mapping[Path, str]) -> None:
+    staged: list[tuple[Path, Path]] = []
+    backups: dict[Path, Path | None] = {}
+    committed: list[Path] = []
+    recovery_paths: list[Path] = []
+    rollback_failed = False
+    try:
+        for target, text in outputs.items():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+                staged.append((Path(stream.name), target))
+        for _, target in staged:
+            if target.exists():
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=target.parent,
+                    prefix=f".{target.name}.",
+                    suffix=".bak",
+                    delete=False,
+                ) as stream:
+                    backup_path = Path(stream.name)
+                backup_path.unlink()
+                os.link(target, backup_path)
+                backups[target] = backup_path
+            else:
+                backups[target] = None
+        for temporary, target in staged:
+            os.replace(temporary, target)
+            committed.append(target)
+    except BaseException:
+        for target in reversed(committed):
+            previous_backup = backups[target]
+            try:
+                if previous_backup is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    os.replace(previous_backup, target)
+                    backups[target] = None
+            except BaseException:
+                rollback_failed = True
+                recovery_paths.append(target)
+                if previous_backup is not None:
+                    recovery_paths.append(previous_backup)
+        raise
+    finally:
+        for temporary, _ in staged:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if not rollback_failed:
+            for stale_backup in backups.values():
+                if stale_backup is not None:
+                    try:
+                        stale_backup.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        else:
+            retained = sorted(
+                {
+                    str(path)
+                    for path in (*recovery_paths, *backups.values())
+                    if path is not None and path.exists()
+                }
+            )
+            if retained:
+                print(
+                    "Persisted output recovery copies were retained at: "
+                    + ", ".join(retained),
+                    file=sys.stderr,
+                )
+
+
+def _report_diagnostics(
+    diagnostics: Sequence[GraphDiagnostic], modules: tuple[ModuleSnapshot, ...]
+) -> None:
+    sources = {
+        (item.project, item.module, item.uri, item.version): item.source
+        for item in modules
+    }
+    for diagnostic in diagnostics:
+        source = sources.get(
+            (
+                diagnostic.module.project,
+                diagnostic.module.module,
+                diagnostic.module.uri,
+                diagnostic.module.version,
+            ),
+            "",
+        )
+        before = source[: diagnostic.range.start]
+        line = before.count("\n") + 1
+        column = len(before.rsplit("\n", 1)[-1].removesuffix("\r")) + 1
+        print(
+            f"{diagnostic.module.module}:{line}:{column}: {diagnostic.message}",
+            file=sys.stderr,
+        )
+
+
+def _generate_persisted(
+    config_path: Path | None,
+    schema_name: str | None,
+    explicit_output: str | None,
+    *,
+    disable_normalization: bool,
+    fail_on_warn: bool,
+    environment: Mapping[str, str],
+    stdout_is_terminal: bool,
+) -> int:
+    selected = effective_project(Path.cwd(), explicit_config=config_path)
+    if selected is None:
+        raise ValueError("No GraphQL Desk project configuration was found")
+    config = selected.config
+    validate_project_ownership((config,))
+    destinations = _persisted_outputs(
+        config, schema_name, explicit_output, stdout_is_terminal=stdout_is_terminal
+    )
+    project_id = config.path.as_uri()
+    candidate_files = _python_candidates(config)
+    selected_files = select_project_sources(
+        config,
+        candidate_files,
+        include_stubs=False,
+        validate_entrypoints=False,
+    )
+    modules = tuple(
+        ModuleSnapshot(
+            project_id,
+            source.module,
+            source.path.as_uri(),
+            1,
+            source.path.read_text(encoding="utf-8"),
+            source.is_package,
+        )
+        for source in selected_files
+    )
+    protected = {
+        config.path.resolve(),
+        *(
+            schema.origin.local_path.resolve()
+            for schema in config.schemas
+            if schema.origin.local_path is not None
+        ),
+        *(path.resolve() for path in candidate_files),
+    }
+    if any(
+        destination is not None and destination.resolve() in protected
+        for _, destination in destinations
+    ):
+        raise ValueError("Persisted output cannot overwrite project inputs")
+    selected_schemas = tuple(schema for schema, _ in destinations)
+    selected_config = replace(config, schemas=selected_schemas)
+    bindings = project_bindings(selected_config, project_id=project_id)
+    sources = resolve_project(modules, bindings=(bindings,))
+    schema_contexts: dict[tuple[str, str | None], SchemaContext] = {}
+    for schema_config in selected_schemas:
+        loaded_schema = (
+            load_local_schema(schema_config.origin.local_path)
+            if schema_config.origin.local_path is not None
+            else load_from_url(schema_config.origin, environment=environment)
+        )
+        token = f"persisted-cli:{project_id}:{schema_config.name}"
+        context = SchemaContext(schema_config.name, loaded_schema, token)
+        schema_contexts[(project_id, schema_config.name)] = context
+        if bindings.default_schema == schema_config.name:
+            schema_contexts[(project_id, None)] = context
+    index = index_fragments(sources, schemas=schema_contexts)
+    indexed = {
+        DocumentIdentity(document.call.module, document.call.range): document
+        for document in index.documents
+    }
+    validation_errors: list[GraphDiagnostic] = []
+    for declaration in sources.persisted:
+        document = indexed.get(declaration.document)
+        validation_context = schema_contexts.get((project_id, declaration.schema_name))
+        if document is None or validation_context is None:
+            continue
+        validation_errors.extend(
+            validate_indexed_document(
+                validation_context,
+                document,
+                fragment_index=index,
+                modules=modules,
+                client_directives=config.client_directives,
+            )
+        )
+    if validation_errors:
+        _report_diagnostics(tuple(validation_errors), modules)
+        return 1
+    collection = collect_persisted_manifests(
+        sources, index, normalize=not disable_normalization
+    )
+    if collection.diagnostics:
+        _report_diagnostics(collection.diagnostics, modules)
+        return 1
+    incomplete_analysis = tuple(
+        item
+        for item in sources.diagnostics
+        if item.code
+        in {
+            "persisted-not-static",
+            "invalid-python",
+            "parse-fallback",
+            "source-too-complex",
+        }
+    )
+    if incomplete_analysis:
+        _report_diagnostics(incomplete_analysis, modules)
+        print("Incomplete source analysis prevents persisted output.", file=sys.stderr)
+        return 1
+    if sources.diagnostics:
+        _report_diagnostics(sources.diagnostics, modules)
+    if fail_on_warn and sources.diagnostics:
+        print("Source warnings prevent persisted output.", file=sys.stderr)
+        return 1
+    if config.client_directives:
+        print(
+            "Persisted generation cannot account for configured client transforms.",
+            file=sys.stderr,
+        )
+        return 1
+    manifests = collection.manifests
+    output_text: dict[Path, str] = {}
+    stdout_text: str | None = None
+    for schema, destination in destinations:
+        entries = manifests.get((project_id, schema.name), ())
+        text = (
+            json.dumps(
+                {entry.id: entry.document for entry in entries},
+                ensure_ascii=True,
+                indent=2,
+            )
+            + "\n"
+        )
+        if destination is None:
+            if stdout_text is not None or len(destinations) != 1:
+                raise ValueError("Select one schema for machine stdout")
+            stdout_text = text
+        else:
+            output_text[destination] = text
+    if stdout_text is not None:
+        print(stdout_text, end="")
+    if output_text:
+        _stage_outputs(output_text)
+    return 0
+
+
+def generate_persisted(
+    *,
+    config: Path | str | None = None,
+    schema: str | None = None,
+    output: Path | str | None = None,
+    disable_normalization: bool = False,
+    fail_on_warn: bool = False,
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    """Generate manifests through the same project facts as the CLI."""
+    diagnostics = StringIO()
+    try:
+        with redirect_stderr(diagnostics):
+            result = _generate_persisted(
+                Path(config) if config is not None else None,
+                schema,
+                str(output) if output is not None else None,
+                disable_normalization=disable_normalization,
+                fail_on_warn=fail_on_warn,
+                environment=os.environ if environment is None else environment,
+                stdout_is_terminal=True,
+            )
+    except (OSError, RuntimeError, ValueError):
+        messages = tuple(diagnostics.getvalue().splitlines())
+        raise PersistedGenerationError(
+            messages or ("Check configuration, sources, schema access and outputs.",)
+        ) from None
+    messages = tuple(diagnostics.getvalue().splitlines())
+    if result:
+        raise PersistedGenerationError(
+            messages or ("Check configuration, sources, schema access and outputs.",)
+        )
+    if messages:
+        print("\n".join(messages), file=sys.stderr)
 
 
 def _doctor(
@@ -411,24 +808,44 @@ def _doctor(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Return an exit code; only the module/console entrypoint terminates a process.
-
-    Doctor is deliberately degraded until editor, bridge and owned-generation
-    health have authoritative inputs. Schema loading is explicit, never discovery.
-    """
+    """Return an exit code; only the module/console entrypoint exits the process."""
     try:
-        arguments = _parser().parse_args(argv)
+        command_line = list(sys.argv[1:] if argv is None else argv)
+        for position in range(len(command_line) - 1):
+            if command_line[position : position + 2] == ["generate", "persisted"]:
+                command_line[position : position + 2] = ["generate-persisted"]
+                break
+        arguments = _parser().parse_args(command_line)
     except ValueError:
         print("Invalid arguments; use --help.", file=sys.stderr)
         return 2
     except SystemExit as error:
         return error.code if isinstance(error.code, int) else 2
     try:
-        return _doctor(
-            Path(arguments.config) if hasattr(arguments, "config") else None,
-            arguments.schema if hasattr(arguments, "schema") else None,
-            environment=dict(os.environ),
-        )
+        config_path = Path(arguments.config) if hasattr(arguments, "config") else None
+        schema_name = arguments.schema if hasattr(arguments, "schema") else None
+        if arguments.command == "generate-persisted":
+            return _generate_persisted(
+                config_path,
+                schema_name,
+                arguments.output,
+                disable_normalization=arguments.disable_normalization,
+                fail_on_warn=arguments.fail_on_warn,
+                environment=dict(os.environ),
+                stdout_is_terminal=sys.stdout.isatty(),
+            )
+        return _doctor(config_path, schema_name, environment=dict(os.environ))
     except KeyboardInterrupt:
-        print("Doctor cancelled.", file=sys.stderr)
+        message = (
+            "Doctor cancelled."
+            if arguments.command == "doctor"
+            else "Persisted generation cancelled."
+        )
+        print(message, file=sys.stderr)
         return 130
+    except (OSError, RuntimeError, ValueError):
+        print(
+            "GraphQL Desk command failed; check configuration, sources and outputs.",
+            file=sys.stderr,
+        )
+        return 1

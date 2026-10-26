@@ -114,6 +114,16 @@ class ResolvedCall:
 
 
 @dataclass(frozen=True)
+class PersistedDeclaration:
+    module: ModuleDependency
+    range: Span
+    id: str
+    id_range: Span
+    document: DocumentIdentity
+    schema_name: str | None
+
+
+@dataclass(frozen=True)
 class GraphDiagnostic:
     module: ModuleDependency
     code: str
@@ -137,6 +147,7 @@ class ProjectSources:
     calls: tuple[ResolvedCall, ...]
     diagnostics: tuple[GraphDiagnostic, ...]
     unavailable: tuple[RejectedCall, ...] = ()
+    persisted: tuple[PersistedDeclaration, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -189,6 +200,12 @@ class _SourceFailure(_Unresolved):
     def __init__(self, owner: DocumentIdentity, message: str) -> None:
         super().__init__(message)
         self.owner = owner
+
+
+class _PersistedFailure(_Unresolved):
+    def __init__(self, message: str, range_: Span) -> None:
+        super().__init__(message)
+        self.range = range_
 
 
 class _MissingType(_Unresolved):
@@ -581,7 +598,12 @@ class _Graph:
                             (node.lineno, node.col_offset),
                             set(),
                         )
-                        trusted = callee.kind in {"callable", "initializer", "parser"}
+                        trusted = callee.kind in {
+                            "callable",
+                            "initializer",
+                            "parser",
+                            "persisted-callable",
+                        }
                         if (
                             type_symbols
                             and callee.kind == "external"
@@ -625,7 +647,12 @@ class _Graph:
                             self.mutated.add((module.snapshot.project, value.text))
                             if value.text == "builtins":
                                 module.star = True
-                        elif value.kind in {"callable", "initializer", "parser"} or (
+                        elif value.kind in {
+                            "callable",
+                            "initializer",
+                            "parser",
+                            "persisted-callable",
+                        } or (
                             self.type_symbols
                             and value.kind == "external"
                             and value.text in _CLASS_DECORATOR_NAMESPACES
@@ -675,6 +702,8 @@ class _Graph:
                         "callable",
                         "initializer",
                         "document-candidate",
+                        "persisted-callable",
+                        "persisted-candidate",
                         "parser",
                     }
                     or self.type_symbols
@@ -1065,7 +1094,8 @@ class _Graph:
                 )
             if (
                 not probe
-                or value.kind in {"callable", "initializer", "parser"}
+                or value.kind
+                in {"callable", "initializer", "parser", "persisted-callable"}
                 or value.text == "graphql_desk"
             ):
                 return value
@@ -1566,6 +1596,13 @@ class _Graph:
                     f"{parent.text}.{node.attr}",
                     dependencies=parent.dependencies,
                 )
+            if parent.kind == "callable" and node.attr == "persisted":
+                return _Value(
+                    "persisted-callable",
+                    parent.text + ".persisted",
+                    dependencies=parent.dependencies,
+                    schema_name=parent.schema_name,
+                )
             if parent.kind == "module":
                 value = self.export(module, parent.text, node.attr, active, probe=probe)
                 return _Value(
@@ -1624,6 +1661,17 @@ class _Graph:
                     dependencies=value.dependencies | callee.dependencies,
                     schema_name=value.schema_name,
                 )
+            if callee.kind == "persisted-callable":
+                if probe or not self.ready:
+                    return _Value("persisted-candidate", module.snapshot.module)
+                declaration = self.persisted(module, node, callee)
+                return _Value(
+                    "persisted-document",
+                    declaration.id,
+                    dependencies=callee.dependencies,
+                    schema_name=declaration.schema_name,
+                    document=declaration.document,
+                )
             if callee.kind == "callable":
                 if probe or not self.ready:
                     return _Value("document-candidate", module.snapshot.module)
@@ -1669,6 +1717,83 @@ class _Graph:
             self.active_documents.remove(identity)
         self.documents[identity] = document
         return document
+
+    def persisted(
+        self, module: _Module, node: ast.Call, callable_: _Value
+    ) -> PersistedDeclaration:
+        if any(isinstance(arg, ast.Starred) for arg in node.args) or any(
+            item.arg is None for item in node.keywords
+        ):
+            raise _PersistedFailure(
+                "Persisted arguments must be supplied explicitly", module.span(node)
+            )
+        keywords = {item.arg: item.value for item in node.keywords}
+        if len(keywords) != len(node.keywords) or set(keywords) - {"id", "document"}:
+            raise _PersistedFailure(
+                "Use id and document arguments only", module.span(node)
+            )
+        if (
+            len(node.args) > 2
+            or (node.args and "id" in keywords)
+            or (len(node.args) == 2 and "document" in keywords)
+        ):
+            raise _PersistedFailure(
+                "Supply id and document once each", module.span(node)
+            )
+        id_node = node.args[0] if node.args else keywords.get("id")
+        document_node = (
+            node.args[1] if len(node.args) == 2 else keywords.get("document")
+        )
+        if id_node is None or document_node is None:
+            raise _PersistedFailure(
+                "Persisted declarations require a static ID and document",
+                module.span(node),
+            )
+        id_range = module.span(id_node)
+        try:
+            identifier = self.expression(
+                module, id_node, (node.lineno, node.col_offset), set()
+            )
+        except (_Unresolved, RecursionError):
+            raise _PersistedFailure(
+                "Persisted ID must resolve to a static string", id_range
+            ) from None
+        if identifier.kind != "string":
+            raise _PersistedFailure(
+                "Persisted ID must resolve to a static string", id_range
+            )
+        document_range = module.span(document_node)
+        try:
+            document = self.expression(
+                module, document_node, (node.lineno, node.col_offset), set()
+            )
+        except (_Unresolved, RecursionError):
+            raise _PersistedFailure(
+                "Persisted document must resolve to a GraphQL Desk document",
+                document_range,
+            ) from None
+        if document.kind != "document" or document.document is None:
+            raise _PersistedFailure(
+                "Persisted document must resolve to a GraphQL Desk document",
+                document_range,
+            )
+        if (
+            callable_.schema_name is not None
+            and document.schema_name is not None
+            and callable_.schema_name != document.schema_name
+        ):
+            raise _PersistedFailure(
+                "Persisted declaration and document use different schemas",
+                document_range,
+            )
+        return PersistedDeclaration(
+            module.identity,
+            module.span(node),
+            identifier.text,
+            id_range,
+            document.document,
+            callable_.schema_name or document.schema_name,
+        )
 
     def extract(
         self, module: _Module, node: ast.Call, callable_: _Value
@@ -2025,6 +2150,7 @@ def _resolve(
     graph = _Graph(modules, bindings, parses)
     calls: list[ResolvedCall] = []
     unavailable: list[RejectedCall] = []
+    persisted: list[PersistedDeclaration] = []
     for module in graph.modules.values():
 
         class Calls(_CallScopes):
@@ -2037,6 +2163,7 @@ def _resolve(
                     return
                 candidate = False
                 document_candidate = False
+                persisted_candidate = False
                 source_failure = False
 
                 def reject(diagnostic: GraphDiagnostic) -> None:
@@ -2066,12 +2193,19 @@ def _resolve(
                             )
                         else:
                             calls.append(graph.document(module, node, callable_))
+                    elif callable_.kind == "persisted-callable":
+                        candidate = True
+                        persisted_candidate = True
+                        self.check_scope(node)
+                        persisted.append(graph.persisted(module, node, callable_))
                 except RecursionError:
                     if candidate:
                         reject(
                             GraphDiagnostic(
                                 module.identity,
-                                "source-too-complex",
+                                "persisted-not-static"
+                                if persisted_candidate
+                                else "source-too-complex",
                                 "Static binding nesting exceeds the resolver limit",
                                 module.span(node),
                             )
@@ -2091,28 +2225,42 @@ def _resolve(
                                 set(),
                                 probe=True,
                             )
-                            candidate = origin.kind in {"callable", "initializer"}
+                            candidate = origin.kind in {
+                                "callable",
+                                "initializer",
+                                "persisted-callable",
+                            }
                             document_candidate = origin.kind == "callable"
+                            persisted_candidate = origin.kind == "persisted-callable"
                         except (_Unresolved, RecursionError):
                             pass
                     if candidate:
+                        persisted_failure = (
+                            error if isinstance(error, _PersistedFailure) else None
+                        )
                         reject(
                             GraphDiagnostic(
                                 module.identity,
-                                "source-not-static",
+                                "persisted-not-static"
+                                if persisted_candidate
+                                else "source-not-static",
                                 str(error),
-                                module.span(node),
+                                persisted_failure.range
+                                if persisted_failure is not None
+                                else module.span(node),
                             )
                         )
                 self.generic_visit(node)
 
         start = len(calls)
         rejected_start = len(unavailable)
+        persisted_start = len(persisted)
         try:
             Calls(module).visit(module.tree)
         except RecursionError:
             del calls[start:]
             del unavailable[rejected_start:]
+            del persisted[persisted_start:]
             module.star = True
             graph.failed_modules.add(module.identity)
             graph.diagnostics.append(
@@ -2146,7 +2294,19 @@ def _resolve(
             item.range.start,
         )
     )
-    return ProjectSources(current, tuple(graph.diagnostics), tuple(unavailable))
+    current_persisted = tuple(
+        item
+        for item in persisted
+        if item.module not in graph.failed_modules
+        and item.document.module not in graph.failed_modules
+        and item.document in graph.documents
+        and not graph.failed_modules.intersection(
+            graph.documents[item.document].dependencies
+        )
+    )
+    return ProjectSources(
+        current, tuple(graph.diagnostics), tuple(unavailable), current_persisted
+    )
 
 
 @dataclass(frozen=True)
@@ -2230,7 +2390,20 @@ class IncrementalResolver:
                 item.range.start,
             )
         )
-        result = ProjectSources(tuple(calls), tuple(diagnostics), tuple(unavailable))
+        persisted = [
+            declaration
+            for project in projects.values()
+            for declaration in project.result.persisted
+        ]
+        persisted.sort(
+            key=lambda item: (
+                order[(item.module.project, item.module.module)],
+                item.range.start,
+            )
+        )
+        result = ProjectSources(
+            tuple(calls), tuple(diagnostics), tuple(unavailable), tuple(persisted)
+        )
         self._parses = parses
         self._projects = projects
         return result

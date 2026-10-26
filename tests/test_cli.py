@@ -11,7 +11,7 @@ from importlib import metadata
 from pathlib import Path
 from unittest.mock import patch
 
-from graphql_desk.cli import main
+from graphql_desk.cli import PersistedGenerationError, generate_persisted, main
 from tests.test_schema_url import endpoint
 
 
@@ -156,6 +156,368 @@ class CLITests(unittest.TestCase):
         self.assertEqual((code, out), (1, ""))
         self.assertIn("configuration: ready (explicit)", err)
         self.assertIn("schema default: ready", err)
+
+    def test_generate_persisted_writes_normalized_manifest(self) -> None:
+        self.schema.write_text(
+            "type User { id: ID! } type Query { user: User }", encoding="utf8"
+        )
+        output = self.root / "graphql_desk_generated" / "persisted" / "default.json"
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'persisted_output="graphql_desk_generated/persisted/default.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { user { id } }")\n'
+            'registered = graphql.persisted("public-id", query)\n',
+            encoding="utf8",
+        )
+        code, stdout, stderr = self.invoke(["generate-persisted"])
+        self.assertEqual((code, stdout, stderr), (0, "", ""))
+        self.assertEqual(
+            output.read_text(encoding="utf8"),
+            '{\n  "public-id": "query Q {\\n  user {\\n    id\\n  }\\n}"\n}\n',
+        )
+
+    def test_persisted_callable_uses_cli_facts_and_raises_structured_errors(
+        self,
+    ) -> None:
+        output = self.root / "graphql_desk_generated" / "persisted" / "default.json"
+        output.parent.mkdir(parents=True)
+        output.write_text("previous manifest\n", encoding="utf8")
+        self.schema.write_text("type Query { title: String }", encoding="utf8")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'persisted_output="graphql_desk_generated/persisted/default.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { title }")\n'
+            'graphql.persisted("id", query)\n',
+            encoding="utf8",
+        )
+
+        generate_persisted(config=self.config)
+        previous = output.read_text(encoding="utf8")
+        self.assertIn('"id"', previous)
+
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { title }")\n'
+            "dynamic_id = load_id()\n"
+            "graphql.persisted(dynamic_id, query)\n",
+            encoding="utf8",
+        )
+        with self.assertRaises(PersistedGenerationError) as raised:
+            generate_persisted(config=self.config)
+        self.assertTrue(raised.exception.diagnostics)
+        self.assertEqual(output.read_text(encoding="utf8"), previous)
+
+    def test_generate_persisted_alias_selects_only_requested_schema(self) -> None:
+        alpha_output = self.root / "graphql_desk_generated" / "persisted" / "alpha.json"
+        self.config.write_text(
+            "[tool.graphql-desk]\n"
+            '[[tool.graphql-desk.schemas]]\nname="alpha"\n'
+            'schema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/alpha.pyi"\n'
+            'persisted_output="graphql_desk_generated/persisted/alpha.json"\n'
+            '[[tool.graphql-desk.schemas]]\nname="beta"\n'
+            'schema="missing.graphql"\n'
+            'schema_output="graphql_desk_generated/beta.pyi"\n'
+            'persisted_output="graphql_desk_generated/persisted/beta.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk_generated.alpha import graphql as alpha\n"
+            'query = alpha("query Q { title }")\n'
+            'alpha.persisted("alpha-id", query)\n',
+            encoding="utf8",
+        )
+
+        code, stdout, stderr = self.invoke(
+            ["generate", "persisted", "--schema", "alpha"]
+        )
+
+        self.assertEqual((code, stdout, stderr), (0, "", ""))
+        self.assertEqual(
+            alpha_output.read_text(encoding="utf8"),
+            '{\n  "alpha-id": "query Q {\\n  title\\n}"\n}\n',
+        )
+        self.assertFalse(
+            (self.root / "graphql_desk_generated/persisted/beta.json").exists()
+        )
+
+    def test_persisted_output_cannot_overwrite_excluded_python_source(self) -> None:
+        excluded = self.root / "excluded.py"
+        excluded.write_text("authored source\n", encoding="utf8")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'include=["**/*.py"]\nexclude=["excluded.py"]\n',
+            encoding="utf8",
+        )
+
+        code, stdout, stderr = self.invoke(
+            ["generate-persisted", "--output", str(excluded)]
+        )
+
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertIn("command failed", stderr)
+        self.assertEqual(excluded.read_text(encoding="utf8"), "authored source\n")
+
+    def test_persisted_output_resolves_symlink_destination(self) -> None:
+        target = self.root / "manifest.json"
+        target.write_text("previous manifest\n", encoding="utf8")
+        link = self.root / "manifest-link.json"
+        try:
+            link.symlink_to(target)
+        except (NotImplementedError, OSError):
+            self.skipTest("File symlinks are unavailable")
+        self.schema.write_text("type Query { title: String }", encoding="utf8")
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { title }")\n'
+            'graphql.persisted("id", query)\n',
+            encoding="utf8",
+        )
+
+        code, stdout, stderr = self.invoke(
+            ["generate-persisted", "--output", str(link)]
+        )
+
+        self.assertEqual((code, stdout, stderr), (0, "", ""))
+        self.assertTrue(link.is_symlink())
+        self.assertIn('"id"', target.read_text(encoding="utf8"))
+
+    def test_multi_output_replace_failure_restores_previous_manifests(self) -> None:
+        first = self.root / "first.json"
+        second = self.root / "second.json"
+        self.config.write_text(
+            "[tool.graphql-desk]\n"
+            '[[tool.graphql-desk.schemas]]\nname="first"\n'
+            'schema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/first.pyi"\n'
+            'persisted_output="first.json"\n'
+            '[[tool.graphql-desk.schemas]]\nname="second"\n'
+            'schema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/second.pyi"\n'
+            'persisted_output="second.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk_generated.first import graphql as first\n"
+            "from graphql_desk_generated.second import graphql as second\n"
+            'first_query = first("query First { title }")\n'
+            'second_query = second("query Second { title }")\n'
+            'first.persisted("first-id", first_query)\n'
+            'second.persisted("second-id", second_query)\n',
+            encoding="utf8",
+        )
+        replace = os.replace
+        for failure in (PermissionError, KeyboardInterrupt):
+            with self.subTest(failure=failure.__name__):
+                first.write_text("old first", encoding="utf8")
+                second.write_text("old second", encoding="utf8")
+                failed = False
+
+                def fail_second(
+                    source: str | os.PathLike[str], target: str | os.PathLike[str]
+                ) -> None:
+                    nonlocal failed
+                    if (
+                        Path(target) == second
+                        and str(source).endswith(".tmp")
+                        and not failed
+                    ):
+                        failed = True
+                        raise failure("target in use")
+                    replace(source, target)
+
+                with patch("graphql_desk.cli.os.replace", side_effect=fail_second):
+                    code, stdout, stderr = self.invoke(["generate-persisted"])
+
+                expected = 130 if failure is KeyboardInterrupt else 1
+                self.assertEqual((code, stdout), (expected, ""))
+                self.assertIn(
+                    "cancelled" if failure is KeyboardInterrupt else "command failed",
+                    stderr,
+                )
+                self.assertEqual(first.read_text(encoding="utf8"), "old first")
+                self.assertEqual(second.read_text(encoding="utf8"), "old second")
+
+    def test_generate_persisted_can_write_machine_stdout_and_disable_normalization(
+        self,
+    ) -> None:
+        self.schema.write_text("type Query { title: String }", encoding="utf8")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n',
+            encoding="utf8",
+        )
+        source = "# keep spacing\nquery Q{title}"
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            f"query = graphql({source!r})\n"
+            'graphql.persisted("public-id", query)\n',
+            encoding="utf8",
+        )
+        code, stdout, stderr = self.invoke(
+            ["generate-persisted", "--disable-normalization"]
+        )
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(
+            stdout,
+            '{\n  "public-id": "# keep spacing\\nquery Q{title}"\n}\n',
+        )
+
+    def test_invalid_persisted_operation_and_client_transform_do_not_write(
+        self,
+    ) -> None:
+        output = self.root / "graphql_desk_generated" / "persisted" / "default.json"
+        output.parent.mkdir(parents=True)
+        output.write_text("previous manifest\n", encoding="utf8")
+        self.schema.write_text("type Query { title: String }", encoding="utf8")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'persisted_output="graphql_desk_generated/persisted/default.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { missing }")\n'
+            'graphql.persisted("id", query)\n',
+            encoding="utf8",
+        )
+        code, stdout, stderr = self.invoke(["generate-persisted"])
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertIn("Cannot query field", stderr)
+        self.assertEqual(output.read_text(encoding="utf8"), "previous manifest\n")
+
+        self.config.write_text(
+            self.config.read_text(encoding="utf8").replace(
+                'schema_output="graphql_desk_generated/default.pyi"',
+                'schema_output="graphql_desk_generated/default.pyi"\n'
+                'client_directives=["clientOnly"]',
+            ),
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { title }")\n'
+            'graphql.persisted("id", query)\n',
+            encoding="utf8",
+        )
+        code, stdout, stderr = self.invoke(["generate-persisted"])
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertIn("client transforms", stderr)
+        self.assertEqual(output.read_text(encoding="utf8"), "previous manifest\n")
+
+    def test_persisted_conflict_preserves_existing_manifest(self) -> None:
+        self.schema.write_text(
+            "type User { id: ID! } type Query { user: User title: String }",
+            encoding="utf8",
+        )
+        output = self.root / "graphql_desk_generated" / "persisted" / "default.json"
+        output.parent.mkdir(parents=True)
+        output.write_text("previous manifest\n", encoding="utf8")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'persisted_output="graphql_desk_generated/persisted/default.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'one = graphql("query One { title }")\n'
+            'two = graphql("query Two { user { id } }")\n'
+            'graphql.persisted("same-id", one)\n'
+            'graphql.persisted("same-id", two)\n',
+            encoding="utf8",
+        )
+        code, stdout, stderr = self.invoke(["generate-persisted"])
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertIn("Persisted ID conflicts", stderr)
+        self.assertEqual(output.read_text(encoding="utf8"), "previous manifest\n")
+
+    def test_dynamic_persisted_id_preserves_existing_output(self) -> None:
+        self.schema.write_text("type Query { title: String }", encoding="utf8")
+        output = self.root / "graphql_desk_generated" / "persisted" / "default.json"
+        output.parent.mkdir(parents=True)
+        output.write_text("previous manifest\n", encoding="utf8")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'persisted_output="graphql_desk_generated/persisted/default.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { title }")\n'
+            'graphql.persisted("valid-id", query)\n'
+            "dynamic_id = load_id()\n"
+            "graphql.persisted(dynamic_id, query)\n",
+            encoding="utf8",
+        )
+        code, stdout, stderr = self.invoke(["generate-persisted"])
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertIn("static string", stderr)
+        self.assertEqual(output.read_text(encoding="utf8"), "previous manifest\n")
+
+    def test_fail_on_warn_preserves_output_for_unrelated_dynamic_document(self) -> None:
+        self.schema.write_text("type Query { title: String }", encoding="utf8")
+        output = self.root / "graphql_desk_generated" / "persisted" / "default.json"
+        output.parent.mkdir(parents=True)
+        output.write_text("previous manifest\n", encoding="utf8")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'persisted_output="graphql_desk_generated/persisted/default.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { title }")\n'
+            'graphql.persisted("valid-id", query)\n'
+            "graphql(load_query())\n",
+            encoding="utf8",
+        )
+
+        code, stdout, stderr = self.invoke(["generate-persisted", "--fail-on-warn"])
+
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertIn("Source warnings prevent persisted output", stderr)
+        self.assertEqual(output.read_text(encoding="utf8"), "previous manifest\n")
+
+    def test_invalid_python_preserves_existing_persisted_output(self) -> None:
+        output = self.root / "graphql_desk_generated" / "persisted" / "default.json"
+        output.parent.mkdir(parents=True)
+        output.write_text("previous manifest\n", encoding="utf8")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            'persisted_output="graphql_desk_generated/persisted/default.json"\n',
+            encoding="utf8",
+        )
+        (self.root / "operations.py").write_text(
+            "from graphql_desk import graphql\n"
+            'query = graphql("query Q { title }")\n'
+            'graphql.persisted("valid-id", query)\n',
+            encoding="utf8",
+        )
+        (self.root / "broken.py").write_text(
+            "this is not valid Python (\n", encoding="utf8"
+        )
+
+        code, stdout, stderr = self.invoke(["generate-persisted"])
+
+        self.assertEqual((code, stdout), (1, ""))
+        self.assertIn("Incomplete source analysis", stderr)
+        self.assertEqual(output.read_text(encoding="utf8"), "previous manifest\n")
 
     def test_mapping_declarations_use_schema_policy_without_imports_or_writes(
         self,

@@ -593,6 +593,10 @@ exports.run = async () => {
         results.pylance.conditionalNegative.length > 0 &&
         results.pylance.conditionalGenerated;
     }, "an unsaved GraphQL edit publishes conditional-presence and nullable-list types", 60000);
+    if (!conditionalReady) {
+      try { results.pylance.conditionalPublisherSnapshot = await capturePublisherSnapshot(); }
+      catch (error) { results.pylance.conditionalPublisherSnapshotError = String(error); }
+    }
     assert.ok(conditionalReady, JSON.stringify(results.pylance));
     assert.equal(semanticDocument.isDirty, true, "GraphQL Desk preserves the unsaved Python source edit");
     assert.equal(await fs.readFile(semanticPath, "utf8"), semanticDiskBaseline,

@@ -23,6 +23,14 @@ if TYPE_CHECKING:
     from . import TypedDocument
 
 _Value = TypeVar("_Value")
+_PersistedDocument = TypeVar("_PersistedDocument", bound="TypedDocument[Any, Any]")
+
+
+def persisted(id: object, document: _PersistedDocument) -> _PersistedDocument:
+    """Return the same typed document with its caller-supplied persisted ID."""
+    if not isinstance(id, str):
+        raise TypeError("Persisted ID must be a string")
+    return replace(document, persisted_id=id)
 
 
 def scalar(name: str, value: _Value) -> _Value:
@@ -43,9 +51,14 @@ class _DocumentConstructor(Protocol):
 class _RootGraphQL(_DocumentConstructor, Protocol):
     def scalar(self, name: str, value: _Value) -> _Value: ...
 
+    def persisted(
+        self, id: str, document: _PersistedDocument
+    ) -> _PersistedDocument: ...
 
-def _attach_scalar(function: _DocumentConstructor) -> _RootGraphQL:
+
+def _attach_methods(function: _DocumentConstructor) -> _RootGraphQL:
     setattr(function, "scalar", scalar)
+    setattr(function, "persisted", persisted)
     return cast(_RootGraphQL, function)
 
 
@@ -170,7 +183,7 @@ def _construct(
     )
 
 
-@_attach_scalar
+@_attach_methods
 def graphql(
     source: str,
     fragments: Iterable[TypedDocument[Any, Any]] = (),
@@ -208,6 +221,11 @@ class GraphQLFactory:
     def scalar(self, name: str, value: _Value) -> _Value:
         """Use this binding's generated scalar types without runtime conversion."""
         return scalar(name, value)
+
+    def persisted(self, id: str, document: _PersistedDocument) -> _PersistedDocument:
+        if document.schema_name not in (None, self.schema_name):
+            raise ValueError("Persisted documents belong to a different schema")
+        return persisted(id, document)
 
 
 def init_graphql(schema: str) -> GraphQLFactory:

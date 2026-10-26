@@ -75,6 +75,7 @@ def render_captured_parse_overlay(
                 "    ast: _DocumentNode",
                 "    operation_name: str | None = None",
                 "    schema_name: str | None = _field(default=None, kw_only=True)",
+                "    persisted_id: str | None = _field(default=None, kw_only=True)",
                 "",
                 companion.stub[len(graphql_import) :].rstrip(),
                 "",
