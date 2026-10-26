@@ -93,10 +93,12 @@ prefixes cannot establish a trusted external alias constructor. Supported builti
 aliased `bool` class bases remain rejected as non-subclassable. Constructors must resolve to supported external `builtins`, `typing`,
 `typing_extensions` or `collections.abc` exports; shadowing and mutations invalidate that proof. External arguments stay
 unverified, and containers do not inherit TypedDict provenance from their element.
-Explicit binary unions accept two direct named/qualified type operands or literal
-None, with at least one named operand: `N | M`, `N | None` or `None | N`. Flat
-`typing.Union[...]` and `typing_extensions.Union[...]` aliases use direct named
-operands or literal None, and may appear inside a supported container alias.
+Explicit type aliases accept flat PEP 604 chains of direct named/qualified type
+operands and literal None, with at least one named operand: `N | M`, `N | None`,
+`None | N` or `N | M | None`. Parenthesized or right-nested union groups remain
+unsupported. `typing.Union[...]` and `typing_extensions.Union[...]` aliases use
+direct named operands or literal None, and may appear inside a supported
+container alias.
 Those operands may include a flat PEP 604 union, such as
 `Union[str | int, None]` or `list[Union[str | int, None]]`; its leaves follow
 the same direct-name rule.

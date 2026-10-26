@@ -1082,6 +1082,24 @@ class _Graph:
             )
         )
 
+    def flat_union_operands(self, module: _Module, node: ast.BinOp) -> list[ast.expr]:
+        if not isinstance(node.op, ast.BitOr):
+            raise _Unresolved("Union aliases require the PEP 604 | operator")
+        arguments: list[ast.expr] = []
+        current = node
+        while isinstance(current.op, ast.BitOr):
+            arguments.append(current.right)
+            left = current.left
+            if isinstance(left, ast.BinOp) and isinstance(left.op, ast.BitOr):
+                if module.span(left).start != module.span(current).start:
+                    raise _Unresolved("Parenthesized union groups are unsupported")
+                current = left
+                continue
+            arguments.append(left)
+            break
+        arguments.reverse()
+        return arguments
+
     def alias_target(
         self,
         module: _Module,
@@ -1091,10 +1109,9 @@ class _Graph:
         active: set[tuple[str, str, str]],
     ) -> _Value:
         if isinstance(node, ast.BinOp):
-            if not isinstance(node.op, ast.BitOr):
-                raise _Unresolved("Union aliases require two direct type operands")
+            arguments = self.flat_union_operands(module, node)
             values: list[_Value] = []
-            for argument in (node.left, node.right):
+            for argument in arguments:
                 if isinstance(argument, ast.Constant) and argument.value is None:
                     continue
                 if not isinstance(argument, (ast.Name, ast.Attribute)):
@@ -1276,14 +1293,7 @@ class _Graph:
             flat_operands: list[ast.expr] = []
             for operand in operands:
                 if isinstance(operand, ast.BinOp) and isinstance(operand.op, ast.BitOr):
-                    chain: list[ast.expr] = [operand]
-                    while (
-                        chain
-                        and isinstance(chain[0], ast.BinOp)
-                        and isinstance(chain[0].op, ast.BitOr)
-                    ):
-                        chain[:1] = [chain[0].left, chain[0].right]
-                    flat_operands.extend(chain)
+                    flat_operands.extend(self.flat_union_operands(module, operand))
                 else:
                     flat_operands.append(operand)
             operands = flat_operands

@@ -524,11 +524,19 @@ exports.run = async () => {
       return stub.includes("'selected': 'String | None'") && (await hover(8, 2)).includes("None") && diagnostics().some(item => item.range.start.line === 10);
     }, "nullable output and Pylance refresh from GraphQL edit");
     if (!results.pylance.nullableRefresh) results.lifecycle.nullableProbe = {
-      stub: await fs.readFile(path.join(stubRoot, "graphql_desk_generated", "_documents", "default", "d0.pyi"), "utf8").catch(() => null),
+      stubHasNullableType: (await fs.readFile(path.join(stubRoot, "graphql_desk_generated", "_documents", "default", "d0.pyi"), "utf8").catch(() => "")).includes("'selected': 'String | None'"),
       hover: await hover(8, 2),
       diagnostics: diagnostics().map(item => ({ line: item.range.start.line, message: item.message })),
       stubPath: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath"),
     };
+    if (!results.pylance.nullableRefresh) console.error("GRAPHQL_DESK_NULLABLE_REFRESH_FAILURE " + JSON.stringify({
+      probe: results.lifecycle.nullableProbe,
+      traceCount: results.lifecycle.coldTrace.length,
+      trace: results.lifecycle.coldTrace.filter(item => [
+        "generation.publish.started", "generation.publish.returned", "pylance.stubPath.changed",
+        "pylance.restart.started", "pylance.restart.returned", "pylance.restart.failed",
+      ].includes(item.stage)).slice(-12),
+    }));
     assert.ok(results.pylance.nullableRefresh);
     results.lifecycle.nullableArtifactsPublished = true;
     await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
