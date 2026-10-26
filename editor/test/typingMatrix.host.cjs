@@ -447,6 +447,15 @@ exports.run = async () => {
     if (!inputContractReady) {
       try { results.pylance.publisherSnapshot = await capturePublisherSnapshot(); }
       catch (error) { results.pylance.publisherSnapshotError = String(error); }
+      results.pylance.failureEvidence = {
+        selectedStubPath: path.relative(workspace,
+          path.resolve(workspace, vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""))),
+        diagnostics: vscode.languages.getDiagnostics(semanticUri).map(item => ({
+          source: item.source,
+          message: item.message,
+          line: item.range.start.line,
+        })),
+      };
     }
     assert.ok(inputContractReady, JSON.stringify(results.pylance));
     results.pylance.inputContracts = true;

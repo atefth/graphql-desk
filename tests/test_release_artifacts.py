@@ -27,7 +27,8 @@ class ReleaseArtifactTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        # Match ProjectConfig.root, which is canonicalized before output paths are built.
+        self.root = Path(temporary.name).resolve()
         config = parse_project_config(
             '[tool.graphql-desk]\nschema="schema.graphql"\n'
             'schema_output="graphql_desk_generated/default.pyi"\n',
