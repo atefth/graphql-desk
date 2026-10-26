@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
+const { createHash } = require("node:crypto");
 const http = require("node:http");
 const { pathToFileURL, fileURLToPath } = require("node:url");
 const { buildSchema, introspectionFromSchema } = require("graphql");
@@ -578,13 +579,22 @@ test("workspace folder watchers follow additions and removals and refresh closed
   const nestedGenerationDir = path.join(generationDir, "graphql_desk_generated");
   await fs.mkdir(nestedGenerationDir);
   addedWatch.fire(Uri.file(nestedGenerationDir));
+  const typedMarkerDir = path.join(generationDir, "graphql_desk-stubs");
+  await fs.mkdir(typedMarkerDir);
+  const typedMarker = path.join(typedMarkerDir, "py.typed");
+  const typedMarkerBytes = Buffer.from("partial\n");
+  await fs.writeFile(typedMarker, typedMarkerBytes);
+  const completeManifest = path.join(generationDir, "complete.json");
+  await fs.writeFile(completeManifest, JSON.stringify({ padding: "x".repeat(5000), owner: "graphql-desk-analysis-generation",
+    format: 2, files: [{ path: "graphql_desk-stubs/py.typed", sha256: createHash("sha256").update(typedMarkerBytes).digest("hex") }] }));
+  addedWatch.fire(Uri.file(typedMarker));
+  assert.equal(invalidations, beforeGeneratedStub + 2,
+    "Format 2 py.typed is recognized before its directory events arrive");
   const generationArtifact = path.join(generationDir, "graphql_desk_generated", "default.pyi");
   await fs.writeFile(generationArtifact, renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "class Generated: ...\n"));
   addedWatch.fire(Uri.file(generationDir));
   addedWatch.fire(Uri.file(generationArtifact));
   assert.equal(invalidations, beforeGeneratedStub + 2, "Immutable generation creation and contents must not self-invalidate the source snapshot");
-  const completeManifest = path.join(generationDir, "complete.json");
-  await fs.writeFile(completeManifest, JSON.stringify({ padding: "x".repeat(5000), owner: "graphql-desk-analysis-generation" }));
   addedWatch.fire(Uri.file(completeManifest));
   assert.equal(invalidations, beforeGeneratedStub + 2, "Large owned generation manifests are read completely before classifying watcher events");
   const foreignGenerationFile = path.join(generationDir, "foreign.txt");
