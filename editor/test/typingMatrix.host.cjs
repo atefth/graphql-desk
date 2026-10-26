@@ -420,16 +420,14 @@ exports.run = async () => {
         const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
         const generationRoot = path.resolve(workspace, settings["python.analysis.stubPath"]);
         const complete = JSON.parse(await fs.readFile(path.join(generationRoot, "complete.json"), "utf8"));
-        const operation = complete.operationManifest.flatMap(project => project.operations)
-          .find(item => item.binding === "inputs" || item.operation_name === "Inputs");
         results.pylance.publisherSnapshot = {
           generation: { id: complete.id, sequence: complete.sequence, analysisId: complete.analysisId },
-          operation: operation && {
-            status: operation.status,
-            declarationPath: operation.declaration_path,
-            declarationSymbol: operation.declaration_symbol,
-            sourceExports: operation.source_exports,
-          },
+          operationManifest: complete.operationManifest.map(project => ({
+            project: project.project,
+            operations: project.operations.map(({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports }) =>
+              ({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports })),
+          })),
+          sourceArtifacts: complete.files.map(file => file.path).filter(file => file.includes("/sources/") || file.endsWith("/default.pyi")),
           generationEntries: await fs.readdir(generationRoot),
         };
         const generatedRoot = path.join(generationRoot, "graphql_desk_generated");
