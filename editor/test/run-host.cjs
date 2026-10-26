@@ -295,7 +295,8 @@ async function main() {
         "externalDate(value: ExternalDate!): ExternalDate! " +
         "externalColor(value: ExternalColor!): ExternalColor! }\n") ] : []),
       fs.writeFile(sourcePath, source),
-      ...(suite === "typingMatrix" ? [fs.writeFile(path.join(workspace, "operation_semantics.py"), "")] : []),
+      ...(suite === "typingMatrix" ? [fs.writeFile(path.join(workspace, "operation_semantics.py"),
+        "from graphql_desk_generated.default import graphql\nseed = graphql('query Seed { selected }')\n")] : []),
       ...(["typingMatrix", "parserOverlay"].includes(suite) ? [fs.writeFile(path.join(workspace, "parser_consumer.py"),
         "from graphql_desk import parse\ndocument = parse('query ParserQuery { selected }')\nparsed_name = document.definitions[0].name.value\n")] : []),
       fs.writeFile(path.join(workspace, "fragments.py"), "from graphql_desk_generated.default import graphql\ncard = graphql('fragment Card on User { name }')\n"),

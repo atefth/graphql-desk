@@ -339,7 +339,8 @@ exports.run = async () => {
     ].join("\n"));
     const semanticPath = path.join(workspace, "operation_semantics.py");
     const semanticDiskBaseline = await fs.readFile(semanticPath, "utf8");
-    assert.equal(semanticDiskBaseline, "", "The semantic fixture exists before live typing edits it");
+    assert.match(semanticDiskBaseline, /seed = graphql\('query Seed \{ selected \}'\)/,
+      "The semantic source module is indexed before live typing edits it");
     const semanticSource = [
       "from graphql_desk import TypedDocument",
       "from graphql_desk_generated.default import graphql",
