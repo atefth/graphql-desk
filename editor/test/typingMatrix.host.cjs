@@ -37,6 +37,7 @@ function pythonVersion(python) {
 }
 
 exports.run = async () => {
+  const suite = process.env.GRAPHQL_DESK_TEST_SUITE;
   const results = { host: vscode.version, pylance: {}, lifecycle: { invalidationAndRepair: {} } };
   let settingChanges;
   let diagnosticChanges;
@@ -655,6 +656,73 @@ exports.run = async () => {
         /String/.test(selectedType) && /\bID\b/.test(unaffectedType);
     }, "Pylance typing recovers after restoring the original worker interpreter", 60000);
     assert.ok(results.lifecycle.interpreterChange.restored);
+
+    if (suite === "typingMatrix") {
+      await Promise.all([
+        fs.writeFile(path.join(workspace, "mapping_types.py"),
+          "from typing import TypeAlias\nStringInput: TypeAlias = str | (bytes | bool)\nStringOutput: TypeAlias = float | (int | bool)\nBooleanInput: TypeAlias = bool | (int | bytes)\nBooleanOutput: TypeAlias = bool | (int | bytes)\n"),
+        fs.writeFile(path.join(workspace, "mapping_consumer.py"), [
+          "from typing import TypeVar",
+          "from graphql_desk import TypedDocument",
+          "from graphql_desk_generated.default import graphql",
+          "from mapping_types import StringOutput",
+          "R = TypeVar('R')",
+          "V = TypeVar('V')",
+          "def execute(document: TypedDocument[R, V], variables: V) -> R: ...",
+          "mapping_doc = graphql('query Mapping($value: Boolean!) { selected @include(if: $value) }')",
+          "result = execute(mapping_doc, {'value': True})",
+          "output = result['selected']",
+          "output_ok: StringOutput = output",
+          "output_bad: str = output",
+          "valid_bool_input = execute(mapping_doc, {'value': False})",
+          "invalid_input = execute(mapping_doc, {'value': 1.5})",
+          "",
+        ].join("\n")),
+      ]);
+      const groupedMappingConfig = originalConfig.replace("[tool.graphql-desk]\n",
+        '[tool.graphql-desk]\nscalars = { String = { input = "mapping_types.StringInput", output = "mapping_types.StringOutput" }, Boolean = { input = "mapping_types.BooleanInput", output = "mapping_types.BooleanOutput" } }\n');
+      assert.notEqual(groupedMappingConfig, originalConfig);
+      await replace(configDocument, groupedMappingConfig);
+      const mappingUri = vscode.Uri.file(path.join(workspace, "mapping_consumer.py"));
+      const mappingDocument = await vscode.workspace.openTextDocument(mappingUri);
+      await vscode.window.showTextDocument(mappingDocument, { preview: false });
+      const mappingPosition = name => {
+        const offset = mappingDocument.getText().indexOf(name) + 1;
+        assert.ok(offset > 0, `Expected grouped mapping variable ${name}`);
+        return mappingDocument.positionAt(offset);
+      };
+      const mappingHover = async name => {
+        const items = await vscode.commands.executeCommand("vscode.executeHoverProvider", mappingUri, mappingPosition(name)) || [];
+        return items.flatMap(item => item.contents.map(content => typeof content === "string" ? content : content.value)).join("\n");
+      };
+      const mappingDiagnostics = name => vscode.languages.getDiagnostics(mappingUri)
+        .filter(item => item.range.start.line === mappingPosition(name).line).map(item => item.message);
+      results.lifecycle.groupedMappingAlias = await until(async () => {
+        const output = await mappingHover("output =");
+        const outputPositiveErrors = [...mappingDiagnostics("output_ok"), ...mappingDiagnostics("valid_bool_input")];
+        const outputNegativeErrors = mappingDiagnostics("output_bad");
+        const inputNegativeErrors = mappingDiagnostics("invalid_input");
+        const mappingDiagnosticsFromExtension = vscode.languages.getDiagnostics(mappingUri)
+          .filter(item => item.source === "GraphQL Desk").map(item => item.message);
+        results.lifecycle.groupedMappingAliasProbe = { output, outputPositiveErrors, outputNegativeErrors,
+          inputNegativeErrors, mappingDiagnosticsFromExtension };
+        return /StringOutput/.test(output) && outputPositiveErrors.length === 0 &&
+          outputNegativeErrors.length > 0 && inputNegativeErrors.length > 0 && mappingDiagnosticsFromExtension.length === 0;
+      }, "Pylance applies grouped PEP 604 input and output aliases to live scalar typing", 60000);
+      assert.ok(results.lifecycle.groupedMappingAlias,
+        JSON.stringify(results.lifecycle.groupedMappingAliasProbe));
+      const groupedStubPath = vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", "");
+      assert.ok(groupedStubPath);
+      await replace(configDocument, originalConfig);
+      results.lifecycle.groupedMappingAliasRestored = await until(async () => {
+        const output = await mappingHover("output =");
+        const stubPath = vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", "");
+        results.lifecycle.groupedMappingAliasRestoreProbe = { output, stubPath };
+        return stubPath !== groupedStubPath && /: str\b|: String\b/.test(output) && !/StringOutput/.test(output);
+      }, "restoring the original mapping config republishes baseline typing", 60000);
+      assert.ok(results.lifecycle.groupedMappingAliasRestored,
+        JSON.stringify(results.lifecycle.groupedMappingAliasRestoreProbe));
+    }
 
     const configuration = vscode.workspace.getConfiguration("python", uri);
     results.lifecycle.configuredStubPath = configuration.get("analysis.stubPath");

@@ -678,6 +678,8 @@ BadResult() # error
             ("from typing import TypeAlias\nText:TypeAlias=str|int", True),
             ("from typing import TypeAlias\nText:TypeAlias=int|str", True),
             ("from typing import TypeAlias\nText:TypeAlias=str|int|None", True),
+            ("from typing import TypeAlias\nText:TypeAlias=(str|int)|None", True),
+            ("from typing import TypeAlias\nText:TypeAlias=str|(int|None)", True),
             (
                 "from typing_extensions import TypeAlias,Literal\n"
                 "Text:TypeAlias=Literal['hello','world']",
@@ -761,7 +763,28 @@ BadResult() # error
         ):
             with self.subTest(declaration=declaration):
                 authored = source
-                if "str|int|None" in declaration:
+                if any(
+                    form in declaration
+                    for form in (
+                        "Text:TypeAlias=(str|int)|None",
+                        "Text:TypeAlias=str|(int|None)",
+                    )
+                ):
+                    authored = source.replace(
+                        "value=Text('hello')",
+                        "value:Text='hello'\nnumber:Text=7\nnone:Text=None\n"
+                        "assert graphql.scalar('String',number) is number\n"
+                        "assert graphql.scalar('String',none) is none",
+                    )
+                    authored = authored.replace(
+                        "result: QueryResult={'greeting':value}",
+                        "result: QueryResult={'greeting':number}",
+                    )
+                    authored += (
+                        " bad=graphql.scalar('String',1.5)\n"
+                        " bad=graphql.scalar('String',[1])\n"
+                    )
+                elif "str|int|None" in declaration:
                     authored = source.replace(
                         "value=Text('hello')",
                         "value:Text='hello'\nnumber:Text=7\nnone:Text=None\n"

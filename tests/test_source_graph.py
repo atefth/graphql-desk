@@ -74,12 +74,21 @@ class SourceGraphTests(unittest.TestCase):
         base = module("base", "class Known: pass")
         models = module(
             "models",
-            "from typing import TypeAlias\nimport base\n"
+            "from typing import TypeAlias\nimport base,typing\n"
             "from typing_extensions import TypedDict\n"
             "class Data(TypedDict):\n value:str\n"
             "Text:TypeAlias=str|int\nReverse:TypeAlias=int|str\n"
             "Nullable:TypeAlias=str|int|None\n"
             "NullableReverse:TypeAlias=None|int|str\n"
+            "GroupedLeft:TypeAlias=(str|int)|None\n"
+            "GroupedRight:TypeAlias=str|(int|None)\n"
+            "GroupedNested:TypeAlias=((str|int)|(None|bytes))\n"
+            "GroupedQualified:TypeAlias=(base.Known|str)|None\n"
+            "GroupedNullableDuplicate:TypeAlias=(str|None)|None\n"
+            "UnionGrouped:TypeAlias=typing.Union[(str|int),None]\n"
+            "ContainerUnion:TypeAlias=list[typing.Union[(str|int),None]]\n"
+            "GroupedContainerUnion:TypeAlias=list[str|(int|None)]\n"
+            "GroupedContainerUnionLeft:TypeAlias=list[(str|int)|None]\n"
             "Long:TypeAlias=bytes|str|int|None\n"
             "Known:TypeAlias=base.Known|str\nAlias:TypeAlias=Text\n"
             "Duplicate:TypeAlias=Data|Data\n",
@@ -95,6 +104,15 @@ class SourceGraphTests(unittest.TestCase):
             "models.Nullable",
             "models.NullableReverse",
             "models.Long",
+            "models.GroupedLeft",
+            "models.GroupedRight",
+            "models.GroupedNested",
+            "models.GroupedQualified",
+            "models.GroupedNullableDuplicate",
+            "models.UnionGrouped",
+            "models.ContainerUnion",
+            "models.GroupedContainerUnion",
+            "models.GroupedContainerUnionLeft",
         )
         result = resolve_type_symbols(symbols, modules=snapshots, project_id="app")
         self.assertEqual([r.status for r in result], ["resolved"] * len(symbols))
@@ -114,6 +132,7 @@ class SourceGraphTests(unittest.TestCase):
         )
         for declaration in (
             "from exports import Public\nclass Bad(Public):pass",
+            "from models import GroupedRight\nclass Bad(GroupedRight):pass",
             "from models import Duplicate\nclass Bad(Duplicate,total=False):pass",
         ):
             self.assertEqual(
@@ -130,9 +149,9 @@ class SourceGraphTests(unittest.TestCase):
             "Alias:TypeAlias=str|TypeAlias",
             "Alias:TypeAlias=str|'int'",
             "Alias:TypeAlias=str|list[int]",
-            "Alias:TypeAlias=(str|int)|None",
-            "Alias:TypeAlias=str|(int|None)",
-            "Alias:TypeAlias=str|int|(None|str)",
+            "Alias:TypeAlias=str|(int|list[str])",
+            "Alias:TypeAlias=str|(Missing|None)",
+            "Alias:TypeAlias=str|(value|None)\nvalue=42",
             "value=42\nAlias:TypeAlias=str|value",
             "Alias:TypeAlias=str|int\nint=other",
         ):
@@ -1976,13 +1995,10 @@ class SourceGraphTests(unittest.TestCase):
             "Alias:TypeAlias=str|None\nAlias=other",
             "Alias:TypeAlias=TypeAlias|None",
             "Alias:TypeAlias='str'|None",
-            "Alias:TypeAlias=(str|None)|None",
             "Alias:TypeAlias=list[str]|None",
             "Alias:TypeAlias=None|None",
             "Alias:TypeAlias=list[None]",
             "Alias:TypeAlias=list[None|None]",
-            "Alias:TypeAlias=list[str|(int|None)]",
-            "Alias:TypeAlias=list[(str|int)|None]",
             "Alias:TypeAlias=list[str|list[int]]",
             "Alias:TypeAlias=list[Union[str]]",
             "Alias:TypeAlias=list[Union[None,None]]",
