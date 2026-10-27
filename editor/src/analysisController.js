@@ -187,6 +187,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!["file", "untitled"].includes(uri.scheme) || !path.isAbsolute(uri.fsPath)) return null;
     return canonical(uri.fsPath);
   };
+  const watchesSchema = (state, filename) => [...state.watches.keys()].some(watched => canonical(watched) === filename);
+  const isGraphqlDocument = filename => /\.(?:graphql|graphqls|gql)$/i.test(filename);
   async function stateFor(snapshot, skip) {
     const ticket = epoch;
     if (!trusted()) { skip?.("workspace-untrusted"); return null; }
@@ -284,7 +286,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const found = await vscode.workspace.findFiles(new vscode.RelativePattern(state.folder, "**/*.py"), null);
     const documents = vscode.workspace.textDocuments.filter(document => {
       const filename = localPath(document);
-      return filename && inside(state.root, filename);
+      return filename && (inside(state.root, filename) || isGraphqlDocument(filename));
     });
     const pythonConfig = vscode.workspace.getConfiguration("python", state.folder.uri);
     const inspection = pythonConfig.inspect?.("analysis.stubPath");
@@ -728,8 +730,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (event !== "onDidChangeConfiguration" && extensionSettingsDocument(document)) return;
       const filename = event !== "onDidChangeConfiguration" && document ? localPath(document) : null;
       if (document && event !== "onDidChangeConfiguration" && (!filename ||
-          !(vscode.workspace.workspaceFolders ?? []).some(folder => folder.uri.scheme === "file" &&
-            inside(canonical(folder.uri.fsPath), filename)))) return;
+          (!(vscode.workspace.workspaceFolders ?? []).some(folder => folder.uri.scheme === "file" &&
+            inside(canonical(folder.uri.fsPath), filename)) &&
+           ![...states.values()].some(state => watchesSchema(state, filename))))) return;
       if (event !== "onDidChangeConfiguration" && document?.uri?.scheme === "file" &&
           ownedAnalysisPaths.has(canonical(document.uri.fsPath)) && !(event === "onDidChangeTextDocument" && document.isDirty)) return;
       if (event === "onDidChangeConfiguration" && change?.affectsConfiguration &&
