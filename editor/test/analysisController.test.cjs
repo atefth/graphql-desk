@@ -324,15 +324,17 @@ test("unrelated host documents do not stale artifacts, but required schema edits
   const fixture = await setup(t);
   await fs.writeFile(path.join(fixture.root, "dependency.py"), "dependency = 1\n");
   fixture.candidates(["main.py", "dependency.py"]);
+  const externalDocument = fixture.document("../unrelated.pyi", "value: int\n");
   const schema = fixture.document("schema.graphql", "type Query { title: String }");
   schema.isDirty = true;
   let artifactCalls = 0;
+  let capturedDocuments = [];
   const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
     const worker = createAnalysisWorker(options);
     return { ...worker, async request(message, requestOptions) {
+      if (message.op === "prepare") capturedDocuments = message.documents;
       const reply = await worker.request(message, requestOptions);
       if (message.op === "artifacts" && ++artifactCalls === 1) {
-        fixture.document("../unrelated.pyi", "value: int\n");
         fixture.document("dependency.py", "dependency = 1\n");
       }
       else if (message.op === "artifacts") { schema.text = "type Query { title: String extra: Int }"; schema.version += 1; }
@@ -344,6 +346,8 @@ test("unrelated host documents do not stale artifacts, but required schema edits
 
   const current = await controller.artifacts(snapshot);
   assert.ok(current, "an unrelated host document must not invalidate generated artifacts");
+  assert.ok(!capturedDocuments.some(document => document.id === externalDocument.uri.toString()),
+    "Documents outside the workspace must not enter the captured analysis snapshot");
   const analysis = await controller.analyze(snapshot);
   assert.ok(analysis);
   assert.equal(await controller.isCurrent(analysis, snapshot), true, "an unrelated host document must not stale editor analysis");
