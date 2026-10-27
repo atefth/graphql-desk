@@ -535,6 +535,11 @@ test("workspace folder watchers follow additions and removals and refresh closed
   fixture.events.onDidSaveTextDocument.fire(generatedDocument);
   fixture.events.onDidCloseTextDocument.fire(generatedDocument);
   assert.equal(invalidations, beforeGeneratedStub, "Pylance opening generated typing files must not invalidate their own capture");
+  const internalDocument = { uri: { scheme: "vscode-userdata", fsPath: "", toString: () => "vscode-userdata:/input-0" } };
+  fixture.events.onDidOpenTextDocument.fire(internalDocument);
+  fixture.events.onDidChangeTextDocument.fire({ document: internalDocument, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
+  fixture.events.onDidCloseTextDocument.fire(internalDocument);
+  assert.equal(invalidations, beforeGeneratedStub, "VS Code internal documents must not invalidate GraphQL analysis");
   generatedDocument.isDirty = true;
   fixture.events.onDidChangeTextDocument.fire({ document: generatedDocument, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
   assert.equal(invalidations, beforeGeneratedStub + 1, "Editing a generated buffer still invalidates analysis");

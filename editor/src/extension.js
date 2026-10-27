@@ -287,7 +287,8 @@ function activate(context) {
       publisher = createAnalysisGenerations(vscode, folderRoot, managed.root);
       generations.set(key, publisher);
     }
-    if (!previous && publisher && managed.selectedSetting) {
+    if (publisher && managed.selectedSetting && (!previous || previous.managedRoot !== managed.root ||
+        (!previousOverride && previous.selectedSetting !== managed.selectedSetting))) {
       const selectedDirectory = path.resolve(folderRoot, managed.selectedSetting);
       const selected = publisher.current(managed).find(item => path.resolve(item.directory) === selectedDirectory);
       if (selected) {

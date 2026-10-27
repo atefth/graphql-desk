@@ -723,6 +723,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (vscode.workspace[event]) subscriptions.push(vscode.workspace[event](change => {
       const document = change?.document ?? (["onDidOpenTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument"].includes(event) ? change : null);
       if (event !== "onDidChangeConfiguration" && extensionSettingsDocument(document)) return;
+      if (event !== "onDidChangeConfiguration" && document && !localPath(document)) return;
       if (event !== "onDidChangeConfiguration" && document?.uri?.scheme === "file" &&
           ownedAnalysisPaths.has(canonical(document.uri.fsPath)) && !(event === "onDidChangeTextDocument" && document.isDirty)) return;
       if (event === "onDidChangeConfiguration" && change?.affectsConfiguration &&
