@@ -282,7 +282,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   }
   async function capture(state) {
     const found = await vscode.workspace.findFiles(new vscode.RelativePattern(state.folder, "**/*.py"), null);
-    const documents = vscode.workspace.textDocuments.filter(document => localPath(document));
+    const documents = vscode.workspace.textDocuments.filter(document => {
+      const filename = localPath(document);
+      return filename && inside(state.root, filename);
+    });
     const pythonConfig = vscode.workspace.getConfiguration("python", state.folder.uri);
     const inspection = pythonConfig.inspect?.("analysis.stubPath");
     const explicitlyConfigured = inspection && [inspection.globalValue, inspection.workspaceValue, inspection.workspaceFolderValue]
@@ -723,7 +726,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (vscode.workspace[event]) subscriptions.push(vscode.workspace[event](change => {
       const document = change?.document ?? (["onDidOpenTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument"].includes(event) ? change : null);
       if (event !== "onDidChangeConfiguration" && extensionSettingsDocument(document)) return;
-      if (event !== "onDidChangeConfiguration" && document && !localPath(document)) return;
+      const filename = event !== "onDidChangeConfiguration" && document ? localPath(document) : null;
+      if (document && event !== "onDidChangeConfiguration" && (!filename ||
+          !(vscode.workspace.workspaceFolders ?? []).some(folder => folder.uri.scheme === "file" &&
+            inside(canonical(folder.uri.fsPath), filename)))) return;
       if (event !== "onDidChangeConfiguration" && document?.uri?.scheme === "file" &&
           ownedAnalysisPaths.has(canonical(document.uri.fsPath)) && !(event === "onDidChangeTextDocument" && document.isDirty)) return;
       if (event === "onDidChangeConfiguration" && change?.affectsConfiguration &&

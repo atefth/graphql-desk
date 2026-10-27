@@ -540,6 +540,11 @@ test("workspace folder watchers follow additions and removals and refresh closed
   fixture.events.onDidChangeTextDocument.fire({ document: internalDocument, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
   fixture.events.onDidCloseTextDocument.fire(internalDocument);
   assert.equal(invalidations, beforeGeneratedStub, "VS Code internal documents must not invalidate GraphQL analysis");
+  const externalDocument = fixture.document("../external-library.pyi");
+  fixture.events.onDidOpenTextDocument.fire(externalDocument);
+  fixture.events.onDidChangeTextDocument.fire({ document: externalDocument, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
+  fixture.events.onDidCloseTextDocument.fire(externalDocument);
+  assert.equal(invalidations, beforeGeneratedStub, "Documents outside workspaces must not invalidate GraphQL analysis");
   generatedDocument.isDirty = true;
   fixture.events.onDidChangeTextDocument.fire({ document: generatedDocument, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
   assert.equal(invalidations, beforeGeneratedStub + 1, "Editing a generated buffer still invalidates analysis");
