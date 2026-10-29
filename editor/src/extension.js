@@ -206,7 +206,9 @@ function activate(context) {
   function traceSkip(reason) {
     if (reason === lastSkipReason) return;
     lastSkipReason = reason;
-    output.appendLine(`Live typing skipped: ${reason}`);
+    const detail = process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1"
+      ? ` (${new Error().stack?.split("\n").slice(2, 4).join(" <- ") ?? "unknown caller"})` : "";
+    output.appendLine(`Live typing skipped: ${reason}${detail}`);
   }
   function managedRoot(folder, folderRoot) {
     let promise = roots.get(folderRoot);
@@ -626,3 +628,4 @@ function activate(context) {
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
 module.exports = { activate, deactivate, operationDependencyImpact, reconfigureWorkspaceRoots, typingFingerprint };
+
