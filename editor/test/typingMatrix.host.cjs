@@ -43,6 +43,8 @@ exports.run = async () => {
   let diagnosticChanges;
   let selectionChanges;
   let originalCreateOutputChannel;
+  const workerErrors = [];
+  const originalConsoleError = console.error;
   try {
     for (const id of ["ms-python.python", "ms-python.vscode-pylance"]) {
       const extension = vscode.extensions.getExtension(id);
@@ -76,6 +78,12 @@ exports.run = async () => {
     });
     // Surface a bounded worker traceback only in this isolated host failure run.
     process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR = "1";
+    console.error = (...args) => {
+      if (args[0] === "GraphQL Desk worker stderr:" && workerErrors.length < 8) {
+        workerErrors.push(args.join(" ").slice(-4096));
+      }
+      originalConsoleError(...args);
+    };
     const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
     assert.ok(extension, "GraphQL Desk extension must be loaded in the host");
     await extension.activate();
@@ -481,6 +489,7 @@ exports.run = async () => {
       results.pylance.failureEvidence = {
         selectedStubPath: path.relative(workspace,
           path.resolve(workspace, vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""))),
+        workerErrors,
         diagnostics: vscode.languages.getDiagnostics(semanticUri).map(item => ({
           source: item.source,
           message: item.message,
@@ -980,6 +989,7 @@ exports.run = async () => {
     settingChanges?.dispose();
     diagnosticChanges?.dispose();
     if (originalCreateOutputChannel) vscode.window.createOutputChannel = originalCreateOutputChannel;
+    console.error = originalConsoleError;
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
     console.log(`GRAPHQL_DESK_TYPING_MATRIX ${JSON.stringify(results)}`);
   }
