@@ -585,7 +585,13 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         cancellation?.dispose();
         if (state.artifactsAbort === abort) state.artifactsAbort = null;
       });
-    } catch { state.cached = null; skip(failureReason); return null; }
+    } catch (error) {
+      state.cached = null;
+      skip(process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1"
+        ? `${failureReason}: ${String(error).slice(0, 1000)}`
+        : failureReason);
+      return null;
+    }
   }
   async function quarantine({ workspace, projects, invalidated_owners, preserve_current = false } = {}) {
     if (!trusted() || typeof workspace !== "string" || !path.isAbsolute(workspace) ||
