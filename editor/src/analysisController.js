@@ -637,6 +637,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     for (const state of states.values()) if (state.cached?.bundle === bundle) return state.cached.preferences.find(item => item.project === call.identity.module.project)?.client_directives ?? [];
     return [];
   }
+  function analysisGenerationStagingFile(filename) {
+    const parts = path.resolve(filename).split(path.sep);
+    const lower = parts.map(part => part.toLowerCase());
+    const marker = lower.lastIndexOf(".graphql-desk");
+    return marker >= 0 && lower[marker + 1] === "typings" && lower[marker + 2] === "generations" &&
+      /^g-\d+-[0-9a-f-]{36}$/i.test(parts[marker + 3] ?? "") &&
+      /^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.basename(filename));
+  }
   function reconcileFolderWatches() {
     const folders = new Map((vscode.workspace.workspaceFolders ?? [])
       .filter(folder => folder.uri.scheme === "file").map(folder => [folder.uri.toString(), folder]));
@@ -658,6 +666,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     for (const [uri, folder] of folders) if (!folderWatches.has(uri)) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, "**/*"));
       const sourceChanged = resource => {
+        if (resource?.scheme === "file" && analysisGenerationStagingFile(resource.fsPath)) return;
         if (resource?.scheme === "file" && path.basename(resource.fsPath).toLowerCase() === "settings.json" &&
             path.basename(path.dirname(resource.fsPath)).toLowerCase() === ".vscode") return;
         if (resource?.scheme === "file") {
@@ -750,6 +759,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       const document = change?.document ?? (["onDidOpenTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument"].includes(event) ? change : null);
       if (event !== "onDidChangeConfiguration" && extensionSettingsDocument(document)) return;
       const filename = event !== "onDidChangeConfiguration" && document ? localPath(document) : null;
+      if (filename && analysisGenerationStagingFile(filename)) return;
       if (document && event !== "onDidChangeConfiguration" && (!filename ||
           (!(vscode.workspace.workspaceFolders ?? []).some(folder => folder.uri.scheme === "file" &&
             inside(canonical(folder.uri.fsPath), filename)) &&
