@@ -106,8 +106,11 @@ async function run() {
       .find(item => item.code === "graphql-desk.persisted-hash-mismatch");
     assert.ok(staleId);
     assert.match(persistedDocument.getText(staleId.range), /^"sha256:/);
+    await recordProgress("stale-id-diagnostic-ready");
+    await recordProgress("persisted-update-action-start");
     const persistedActions = await vscode.commands.executeCommand("vscode.executeCodeActionProvider",
       persistedDocument.uri, staleId.range);
+    await recordProgress("persisted-update-action-returned");
     await recordProgress("persisted-update-actions-complete");
     const updateId = persistedActions.find(item => /Update persisted ID/.test(item.title));
     assert.ok(updateId);
