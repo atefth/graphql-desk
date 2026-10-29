@@ -239,6 +239,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
     });
     child = process;
     const parts = [];
+    let stderrTail = Buffer.alloc(0);
     let bytes = 0;
     const failed = () => { if (child === process) stop(); };
     process.on("error", failed);
@@ -246,7 +247,14 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
     process.stdin.on("error", failed);
     process.stdout.on("error", failed);
     process.stderr.on("error", failed);
-    process.stderr.on("data", failed);
+    process.stderr.on("data", chunk => {
+      if (child !== process) return;
+      if (globalThis.process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1" && Buffer.isBuffer(chunk)) {
+        stderrTail = Buffer.concat([stderrTail, chunk]).subarray(-4096);
+      }
+      if (stderrTail.length) console.error("GraphQL Desk worker stderr:", stderrTail.toString("utf8"));
+      failed();
+    });
     process.stdout.on("data", chunk => {
       if (child !== process) return;
       try {

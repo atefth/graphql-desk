@@ -74,6 +74,8 @@ exports.run = async () => {
         results.lifecycle.stubPathSelections.push(vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""));
       }
     });
+    // Surface a bounded worker traceback only in this isolated host failure run.
+    process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR = "1";
     const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
     assert.ok(extension, "GraphQL Desk extension must be loaded in the host");
     await extension.activate();
