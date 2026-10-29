@@ -324,7 +324,12 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
       try {
         const result = await new Promise((resolve, reject) => {
           const abort = () => stop();
-          const timer = setTimeout(abort, timeoutMs);
+          const timer = setTimeout(() => {
+            if (globalThis.process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1") {
+              console.error(`GraphQL Desk worker timed out after ${timeoutMs} ms`);
+            }
+            abort();
+          }, timeoutMs);
           const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); };
           pending = { resolve, reject, cleanup, request: message };
           signal?.addEventListener("abort", abort, { once: true });
