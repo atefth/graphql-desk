@@ -451,7 +451,14 @@ function activate(context) {
       result = await controller.artifacts(snapshot, token, captureArtifactFailure);
     }
     if (!result) return;
-    if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
+    const analysisCurrent = result.isCurrent();
+    if (disposed || ticket !== generation || !analysisCurrent) {
+      if (process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1") {
+        console.error("GraphQL Desk skipped publication:", JSON.stringify({ disposed, ticket, generation,
+          analysisCurrent }));
+      }
+      traceSkip("analysis-snapshot-stale"); return;
+    }
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
     if (!folder) { traceSkip("document-outside-workspace"); return; }
     const folderRoot = path.resolve(folder.uri.fsPath);
@@ -475,7 +482,14 @@ function activate(context) {
       status.show();
       return;
     }
-    if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
+    const analysisStillCurrent = result.isCurrent();
+    if (disposed || ticket !== generation || !analysisStillCurrent) {
+      if (process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1") {
+        console.error("GraphQL Desk skipped after stub resolution:", JSON.stringify({ disposed, ticket, generation,
+          analysisCurrent: analysisStillCurrent, ownsStubPath: managed.stillOwnsSetting() }));
+      }
+      traceSkip("analysis-snapshot-stale"); return;
+    }
     try {
       const groups = new Map();
       const operationManifest = result.projects.map(({ project, generated_package, provenance }) =>
