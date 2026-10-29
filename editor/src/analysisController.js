@@ -572,7 +572,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         cancellation?.dispose();
         if (state.artifactsAbort === abort) state.artifactsAbort = null;
       });
-    } catch (error) {
+    } catch {
       state.cached = null;
       skip(failureReason);
       return null;
