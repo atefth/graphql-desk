@@ -249,11 +249,18 @@ test("analyze replies validate persisted facts against captured source identitie
   const range = { codepoint: { start: 10, end: 20 }, utf16: { start: 10, end: 20 } };
   const persisted = { module, range, id_range: range, id: `sha256:${"0".repeat(64)}`,
     expected_id: `sha256:${"1".repeat(64)}`, id_is_literal: true };
-  const requestData = { request_id: "snapshot", modules: [module], bindings: [], schemas: [] };
-  const response = { request_id: "snapshot", modules: [module], schemas: [], calls: [], persisted: [persisted], diagnostics: [] };
+  const insertionRange = { codepoint: { start: 15, end: 15 }, utf16: { start: 15, end: 15 } };
+  const persistedIdInsertion = { module, range, insertion: insertionRange, expected_id: `sha256:${"1".repeat(64)}` };
+  const requestData = { request_id: "snapshot", modules: [{ ...module, source: `${" ".repeat(15)}document`, is_package: false }], bindings: [], schemas: [] };
+  const response = { request_id: "snapshot", modules: [module], schemas: [], calls: [], persisted: [persisted],
+    persisted_id_insertions: [persistedIdInsertion], diagnostics: [] };
   const valid = { ok: true, id: "job", request: requestData, response, unavailable_schemas: [], remote_schemas: [] };
   const malformed = [
     { ...response, persisted: undefined },
+    { ...response, persisted_id_insertions: [{ ...persistedIdInsertion, insertion: range }] },
+    { ...response, persisted_id_insertions: [{ ...persistedIdInsertion,
+      insertion: { codepoint: { start: 14, end: 14 }, utf16: { start: 14, end: 14 } } }] },
+    { ...response, persisted_id_insertions: [{ ...persistedIdInsertion, expected_id: "not-a-hash" }] },
     { ...response, persisted: [{ ...persisted, id_range: { ...range, utf16: { start: 20, end: 19 } } }] },
     { ...response, persisted: [{ ...persisted, id_is_literal: "yes" }] },
     { ...response, persisted: [{ ...persisted, module: { ...module, version: 2 } }] },

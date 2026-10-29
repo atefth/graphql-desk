@@ -98,6 +98,19 @@ function validReply(reply, request) {
     const persisted = value => keys(value, ["module", "range", "id_range", "id", "expected_id", "id_is_literal"]) &&
       module(value.module) && sourceRange(value.range) && sourceRange(value.id_range) &&
       string(value.id) && string(value.expected_id) && typeof value.id_is_literal === "boolean";
+    const persistedInsertion = value => keys(value, ["module", "range", "insertion", "expected_id"]) &&
+      module(value.module) && sourceRange(value.range) && sourceRange(value.insertion) &&
+      value.insertion.codepoint.start === value.insertion.codepoint.end &&
+      value.insertion.utf16.start === value.insertion.utf16.end &&
+      value.range.codepoint.start <= value.insertion.codepoint.start && value.insertion.codepoint.end <= value.range.codepoint.end &&
+      value.range.utf16.start <= value.insertion.utf16.start && value.insertion.utf16.end <= value.range.utf16.end &&
+      /^sha256:[0-9a-f]{64}$/.test(value.expected_id) && reply.request.modules.some(source =>
+        keys(source, ["project", "module", "uri", "version", "source", "is_package"]) &&
+        [source.project, source.module, source.uri].every(string) && Number.isSafeInteger(source.version) &&
+        source.version >= 0 && typeof source.source === "string" && typeof source.is_package === "boolean" &&
+        sameModule(source, value.module) &&
+        value.insertion.utf16.start <= source.source.length - "document".length &&
+        source.source.slice(value.insertion.utf16.start, value.insertion.utf16.start + "document".length) === "document");
     const sameModule = (left, right) => left.project === right.project && left.module === right.module &&
       left.uri === right.uri && left.version === right.version;
     return keys(reply, ["ok", "id", "request", "response", "unavailable_schemas", "remote_schemas"]) && reply.id === request.id &&
@@ -105,12 +118,15 @@ function validReply(reply, request) {
         keys(item, ["project", "schema_name", "status"]) && string(item.project) && string(item.schema_name) &&
         ["ready", "stale", "unavailable"].includes(item.status)) &&
       keys(reply.request, ["request_id", "modules", "bindings", "schemas"]) &&
-      keys(reply.response, ["request_id", "modules", "schemas", "calls", "persisted", "diagnostics"]) &&
+      keys(reply.response, ["request_id", "modules", "schemas", "calls", "persisted", "persisted_id_insertions", "diagnostics"]) &&
       string(reply.request.request_id) && reply.request.request_id === reply.response.request_id &&
       [reply.request.modules, reply.request.bindings, reply.request.schemas, reply.response.modules,
-        reply.response.schemas, reply.response.calls, reply.response.persisted, reply.response.diagnostics,
+        reply.response.schemas, reply.response.calls, reply.response.persisted,
+        reply.response.persisted_id_insertions, reply.response.diagnostics,
         reply.unavailable_schemas].every(Array.isArray) && reply.response.persisted.every(item =>
-          persisted(item) && reply.response.modules.some(source => module(source) && sameModule(source, item.module)));
+          persisted(item) && reply.response.modules.some(source => module(source) && sameModule(source, item.module))) &&
+      reply.response.persisted_id_insertions.every(item => persistedInsertion(item) &&
+        reply.response.modules.some(source => module(source) && sameModule(source, item.module)));
   }
   if (request.op === "artifacts") {
     if (keys(reply, ["ok", "id", "current"])) return string(reply.id) && reply.id === request.id && reply.current === false;

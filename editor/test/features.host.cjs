@@ -27,6 +27,7 @@ async function run() {
     "schema.graphql": schema,
     "main.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('{ user { missing old } }')\r\n",
     "persisted.py": `from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted("sha256:${"0".repeat(64)}", query)\n`,
+    "missingPersisted.py": "from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted(document=query)\n",
     "partial.py": "from graphql_desk import gql\nq=gql('{ user { na')\n",
     "blank.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''\r\n\r\n''')\r\n",
     "lexical.py": "from graphql_desk import gql\nq=gql('''query Read { user { name",
@@ -81,7 +82,8 @@ async function run() {
   const observations = { outcome: "read-only-features-observed", vscode: vscode.version, diagnostics: false, completion: false, boundaryCompletion: false, hover: false,
     schemaDefinition: false, fragmentDefinition: false, ambiguousFragmentDefinition: false, nativeCoexistence: false,
     highlighting: false, lexicalHighlighting: false, escapedLexicalHighlighting: false, highlightRecovery: false,
-    nativePythonHover: false, untrustedNoAnalysis: false, persistedIdAction: false, diskUnchanged: false, cleanBuffers: false };
+    nativePythonHover: false, untrustedNoAnalysis: false, persistedIdAction: false, persistedIdInsertion: false,
+    diskUnchanged: false, cleanBuffers: false };
   try {
     const invalid = documents.get("main.py");
     await registration.refresh(invalid);
@@ -111,6 +113,21 @@ async function run() {
           uri: document.uri.toString(), version: document.version, source: document.getText(), is_package: false })) });
     assert.equal(edit.newText, JSON.stringify(indexed.response.persisted[0].expected_id));
     observations.persistedIdAction = true;
+    const missingPersistedDocument = documents.get("missingPersisted.py");
+    await registration.refresh(missingPersistedDocument);
+    const missingPersisted = vscode.languages.getDiagnostics(missingPersistedDocument.uri)
+      .find(item => item.code === "graphql-desk.persisted-id-missing");
+    assert.ok(missingPersisted);
+    const insertActions = await vscode.commands.executeCommand("vscode.executeCodeActionProvider",
+      missingPersistedDocument.uri, missingPersisted.range);
+    const insertId = insertActions.find(item => /Insert persisted ID/.test(item.title));
+    assert.ok(insertId);
+    const insertEdit = insertId.edit.entries().find(([uri]) => uri.toString() === missingPersistedDocument.uri.toString())?.[1]?.[0];
+    assert.ok(insertEdit);
+    assert.ok(insertEdit.range.isEmpty);
+    assert.equal(missingPersistedDocument.getText(insertEdit.range), "");
+    assert.match(insertEdit.newText, /^id="sha256:[0-9a-f]{64}", $/);
+    observations.persistedIdInsertion = true;
     const partial = documents.get("partial.py");
     const completion = await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", partial.uri,
       partial.positionAt(partial.getText().indexOf("na'") + 2));

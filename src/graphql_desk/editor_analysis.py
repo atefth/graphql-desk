@@ -444,6 +444,21 @@ def analyze_editor_snapshot_details(
         DocumentIdentity(item.call.module, item.call.range): item
         for item in index.documents
     }
+
+    def expected_persisted_id(identity: DocumentIdentity) -> str | None:
+        indexed_document = indexed.get(identity)
+        if indexed_document is None or indexed_document.selected_operation is None:
+            return None
+        external_fragments = tuple(
+            fact.printed
+            for fact in indexed_document.definitions
+            if fact.kind == "fragment" and fact.document != identity
+        )
+        try:
+            return editor_sha256_id(indexed_document.call.source, external_fragments)
+        except (ValueError, TypeError, RecursionError):
+            return None
+
     snapshots = {
         ModuleDependency(item.project, item.module, item.uri, item.version): item.source
         for item in modules
@@ -470,6 +485,9 @@ def analyze_editor_snapshot_details(
     for declaration in sources.persisted:
         require(declaration.module, declaration.range)
         require(declaration.module, declaration.id_range)
+    for insertion in sources.persisted_id_insertions:
+        require(insertion.module, insertion.range)
+        require(insertion.module, insertion.insertion)
     for document in index.documents:
         for fact in document.definitions:
             require(fact.document.module, fact.document.call_range)
@@ -575,19 +593,8 @@ def analyze_editor_snapshot_details(
         )
     persisted_facts: list[dict[str, object]] = []
     for declaration in sources.persisted:
-        indexed_document = indexed.get(declaration.document)
-        if indexed_document is None or indexed_document.selected_operation is None:
-            continue
-        external_fragments = tuple(
-            fact.printed
-            for fact in indexed_document.definitions
-            if fact.kind == "fragment" and fact.document != declaration.document
-        )
-        try:
-            expected_id = editor_sha256_id(
-                indexed_document.call.source, external_fragments
-            )
-        except (ValueError, TypeError, RecursionError):
+        expected_id = expected_persisted_id(declaration.document)
+        if expected_id is None:
             continue
         persisted_facts.append(
             {
@@ -599,12 +606,26 @@ def analyze_editor_snapshot_details(
                 "id_is_literal": declaration.id_is_literal,
             }
         )
+    persisted_id_insertions: list[dict[str, object]] = []
+    for insertion in sources.persisted_id_insertions:
+        expected_id = expected_persisted_id(insertion.document)
+        if expected_id is None:
+            continue
+        persisted_id_insertions.append(
+            {
+                "module": _module(insertion.module),
+                "range": range_(insertion.module, insertion.range),
+                "insertion": range_(insertion.module, insertion.insertion),
+                "expected_id": expected_id,
+            }
+        )
     response: dict[str, object] = {
         "request_id": request_id,
         "modules": [_module(item) for item in snapshots],
         "schemas": schema_facts,
         "calls": calls,
         "persisted": persisted_facts,
+        "persisted_id_insertions": persisted_id_insertions,
         "diagnostics": [
             editor_diagnostic(item, snapshots) for item in index.diagnostics
         ]

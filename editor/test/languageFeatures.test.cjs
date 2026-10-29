@@ -58,6 +58,31 @@ test("stale persisted hashes produce an exact fix only for direct ID literals", 
   ]), []);
 });
 
+test("missing persisted ID action is limited to explicit document keywords", async () => {
+  const source = "from graphql_desk import gql\nquery = gql('query Q { user { id } }')\nsaved = gql.persisted(document=query)\n";
+  const value = bundle(source);
+  const snapshot = document(value);
+  const service = createLanguageFeatures(options(value));
+  const diagnostic = (await service.diagnostics(snapshot)).find(item =>
+    item.code === "graphql-desk.persisted-id-missing");
+  assert.ok(diagnostic);
+  assert.equal(snapshot.text.slice(diagnostic.range.start, diagnostic.range.end), "gql.persisted(document=query)");
+  const actions = await service.persistedIdActions(snapshot, [{ code: diagnostic.code, range: diagnostic.range }]);
+  assert.equal(actions.length, 1);
+  assert.deepEqual(actions[0].range, { start: source.indexOf("document"), end: source.indexOf("document") });
+  assert.match(actions[0].replacement, /^id="sha256:[0-9a-f]{64}", $/);
+  assert.deepEqual(await service.persistedIdActions(snapshot, [{ code: diagnostic.code,
+    range: { start: diagnostic.range.start + 1, end: diagnostic.range.end } }]), []);
+
+  const positional = bundle(source.replace("gql.persisted(document=query)", "gql.persisted(query)"));
+  const positionalService = createLanguageFeatures(options(positional));
+  const positionalDiagnostic = (await positionalService.diagnostics(document(positional)))
+    .find(item => item.code === "graphql-desk.persisted-id-missing");
+  if (positionalDiagnostic) assert.deepEqual(await positionalService.persistedIdActions(document(positional), [
+    { code: positionalDiagnostic.code, range: positionalDiagnostic.range },
+  ]), []);
+});
+
 test("dynamic factory source is diagnosed while valid sibling operations remain indexed", async () => {
   const source = `from graphql_desk import gql
 def query_source() -> str: return "{ user { name } }"
