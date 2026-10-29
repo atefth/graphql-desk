@@ -83,7 +83,11 @@ async function run() {
     schemaDefinition: false, fragmentDefinition: false, ambiguousFragmentDefinition: false, nativeCoexistence: false,
     highlighting: false, lexicalHighlighting: false, escapedLexicalHighlighting: false, highlightRecovery: false,
     nativePythonHover: false, untrustedNoAnalysis: false, persistedIdAction: false, persistedIdInsertion: false,
-    diskUnchanged: false, cleanBuffers: false };
+    diskUnchanged: false, cleanBuffers: false, progress: "fixtures-ready" };
+  const recordProgress = async progress => {
+    observations.progress = progress;
+    await fs.writeFile(resultPath, JSON.stringify(observations), "utf8");
+  };
   try {
     const invalid = documents.get("main.py");
     await registration.refresh(invalid);
@@ -93,6 +97,7 @@ async function run() {
     assert.equal(invalid.getText(missing.range), "missing");
     assert.ok(diagnostics.some((item) => item.code === "graphql.deprecation"));
     observations.diagnostics = true;
+    await recordProgress("diagnostics");
     const persistedDocument = documents.get("persisted.py");
     await registration.refresh(persistedDocument);
     const staleId = vscode.languages.getDiagnostics(persistedDocument.uri)
@@ -113,6 +118,7 @@ async function run() {
           uri: document.uri.toString(), version: document.version, source: document.getText(), is_package: false })) });
     assert.equal(edit.newText, JSON.stringify(indexed.response.persisted[0].expected_id));
     observations.persistedIdAction = true;
+    await recordProgress("persisted-id-update-action");
     const missingPersistedDocument = documents.get("missingPersisted.py");
     await registration.refresh(missingPersistedDocument);
     const missingPersisted = vscode.languages.getDiagnostics(missingPersistedDocument.uri)
@@ -128,6 +134,7 @@ async function run() {
     assert.equal(missingPersistedDocument.getText(insertEdit.range), "");
     assert.match(insertEdit.newText, /^id="sha256:[0-9a-f]{64}", $/);
     observations.persistedIdInsertion = true;
+    await recordProgress("persisted-id-insertion-action");
     const partial = documents.get("partial.py");
     const completion = await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", partial.uri,
       partial.positionAt(partial.getText().indexOf("na'") + 2));
@@ -163,6 +170,7 @@ async function run() {
     assert.match(hoverText(outside), /native-python-fixture/);
     assert.doesNotMatch(hoverText(outside), /Display name/);
     observations.nativeCoexistence = true;
+    await recordProgress("native-coexistence");
     const deadline = Date.now() + 30000;
     let pythonHover;
     do {
@@ -174,6 +182,7 @@ async function run() {
     assert.match(hoverText(pythonHover), /outside/);
     assert.match(hoverText(pythonHover), /int|Literal/);
     observations.nativePythonHover = true;
+    await recordProgress("native-python-hover");
     const definitions = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", selected.uri, position);
     assert.ok(definitions.map(locationTarget).some((item) => item.uri.toString() === schemaDoc.uri.toString() && schemaDoc.getText(item.range) === "name"));
     observations.schemaDefinition = true;

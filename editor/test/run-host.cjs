@@ -386,6 +386,7 @@ async function runHost(version, suite, factorySuite, temporary) {
         console.error(`Host test evidence: ${JSON.stringify({
           outcome: observed.outcome,
           error: observed.error,
+          progress: observed.progress,
           probes: Object.fromEntries(Object.entries(observed.lifecycle || {}).filter(([key]) => /probe/i.test(key))),
           trace: observed.lifecycle?.coldTrace?.slice(-60),
           skipTraces: observed.lifecycle?.skipTraces?.slice(-30),
