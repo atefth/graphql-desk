@@ -74,7 +74,25 @@ async function run() {
       document.uri.toString() === item.uri && !document.isClosed && document.version === item.version && document.getText() === item.source)) &&
       value.request.schemas.every((item) => item.uri === schemaDoc.uri.toString() && item.version === schemaDoc.version && item.text === schemaDoc.getText()),
   };
-  const registration = registerLanguageFeatures(vscode, options);
+  const codeActionProviders = [];
+  const languageApi = new Proxy(vscode.languages, {
+    get(target, property) {
+      if (property === "registerCodeActionsProvider") return (selector, provider, metadata) => {
+        codeActionProviders.push(provider);
+        return target.registerCodeActionsProvider(selector, provider, metadata);
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const vscodeApi = new Proxy(vscode, {
+    get(target, property, receiver) {
+      return property === "languages" ? languageApi : Reflect.get(target, property, receiver);
+    },
+  });
+  const registration = registerLanguageFeatures(vscodeApi, options);
+  const codeActionProvider = codeActionProviders[0];
+  assert.ok(codeActionProvider);
   const highlighting = registerHighlighting(vscode, options);
   const native = vscode.languages.registerHoverProvider({ language: "python", scheme: "file" }, {
     provideHover() { return new vscode.Hover("native-python-fixture"); },
@@ -108,8 +126,8 @@ async function run() {
     assert.match(persistedDocument.getText(staleId.range), /^"sha256:/);
     await recordProgress("stale-id-diagnostic-ready");
     await recordProgress("persisted-update-action-start");
-    const persistedActions = await vscode.commands.executeCommand("vscode.executeCodeActionProvider",
-      persistedDocument.uri, staleId.range);
+    const persistedActions = await codeActionProvider.provideCodeActions(persistedDocument, staleId.range,
+      { diagnostics: [staleId] });
     await recordProgress("persisted-update-action-returned");
     await recordProgress("persisted-update-actions-complete");
     const updateId = persistedActions.find(item => /Update persisted ID/.test(item.title));
@@ -132,8 +150,8 @@ async function run() {
     const missingPersisted = vscode.languages.getDiagnostics(missingPersistedDocument.uri)
       .find(item => item.code === "graphql-desk.persisted-id-missing");
     assert.ok(missingPersisted);
-    const insertActions = await vscode.commands.executeCommand("vscode.executeCodeActionProvider",
-      missingPersistedDocument.uri, missingPersisted.range);
+    const insertActions = await codeActionProvider.provideCodeActions(missingPersistedDocument, missingPersisted.range,
+      { diagnostics: [missingPersisted] });
     const insertId = insertActions.find(item => /Insert persisted ID/.test(item.title));
     assert.ok(insertId);
     const insertEdit = insertId.edit.entries().find(([uri]) => uri.toString() === missingPersistedDocument.uri.toString())?.[1]?.[0];
