@@ -65,17 +65,6 @@ function isVerifiedGenerationFile(filename, generationRoot) {
   } catch { return false; }
   finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
 }
-function staleCaptureSummary(before, after) {
-  if (process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR !== "1") return;
-  const previous = JSON.parse(before);
-  const current = JSON.parse(after);
-  const safe = (value, index) => index === 2
-    ? value.map(({ path, version, is_dirty, text }) => ({ path, version, is_dirty, bytes: Buffer.byteLength(text) }))
-    : index === 3 ? value.map(({ id, path, version, is_dirty }) => ({ id, path, version, is_dirty })) : value;
-  console.error("GraphQL Desk stale analysis snapshot:", JSON.stringify(previous.flatMap((value, index) =>
-    JSON.stringify(value) === JSON.stringify(current[index]) ? [] : [{ input: index, before: safe(value, index), after: safe(current[index], index) }])
-    ).slice(0, 4096));
-}
 function artifactRootFor(filename, selectedStubRoot) {
   const managedRoot = path.basename(path.dirname(selectedStubRoot)) === "generations"
     ? path.resolve(selectedStubRoot, "..", "..") : selectedStubRoot;
@@ -561,7 +550,6 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         check(cached.ticket, token, state);
         const signature = captureSignature(latest, cached.schemaPaths);
         if (signature !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
-          staleCaptureSummary(cached.signature, signature);
           state.cached = null;
           skip("analysis-snapshot-stale"); return null;
         }
@@ -574,7 +562,6 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         check(cached.ticket, token, state);
         const finalSignature = captureSignature(final, cached.schemaPaths);
         if (finalSignature !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
-          staleCaptureSummary(cached.signature, finalSignature);
           state.cached = null;
           skip("analysis-snapshot-stale"); return null;
         }
@@ -587,9 +574,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       });
     } catch (error) {
       state.cached = null;
-      skip(process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1"
-        ? `${failureReason}: ${String(error).slice(0, 1000)}`
-        : failureReason);
+      skip(failureReason);
       return null;
     }
   }
