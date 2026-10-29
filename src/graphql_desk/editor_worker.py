@@ -6,6 +6,7 @@ import math
 import os
 import re
 import sys
+import traceback
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import BinaryIO, cast
@@ -1013,6 +1014,8 @@ def serve(reader: BinaryIO, writer: BinaryIO) -> None:
             )
             result = worker.handle(value)
         except (ValueError, UnicodeError, RecursionError):
+            if os.environ.get("GRAPHQL_DESK_CAPTURE_WORKER_STDERR") == "1":
+                traceback.print_exc(file=sys.stderr)
             worker.invalidate()
             result = {"ok": False, "error": "editor-request-failed"}
         encoded = (json.dumps(result, ensure_ascii=True) + "\n").encode("utf-8")
