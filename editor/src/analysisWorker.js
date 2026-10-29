@@ -239,7 +239,6 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
     });
     child = process;
     const parts = [];
-    let stderrTail = Buffer.alloc(0);
     let bytes = 0;
     const failed = () => { if (child === process) stop(); };
     process.on("error", failed);
@@ -247,14 +246,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
     process.stdin.on("error", failed);
     process.stdout.on("error", failed);
     process.stderr.on("error", failed);
-    process.stderr.on("data", chunk => {
-      if (child !== process) return;
-      if (globalThis.process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1" && Buffer.isBuffer(chunk)) {
-        stderrTail = Buffer.concat([stderrTail, chunk]).subarray(-4096);
-      }
-      if (stderrTail.length) console.error("GraphQL Desk worker stderr:", stderrTail.toString("utf8"));
-      failed();
-    });
+    process.stderr.on("data", failed);
     process.stdout.on("data", chunk => {
       if (child !== process) return;
       try {
@@ -324,12 +316,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
       try {
         const result = await new Promise((resolve, reject) => {
           const abort = () => stop();
-          const timer = setTimeout(() => {
-            if (globalThis.process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1") {
-              console.error(`GraphQL Desk worker timed out after ${timeoutMs} ms`);
-            }
-            abort();
-          }, timeoutMs);
+          const timer = setTimeout(abort, timeoutMs);
           const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); };
           pending = { resolve, reject, cleanup, request: message };
           signal?.addEventListener("abort", abort, { once: true });
