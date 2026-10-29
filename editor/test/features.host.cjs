@@ -98,7 +98,7 @@ async function run() {
     assert.ok(staleId);
     assert.match(persistedDocument.getText(staleId.range), /^"sha256:/);
     const persistedActions = await vscode.commands.executeCommand("vscode.executeCodeActionProvider",
-      persistedDocument.uri, staleId.range, vscode.CodeActionKind.QuickFix);
+      persistedDocument.uri, staleId.range);
     const updateId = persistedActions.find(item => /Update persisted ID/.test(item.title));
     assert.ok(updateId);
     const edit = updateId.edit.entries().find(([uri]) => uri.toString() === persistedDocument.uri.toString())?.[1]?.[0];
