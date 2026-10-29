@@ -43,8 +43,6 @@ exports.run = async () => {
   let diagnosticChanges;
   let selectionChanges;
   let originalCreateOutputChannel;
-  const workerErrors = [];
-  const originalConsoleError = console.error;
   try {
     for (const id of ["ms-python.python", "ms-python.vscode-pylance"]) {
       const extension = vscode.extensions.getExtension(id);
@@ -76,14 +74,6 @@ exports.run = async () => {
         results.lifecycle.stubPathSelections.push(vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""));
       }
     });
-    // Surface a bounded worker traceback only in this isolated host failure run.
-    process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR = "1";
-    console.error = (...args) => {
-      if (args[0] === "GraphQL Desk worker stderr:" && workerErrors.length < 8) {
-        workerErrors.push(args.join(" ").slice(-4096));
-      }
-      originalConsoleError(...args);
-    };
     const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
     assert.ok(extension, "GraphQL Desk extension must be loaded in the host");
     await extension.activate();
@@ -293,27 +283,6 @@ exports.run = async () => {
       "count_bad_field = count_result['selected']",
       "",
     ].join("\n");
-    const capturePublisherSnapshot = async () => {
-      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
-      const generationRoot = path.resolve(workspace, settings["python.analysis.stubPath"]);
-      const complete = JSON.parse(await fs.readFile(path.join(generationRoot, "complete.json"), "utf8"));
-      const generatedRoot = path.join(generationRoot, "graphql_desk_generated");
-      const factory = await fs.readFile(path.join(generatedRoot, "default.pyi"), "utf8").catch(() => "");
-      const source = await fs.readFile(path.join(generatedRoot, "sources", "operation_semantics.pyi"), "utf8").catch(() => "");
-      const consumer = await fs.readFile(path.join(generatedRoot, "sources", "consumer.pyi"), "utf8").catch(() => "");
-      return {
-        generation: { id: complete.id, sequence: complete.sequence, analysisId: complete.analysisId },
-        operationManifest: complete.operationManifest.map(project => ({
-          project: project.project,
-          operations: project.operations.map(({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports }) =>
-            ({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports })),
-        })),
-        sourceArtifacts: complete.files.map(file => file.path).filter(file => file.includes("/sources/") || file.endsWith("/default.pyi")),
-        factoryOverloads: factory.split("\n").filter(line => /Text|Count|Inputs/.test(line)),
-        consumerDeclarations: consumer.split("\n").filter(line => /Text|Count/.test(line)),
-        sourceDeclarations: source.split("\n").filter(line => /Text|Count|Inputs|Filter|Choice/.test(line)),
-      };
-    };
     await replace(document, multiSource);
     const multiUri = uri;
     const multiDocument = document;
@@ -340,22 +309,6 @@ exports.run = async () => {
         multiProbe.textVariableErrors.length > 0 && multiProbe.countVariableErrors.length > 0 &&
         multiProbe.textFieldErrors.length > 0 && multiProbe.countFieldErrors.length > 0;
     }, "Pylance infers isolated results and variables for same-source operation selectors", 60000);
-    if (!multiReady) {
-      results.pylance.multiDocumentState = {
-        version: multiDocument.version,
-        dirty: multiDocument.isDirty,
-        includesText: multiDocument.getText().includes("text_doc = graphql"),
-        includesCount: multiDocument.getText().includes("count_doc = graphql"),
-      };
-      try { results.pylance.publisherSnapshot = await capturePublisherSnapshot(); }
-      catch (error) { results.pylance.publisherSnapshotError = String(error); }
-      results.pylance.failureEvidence = {
-        selectedStubPath: path.relative(workspace,
-          path.resolve(workspace, vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""))),
-        document: results.pylance.multiDocumentState,
-        workerErrors,
-      };
-    }
     assert.ok(multiReady, JSON.stringify({ ...multiProbe, publisherSnapshot: results.pylance.publisherSnapshot }));
     results.pylance.multiOperationIsolation = multiProbe;
     await replace(document, originalConsumerSource);
@@ -489,20 +442,6 @@ exports.run = async () => {
         results.pylance.inputLiteralExtraErrors.some(message => /unknown|not defined|field/i.test(message)) &&
         Object.values(results.pylance.inputNegativeErrors).every(errors => errors.length > 0);
     }, "Pylance checks recursive inputs, defaults, enums, oneOf alternatives and schema-bound scalar helpers", 60000);
-    if (!inputContractReady) {
-      try { results.pylance.publisherSnapshot = await capturePublisherSnapshot(); }
-      catch (error) { results.pylance.publisherSnapshotError = String(error); }
-      results.pylance.failureEvidence = {
-        selectedStubPath: path.relative(workspace,
-          path.resolve(workspace, vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""))),
-        workerErrors,
-        diagnostics: vscode.languages.getDiagnostics(semanticUri).map(item => ({
-          source: item.source,
-          message: item.message,
-          line: item.range.start.line,
-        })),
-      };
-    }
     assert.ok(inputContractReady, JSON.stringify(results.pylance));
     results.pylance.inputContracts = true;
     const directiveReady = await until(async () => {
@@ -648,10 +587,6 @@ exports.run = async () => {
         results.pylance.conditionalNegative.length > 0 &&
         results.pylance.conditionalGenerated;
     }, "an unsaved GraphQL edit publishes conditional-presence and nullable-list types", 60000);
-    if (!conditionalReady) {
-      try { results.pylance.conditionalPublisherSnapshot = await capturePublisherSnapshot(); }
-      catch (error) { results.pylance.conditionalPublisherSnapshotError = String(error); }
-    }
     assert.ok(conditionalReady, JSON.stringify(results.pylance));
     assert.equal(semanticDocument.isDirty, true, "GraphQL Desk preserves the unsaved Python source edit");
     assert.equal(await fs.readFile(semanticPath, "utf8"), semanticDiskBaseline,
@@ -995,7 +930,6 @@ exports.run = async () => {
     settingChanges?.dispose();
     diagnosticChanges?.dispose();
     if (originalCreateOutputChannel) vscode.window.createOutputChannel = originalCreateOutputChannel;
-    console.error = originalConsoleError;
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
     console.log(`GRAPHQL_DESK_TYPING_MATRIX ${JSON.stringify(results)}`);
   }
