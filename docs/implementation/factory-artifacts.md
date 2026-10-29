@@ -90,7 +90,7 @@ unattributed, structural, stale-snapshot and schema/context failures remain fata
 This bounded recovery does not complete live inference or invalid-buffer
 acceptance. Together with the precision and recovery fixtures, the factory
 artifact criteria in #36 are complete; broad live typing and invalid-buffer
-acceptance remain under #42.
+acceptance remain under #38 and broader TYPE-01. Hosted Stage 1 gate #42 passed.
 
 Source maps verify decoded contributions against supplied snapshots before
 emission. Schema/context/dependency mismatches, unsafe names, normalized alias or
@@ -134,4 +134,4 @@ negative variable/result cases, exact ASTs, explicit fallback limits, aliases,
 source packages, diagnostics and stale/collision failures. Dynamic discovery,
 persisted helpers, complete reader precision, writer integration,
 incremental generation and the full editor/client matrix remain separate work.
-No broad typing, API or live-typing gate is passed.
+No broad typing or API gate has passed; hosted Stage 1 live-typing story #42 has passed.

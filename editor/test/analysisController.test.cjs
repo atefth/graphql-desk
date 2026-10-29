@@ -324,15 +324,17 @@ test("unrelated host documents do not stale artifacts, but required schema edits
   const fixture = await setup(t);
   await fs.writeFile(path.join(fixture.root, "dependency.py"), "dependency = 1\n");
   fixture.candidates(["main.py", "dependency.py"]);
+  const externalDocument = fixture.document("../unrelated.pyi", "value: int\n");
   const schema = fixture.document("schema.graphql", "type Query { title: String }");
   schema.isDirty = true;
   let artifactCalls = 0;
+  let capturedDocuments = [];
   const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
     const worker = createAnalysisWorker(options);
     return { ...worker, async request(message, requestOptions) {
+      if (message.op === "prepare") capturedDocuments = message.documents;
       const reply = await worker.request(message, requestOptions);
       if (message.op === "artifacts" && ++artifactCalls === 1) {
-        fixture.document("../unrelated.pyi", "value: int\n");
         fixture.document("dependency.py", "dependency = 1\n");
       }
       else if (message.op === "artifacts") { schema.text = "type Query { title: String extra: Int }"; schema.version += 1; }
@@ -344,6 +346,8 @@ test("unrelated host documents do not stale artifacts, but required schema edits
 
   const current = await controller.artifacts(snapshot);
   assert.ok(current, "an unrelated host document must not invalidate generated artifacts");
+  assert.ok(!capturedDocuments.some(document => document.id === externalDocument.uri.toString()),
+    "Documents outside the workspace must not enter the captured analysis snapshot");
   const analysis = await controller.analyze(snapshot);
   assert.ok(analysis);
   assert.equal(await controller.isCurrent(analysis, snapshot), true, "an unrelated host document must not stale editor analysis");
@@ -535,6 +539,16 @@ test("workspace folder watchers follow additions and removals and refresh closed
   fixture.events.onDidSaveTextDocument.fire(generatedDocument);
   fixture.events.onDidCloseTextDocument.fire(generatedDocument);
   assert.equal(invalidations, beforeGeneratedStub, "Pylance opening generated typing files must not invalidate their own capture");
+  const internalDocument = { uri: { scheme: "vscode-userdata", fsPath: "", toString: () => "vscode-userdata:/input-0" } };
+  fixture.events.onDidOpenTextDocument.fire(internalDocument);
+  fixture.events.onDidChangeTextDocument.fire({ document: internalDocument, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
+  fixture.events.onDidCloseTextDocument.fire(internalDocument);
+  assert.equal(invalidations, beforeGeneratedStub, "VS Code internal documents must not invalidate GraphQL analysis");
+  const externalDocument = fixture.document("../external-library.pyi");
+  fixture.events.onDidOpenTextDocument.fire(externalDocument);
+  fixture.events.onDidChangeTextDocument.fire({ document: externalDocument, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
+  fixture.events.onDidCloseTextDocument.fire(externalDocument);
+  assert.equal(invalidations, beforeGeneratedStub, "Documents outside workspaces must not invalidate GraphQL analysis");
   generatedDocument.isDirty = true;
   fixture.events.onDidChangeTextDocument.fire({ document: generatedDocument, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
   assert.equal(invalidations, beforeGeneratedStub + 1, "Editing a generated buffer still invalidates analysis");
@@ -595,6 +609,12 @@ test("workspace folder watchers follow additions and removals and refresh closed
   addedWatch.fire(Uri.file(generationDir));
   addedWatch.fire(Uri.file(generationArtifact));
   assert.equal(invalidations, beforeGeneratedStub + 2, "Immutable generation creation and contents must not self-invalidate the source snapshot");
+  const generationStage = path.join(nestedGenerationDir, ".graphql-desk-123e4567-e89b-12d3-a456-426614174000.tmp");
+  await fs.writeFile(generationStage, "");
+  addedWatch.fire(Uri.file(generationStage));
+  fixture.events.onDidOpenTextDocument.fire({ uri: Uri.file(generationStage) });
+  fixture.events.onDidChangeTextDocument.fire({ document: { uri: Uri.file(generationStage), isDirty: true }, contentChanges: [{ rangeOffset: 0, rangeLength: 0 }] });
+  assert.equal(invalidations, beforeGeneratedStub + 2, "GraphQL Desk staging files in an immutable generation must not restart analysis while being written");
   addedWatch.fire(Uri.file(completeManifest));
   assert.equal(invalidations, beforeGeneratedStub + 2, "Large owned generation manifests are read completely before classifying watcher events");
   const foreignGenerationFile = path.join(generationDir, "foreign.txt");

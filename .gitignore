@@ -1,4 +1,5 @@
 .venv/
+.vscode-test/
 __pycache__/
 *.py[cod]
 .mypy_cache/

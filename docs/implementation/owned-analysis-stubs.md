@@ -122,8 +122,8 @@ is closed: after restart, the removed field becomes `Unknown` with a GraphQL
 Desk diagnostic, the independent sibling remains `ID`, and schema repair
 restores `String` and clears the diagnostic. See
 [`restart-recovery-stale-input-1.142.0.json`](../../editor/test/observations/restart-recovery-stale-input-1.142.0.json).
-This is bounded restart evidence; it does not complete issue #38 or live-typing
-gate #42.
+This is bounded restart evidence; it does not complete issue #38 or broad
+TYPE-01 acceptance. Hosted Stage 1 gate #42 passed.
 
 The full `factoryArtifacts` scenario now runs in Windows CI on VS Code 1.141.0
 and 1.142.0 with pinned Python 2026.10.0 / Pylance 2026.4.1. Its cold-root
@@ -201,9 +201,9 @@ its `.pyi` files. Every runtime path must have a same-generation stub with the
 same module path; stub-only modules remain valid. Both file kinds are hashed and
 verified by the completion manifest before selection. The implementation
 acceptance for #37 is complete through #212 and linked #207/#210. This does not
-pass broad live typing TYPE-01 or gate #42: broader invalid-edit recovery,
+pass broad live typing TYPE-01: broader invalid-edit recovery,
 cancellation races, forced-crash recovery, and the full editor lifecycle matrix
-remain open under #38/#42. This change does not adopt pre-existing packages or authorize
+remain open under #38 and broader TYPE-01 acceptance. This change does not adopt pre-existing packages or authorize
 deletion of user files.
 
 The `restartRecovery` host suite now launches two separate VS Code processes
@@ -242,7 +242,7 @@ See
 [`issue-38-invalidation-repair-interpreter-1.142.0.json`](../../editor/test/observations/issue-38-invalidation-repair-interpreter-1.142.0.json).
 This does not test delayed/superseded publication or prove the full lifecycle
 matrix.
-This is bounded evidence only; broad TYPE-01 and gate #42 remain open.
+This is bounded evidence only; hosted Stage 1 gate #42 passed, while broad TYPE-01 acceptance remains open.
 
 The lifecycle host also forces the real worker to fail while an `artifacts`
 request is pending. It confirms that the previous complete generation remains
@@ -251,7 +251,7 @@ field from `String` to `Int` while the sibling `ID` hover stays intact. The
 last-known `String` hover remains visible during the failed refresh, so this
 does not prove a no-stale interval or cancellation/supersession safety. See
 [`issue-38-worker-crash-recovery-1.142.0.json`](../../editor/test/observations/issue-38-worker-crash-recovery-1.142.0.json).
-This bounded recovery result does not close #38 or gate #42.
+This bounded recovery result does not close #38 or broader TYPE-01 acceptance; hosted Stage 1 gate #42 has passed.
 
 ### Issue #42 lifecycle host coverage on VS Code 1.141
 

@@ -187,6 +187,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!["file", "untitled"].includes(uri.scheme) || !path.isAbsolute(uri.fsPath)) return null;
     return canonical(uri.fsPath);
   };
+  const watchesSchema = (state, filename) => [...state.watches.keys()].some(watched => canonical(watched) === filename);
+  const isGraphqlDocument = filename => /\.(?:graphql|graphqls|gql)$/i.test(filename);
   async function stateFor(snapshot, skip) {
     const ticket = epoch;
     if (!trusted()) { skip?.("workspace-untrusted"); return null; }
@@ -282,7 +284,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   }
   async function capture(state) {
     const found = await vscode.workspace.findFiles(new vscode.RelativePattern(state.folder, "**/*.py"), null);
-    const documents = vscode.workspace.textDocuments.filter(document => localPath(document));
+    const documents = vscode.workspace.textDocuments.filter(document => {
+      const filename = localPath(document);
+      return filename && (inside(state.root, filename) || isGraphqlDocument(filename));
+    });
     const pythonConfig = vscode.workspace.getConfiguration("python", state.folder.uri);
     const inspection = pythonConfig.inspect?.("analysis.stubPath");
     const explicitlyConfigured = inspection && [inspection.globalValue, inspection.workspaceValue, inspection.workspaceFolderValue]
@@ -543,7 +548,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         check(cached.ticket, token, state);
         const latest = await capture(state);
         check(cached.ticket, token, state);
-        if (captureSignature(latest, cached.schemaPaths) !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
+        const signature = captureSignature(latest, cached.schemaPaths);
+        if (signature !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
           state.cached = null;
           skip("analysis-snapshot-stale"); return null;
         }
@@ -554,7 +560,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         failureReason = "artifact-freshness-check-failed";
         const final = await capture(state);
         check(cached.ticket, token, state);
-        if (captureSignature(final, cached.schemaPaths) !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
+        const finalSignature = captureSignature(final, cached.schemaPaths);
+        if (finalSignature !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
           state.cached = null;
           skip("analysis-snapshot-stale"); return null;
         }
@@ -565,7 +572,11 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         cancellation?.dispose();
         if (state.artifactsAbort === abort) state.artifactsAbort = null;
       });
-    } catch { state.cached = null; skip(failureReason); return null; }
+    } catch {
+      state.cached = null;
+      skip(failureReason);
+      return null;
+    }
   }
   async function quarantine({ workspace, projects, invalidated_owners, preserve_current = false } = {}) {
     if (!trusted() || typeof workspace !== "string" || !path.isAbsolute(workspace) ||
@@ -611,6 +622,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     for (const state of states.values()) if (state.cached?.bundle === bundle) return state.cached.preferences.find(item => item.project === call.identity.module.project)?.client_directives ?? [];
     return [];
   }
+  function analysisGenerationStagingFile(filename) {
+    const parts = path.resolve(filename).split(path.sep);
+    const lower = parts.map(part => part.toLowerCase());
+    const marker = lower.lastIndexOf(".graphql-desk");
+    return marker >= 0 && lower[marker + 1] === "typings" && lower[marker + 2] === "generations" &&
+      /^g-\d+-[0-9a-f-]{36}$/i.test(parts[marker + 3] ?? "") &&
+      /^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.basename(filename));
+  }
   function reconcileFolderWatches() {
     const folders = new Map((vscode.workspace.workspaceFolders ?? [])
       .filter(folder => folder.uri.scheme === "file").map(folder => [folder.uri.toString(), folder]));
@@ -632,6 +651,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     for (const [uri, folder] of folders) if (!folderWatches.has(uri)) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, "**/*"));
       const sourceChanged = resource => {
+        if (resource?.scheme === "file" && analysisGenerationStagingFile(resource.fsPath)) return;
         if (resource?.scheme === "file" && path.basename(resource.fsPath).toLowerCase() === "settings.json" &&
             path.basename(path.dirname(resource.fsPath)).toLowerCase() === ".vscode") return;
         if (resource?.scheme === "file") {
@@ -723,6 +743,12 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (vscode.workspace[event]) subscriptions.push(vscode.workspace[event](change => {
       const document = change?.document ?? (["onDidOpenTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument"].includes(event) ? change : null);
       if (event !== "onDidChangeConfiguration" && extensionSettingsDocument(document)) return;
+      const filename = event !== "onDidChangeConfiguration" && document ? localPath(document) : null;
+      if (filename && analysisGenerationStagingFile(filename)) return;
+      if (document && event !== "onDidChangeConfiguration" && (!filename ||
+          (!(vscode.workspace.workspaceFolders ?? []).some(folder => folder.uri.scheme === "file" &&
+            inside(canonical(folder.uri.fsPath), filename)) &&
+           ![...states.values()].some(state => watchesSchema(state, filename))))) return;
       if (event !== "onDidChangeConfiguration" && document?.uri?.scheme === "file" &&
           ownedAnalysisPaths.has(canonical(document.uri.fsPath)) && !(event === "onDidChangeTextDocument" && document.isDirty)) return;
       if (event === "onDidChangeConfiguration" && change?.affectsConfiguration &&
@@ -752,4 +778,5 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); folderWatchRoots.clear(); ownedAnalysisPaths.clear(); ownedAnalysisDirectories.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
 module.exports = { createAnalysisController };
+
 

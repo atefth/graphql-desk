@@ -287,7 +287,8 @@ function activate(context) {
       publisher = createAnalysisGenerations(vscode, folderRoot, managed.root);
       generations.set(key, publisher);
     }
-    if (!previous && publisher && managed.selectedSetting) {
+    if (publisher && managed.selectedSetting && (!previous || previous.managedRoot !== managed.root ||
+        (!previousOverride && previous.selectedSetting !== managed.selectedSetting))) {
       const selectedDirectory = path.resolve(folderRoot, managed.selectedSetting);
       const selected = publisher.current(managed).find(item => path.resolve(item.directory) === selectedDirectory);
       if (selected) {
@@ -448,7 +449,10 @@ function activate(context) {
       result = await controller.artifacts(snapshot, token, captureArtifactFailure);
     }
     if (!result) return;
-    if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
+    const analysisCurrent = result.isCurrent();
+    if (disposed || ticket !== generation || !analysisCurrent) {
+      traceSkip("analysis-snapshot-stale"); return;
+    }
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
     if (!folder) { traceSkip("document-outside-workspace"); return; }
     const folderRoot = path.resolve(folder.uri.fsPath);
@@ -472,7 +476,10 @@ function activate(context) {
       status.show();
       return;
     }
-    if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
+    const analysisStillCurrent = result.isCurrent();
+    if (disposed || ticket !== generation || !analysisStillCurrent) {
+      traceSkip("analysis-snapshot-stale"); return;
+    }
     try {
       const groups = new Map();
       const operationManifest = result.projects.map(({ project, generated_package, provenance }) =>
@@ -625,3 +632,4 @@ function activate(context) {
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
 module.exports = { activate, deactivate, operationDependencyImpact, reconfigureWorkspaceRoots, typingFingerprint };
+

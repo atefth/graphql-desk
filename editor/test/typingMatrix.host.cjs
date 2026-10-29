@@ -38,9 +38,11 @@ function pythonVersion(python) {
 
 exports.run = async () => {
   const suite = process.env.GRAPHQL_DESK_TEST_SUITE;
-  const results = { host: vscode.version, pylance: {}, lifecycle: { invalidationAndRepair: {} } };
+  const results = { host: vscode.version, pylance: {}, lifecycle: { invalidationAndRepair: {}, skipTraces: [], stubPathSelections: [] } };
   let settingChanges;
   let diagnosticChanges;
+  let selectionChanges;
+  let originalCreateOutputChannel;
   try {
     for (const id of ["ms-python.python", "ms-python.vscode-pylance"]) {
       const extension = vscode.extensions.getExtension(id);
@@ -53,6 +55,25 @@ exports.run = async () => {
 
     const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
     const consumerUri = vscode.Uri.file(path.join(workspace, "consumer.py"));
+    originalCreateOutputChannel = vscode.window.createOutputChannel;
+    vscode.window.createOutputChannel = (name, ...args) => {
+      const channel = originalCreateOutputChannel.call(vscode.window, name, ...args);
+      if (name !== "GraphQL Desk") return channel;
+      return new Proxy(channel, { get(target, property) {
+        if (property === "appendLine") return value => {
+          if (typeof value === "string" && value.startsWith("Live typing skipped: ") &&
+              results.lifecycle.skipTraces.length < 80) results.lifecycle.skipTraces.push(value);
+          return target.appendLine(value);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+    };
+    selectionChanges = vscode.workspace.onDidChangeConfiguration(event => {
+      if (event.affectsConfiguration("python.analysis.stubPath", vscode.workspace.getWorkspaceFolder(consumerUri)?.uri)) {
+        results.lifecycle.stubPathSelections.push(vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""));
+      }
+    });
     const extension = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
     assert.ok(extension, "GraphQL Desk extension must be loaded in the host");
     await extension.activate();
@@ -262,25 +283,6 @@ exports.run = async () => {
       "count_bad_field = count_result['selected']",
       "",
     ].join("\n");
-    const capturePublisherSnapshot = async () => {
-      const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
-      const generationRoot = path.resolve(workspace, settings["python.analysis.stubPath"]);
-      const complete = JSON.parse(await fs.readFile(path.join(generationRoot, "complete.json"), "utf8"));
-      const generatedRoot = path.join(generationRoot, "graphql_desk_generated");
-      const factory = await fs.readFile(path.join(generatedRoot, "default.pyi"), "utf8").catch(() => "");
-      const source = await fs.readFile(path.join(generatedRoot, "sources", "operation_semantics.pyi"), "utf8").catch(() => "");
-      return {
-        generation: { id: complete.id, sequence: complete.sequence, analysisId: complete.analysisId },
-        operationManifest: complete.operationManifest.map(project => ({
-          project: project.project,
-          operations: project.operations.map(({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports }) =>
-            ({ owner, binding, operation_name, status, declaration_path, declaration_symbol, source_exports })),
-        })),
-        sourceArtifacts: complete.files.map(file => file.path).filter(file => file.includes("/sources/") || file.endsWith("/default.pyi")),
-        factoryOverloads: factory.split("\n").filter(line => /Text|Count|Inputs/.test(line)),
-        sourceDeclarations: source.split("\n").filter(line => /Text|Count|Inputs|Filter|Choice/.test(line)),
-      };
-    };
     await replace(document, multiSource);
     const multiUri = uri;
     const multiDocument = document;
@@ -307,10 +309,6 @@ exports.run = async () => {
         multiProbe.textVariableErrors.length > 0 && multiProbe.countVariableErrors.length > 0 &&
         multiProbe.textFieldErrors.length > 0 && multiProbe.countFieldErrors.length > 0;
     }, "Pylance infers isolated results and variables for same-source operation selectors", 60000);
-    if (!multiReady) {
-      try { results.pylance.publisherSnapshot = await capturePublisherSnapshot(); }
-      catch (error) { results.pylance.publisherSnapshotError = String(error); }
-    }
     assert.ok(multiReady, JSON.stringify({ ...multiProbe, publisherSnapshot: results.pylance.publisherSnapshot }));
     results.pylance.multiOperationIsolation = multiProbe;
     await replace(document, originalConsumerSource);
@@ -444,10 +442,6 @@ exports.run = async () => {
         results.pylance.inputLiteralExtraErrors.some(message => /unknown|not defined|field/i.test(message)) &&
         Object.values(results.pylance.inputNegativeErrors).every(errors => errors.length > 0);
     }, "Pylance checks recursive inputs, defaults, enums, oneOf alternatives and schema-bound scalar helpers", 60000);
-    if (!inputContractReady) {
-      try { results.pylance.publisherSnapshot = await capturePublisherSnapshot(); }
-      catch (error) { results.pylance.publisherSnapshotError = String(error); }
-    }
     assert.ok(inputContractReady, JSON.stringify(results.pylance));
     results.pylance.inputContracts = true;
     const directiveReady = await until(async () => {
@@ -593,10 +587,6 @@ exports.run = async () => {
         results.pylance.conditionalNegative.length > 0 &&
         results.pylance.conditionalGenerated;
     }, "an unsaved GraphQL edit publishes conditional-presence and nullable-list types", 60000);
-    if (!conditionalReady) {
-      try { results.pylance.conditionalPublisherSnapshot = await capturePublisherSnapshot(); }
-      catch (error) { results.pylance.conditionalPublisherSnapshotError = String(error); }
-    }
     assert.ok(conditionalReady, JSON.stringify(results.pylance));
     assert.equal(semanticDocument.isDirty, true, "GraphQL Desk preserves the unsaved Python source edit");
     assert.equal(await fs.readFile(semanticPath, "utf8"), semanticDiskBaseline,
@@ -923,14 +913,25 @@ exports.run = async () => {
     results.lifecycle.activeStubRoot = path.resolve(workspace, results.lifecycle.configuredStubPath || ".graphql-desk/typings");
     assert.ok(results.lifecycle.configuredStubPath);
     results.outcome = "live-typing-matrix-observed";
+    results.lifecycle.skipTraces = [];
+    results.lifecycle.stubPathSelections = [];
   } catch (error) {
     results.error = String(error.stack || error);
     results.outcome = "live-typing-matrix-failed";
     throw error;
   } finally {
+    results.lifecycle.stubPathSelections = results.lifecycle.stubPathSelections.map(setting => {
+      const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
+      const relative = path.relative(workspace, path.resolve(workspace, setting));
+      return path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)
+        ? "<external>" : relative;
+    });
+    selectionChanges?.dispose();
     settingChanges?.dispose();
     diagnosticChanges?.dispose();
+    if (originalCreateOutputChannel) vscode.window.createOutputChannel = originalCreateOutputChannel;
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify(results, null, 2));
     console.log(`GRAPHQL_DESK_TYPING_MATRIX ${JSON.stringify(results)}`);
   }
 };
+

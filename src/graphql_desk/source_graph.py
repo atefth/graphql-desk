@@ -121,6 +121,7 @@ class PersistedDeclaration:
     id_range: Span
     document: DocumentIdentity
     schema_name: str | None
+    binding: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1793,6 +1794,7 @@ class _Graph:
             id_range,
             document.document,
             callable_.schema_name or document.schema_name,
+            module.call_bindings.get(id(node)),
         )
 
     def extract(

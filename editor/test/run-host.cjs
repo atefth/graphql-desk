@@ -377,6 +377,9 @@ async function main() {
           outcome: observed.outcome,
           error: observed.error,
           probes: Object.fromEntries(Object.entries(observed.lifecycle || {}).filter(([key]) => /probe/i.test(key))),
+          trace: observed.lifecycle?.coldTrace?.slice(-60),
+          skipTraces: observed.lifecycle?.skipTraces?.slice(-30),
+          pylanceFailure: observed.pylance?.failureEvidence,
           debug: debug && {
             sourceChanges: debug.sourceChanges,
             stubPath: debug.stubPath,
