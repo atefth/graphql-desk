@@ -26,6 +26,7 @@ async function run() {
   const fixtures = {
     "schema.graphql": schema,
     "main.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('{ user { missing old } }')\r\n",
+    "persisted.py": `from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted("sha256:${"0".repeat(64)}", query)\n`,
     "partial.py": "from graphql_desk import gql\nq=gql('{ user { na')\n",
     "blank.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''\r\n\r\n''')\r\n",
     "lexical.py": "from graphql_desk import gql\nq=gql('''query Read { user { name",
@@ -80,7 +81,7 @@ async function run() {
   const observations = { outcome: "read-only-features-observed", vscode: vscode.version, diagnostics: false, completion: false, boundaryCompletion: false, hover: false,
     schemaDefinition: false, fragmentDefinition: false, ambiguousFragmentDefinition: false, nativeCoexistence: false,
     highlighting: false, lexicalHighlighting: false, escapedLexicalHighlighting: false, highlightRecovery: false,
-    nativePythonHover: false, untrustedNoAnalysis: false, diskUnchanged: false, cleanBuffers: false };
+    nativePythonHover: false, untrustedNoAnalysis: false, persistedIdAction: false, diskUnchanged: false, cleanBuffers: false };
   try {
     const invalid = documents.get("main.py");
     await registration.refresh(invalid);
@@ -90,6 +91,26 @@ async function run() {
     assert.equal(invalid.getText(missing.range), "missing");
     assert.ok(diagnostics.some((item) => item.code === "graphql.deprecation"));
     observations.diagnostics = true;
+    const persistedDocument = documents.get("persisted.py");
+    await registration.refresh(persistedDocument);
+    const staleId = vscode.languages.getDiagnostics(persistedDocument.uri)
+      .find(item => item.code === "graphql-desk.persisted-hash-mismatch");
+    assert.ok(staleId);
+    assert.match(persistedDocument.getText(staleId.range), /^"sha256:/);
+    const persistedActions = await vscode.commands.executeCommand("vscode.executeCodeActionProvider",
+      persistedDocument.uri, staleId.range, vscode.CodeActionKind.QuickFix);
+    const updateId = persistedActions.find(item => /Update persisted ID/.test(item.title));
+    assert.ok(updateId);
+    const edit = updateId.edit.entries().find(([uri]) => uri.toString() === persistedDocument.uri.toString())?.[1]?.[0];
+    assert.ok(edit);
+    assert.ok(edit.range.isEqual(staleId.range));
+    const indexed = bundle(persistedDocument.getText(), { uri: persistedDocument.uri.toString(),
+      version: persistedDocument.version, schema, schemaUri: schemaDoc.uri.toString(), schemaVersion: schemaDoc.version,
+      schemaToken: `schema-${schemaDoc.version}`, modules: ["fragments.py", "other.py"].map(name => documents.get(name))
+        .map(document => ({ project: "p", module: path.basename(document.fileName, ".py"),
+          uri: document.uri.toString(), version: document.version, source: document.getText(), is_package: false })) });
+    assert.equal(edit.newText, JSON.stringify(indexed.response.persisted[0].expected_id));
+    observations.persistedIdAction = true;
     const partial = documents.get("partial.py");
     const completion = await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", partial.uri,
       partial.positionAt(partial.getText().indexOf("na'") + 2));

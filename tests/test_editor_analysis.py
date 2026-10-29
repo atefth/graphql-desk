@@ -11,6 +11,7 @@ from graphql import build_schema, introspection_from_schema
 
 from graphql_desk import source_graph
 from graphql_desk.editor_analysis import analyze_editor_json, analyze_editor_snapshot
+from graphql_desk.persisted import editor_sha256_id
 from graphql_desk.source_graph import IncrementalResolver, ModuleSnapshot
 
 
@@ -67,6 +68,53 @@ def array(value: object) -> list[object]:
 
 
 class EditorAnalysisTests(unittest.TestCase):
+    def test_persisted_editor_snapshot_reports_stale_hash_and_exact_literal_action(
+        self,
+    ) -> None:
+        source = (
+            "from graphql_desk import gql\n"
+            "from fragments import card\n"
+            "query = gql('query Q { user { ...Card } }', [card])\n"
+            "registered = gql.persisted('sha256:" + "0" * 64 + "', query)\n"
+        )
+        payload = request(source)
+        array(payload["modules"]).append(
+            module(
+                "fragments",
+                "from graphql_desk import gql\n"
+                "card = gql('fragment Card on User { name }')\n",
+            )
+        )
+
+        response = analyze_editor_snapshot(payload)
+        persisted = object_(array(response["persisted"])[0])
+        main = object_(array(payload["modules"])[0])
+        id_text = "'sha256:" + "0" * 64 + "'"
+        start = cast(str, main["source"]).index(id_text)
+        expected = editor_sha256_id(
+            "query Q { user { ...Card } }", ("fragment Card on User {\n  name\n}",)
+        )
+        self.assertEqual(persisted["expected_id"], expected)
+        self.assertTrue(persisted["id_is_literal"])
+        id_range = object_(persisted["id_range"])
+        self.assertEqual(
+            object_(id_range["codepoint"]),
+            {"start": start, "end": start + len(id_text)},
+        )
+        diagnostics = [object_(item) for item in array(response["diagnostics"])]
+        stale = next(
+            item for item in diagnostics if item["code"] == "persisted-hash-mismatch"
+        )
+        self.assertEqual(stale["range"], id_range)
+
+        alias_source = source.replace(
+            "registered = gql.persisted('sha256:" + "0" * 64 + "', query)",
+            "id = 'sha256:" + "0" * 64 + "'\nregistered = gql.persisted(id, query)",
+        )
+        object_(array(payload["modules"])[0])["source"] = alias_source
+        alias = object_(array(analyze_editor_snapshot(payload)["persisted"])[0])
+        self.assertFalse(alias["id_is_literal"])
+
     def test_type_mapping_status_uses_captured_symbols_only(self) -> None:
         payload = request("from graphql_desk import gql\nq=gql('{ date }')")
         schema = object_(array(payload["schemas"])[0])

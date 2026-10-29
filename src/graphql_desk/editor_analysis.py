@@ -7,6 +7,8 @@ from urllib.parse import urlsplit
 
 from .config import ScalarMapping
 from .fragments import DefinitionFact, FragmentIndex, SchemaContext, index_fragments
+from .persisted import editor_sha256_id
+from .persisted_manifest import collect_persisted_manifests
 from .schema_loading import load_from_introspection, load_from_sdl
 from .schema_types import mapped_type_declarations
 from .source import Span
@@ -337,6 +339,7 @@ def analyze_editor_snapshot_details(
             }
         )
     index = index_fragments(sources, schemas=schemas)
+    persisted_collection = collect_persisted_manifests(sources, index)
     mapping_diagnostics: list[GraphDiagnostic] = []
     for project, project_mappings in type_mappings.items():
         for mapping_record in project_mappings:
@@ -462,6 +465,11 @@ def analyze_editor_snapshot_details(
             require(reference.reference_module, reference.range)
     for diagnostic in index.diagnostics:
         require(diagnostic.module, diagnostic.range)
+    for diagnostic in persisted_collection.diagnostics:
+        require(diagnostic.module, diagnostic.range)
+    for declaration in sources.persisted:
+        require(declaration.module, declaration.range)
+        require(declaration.module, declaration.id_range)
     for document in index.documents:
         for fact in document.definitions:
             require(fact.document.module, fact.document.call_range)
@@ -565,13 +573,44 @@ def analyze_editor_snapshot_details(
                 },
             }
         )
+    persisted_facts: list[dict[str, object]] = []
+    for declaration in sources.persisted:
+        indexed_document = indexed.get(declaration.document)
+        if indexed_document is None or indexed_document.selected_operation is None:
+            continue
+        external_fragments = tuple(
+            fact.printed
+            for fact in indexed_document.definitions
+            if fact.kind == "fragment" and fact.document != declaration.document
+        )
+        try:
+            expected_id = editor_sha256_id(
+                indexed_document.call.source, external_fragments
+            )
+        except (ValueError, TypeError, RecursionError):
+            continue
+        persisted_facts.append(
+            {
+                "module": _module(declaration.module),
+                "range": range_(declaration.module, declaration.range),
+                "id_range": range_(declaration.module, declaration.id_range),
+                "id": declaration.id,
+                "expected_id": expected_id,
+                "id_is_literal": declaration.id_is_literal,
+            }
+        )
     response: dict[str, object] = {
         "request_id": request_id,
         "modules": [_module(item) for item in snapshots],
         "schemas": schema_facts,
         "calls": calls,
+        "persisted": persisted_facts,
         "diagnostics": [
             editor_diagnostic(item, snapshots) for item in index.diagnostics
+        ]
+        + [
+            editor_diagnostic(item, snapshots)
+            for item in persisted_collection.diagnostics
         ]
         + [editor_diagnostic(item, snapshots) for item in mapping_diagnostics],
     }
