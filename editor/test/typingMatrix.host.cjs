@@ -292,6 +292,7 @@ exports.run = async () => {
       const generatedRoot = path.join(generationRoot, "graphql_desk_generated");
       const factory = await fs.readFile(path.join(generatedRoot, "default.pyi"), "utf8").catch(() => "");
       const source = await fs.readFile(path.join(generatedRoot, "sources", "operation_semantics.pyi"), "utf8").catch(() => "");
+      const consumer = await fs.readFile(path.join(generatedRoot, "sources", "consumer.pyi"), "utf8").catch(() => "");
       return {
         generation: { id: complete.id, sequence: complete.sequence, analysisId: complete.analysisId },
         operationManifest: complete.operationManifest.map(project => ({
@@ -301,6 +302,7 @@ exports.run = async () => {
         })),
         sourceArtifacts: complete.files.map(file => file.path).filter(file => file.includes("/sources/") || file.endsWith("/default.pyi")),
         factoryOverloads: factory.split("\n").filter(line => /Text|Count|Inputs/.test(line)),
+        consumerDeclarations: consumer.split("\n").filter(line => /Text|Count/.test(line)),
         sourceDeclarations: source.split("\n").filter(line => /Text|Count|Inputs|Filter|Choice/.test(line)),
       };
     };
@@ -331,6 +333,12 @@ exports.run = async () => {
         multiProbe.textFieldErrors.length > 0 && multiProbe.countFieldErrors.length > 0;
     }, "Pylance infers isolated results and variables for same-source operation selectors", 60000);
     if (!multiReady) {
+      results.pylance.multiDocumentState = {
+        version: multiDocument.version,
+        dirty: multiDocument.isDirty,
+        includesText: multiDocument.getText().includes("text_doc = graphql"),
+        includesCount: multiDocument.getText().includes("count_doc = graphql"),
+      };
       try { results.pylance.publisherSnapshot = await capturePublisherSnapshot(); }
       catch (error) { results.pylance.publisherSnapshotError = String(error); }
     }
@@ -976,3 +984,4 @@ exports.run = async () => {
     console.log(`GRAPHQL_DESK_TYPING_MATRIX ${JSON.stringify(results)}`);
   }
 };
+
