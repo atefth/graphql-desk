@@ -349,6 +349,12 @@ exports.run = async () => {
       };
       try { results.pylance.publisherSnapshot = await capturePublisherSnapshot(); }
       catch (error) { results.pylance.publisherSnapshotError = String(error); }
+      results.pylance.failureEvidence = {
+        selectedStubPath: path.relative(workspace,
+          path.resolve(workspace, vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""))),
+        document: results.pylance.multiDocumentState,
+        workerErrors,
+      };
     }
     assert.ok(multiReady, JSON.stringify({ ...multiProbe, publisherSnapshot: results.pylance.publisherSnapshot }));
     results.pylance.multiOperationIsolation = multiProbe;
