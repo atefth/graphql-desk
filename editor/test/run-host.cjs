@@ -158,7 +158,7 @@ async function main() {
   try {
     await runHost(version, suite, factorySuite, temporary);
   } finally {
-    await fs.rm(temporary, { recursive: true, force: true });
+    await fs.rm(temporary, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
     await assert.rejects(fs.access(temporary), { code: "ENOENT" }, "Host-test temporary data must be removed");
   }
 }
