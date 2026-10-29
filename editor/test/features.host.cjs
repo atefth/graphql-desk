@@ -99,13 +99,16 @@ async function run() {
     observations.diagnostics = true;
     await recordProgress("diagnostics");
     const persistedDocument = documents.get("persisted.py");
+    await recordProgress("persisted-refresh-start");
     await registration.refresh(persistedDocument);
+    await recordProgress("persisted-refresh-complete");
     const staleId = vscode.languages.getDiagnostics(persistedDocument.uri)
       .find(item => item.code === "graphql-desk.persisted-hash-mismatch");
     assert.ok(staleId);
     assert.match(persistedDocument.getText(staleId.range), /^"sha256:/);
     const persistedActions = await vscode.commands.executeCommand("vscode.executeCodeActionProvider",
       persistedDocument.uri, staleId.range);
+    await recordProgress("persisted-update-actions-complete");
     const updateId = persistedActions.find(item => /Update persisted ID/.test(item.title));
     assert.ok(updateId);
     const edit = updateId.edit.entries().find(([uri]) => uri.toString() === persistedDocument.uri.toString())?.[1]?.[0];
@@ -120,7 +123,9 @@ async function run() {
     observations.persistedIdAction = true;
     await recordProgress("persisted-id-update-action");
     const missingPersistedDocument = documents.get("missingPersisted.py");
+    await recordProgress("missing-persisted-refresh-start");
     await registration.refresh(missingPersistedDocument);
+    await recordProgress("missing-persisted-refresh-complete");
     const missingPersisted = vscode.languages.getDiagnostics(missingPersistedDocument.uri)
       .find(item => item.code === "graphql-desk.persisted-id-missing");
     assert.ok(missingPersisted);
@@ -316,3 +321,4 @@ async function run() {
 }
 
 module.exports = { run };
+
