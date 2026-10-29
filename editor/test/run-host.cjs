@@ -152,7 +152,7 @@ async function main() {
   const suite = process.argv[3] || "features";
   assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
   const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
-  const temporaryRoot = path.resolve(__dirname, "../test-host-workspaces");
+  const temporaryRoot = path.resolve(__dirname, "../../../");
   await fs.mkdir(temporaryRoot, { recursive: true });
   const temporary = await fs.mkdtemp(path.join(temporaryRoot, "graphql-desk-features-"));
   try {
