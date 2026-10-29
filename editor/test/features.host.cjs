@@ -288,6 +288,9 @@ async function run() {
     assert.equal(analyses, before);
     assert.equal(vscode.languages.getDiagnostics(invalid.uri).filter((item) => item.source === "GraphQL Desk").length, 0);
     observations.untrustedNoAnalysis = true;
+  } catch (error) {
+    await fs.writeFile(resultPath, JSON.stringify({ ...observations, error: String(error) }), "utf8");
+    throw error;
   } finally {
     highlighting.dispose();
     registration.dispose();
