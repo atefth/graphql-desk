@@ -206,9 +206,7 @@ function activate(context) {
   function traceSkip(reason) {
     if (reason === lastSkipReason) return;
     lastSkipReason = reason;
-    const detail = process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1"
-      ? ` (${new Error().stack?.split("\n").slice(2, 4).join(" <- ") ?? "unknown caller"})` : "";
-    output.appendLine(`Live typing skipped: ${reason}${detail}`);
+    output.appendLine(`Live typing skipped: ${reason}`);
   }
   function managedRoot(folder, folderRoot) {
     let promise = roots.get(folderRoot);
@@ -453,10 +451,6 @@ function activate(context) {
     if (!result) return;
     const analysisCurrent = result.isCurrent();
     if (disposed || ticket !== generation || !analysisCurrent) {
-      if (process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1") {
-        console.error("GraphQL Desk skipped publication:", JSON.stringify({ disposed, ticket, generation,
-          analysisCurrent }));
-      }
       traceSkip("analysis-snapshot-stale"); return;
     }
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
@@ -484,10 +478,6 @@ function activate(context) {
     }
     const analysisStillCurrent = result.isCurrent();
     if (disposed || ticket !== generation || !analysisStillCurrent) {
-      if (process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1") {
-        console.error("GraphQL Desk skipped after stub resolution:", JSON.stringify({ disposed, ticket, generation,
-          analysisCurrent: analysisStillCurrent, ownsStubPath: managed.stillOwnsSetting() }));
-      }
       traceSkip("analysis-snapshot-stale"); return;
     }
     try {
@@ -549,12 +539,6 @@ function activate(context) {
     }
   }
   const refreshVisible = (sourceUri, invalidateTypes = Boolean(sourceUri), sourceRanges = null) => {
-    if (process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1") console.error("GraphQL Desk refresh requested:", JSON.stringify({
-      sourceUri, invalidateTypes, generation, visible: vscode.window.visibleTextEditors.map(editor => ({
-        uri: editor.document.uri.toString(), languageId: editor.document.languageId,
-        version: editor.document.version, dirty: editor.document.isDirty,
-      })),
-    }));
     generation += 1;
     const ticket = generation;
     const parsed = sourceUri ? vscode.Uri.parse(sourceUri) : null;
@@ -574,12 +558,6 @@ function activate(context) {
     timer = setTimeout(() => {
       if (disposed) return;
       const editors = vscode.window.visibleTextEditors.filter(editor => editor.document.languageId === "python");
-      if (process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1") console.error("GraphQL Desk refresh scheduled:", JSON.stringify({
-        ticket, generation, disposed, editors: editors.map(editor => ({
-          uri: editor.document.uri.toString(), version: editor.document.version,
-          dirty: editor.document.isDirty, workspace: vscode.workspace.getWorkspaceFolder(editor.document.uri)?.uri.toString(),
-        })),
-      }));
       const publishers = new Set();
       const workspaceRoots = new Set();
       for (const editor of editors) {
@@ -592,10 +570,6 @@ function activate(context) {
       }
       for (const editor of editors) {
         void Promise.allSettled([language.refresh(editor.document), highlighting.refresh(editor)]).then(() => {
-          if (process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR === "1") console.error("GraphQL Desk refresh result:", JSON.stringify({
-            ticket, generation, disposed, isPublisher: publishers.has(editor),
-            uri: editor.document.uri.toString(), version: editor.document.version,
-          }));
           if (!publishers.has(editor) || disposed || ticket !== generation) return;
           return quarantine.then(() => publishTypes(editor, ticket, token, quarantineContext));
         });
