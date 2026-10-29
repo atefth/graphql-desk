@@ -65,6 +65,17 @@ function isVerifiedGenerationFile(filename, generationRoot) {
   } catch { return false; }
   finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
 }
+function staleCaptureSummary(before, after) {
+  if (process.env.GRAPHQL_DESK_CAPTURE_WORKER_STDERR !== "1") return;
+  const previous = JSON.parse(before);
+  const current = JSON.parse(after);
+  const safe = (value, index) => index === 2
+    ? value.map(({ path, version, is_dirty, text }) => ({ path, version, is_dirty, bytes: Buffer.byteLength(text) }))
+    : index === 3 ? value.map(({ id, path, version, is_dirty }) => ({ id, path, version, is_dirty })) : value;
+  console.error("GraphQL Desk stale analysis snapshot:", JSON.stringify(previous.flatMap((value, index) =>
+    JSON.stringify(value) === JSON.stringify(current[index]) ? [] : [{ input: index, before: safe(value, index), after: safe(current[index], index) }])
+    ).slice(0, 4096));
+}
 function artifactRootFor(filename, selectedStubRoot) {
   const managedRoot = path.basename(path.dirname(selectedStubRoot)) === "generations"
     ? path.resolve(selectedStubRoot, "..", "..") : selectedStubRoot;
@@ -548,7 +559,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         check(cached.ticket, token, state);
         const latest = await capture(state);
         check(cached.ticket, token, state);
-        if (captureSignature(latest, cached.schemaPaths) !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
+        const signature = captureSignature(latest, cached.schemaPaths);
+        if (signature !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
+          staleCaptureSummary(cached.signature, signature);
           state.cached = null;
           skip("analysis-snapshot-stale"); return null;
         }
@@ -559,7 +572,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         failureReason = "artifact-freshness-check-failed";
         const final = await capture(state);
         check(cached.ticket, token, state);
-        if (captureSignature(final, cached.schemaPaths) !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
+        const finalSignature = captureSignature(final, cached.schemaPaths);
+        if (finalSignature !== cached.signature || JSON.stringify(revisions(state)) !== cached.revisionSignature) {
+          staleCaptureSummary(cached.signature, finalSignature);
           state.cached = null;
           skip("analysis-snapshot-stale"); return null;
         }
@@ -762,4 +777,5 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); folderWatchRoots.clear(); ownedAnalysisPaths.clear(); ownedAnalysisDirectories.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
 module.exports = { createAnalysisController };
+
 
