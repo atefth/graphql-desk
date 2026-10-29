@@ -609,6 +609,12 @@ test("workspace folder watchers follow additions and removals and refresh closed
   addedWatch.fire(Uri.file(generationDir));
   addedWatch.fire(Uri.file(generationArtifact));
   assert.equal(invalidations, beforeGeneratedStub + 2, "Immutable generation creation and contents must not self-invalidate the source snapshot");
+  const generationStage = path.join(nestedGenerationDir, ".graphql-desk-123e4567-e89b-12d3-a456-426614174000.tmp");
+  await fs.writeFile(generationStage, "");
+  addedWatch.fire(Uri.file(generationStage));
+  fixture.events.onDidOpenTextDocument.fire({ uri: Uri.file(generationStage) });
+  fixture.events.onDidChangeTextDocument.fire({ document: { uri: Uri.file(generationStage), isDirty: true }, contentChanges: [{ rangeOffset: 0, rangeLength: 0 }] });
+  assert.equal(invalidations, beforeGeneratedStub + 2, "GraphQL Desk staging files in an immutable generation must not restart analysis while being written");
   addedWatch.fire(Uri.file(completeManifest));
   assert.equal(invalidations, beforeGeneratedStub + 2, "Large owned generation manifests are read completely before classifying watcher events");
   const foreignGenerationFile = path.join(generationDir, "foreign.txt");
