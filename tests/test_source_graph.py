@@ -2913,6 +2913,7 @@ alias('{ id }')
         )
         first, second = result.persisted
         self.assertEqual(first.id, "opaque-id")
+        self.assertTrue(first.id_is_literal)
         self.assertEqual(first.schema_name, "main")
         self.assertEqual(first.document, DocumentIdentity(query.module, query.range))
         self.assertEqual(
@@ -2924,6 +2925,7 @@ alias('{ id }')
             "persist('opaque-id', query)",
         )
         self.assertEqual(second.id, "sha256:abc")
+        self.assertTrue(second.id_is_literal)
         self.assertEqual(second.schema_name, "other")
         self.assertEqual(
             second.document, DocumentIdentity(other_query.module, other_query.range)

@@ -23,6 +23,41 @@ test("actual Python source maps give exact schema/deprecation diagnostics and cl
   assert.deepEqual(await createLanguageFeatures(options(fixed)).diagnostics(document(fixed)), []);
 });
 
+test("stale persisted hashes produce an exact fix only for direct ID literals", async () => {
+  const source = [
+    "from graphql_desk import gql",
+    "from fragments import card",
+    "query = gql('query Q { user { ...Card } }', [card])",
+    `registered = gql.persisted(${JSON.stringify(`sha256:${"0".repeat(64)}`)}, query)`,
+  ].join("\n");
+  const fragment = { project: "p", module: "fragments", uri: "file:///workspace/fragments.py", version: 2,
+    source: "from graphql_desk import gql\ncard = gql('fragment Card on User { name }')", is_package: false };
+  const value = bundle(source, { modules: [fragment] });
+  const snapshot = document(value);
+  const service = createLanguageFeatures(options(value));
+  const diagnostics = await service.diagnostics(snapshot);
+  const stale = diagnostics.find(item => item.code === "graphql-desk.persisted-hash-mismatch");
+  assert.ok(stale);
+  assert.match(snapshot.text.slice(stale.range.start, stale.range.end), /^["']sha256:/);
+  const actions = await service.persistedIdActions(snapshot, [{ code: stale.code, range: stale.range }]);
+  assert.equal(actions.length, 1);
+  assert.equal(snapshot.text.slice(actions[0].range.start, actions[0].range.end), snapshot.text.slice(stale.range.start, stale.range.end));
+  assert.match(actions[0].replacement, /^"sha256:[0-9a-f]{64}"$/);
+  assert.notEqual(actions[0].replacement.slice(1, -1), `sha256:${"0".repeat(64)}`);
+
+  const aliased = bundle(source.replace(
+    `registered = gql.persisted(${JSON.stringify(`sha256:${"0".repeat(64)}`)}, query)`,
+    `id = ${JSON.stringify(`sha256:${"0".repeat(64)}`)}\nregistered = gql.persisted(id, query)`,
+  ), { modules: [fragment] });
+  const aliasService = createLanguageFeatures(options(aliased));
+  const aliasDiagnostic = (await aliasService.diagnostics(document(aliased)))
+    .find(item => item.code === "graphql-desk.persisted-hash-mismatch");
+  assert.ok(aliasDiagnostic);
+  assert.deepEqual(await aliasService.persistedIdActions(document(aliased), [
+    { code: aliasDiagnostic.code, range: aliasDiagnostic.range },
+  ]), []);
+});
+
 test("dynamic factory source is diagnosed while valid sibling operations remain indexed", async () => {
   const source = `from graphql_desk import gql
 def query_source() -> str: return "{ user { name } }"
@@ -402,7 +437,7 @@ test("cancellation during the final freshness await cannot publish", async () =>
 });
 
 test("VS Code registration supplements Python services and ignores old diagnostic refreshes", async () => {
-  const value = bundle("from graphql_desk import gql\nq=gql('query Check {user{missing}}')");
+  const value = bundle(`from graphql_desk import gql\nq=gql('query Check {user{missing}}')\np=gql.persisted("sha256:${"0".repeat(64)}", q)`);
   const publications = [];
   const providers = {};
   let disposed = 0;
@@ -411,12 +446,16 @@ test("VS Code registration supplements Python services and ignores old diagnosti
     Range: class { constructor(start, end) { this.start = start; this.end = end; } },
     CompletionItem: class { constructor(label) { this.label = label; } },
     Diagnostic: class { constructor(range, message, severity) { Object.assign(this, { range, message, severity }); } },
+    CodeAction: class { constructor(title, kind) { Object.assign(this, { title, kind }); } },
+    CodeActionKind: { QuickFix: 1 },
+    WorkspaceEdit: class { constructor() { this.changes = []; } replace(...change) { this.changes.push(change); } },
     languages: {
       createDiagnosticCollection() { return { set(_uri, diagnostics) { publications.push(diagnostics); }, delete() {}, dispose() { disposed += 1; } }; },
       registerCompletionItemProvider(selector, provider) { providers.complete = provider; assert.equal(selector[0].language, "python"); return handle(); },
       registerHoverProvider(_selector, provider) { providers.hover = provider; return handle(); },
       registerDefinitionProvider(_selector, provider) { providers.definition = provider; return handle(); },
       registerDocumentSymbolProvider(_selector, provider) { providers.symbols = provider; return handle(); },
+      registerCodeActionsProvider(_selector, provider) { providers.actions = provider; return handle(); },
     },
     DocumentSymbol: class { constructor(name, detail, kind, range, selectionRange) { Object.assign(this, { name, detail, kind, range, selectionRange }); } },
     SymbolKind: { Function: 11, Struct: 22 },
@@ -430,18 +469,27 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   } }));
   const item = value.request.modules[0];
   const doc = { uri: { toString: () => item.uri }, version: item.version,
-    getText: () => item.source, positionAt: (offset) => positionAt(item.source, offset) };
+    getText: () => item.source, positionAt: (offset) => ({ offset }), offsetAt: (position) => position.offset };
   const old = registered.refresh(doc);
   await registered.refresh(doc);
   release();
   await old;
   assert.equal(publications.length, 1);
-  assert.equal(publications[0][0].code, "graphql.validation");
-  assert.deepEqual(Object.keys(providers).sort(), ["complete", "definition", "hover", "symbols"]);
+  assert.ok(publications[0].some(item => item.code === "graphql.validation"));
+  const persistedDiagnostic = publications[0].find(item => item.code === "graphql-desk.persisted-hash-mismatch");
+  assert.ok(persistedDiagnostic);
+  assert.deepEqual(Object.keys(providers).sort(), ["actions", "complete", "definition", "hover", "symbols"]);
+  const codeActions = await providers.actions.provideCodeActions(doc, undefined,
+    { diagnostics: [persistedDiagnostic] });
+  assert.equal(codeActions.length, 1);
+  assert.equal(codeActions[0].kind, vscode.CodeActionKind.QuickFix);
+  assert.equal(codeActions[0].edit.changes[0][0], doc.uri);
+  assert.equal(codeActions[0].edit.changes[0][1].start.offset, persistedDiagnostic.range.start.offset);
+  assert.match(codeActions[0].edit.changes[0][2], /^"sha256:[0-9a-f]{64}"$/);
   const documentSymbols = await providers.symbols.provideDocumentSymbols(doc);
   assert.deepEqual(documentSymbols.map(item => [item.name, item.detail, item.kind]), [["Check", "query", 11]]);
   registered.dispose();
-  assert.equal(disposed, 5);
+  assert.equal(disposed, 6);
   let releaseFinal;
   let enteredFinal;
   const reachedFinal = new Promise((resolve) => { enteredFinal = resolve; });

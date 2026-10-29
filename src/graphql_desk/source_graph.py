@@ -122,6 +122,7 @@ class PersistedDeclaration:
     document: DocumentIdentity
     schema_name: str | None
     binding: str | None = None
+    id_is_literal: bool = field(default=False, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -1795,6 +1796,8 @@ class _Graph:
             document.document,
             callable_.schema_name or document.schema_name,
             module.call_bindings.get(id(node)),
+            id_is_literal=isinstance(id_node, ast.Constant)
+            and isinstance(id_node.value, str),
         )
 
     def extract(

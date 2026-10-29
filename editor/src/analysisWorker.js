@@ -89,6 +89,29 @@ function validReply(reply, request) {
     });
   }
   if (request.op === "current") return keys(reply, ["ok", "current"]) && typeof reply.current === "boolean";
+  if (request.op === "analyze") {
+    const span = value => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 &&
+      Number.isSafeInteger(value.end) && value.end >= value.start;
+    const module = value => keys(value, ["project", "module", "uri", "version"]) &&
+      [value.project, value.module, value.uri].every(string) && Number.isSafeInteger(value.version) && value.version >= 0;
+    const sourceRange = value => keys(value, ["codepoint", "utf16"]) && span(value.codepoint) && span(value.utf16);
+    const persisted = value => keys(value, ["module", "range", "id_range", "id", "expected_id", "id_is_literal"]) &&
+      module(value.module) && sourceRange(value.range) && sourceRange(value.id_range) &&
+      string(value.id) && string(value.expected_id) && typeof value.id_is_literal === "boolean";
+    const sameModule = (left, right) => left.project === right.project && left.module === right.module &&
+      left.uri === right.uri && left.version === right.version;
+    return keys(reply, ["ok", "id", "request", "response", "unavailable_schemas", "remote_schemas"]) && reply.id === request.id &&
+      Array.isArray(reply.remote_schemas) && reply.remote_schemas.every(item =>
+        keys(item, ["project", "schema_name", "status"]) && string(item.project) && string(item.schema_name) &&
+        ["ready", "stale", "unavailable"].includes(item.status)) &&
+      keys(reply.request, ["request_id", "modules", "bindings", "schemas"]) &&
+      keys(reply.response, ["request_id", "modules", "schemas", "calls", "persisted", "diagnostics"]) &&
+      string(reply.request.request_id) && reply.request.request_id === reply.response.request_id &&
+      [reply.request.modules, reply.request.bindings, reply.request.schemas, reply.response.modules,
+        reply.response.schemas, reply.response.calls, reply.response.persisted, reply.response.diagnostics,
+        reply.unavailable_schemas].every(Array.isArray) && reply.response.persisted.every(item =>
+          persisted(item) && reply.response.modules.some(source => module(source) && sameModule(source, item.module)));
+  }
   if (request.op === "artifacts") {
     if (keys(reply, ["ok", "id", "current"])) return string(reply.id) && reply.id === request.id && reply.current === false;
     const identifier = value => typeof value === "string" && /^[\p{ID_Start}_][\p{ID_Continue}_]*$/u.test(value);
@@ -161,15 +184,7 @@ function validReply(reply, request) {
         Array.isArray(project.diagnostics) && project.diagnostics.every(value => diagnostic(value) && value.module.project === project.project) &&
         validProvenance(project));
   }
-  return keys(reply, ["ok", "id", "request", "response", "unavailable_schemas", "remote_schemas"]) && reply.id === request.id &&
-    Array.isArray(reply.remote_schemas) && reply.remote_schemas.every(item =>
-      keys(item, ["project", "schema_name", "status"]) && string(item.project) && string(item.schema_name) &&
-      ["ready", "stale", "unavailable"].includes(item.status)) &&
-    keys(reply.request, ["request_id", "modules", "bindings", "schemas"]) &&
-    keys(reply.response, ["request_id", "modules", "schemas", "calls", "diagnostics"]) &&
-    string(reply.request.request_id) && reply.request.request_id === reply.response.request_id &&
-    [reply.request.modules, reply.request.bindings, reply.request.schemas, reply.response.modules,
-      reply.response.schemas, reply.response.calls, reply.response.diagnostics, reply.unavailable_schemas].every(Array.isArray);
+  return false;
 }
 
 /** One request at a time; concurrent calls reject immediately, without a queue.

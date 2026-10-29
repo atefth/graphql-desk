@@ -336,6 +336,28 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         return await finish(bundle, snapshot, token, unique(result), []);
       } catch { return []; }
     },
+    async persistedIdActions(snapshot, diagnostics, token) {
+      try {
+        const bundle = await load(snapshot, token);
+        if (!bundle) return [];
+        snapshot = mapSnapshot(snapshot, bundle);
+        const ranges = diagnostics
+          .filter((item) => item.code === "graphql-desk.persisted-hash-mismatch")
+          .map((item) => item.range);
+        if (!ranges.length) return [];
+        return (bundle.response.persisted ?? [])
+          .filter((item) => item.module.uri === snapshot.uri &&
+            item.module.version === snapshot.version && item.id_is_literal &&
+            item.expected_id !== item.id &&
+            ranges.some((range) => range.start === item.id_range.utf16.start &&
+              range.end === item.id_range.utf16.end))
+          .map((item) => ({
+            title: "Update persisted ID to current document hash",
+            range: item.id_range.utf16,
+            replacement: JSON.stringify(item.expected_id),
+          }));
+      } catch { return []; }
+    },
     async diagnostics(snapshot, token) {
       try {
         const bundle = await load(snapshot, token);
@@ -445,6 +467,26 @@ function registerLanguageFeatures(vscode, options) {
           item.name, item.detail,
           item.kind === "fragment" ? vscode.SymbolKind.Struct : vscode.SymbolKind.Function,
           range(document, item.range), range(document, item.selectionRange)));
+      },
+    }),
+    vscode.languages.registerCodeActionsProvider(selector, {
+      async provideCodeActions(document, _range, context, token) {
+        const diagnostics = context.diagnostics.filter((item) =>
+          item.code === "graphql-desk.persisted-hash-mismatch");
+        const items = diagnostics.map((item) => ({
+          code: item.code,
+          range: {
+            start: document.offsetAt(item.range.start),
+            end: document.offsetAt(item.range.end),
+          },
+        }));
+        return (await service.persistedIdActions(snapshot(document), items, token)).map((item) => {
+          const action = new vscode.CodeAction(item.title, vscode.CodeActionKind.QuickFix);
+          action.edit = new vscode.WorkspaceEdit();
+          action.edit.replace(document.uri, range(document, item.range), item.replacement);
+          action.diagnostics = diagnostics;
+          return action;
+        });
       },
     }),
   ];
