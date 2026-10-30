@@ -18,9 +18,10 @@ function bundle(source, extra = {}) {
   const request = {
     request_id: "features-1",
     modules: [{ project: "p", module: "main", uri: extra.uri ?? "file:///workspace/main.py", version: extra.version ?? 1, source, is_package: false }, ...(extra.modules ?? [])],
-    bindings: [{ project: "p", schemas: ["default"], default_schema: "default", factories: [], type_mappings: [] }],
-    schemas: [{ project: "p", schema_name: "default", uri: extra.schemaUri ?? "file:///workspace/schema.graphql", version: extra.schemaVersion ?? 2,
-      token: extra.schemaToken ?? "schema-2", format: extra.schemaFormat ?? "sdl", text: extra.schema ?? schema }],
+    bindings: [{ project: "p", schemas: extra.schemaNames ?? ["default"], default_schema: extra.defaultSchema === undefined ? "default" : extra.defaultSchema,
+      factories: extra.factories ?? [], type_mappings: [] }],
+    schemas: [...(extra.includeDefaultSchema === false ? [] : [{ project: "p", schema_name: "default", uri: extra.schemaUri ?? "file:///workspace/schema.graphql", version: extra.schemaVersion ?? 2,
+      token: extra.schemaToken ?? "schema-2", format: extra.schemaFormat ?? "sdl", text: extra.schema ?? schema }]), ...(extra.schemas ?? [])],
   };
   const result = spawnSync(python, ["-I", "-X", "utf8", "-c",
     "import sys; sys.path.insert(0, sys.argv[1]); from graphql_desk.editor_analysis import analyze_editor_json; sys.stdout.write(analyze_editor_json(sys.stdin.read()))",

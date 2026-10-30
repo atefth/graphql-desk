@@ -150,20 +150,22 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
+  assert.ok(["features", "renameProtocol", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
   const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
   const temporaryRoot = path.resolve(__dirname, "../../../");
+  const cachePath = path.resolve(__dirname, "../.cache/vscode-test");
+  await fs.mkdir(cachePath, { recursive: true });
   await fs.mkdir(temporaryRoot, { recursive: true });
   const temporary = await fs.mkdtemp(path.join(temporaryRoot, "graphql-desk-features-"));
   try {
-    await runHost(version, suite, factorySuite, temporary);
+    await runHost(version, suite, factorySuite, temporary, cachePath);
   } finally {
     await fs.rm(temporary, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
     await assert.rejects(fs.access(temporary), { code: "ENOENT" }, "Host-test temporary data must be removed");
   }
 }
 
-async function runHost(version, suite, factorySuite, temporary) {
+async function runHost(version, suite, factorySuite, temporary, cachePath) {
   assert.deepEqual(await fs.readdir(temporary), [], "Every host run starts from a new temporary root");
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
@@ -345,13 +347,14 @@ async function runHost(version, suite, factorySuite, temporary) {
       settings: JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")),
     }));
   }
-  if (suite !== "discovery") {
+  if (!["discovery", "renameProtocol"].includes(suite)) {
     for (const extension of ["ms-python.python@2026.10.0", "ms-python.vscode-pylance@2026.4.1"]) {
-      await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], { version });
+      await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], { version, cachePath });
     }
   }
   const options = {
     version,
+    cachePath,
     extensionDevelopmentPath: path.resolve(__dirname, ".."),
     extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["parserOverlay", "externalMappings", "mixedLists", "fragmentTyping"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
     extensionTestsEnv: {
@@ -553,7 +556,7 @@ async function runHost(version, suite, factorySuite, temporary) {
     observed.lifecycle.userConfigurationPreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   }
-  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "mixedLists" ? "mixed-list-nullability-observed" : suite === "fragmentTyping" ? "fragment-masking-live-typing-observed" : suite === "externalMappings" ? "external-mappings-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : `read-only-${suite}-observed`);
+  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "mixedLists" ? "mixed-list-nullability-observed" : suite === "fragmentTyping" ? "fragment-masking-live-typing-observed" : suite === "externalMappings" ? "external-mappings-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : suite === "renameProtocol" ? "fragment-rename-lsp-observed" : `read-only-${suite}-observed`);
   console.log(`${suite} evidence: ${result}`);
 }
 
