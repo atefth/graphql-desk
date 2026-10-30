@@ -27,6 +27,7 @@ async function run() {
     "schema.graphql": schema,
     "main.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('{ user { missing old } }')\r\n",
     "persisted.py": `from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted("sha256:${"0".repeat(64)}", query)\n`,
+    "missingPersisted.py": "from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted(document=query)\n",
     "partial.py": "from graphql_desk import gql\nq=gql('{ user { na')\n",
     "blank.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''\r\n\r\n''')\r\n",
     "lexical.py": "from graphql_desk import gql\nq=gql('''query Read { user { name",
@@ -73,7 +74,25 @@ async function run() {
       document.uri.toString() === item.uri && !document.isClosed && document.version === item.version && document.getText() === item.source)) &&
       value.request.schemas.every((item) => item.uri === schemaDoc.uri.toString() && item.version === schemaDoc.version && item.text === schemaDoc.getText()),
   };
-  const registration = registerLanguageFeatures(vscode, options);
+  const codeActionProviders = [];
+  const languageApi = new Proxy(vscode.languages, {
+    get(target, property) {
+      if (property === "registerCodeActionsProvider") return (selector, provider, metadata) => {
+        codeActionProviders.push(provider);
+        return target.registerCodeActionsProvider(selector, provider, metadata);
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const vscodeApi = new Proxy(vscode, {
+    get(target, property, receiver) {
+      return property === "languages" ? languageApi : Reflect.get(target, property, receiver);
+    },
+  });
+  const registration = registerLanguageFeatures(vscodeApi, options);
+  const codeActionProvider = codeActionProviders[0];
+  assert.ok(codeActionProvider);
   const highlighting = registerHighlighting(vscode, options);
   const native = vscode.languages.registerHoverProvider({ language: "python", scheme: "file" }, {
     provideHover() { return new vscode.Hover("native-python-fixture"); },
@@ -81,7 +100,12 @@ async function run() {
   const observations = { outcome: "read-only-features-observed", vscode: vscode.version, diagnostics: false, completion: false, boundaryCompletion: false, hover: false,
     schemaDefinition: false, fragmentDefinition: false, ambiguousFragmentDefinition: false, nativeCoexistence: false,
     highlighting: false, lexicalHighlighting: false, escapedLexicalHighlighting: false, highlightRecovery: false,
-    nativePythonHover: false, untrustedNoAnalysis: false, persistedIdAction: false, diskUnchanged: false, cleanBuffers: false };
+    nativePythonHover: false, untrustedNoAnalysis: false, persistedIdAction: false, persistedIdInsertion: false,
+    diskUnchanged: false, cleanBuffers: false, progress: "fixtures-ready" };
+  const recordProgress = async progress => {
+    observations.progress = progress;
+    await fs.writeFile(resultPath, JSON.stringify(observations), "utf8");
+  };
   try {
     const invalid = documents.get("main.py");
     await registration.refresh(invalid);
@@ -91,14 +115,21 @@ async function run() {
     assert.equal(invalid.getText(missing.range), "missing");
     assert.ok(diagnostics.some((item) => item.code === "graphql.deprecation"));
     observations.diagnostics = true;
+    await recordProgress("diagnostics");
     const persistedDocument = documents.get("persisted.py");
+    await recordProgress("persisted-refresh-start");
     await registration.refresh(persistedDocument);
+    await recordProgress("persisted-refresh-complete");
     const staleId = vscode.languages.getDiagnostics(persistedDocument.uri)
       .find(item => item.code === "graphql-desk.persisted-hash-mismatch");
     assert.ok(staleId);
     assert.match(persistedDocument.getText(staleId.range), /^"sha256:/);
-    const persistedActions = await vscode.commands.executeCommand("vscode.executeCodeActionProvider",
-      persistedDocument.uri, staleId.range);
+    await recordProgress("stale-id-diagnostic-ready");
+    await recordProgress("persisted-update-action-start");
+    const persistedActions = await codeActionProvider.provideCodeActions(persistedDocument, staleId.range,
+      { diagnostics: [staleId] });
+    await recordProgress("persisted-update-action-returned");
+    await recordProgress("persisted-update-actions-complete");
     const updateId = persistedActions.find(item => /Update persisted ID/.test(item.title));
     assert.ok(updateId);
     const edit = updateId.edit.entries().find(([uri]) => uri.toString() === persistedDocument.uri.toString())?.[1]?.[0];
@@ -111,6 +142,25 @@ async function run() {
           uri: document.uri.toString(), version: document.version, source: document.getText(), is_package: false })) });
     assert.equal(edit.newText, JSON.stringify(indexed.response.persisted[0].expected_id));
     observations.persistedIdAction = true;
+    await recordProgress("persisted-id-update-action");
+    const missingPersistedDocument = documents.get("missingPersisted.py");
+    await recordProgress("missing-persisted-refresh-start");
+    await registration.refresh(missingPersistedDocument);
+    await recordProgress("missing-persisted-refresh-complete");
+    const missingPersisted = vscode.languages.getDiagnostics(missingPersistedDocument.uri)
+      .find(item => item.code === "graphql-desk.persisted-id-missing");
+    assert.ok(missingPersisted);
+    const insertActions = await codeActionProvider.provideCodeActions(missingPersistedDocument, missingPersisted.range,
+      { diagnostics: [missingPersisted] });
+    const insertId = insertActions.find(item => /Insert persisted ID/.test(item.title));
+    assert.ok(insertId);
+    const insertEdit = insertId.edit.entries().find(([uri]) => uri.toString() === missingPersistedDocument.uri.toString())?.[1]?.[0];
+    assert.ok(insertEdit);
+    assert.ok(insertEdit.range.isEmpty);
+    assert.equal(missingPersistedDocument.getText(insertEdit.range), "");
+    assert.match(insertEdit.newText, /^id="sha256:[0-9a-f]{64}", $/);
+    observations.persistedIdInsertion = true;
+    await recordProgress("persisted-id-insertion-action");
     const partial = documents.get("partial.py");
     const completion = await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", partial.uri,
       partial.positionAt(partial.getText().indexOf("na'") + 2));
@@ -146,6 +196,7 @@ async function run() {
     assert.match(hoverText(outside), /native-python-fixture/);
     assert.doesNotMatch(hoverText(outside), /Display name/);
     observations.nativeCoexistence = true;
+    await recordProgress("native-coexistence");
     const deadline = Date.now() + 30000;
     let pythonHover;
     do {
@@ -157,6 +208,7 @@ async function run() {
     assert.match(hoverText(pythonHover), /outside/);
     assert.match(hoverText(pythonHover), /int|Literal/);
     observations.nativePythonHover = true;
+    await recordProgress("native-python-hover");
     const definitions = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", selected.uri, position);
     assert.ok(definitions.map(locationTarget).some((item) => item.uri.toString() === schemaDoc.uri.toString() && schemaDoc.getText(item.range) === "name"));
     observations.schemaDefinition = true;
@@ -271,6 +323,9 @@ async function run() {
     assert.equal(analyses, before);
     assert.equal(vscode.languages.getDiagnostics(invalid.uri).filter((item) => item.source === "GraphQL Desk").length, 0);
     observations.untrustedNoAnalysis = true;
+  } catch (error) {
+    await fs.writeFile(resultPath, JSON.stringify({ ...observations, error: String(error) }), "utf8");
+    throw error;
   } finally {
     highlighting.dispose();
     registration.dispose();
@@ -287,3 +342,4 @@ async function run() {
 }
 
 module.exports = { run };
+

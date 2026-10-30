@@ -126,6 +126,14 @@ class PersistedDeclaration:
 
 
 @dataclass(frozen=True)
+class PersistedIdInsertion:
+    module: ModuleDependency
+    range: Span
+    insertion: Span
+    document: DocumentIdentity
+
+
+@dataclass(frozen=True)
 class GraphDiagnostic:
     module: ModuleDependency
     code: str
@@ -150,6 +158,7 @@ class ProjectSources:
     diagnostics: tuple[GraphDiagnostic, ...]
     unavailable: tuple[RejectedCall, ...] = ()
     persisted: tuple[PersistedDeclaration, ...] = ()
+    persisted_id_insertions: tuple[PersistedIdInsertion, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -412,7 +421,7 @@ class _Module:
         return visitor.names
 
     def span(self, node: ast.AST) -> Span:
-        assert isinstance(node, (ast.expr, ast.stmt))
+        assert isinstance(node, (ast.expr, ast.stmt, ast.keyword))
         assert node.end_lineno is not None and node.end_col_offset is not None
 
         def offset(line: int, column: int) -> int:
@@ -1667,6 +1676,8 @@ class _Graph:
                 if probe or not self.ready:
                     return _Value("persisted-candidate", module.snapshot.module)
                 declaration = self.persisted(module, node, callee)
+                if isinstance(declaration, PersistedIdInsertion):
+                    raise _Unresolved("Persisted document is missing its ID")
                 return _Value(
                     "persisted-document",
                     declaration.id,
@@ -1722,7 +1733,7 @@ class _Graph:
 
     def persisted(
         self, module: _Module, node: ast.Call, callable_: _Value
-    ) -> PersistedDeclaration:
+    ) -> PersistedDeclaration | PersistedIdInsertion:
         if any(isinstance(arg, ast.Starred) for arg in node.args) or any(
             item.arg is None for item in node.keywords
         ):
@@ -1746,6 +1757,41 @@ class _Graph:
         document_node = (
             node.args[1] if len(node.args) == 2 else keywords.get("document")
         )
+        if id_node is None and document_node is not None:
+            document_range = module.span(document_node)
+            try:
+                document = self.expression(
+                    module, document_node, (node.lineno, node.col_offset), set()
+                )
+            except (_Unresolved, RecursionError):
+                raise _PersistedFailure(
+                    "Persisted document must resolve to a GraphQL Desk document",
+                    document_range,
+                ) from None
+            if document.kind != "document" or document.document is None:
+                raise _PersistedFailure(
+                    "Persisted document must resolve to a GraphQL Desk document",
+                    document_range,
+                )
+            if (
+                callable_.schema_name is not None
+                and document.schema_name is not None
+                and callable_.schema_name != document.schema_name
+            ):
+                raise _PersistedFailure(
+                    "Persisted declaration and document use different schemas",
+                    document_range,
+                )
+            document_keyword = next(
+                item for item in node.keywords if item.arg == "document"
+            )
+            insertion = module.span(document_keyword)
+            return PersistedIdInsertion(
+                module.identity,
+                module.span(node),
+                Span(insertion.start, insertion.start),
+                document.document,
+            )
         if id_node is None or document_node is None:
             raise _PersistedFailure(
                 "Persisted declarations require a static ID and document",
@@ -2156,6 +2202,7 @@ def _resolve(
     calls: list[ResolvedCall] = []
     unavailable: list[RejectedCall] = []
     persisted: list[PersistedDeclaration] = []
+    persisted_id_insertions: list[PersistedIdInsertion] = []
     for module in graph.modules.values():
 
         class Calls(_CallScopes):
@@ -2202,7 +2249,19 @@ def _resolve(
                         candidate = True
                         persisted_candidate = True
                         self.check_scope(node)
-                        persisted.append(graph.persisted(module, node, callable_))
+                        declaration = graph.persisted(module, node, callable_)
+                        if isinstance(declaration, PersistedIdInsertion):
+                            persisted_id_insertions.append(declaration)
+                            graph.diagnostics.append(
+                                GraphDiagnostic(
+                                    module.identity,
+                                    "persisted-id-missing",
+                                    "Persisted declaration is missing its ID",
+                                    declaration.range,
+                                )
+                            )
+                        else:
+                            persisted.append(declaration)
                 except RecursionError:
                     if candidate:
                         reject(
@@ -2260,12 +2319,14 @@ def _resolve(
         start = len(calls)
         rejected_start = len(unavailable)
         persisted_start = len(persisted)
+        persisted_id_insertions_start = len(persisted_id_insertions)
         try:
             Calls(module).visit(module.tree)
         except RecursionError:
             del calls[start:]
             del unavailable[rejected_start:]
             del persisted[persisted_start:]
+            del persisted_id_insertions[persisted_id_insertions_start:]
             module.star = True
             graph.failed_modules.add(module.identity)
             graph.diagnostics.append(
@@ -2309,8 +2370,22 @@ def _resolve(
             graph.documents[item.document].dependencies
         )
     )
+    current_persisted_id_insertions = tuple(
+        item
+        for item in persisted_id_insertions
+        if item.module not in graph.failed_modules
+        and item.document.module not in graph.failed_modules
+        and item.document in graph.documents
+        and not graph.failed_modules.intersection(
+            graph.documents[item.document].dependencies
+        )
+    )
     return ProjectSources(
-        current, tuple(graph.diagnostics), tuple(unavailable), current_persisted
+        current,
+        tuple(graph.diagnostics),
+        tuple(unavailable),
+        current_persisted,
+        current_persisted_id_insertions,
     )
 
 
@@ -2406,8 +2481,23 @@ class IncrementalResolver:
                 item.range.start,
             )
         )
+        persisted_id_insertions = [
+            insertion
+            for project in projects.values()
+            for insertion in project.result.persisted_id_insertions
+        ]
+        persisted_id_insertions.sort(
+            key=lambda item: (
+                order[(item.module.project, item.module.module)],
+                item.range.start,
+            )
+        )
         result = ProjectSources(
-            tuple(calls), tuple(diagnostics), tuple(unavailable), tuple(persisted)
+            tuple(calls),
+            tuple(diagnostics),
+            tuple(unavailable),
+            tuple(persisted),
+            tuple(persisted_id_insertions),
         )
         self._parses = parses
         self._projects = projects

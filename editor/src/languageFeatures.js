@@ -341,21 +341,34 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         const bundle = await load(snapshot, token);
         if (!bundle) return [];
         snapshot = mapSnapshot(snapshot, bundle);
-        const ranges = diagnostics
+        const staleRanges = diagnostics
           .filter((item) => item.code === "graphql-desk.persisted-hash-mismatch")
           .map((item) => item.range);
-        if (!ranges.length) return [];
-        return (bundle.response.persisted ?? [])
+        const missingRanges = diagnostics
+          .filter((item) => item.code === "graphql-desk.persisted-id-missing")
+          .map((item) => item.range);
+        const stale = (bundle.response.persisted ?? [])
           .filter((item) => item.module.uri === snapshot.uri &&
             item.module.version === snapshot.version && item.id_is_literal &&
             item.expected_id !== item.id &&
-            ranges.some((range) => range.start === item.id_range.utf16.start &&
+            staleRanges.some((range) => range.start === item.id_range.utf16.start &&
               range.end === item.id_range.utf16.end))
           .map((item) => ({
             title: "Update persisted ID to current document hash",
             range: item.id_range.utf16,
             replacement: JSON.stringify(item.expected_id),
           }));
+        const insertions = (bundle.response.persisted_id_insertions ?? [])
+          .filter((item) => item.module.uri === snapshot.uri &&
+            item.module.version === snapshot.version &&
+            missingRanges.some((range) => range.start === item.range.utf16.start &&
+              range.end === item.range.utf16.end))
+          .map((item) => ({
+            title: "Insert persisted ID for current document hash",
+            range: item.insertion.utf16,
+            replacement: `id=${JSON.stringify(item.expected_id)}, `,
+          }));
+        return [...stale, ...insertions];
       } catch { return []; }
     },
     async diagnostics(snapshot, token) {
@@ -472,7 +485,7 @@ function registerLanguageFeatures(vscode, options) {
     vscode.languages.registerCodeActionsProvider(selector, {
       async provideCodeActions(document, _range, context, token) {
         const diagnostics = context.diagnostics.filter((item) =>
-          item.code === "graphql-desk.persisted-hash-mismatch");
+          ["graphql-desk.persisted-hash-mismatch", "graphql-desk.persisted-id-missing"].includes(item.code));
         const items = diagnostics.map((item) => ({
           code: item.code,
           range: {

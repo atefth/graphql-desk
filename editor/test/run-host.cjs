@@ -3,7 +3,6 @@ const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
-const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
@@ -153,7 +152,18 @@ async function main() {
   const suite = process.argv[3] || "features";
   assert.ok(["features", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
   const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
-  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-features-"));
+  const temporaryRoot = path.resolve(__dirname, "../../../");
+  await fs.mkdir(temporaryRoot, { recursive: true });
+  const temporary = await fs.mkdtemp(path.join(temporaryRoot, "graphql-desk-features-"));
+  try {
+    await runHost(version, suite, factorySuite, temporary);
+  } finally {
+    await fs.rm(temporary, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
+    await assert.rejects(fs.access(temporary), { code: "ENOENT" }, "Host-test temporary data must be removed");
+  }
+}
+
+async function runHost(version, suite, factorySuite, temporary) {
   assert.deepEqual(await fs.readdir(temporary), [], "Every host run starts from a new temporary root");
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
@@ -376,6 +386,7 @@ async function main() {
         console.error(`Host test evidence: ${JSON.stringify({
           outcome: observed.outcome,
           error: observed.error,
+          progress: observed.progress,
           probes: Object.fromEntries(Object.entries(observed.lifecycle || {}).filter(([key]) => /probe/i.test(key))),
           trace: observed.lifecycle?.coldTrace?.slice(-60),
           skipTraces: observed.lifecycle?.skipTraces?.slice(-30),
@@ -552,3 +563,4 @@ main().catch(async error => {
   console.error(error);
   process.exitCode = 1;
 });
+

@@ -68,6 +68,47 @@ def array(value: object) -> list[object]:
 
 
 class EditorAnalysisTests(unittest.TestCase):
+    def test_missing_persisted_id_exposes_only_explicit_keyword_insertion(self) -> None:
+        source = (
+            "from graphql_desk import gql\n"
+            "from fragments import card\n"
+            "query = gql('query Q { user { ...Card } }', [card])\n"
+            "saved = gql.persisted(document=query)\n"
+        )
+        payload = request(source)
+        array(payload["modules"]).append(
+            module(
+                "fragments",
+                "from graphql_desk import gql\n"
+                "card = gql('fragment Card on User { name }')\n",
+            )
+        )
+        response = analyze_editor_snapshot(payload)
+        insertion = object_(array(response["persisted_id_insertions"])[0])
+        expected = editor_sha256_id(
+            "query Q { user { ...Card } }", ("fragment Card on User {\n  name\n}",)
+        )
+        self.assertEqual(insertion["expected_id"], expected)
+        insertion_range = object_(insertion["insertion"])
+        insertion_codepoint = object_(insertion_range["codepoint"])
+        self.assertEqual(insertion_codepoint["start"], source.index("document"))
+        diagnostic = next(
+            object_(item)
+            for item in array(response["diagnostics"])
+            if object_(item)["code"] == "persisted-id-missing"
+        )
+        call_start = source.index("gql.persisted")
+        diagnostic_range = object_(diagnostic["range"])
+        diagnostic_codepoint = object_(diagnostic_range["codepoint"])
+        self.assertEqual(diagnostic_codepoint["start"], call_start)
+        self.assertEqual(diagnostic_codepoint["end"], source.index("\n", call_start))
+
+        ambiguous = request(
+            source.replace("gql.persisted(document=query)", "gql.persisted(query)")
+        )
+        ambiguous_response = analyze_editor_snapshot(ambiguous)
+        self.assertEqual(ambiguous_response["persisted_id_insertions"], [])
+
     def test_persisted_editor_snapshot_reports_stale_hash_and_exact_literal_action(
         self,
     ) -> None:
