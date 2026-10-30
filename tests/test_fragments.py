@@ -245,7 +245,7 @@ class FragmentTests(unittest.TestCase):
             bindings=(bindings,),
             collect_document_imports=True,
         )
-        schemas = {
+        schemas: dict[tuple[str, str | None], SchemaContext] = {
             ("p", "default"): self.context,
             ("p", "other"): SchemaContext("other", self.schema, "other-generation"),
         }
