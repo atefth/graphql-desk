@@ -357,6 +357,74 @@ function definitionNodes(schema, ast, fragments, offset) {
   return result.filter(Boolean);
 }
 
+function validationIssues(schema, ast, fragments, allowed) {
+  const document = { kind: gql.Kind.DOCUMENT, definitions: [...ast.definitions, ...fragments] };
+  const errors = gls.validateWithCustomRules(schema, document, [gql.ExecutableDefinitionsRule])
+    .filter((error) => !(error.message.startsWith("Unknown directive") &&
+      error.nodes?.every((node) => node.kind === gql.Kind.DIRECTIVE && allowed.has(node.name.value) &&
+        !schema.getDirective(node.name.value))));
+  return { errors, warnings: gql.validate(schema, document, [gql.NoDeprecatedCustomRule]) };
+}
+
+function suggestedNames(message) {
+  const index = message.indexOf("Did you mean ");
+  if (index < 0 || /inline fragment/i.test(message.slice(index))) return [];
+  return [...message.slice(index).matchAll(/"([_A-Za-z][_0-9A-Za-z]*)"/g)].map((item) => item[1]);
+}
+
+function deprecatedReplacement(message) {
+  const reason = message.split(/is deprecated\.\s*/i)[1] ?? "";
+  const match = /\b(?:use|replaced\s+(?:by|with))\s+(?:`([_A-Za-z][_0-9A-Za-z]*)`|"([_A-Za-z][_0-9A-Za-z]*)"|'([_A-Za-z][_0-9A-Za-z]*)'|([_A-Za-z][_0-9A-Za-z]*)(?![_0-9A-Za-z.]))/i.exec(reason);
+  return match?.slice(1).find(Boolean) ?? null;
+}
+
+function diagnosticMatches(diagnostics, code, range, message) {
+  return diagnostics.some((item) => item.code === code && item.message === message &&
+    item.range.start === range.start && item.range.end === range.end);
+}
+
+function suggestionActions(bundle, snapshot, diagnostics, calls) {
+  const result = [];
+  const fixableKinds = new Set([gql.Kind.FIELD, gql.Kind.ARGUMENT, gql.Kind.DIRECTIVE,
+    gql.Kind.NAMED_TYPE, gql.Kind.OBJECT_FIELD, gql.Kind.ENUM]);
+  for (const call of calls) {
+    const parsed = call.ast;
+    const nameNodes = (node) => fixableKinds.has(node.kind) ? [node.name ?? (node.kind === gql.Kind.ENUM ? node : null)].filter(Boolean) : [];
+    for (const error of call.errors) {
+      const replacements = [...new Set(suggestedNames(error.message))];
+      if (!replacements.length) continue;
+      for (const node of error.nodes ?? []) for (const name of nameNodes(node)) {
+        if (node.loc?.source?.name !== documentKey(call.call.identity)) continue;
+        if (!name.loc || typeof name.value !== "string") continue;
+        const range = editableRange(bundle, call.call, name.loc, snapshot);
+        if (!range || !diagnosticMatches(diagnostics, "graphql.validation", range, error.message)) continue;
+        for (const replacement of replacements) {
+          if (replacement === name.value) continue;
+          result.push({ title: `Change '${name.value}' to '${replacement}'`, range, replacement });
+        }
+      }
+    }
+    const typeInfo = new gql.TypeInfo(call.schema);
+    const parentTypes = new Map();
+    gql.visit(parsed, gql.visitWithTypeInfo(typeInfo, {
+      Field(node) { parentTypes.set(node, typeInfo.getParentType()); },
+    }));
+    for (const warning of call.warnings) for (const node of warning.nodes ?? []) {
+      if (node.loc?.source?.name !== documentKey(call.call.identity)) continue;
+      if (node.kind !== gql.Kind.FIELD || !node.name?.loc) continue;
+      const replacement = deprecatedReplacement(warning.message);
+      const parent = parentTypes.get(node);
+      const definition = parent?.getFields?.()[replacement];
+      if (!replacement || replacement === node.name.value || !definition || definition.deprecationReason != null) continue;
+      const range = editableRange(bundle, call.call, node.name.loc, snapshot);
+      if (range && diagnosticMatches(diagnostics, "graphql.deprecation", range, warning.message)) {
+        result.push({ title: `Replace deprecated field '${node.name.value}' with '${replacement}'`, range, replacement });
+      }
+    }
+  }
+  return unique(result);
+}
+
 /** All analysis and freshness authority is injected; this module never starts Python. */
 function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirectives = () => [], mapSnapshot = value => value }) {
   if (![analyze, isCurrent, isTrusted].every((item) => typeof item === "function")) throw new Error("Analysis, trust and freshness callbacks are required");
@@ -530,7 +598,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         return await finish(bundle, snapshot, token, unique(result), []);
       } catch { return []; }
     },
-    async persistedIdActions(snapshot, diagnostics, token) {
+    async codeActions(snapshot, diagnostics, token) {
       try {
         const bundle = await load(snapshot, token);
         if (!bundle) return [];
@@ -562,7 +630,23 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
             range: item.insertion.utf16,
             replacement: item.positional ? `${JSON.stringify(item.expected_id)}, ` : `id=${JSON.stringify(item.expected_id)}, `,
           }));
-        return [...stale, ...insertions];
+        let semantic = [];
+        if (diagnostics.some((item) => ["graphql.validation", "graphql.deprecation"].includes(item.code))) {
+          const validated = [];
+          for (const call of bundle.response.calls) {
+            const schema = schemaFor(bundle, call);
+            if (!schema) continue;
+            let ast;
+            try { ast = gql.parse(new gql.Source(call.source, documentKey(call.identity))); }
+            catch (error) { if (error instanceof gql.GraphQLError) continue; throw error; }
+            const fragments = fragmentRegistry(bundle, call);
+            const issues = validationIssues(schema, ast, fragments,
+              new Set([...CLIENT_DIRECTIVES, ...clientDirectives(bundle, call)]));
+            validated.push({ call, schema, ast: { ...ast, definitions: [...ast.definitions, ...fragments] }, ...issues });
+          }
+          semantic = suggestionActions(bundle, snapshot, diagnostics, validated);
+        }
+        return await finish(bundle, snapshot, token, [...stale, ...insertions, ...semantic], []);
       } catch { return []; }
     },
     async diagnostics(snapshot, token) {
@@ -594,10 +678,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
             }
             continue;
           }
-          const document = { kind: gql.Kind.DOCUMENT, definitions: [...ast.definitions, ...fragmentRegistry(bundle, call)] };
-          const errors = gls.validateWithCustomRules(schema, document, [gql.ExecutableDefinitionsRule])
-            .filter((error) => !(error.message.startsWith("Unknown directive") && error.nodes?.every((node) => node.kind === gql.Kind.DIRECTIVE && allowed.has(node.name.value) && !schema.getDirective(node.name.value))));
-          const warnings = gql.validate(schema, document, [gql.NoDeprecatedCustomRule]);
+          const { errors, warnings } = validationIssues(schema, ast, fragmentRegistry(bundle, call), allowed);
           for (const [issues, severity, code] of [[errors, 1, "graphql.validation"], [warnings, 2, "graphql.deprecation"]]) {
             for (const error of issues) {
               for (const node of error.nodes ?? []) {
@@ -687,15 +768,17 @@ function registerLanguageFeatures(vscode, options) {
     vscode.languages.registerCodeActionsProvider(selector, {
       async provideCodeActions(document, _range, context, token) {
         const diagnostics = context.diagnostics.filter((item) =>
-          ["graphql-desk.persisted-hash-mismatch", "graphql-desk.persisted-id-missing"].includes(item.code));
+          ["graphql-desk.persisted-hash-mismatch", "graphql-desk.persisted-id-missing",
+            "graphql.validation", "graphql.deprecation"].includes(item.code));
         const items = diagnostics.map((item) => ({
           code: item.code,
+          message: item.message,
           range: {
             start: document.offsetAt(item.range.start),
             end: document.offsetAt(item.range.end),
           },
         }));
-        return (await service.persistedIdActions(snapshot(document), items, token)).map((item) => {
+        return (await service.codeActions(snapshot(document), items, token)).map((item) => {
           const action = new vscode.CodeAction(item.title, vscode.CodeActionKind.QuickFix);
           action.edit = new vscode.WorkspaceEdit();
           action.edit.replace(document.uri, range(document, item.range), item.replacement);

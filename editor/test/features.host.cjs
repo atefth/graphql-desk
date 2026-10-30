@@ -25,7 +25,7 @@ async function run() {
   assert.ok(resultPath && path.isAbsolute(resultPath), "An isolated observations path is required");
   const fixtures = {
     "schema.graphql": schema,
-    "main.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('{ user { missing old } }')\r\n",
+    "main.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('{ user { nam old } }')\r\n",
     "persisted.py": `from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted("sha256:${"0".repeat(64)}", query)\n`,
     "missingPersisted.py": "from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted(document=query)\n",
     "missingPersistedPositional.py": "from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted(query)\n",
@@ -114,8 +114,23 @@ async function run() {
     const diagnostics = vscode.languages.getDiagnostics(invalid.uri).filter((item) => item.source === "GraphQL Desk");
     const missing = diagnostics.find((item) => item.code === "graphql.validation");
     assert.ok(missing);
-    assert.equal(invalid.getText(missing.range), "missing");
-    assert.ok(diagnostics.some((item) => item.code === "graphql.deprecation"));
+    assert.equal(invalid.getText(missing.range), "nam");
+    const suggestions = await codeActionProvider.provideCodeActions(invalid, missing.range, { diagnostics: [missing] });
+    const renameSuggestion = suggestions.find((item) => /Change 'nam' to 'name'/.test(item.title));
+    assert.ok(renameSuggestion);
+    const suggestionEdit = renameSuggestion.edit.entries().find(([uri]) => uri.toString() === invalid.uri.toString())?.[1]?.[0];
+    assert.ok(suggestionEdit);
+    assert.equal(invalid.getText(suggestionEdit.range), "nam");
+    assert.equal(suggestionEdit.newText, "name");
+    const deprecated = diagnostics.find((item) => item.code === "graphql.deprecation");
+    assert.ok(deprecated);
+    const deprecations = await codeActionProvider.provideCodeActions(invalid, deprecated.range, { diagnostics: [deprecated] });
+    const replacement = deprecations.find((item) => /Replace deprecated field 'old' with 'name'/.test(item.title));
+    assert.ok(replacement);
+    const replacementEdit = replacement.edit.entries().find(([uri]) => uri.toString() === invalid.uri.toString())?.[1]?.[0];
+    assert.ok(replacementEdit);
+    assert.equal(invalid.getText(replacementEdit.range), "old");
+    assert.equal(replacementEdit.newText, "name");
     observations.diagnostics = true;
     await recordProgress("diagnostics");
     const persistedDocument = documents.get("persisted.py");
