@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 9443)
+Total output lines: 569
+
 "use strict";
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
@@ -153,7 +156,7 @@ async function main() {
   assert.ok(["features", "renameProtocol", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
   const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
   const temporaryRoot = path.resolve(__dirname, "../..");
-  const cachePath = path.resolve(process.env.GRAPHQL_DESK_VSCODE_TEST_CACHE ?? path.resolve(__dirname, "../.cache/vscode-test"));
+  const cachePath = path.resolve(__dirname, "../.cache/vscode-test");
   await fs.mkdir(cachePath, { recursive: true });
   await fs.mkdir(temporaryRoot, { recursive: true });
   const temporary = await fs.mkdtemp(path.join(temporaryRoot, "graphql-desk-features-"));
@@ -272,71 +275,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
         "defaults_bad = execute(defaults_doc, {'limit': None})",
       ] : []),
       ...(suite === "mixedLists" ? [
-        "nullable_list_doc = graphql('query NullableList { nullableList }')",
-        "nullable_list_result = execute(nullable_list_doc, {})",
-        "nullable_list_value = nullable_list_result['nullableList']",
-        "nullable_list_ok: list[str] | None = nullable_list_value",
-        "nullable_list_bad: list[str] = nullable_list_value",
-        "nullable_items_doc = graphql('query NullableItems { nullableItems }')",
-        "nullable_items_result = execute(nullable_items_doc, {})",
-        "nullable_items_value = nullable_items_result['nullableItems']",
-        "nullable_items_ok: list[str | None] = nullable_items_value",
-        "nullable_items_bad: list[str] = nullable_items_value",
-      ] : []),
-      ...(suite === "fragmentTyping" ? [
-        "fragment_doc = graphql('query FragmentRead { user { id ...Card } }', (card,))",
-        "fragment_result = execute(fragment_doc, {})",
-        "hidden_name = fragment_result['user']['name']",
-        "from graphql_desk_generated.sources.fragments import read_card",
-        "visible_name = read_card(fragment_result['user'])['name']",
-        "fragment_name_ok: str = visible_name",
-      ] : []),
-      "",
-    ].join("\n");
-    const shapeFields = ["typingMatrix", "mixedLists"].includes(suite)
-      ? ` nested: [[String!]!]! nullable: [String]${suite === "mixedLists" ? " nullableList: [String!] nullableItems: [String]!" : ""}` : "";
-    await Promise.all([
-      fs.writeFile(path.join(workspace, "pyproject.toml"), suite === "externalMappings"
-        ? `[tool.graphql-desk]\ngenerated_package = "graphql_desk_generated"\n[[tool.graphql-desk.schemas]]\nname = "default"\nschema = "schema.graphql"\nschema_output = "graphql_desk_generated/default.pyi"\nscalars = { ExternalDate = { input = "${mappingFixture.packageName}.alpha.AlphaDateInput", output = "${mappingFixture.packageName}.alpha.AlphaDateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.alpha.AlphaColor" }\n[[tool.graphql-desk.schemas]]\nname = "beta"\nschema = "beta.graphql"\nschema_output = "graphql_desk_generated/beta.pyi"\nscalars = { ExternalDate = { input = "${mappingFixture.packageName}.beta.BetaDateInput", output = "${mappingFixture.packageName}.beta.BetaDateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.beta.BetaColor" }\n`
-        : '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n'),
-      fs.writeFile(path.join(workspace, "schema.graphql"), `${suite === "externalMappings" ? "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" : ""}type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${suite === "externalMappings" ? " externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor!" : ""}${shapeFields} }\n`),
-      ...(suite === "externalMappings" ? [fs.writeFile(path.join(workspace, "beta.graphql"),
-        "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" +
-        "type User { id: ID! name: String! }\n" +
-        "type Query { selected: String! count(limit: Int!): Int! user: User! " +
-        "externalDate(value: ExternalDate!): ExternalDate! " +
-        "externalColor(value: ExternalColor!): ExternalColor! }\n") ] : []),
-      fs.writeFile(sourcePath, source),
-      ...(suite === "typingMatrix" ? [fs.writeFile(path.join(workspace, "operation_semantics.py"),
-        "from graphql_desk_generated.default import graphql\nseed = graphql('query Seed { selected }')\n")] : []),
-      ...(["typingMatrix", "parserOverlay"].includes(suite) ? [fs.writeFile(path.join(workspace, "parser_consumer.py"),
-        "from graphql_desk import parse\ndocument = parse('query ParserQuery { selected }')\nparsed_name = document.definitions[0].name.value\n")] : []),
-      fs.writeFile(path.join(workspace, "fragments.py"), "from graphql_desk_generated.default import graphql\ncard = graphql('fragment Card on User { name }')\n"),
-      ...(suite === "lifecycle" ? [fs.writeFile(path.join(workspace, "lifecycle_calls.py"), "from graphql_desk_generated.default import graphql\nextra = graphql('query Extra { user { id } }')\n")] : []),
-      ...(suite === "lifecycle" ? [fs.writeFile(path.join(workspace, "preserved_user.py"), "value = 'saved'\n")] : []),
-    ]);
-    const runtimePackage = path.join(workspace, "graphql_desk_generated");
-    await fs.mkdir(path.join(runtimePackage, "sources"), { recursive: true });
-    await Promise.all([
-      fs.writeFile(path.join(runtimePackage, "__init__.py"), ""),
-      fs.writeFile(path.join(runtimePackage, "default.py"), 'from graphql_desk import init_graphql\ngraphql = init_graphql("default")\n'),
-      ...(suite === "externalMappings" ? [fs.writeFile(path.join(runtimePackage, "beta.py"),
-        'from graphql_desk import init_graphql\ngraphql = init_graphql("beta")\n')] : []),
-      fs.writeFile(path.join(runtimePackage, "sources", "__init__.py"), ""),
-      fs.writeFile(path.join(runtimePackage, "sources", "fragments.py"), [
-        "from graphql_desk_generated.default import graphql",
-        "card = graphql('fragment Card on User { name }')",
-        "def read_card(data): return data",
-        "",
-      ].join("\n")),
-    ]);
-    const generated = generatedFactoryFiles(python, workspace, sourcePath,
-      ["typingMatrix", "mixedLists", "fragmentTyping"].includes(suite), suite === "externalMappings", suite === "mixedLists",
-      suite === "fragmentTyping" ? path.join(workspace, "fragments.py") : null);
-    await fs.writeFile(artifacts, JSON.stringify(generated));
-    console.log(`Captured ${generated.initial.length} initial and ${generated.nullable.length} nullable factory stub files.`);
-  }
-  const isolation = [`--user-data-dir=${profile}`, `--extensions-dir=${extensions}`];
+        "nulla…1443 tokens truncated…tion = [`--user-data-dir=${profile}`, `--extensions-dir=${extensions}`];
   let launchTarget = workspace;
   if (suite === "workspaceRemoval") {
     const removedWorkspace = path.join(temporary, "removed-workspace");
