@@ -354,9 +354,13 @@ def render_fragment_helpers(
         (f"{sequence}[{input_}]", f"{sequence}[{output}]")
         for input_, output in narrowed
     )
+    # Sequence covariance causes an intentional overlap with the mixed-branch fallback.
+    nullable_narrowed = [
+        (f"{sequence}[{input_} | None]", f"{sequence}[{output} | None]")
+        for input_, output in narrowed
+    ]
+    signatures.extend(nullable_narrowed)
     signatures.append((f"{sequence}[{raw}]", f"{sequence}[{result}]"))
-    # shortcut: nullable arrays retain all typename alternatives; refine when
-    # checker-valid overloads can exclude their shared all-None input.
     if absence:
         extra = "__graphql_desk_FragmentExtra"
         signatures.append(
@@ -366,7 +370,14 @@ def render_fragment_helpers(
         signatures.append((f"{sequence}[{raw} | None]", f"{sequence}[{result} | None]"))
     functions = "\n" + "".join(
         "@__graphql_desk_overload\n"
-        f"def {function_name}(data: {input_}) -> {output}: ...\n"
+        f"def {function_name}(data: {input_}) -> {output}: ..."
+        + (
+            "  # type: ignore[overload-overlap]  "
+            "# pyright: ignore[reportOverlappingOverload]"
+            if (input_, output) in nullable_narrowed
+            else ""
+        )
+        + "\n"
         for input_, output in signatures
     )
     return FragmentHelperDeclarations(
