@@ -51,8 +51,8 @@ async function run() {
   const fragmentSymbol = fragmentSymbols.find(item => item.name === "Card");
   assert.equal(symbolText(documents.get("outline.py"), operationSymbol.selectionRange), "Main");
   assert.equal(symbolText(documents.get("fragments.py"), fragmentSymbol.selectionRange), "Card");
-  assert.equal(symbolText(documents.get("outline.py"), operationSymbol.range), "gql('query Main { user { id } }')");
-  assert.equal(symbolText(documents.get("fragments.py"), fragmentSymbol.range), 'gql("fragment Card on User { id }")');
+  assert.equal(symbolText(documents.get("outline.py"), operationSymbol.range), "query Main { user { id } }");
+  assert.equal(symbolText(documents.get("fragments.py"), fragmentSymbol.range), "fragment Card on User { id }");
   if (process.env.GRAPHQL_DESK_SYMBOLS_ONLY === "1") {
     await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-symbols-observed", vscode: vscode.version,
       actualActivation: extension.isActive, operation: operationSymbol.name, fragment: fragmentSymbol.name }, null, 2));
