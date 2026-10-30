@@ -152,7 +152,7 @@ async function main() {
   const suite = process.argv[3] || "features";
   assert.ok(["features", "renameProtocol", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
   const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
-  const temporaryRoot = path.resolve(__dirname, "../..");
+  const temporaryRoot = path.resolve(__dirname, "../../../");
   const cachePath = path.resolve(__dirname, "../.cache/vscode-test");
   await fs.mkdir(cachePath, { recursive: true });
   await fs.mkdir(temporaryRoot, { recursive: true });
