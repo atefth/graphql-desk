@@ -256,11 +256,11 @@ from optional import document as optional
 from outer import OuterReadFragment as read_outer, OuterResult
 from outer import OuterResult_friends
 from inner import InnerReadFragment as read_inner, InnerResult
-from abstract import AbstractReadFragment as read_abstract, AbstractResult
+from abstract import AbstractReadFragment as read_abstract
 from abstract import document as abstract, UserResult, OrgResult
 from mapped import MappedReadFragment as read_mapped
 from mapped import document as mapped
-from mapped import MappedResult, MappedUserInput, UserResult as MappedUserResult
+from mapped import MappedUserInput, UserResult as MappedUserResult
 from sparse import SparseReadFragment as read_sparse, OrgResult as SparseOrg
 from correlated import CorrelatedReadFragment as read_correlated, CorrelatedResult
 from vacant import VacantReadFragment as read_vacant
@@ -269,7 +269,7 @@ from required import RequiredIdentity, RequiredVariables
 from graphql_desk.fragment_refs import FragmentDocument, FragmentIdentity, FragmentRef
 base:FragmentDocument[RequiredIdentity,RequiredResult,RequiredVariables]=required
 
-def check(query:QueryResult, absent:Absent)->None:
+def check(query:QueryResult, absent:Absent, include:bool)->None:
  assert_type(read_required(absent),FragmentAbsent)
  assert_type(read_optional(absent),OptionalResult)
  assert_type(read_required(query['conditional']),RequiredResult|FragmentAbsent)
@@ -300,8 +300,16 @@ def check(query:QueryResult, absent:Absent)->None:
  if query['node']['__typename']=='User':
   assert_type(read_abstract(query['node']),UserResult)
   assert_type(read_fragment(abstract,query['node']),UserResult)
-  assert_type(read_fragment(abstract,[query['node'],None]),Sequence[UserResult|None])
-  assert_type(read_abstract([query['node'],None]),Sequence[AbstractResult|None])
+  user_values=[query['node']]
+  nullable_user_values=[query['node'],None]
+  assert_type(read_abstract(user_values),Sequence[UserResult])
+  assert_type(read_abstract(nullable_user_values),Sequence[UserResult|None])
+  assert_type(read_abstract(user_values if include else None),Sequence[UserResult]|None)
+  assert_type(
+   read_abstract(nullable_user_values if include else None),
+   Sequence[UserResult|None]|None,
+  )
+  assert_type(read_fragment(abstract,nullable_user_values),Sequence[UserResult|None])
 
 def nullable(values:list[OptionalResult|None]|None)->None:
  assert_type(read_optional(values),Sequence[OptionalResult|None]|None)
@@ -339,11 +347,11 @@ def nullable_abstract(query:QueryResult)->None:
  assert_type(read_fragment(mapped,values),Sequence[MappedUserResult])
 
 def nullable_mapped(values:Sequence[MappedUserInput|None]|None)->None:
- assert_type(read_mapped(values),Sequence[MappedResult|None]|None)
+ assert_type(read_mapped(values),Sequence[MappedUserResult|None]|None)
  assert_type(read_fragment(mapped,values),Sequence[MappedUserResult|None]|None)
 
 def nullable_mapped_items(values:Sequence[MappedUserInput|None])->None:
- assert_type(read_mapped(values),Sequence[MappedResult|None])
+ assert_type(read_mapped(values),Sequence[MappedUserResult|None])
  assert_type(read_fragment(mapped,values),Sequence[MappedUserResult|None])
 
 def nullable_mapped_outer(values:Sequence[MappedUserInput]|None)->None:
