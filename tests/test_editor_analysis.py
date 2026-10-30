@@ -191,6 +191,181 @@ class EditorAnalysisTests(unittest.TestCase):
         alias = object_(array(analyze_editor_snapshot(payload)["persisted"])[0])
         self.assertFalse(alias["id_is_literal"])
 
+    def test_malformed_persisted_calls_report_exact_diagnostics_without_fixes(
+        self,
+    ) -> None:
+        prefix = (
+            "from graphql_desk import gql, init_graphql\n"
+            "query = gql('{ user { id } }')\n"
+        )
+        malformed = (
+            (
+                "starred positional",
+                "gql.persisted(*args)",
+                "gql.persisted(*args)",
+                "persisted-not-static",
+                "Persisted arguments must be supplied explicitly",
+            ),
+            (
+                "expanded keywords",
+                "gql.persisted(**kwargs)",
+                "gql.persisted(**kwargs)",
+                "persisted-not-static",
+                "Persisted arguments must be supplied explicitly",
+            ),
+            (
+                "duplicate keyword",
+                "gql.persisted(id='a', id='b', document=query)",
+                None,
+                "invalid-python",
+                "duplicate keyword: id",
+            ),
+            (
+                "unknown keyword",
+                "gql.persisted(query=query)",
+                "gql.persisted(query=query)",
+                "persisted-not-static",
+                "Use id and document arguments only",
+            ),
+            (
+                "positional ID plus keyword ID",
+                "gql.persisted('a', id='b', document=query)",
+                "gql.persisted('a', id='b', document=query)",
+                "persisted-not-static",
+                "Supply id and document once each",
+            ),
+            (
+                "two positionals plus document",
+                "gql.persisted('a', query, document=query)",
+                "gql.persisted('a', query, document=query)",
+                "persisted-not-static",
+                "Supply id and document once each",
+            ),
+            (
+                "excess positional arguments",
+                "gql.persisted('a', query, query)",
+                "gql.persisted('a', query, query)",
+                "persisted-not-static",
+                "Supply id and document once each",
+            ),
+            (
+                "missing both arguments",
+                "gql.persisted()",
+                "gql.persisted()",
+                "persisted-not-static",
+                "Persisted declarations require a static ID and document",
+            ),
+            (
+                "missing document",
+                "gql.persisted(id='a')",
+                "gql.persisted(id='a')",
+                "persisted-not-static",
+                "Persisted declarations require a static ID and document",
+            ),
+            (
+                "non-string ID literal",
+                "gql.persisted(123, query)",
+                "123",
+                "persisted-not-static",
+                "Persisted ID must resolve to a static string",
+            ),
+            (
+                "unresolved ID",
+                "gql.persisted(make_id(), query)",
+                "make_id()",
+                "persisted-not-static",
+                "Persisted ID must resolve to a static string",
+            ),
+            (
+                "unresolved document",
+                "gql.persisted('a', make_document())",
+                "make_document()",
+                "persisted-not-static",
+                "Persisted document must resolve to a GraphQL Desk document",
+            ),
+        )
+        for label, expression, diagnostic_span, code, message in malformed:
+            source = prefix + f"saved = {expression}\n"
+            with self.subTest(shape=label):
+                response = analyze_editor_snapshot(request(source))
+                self.assertEqual(response["persisted"], [])
+                self.assertEqual(response["persisted_id_insertions"], [])
+                diagnostics = [
+                    object_(item)
+                    for item in array(response["diagnostics"])
+                    if object_(item)["code"] == code
+                ]
+                self.assertEqual(len(diagnostics), 1)
+                diagnostic = diagnostics[0]
+                diagnostic_message = cast(str, diagnostic["message"])
+                if label == "duplicate keyword":
+                    self.assertIn("keyword argument repeated: id", diagnostic_message)
+                    self.assertIn("line 3", diagnostic_message)
+                else:
+                    self.assertEqual(diagnostic_message, message)
+                codepoint = object_(object_(diagnostic["range"])["codepoint"])
+                if diagnostic_span is None:
+                    expected = {"start": 0, "end": len(source)}
+                else:
+                    start = source.index(diagnostic_span, source.index("saved = "))
+                    expected = {"start": start, "end": start + len(diagnostic_span)}
+                self.assertEqual(
+                    codepoint,
+                    expected,
+                )
+
+        wrong_schema_source = (
+            "from graphql_desk import init_graphql\n"
+            "main = init_graphql('main')\n"
+            "other = init_graphql('other')\n"
+            "query = main('query Q { user { id } }')\n"
+            "other_query = other('query Other { user { id } }')\n"
+            "saved = main.persisted('a', other_query)\n"
+        )
+        wrong_schema = request(wrong_schema_source)
+        object_(array(wrong_schema["bindings"])[0])["schemas"] = ["main", "other"]
+        object_(array(wrong_schema["bindings"])[0])["default_schema"] = "main"
+        wrong_schema["schemas"] = [
+            {
+                "project": "p",
+                "schema_name": name,
+                "uri": f"file:///p/{name}.graphql",
+                "version": version,
+                "token": f"{name}-schema",
+                "format": "sdl",
+                "text": "type User { id: ID! } type Query { user: User }",
+            }
+            for name, version in (("main", 2), ("other", 3))
+        ]
+        response = analyze_editor_snapshot(wrong_schema)
+        self.assertEqual(response["persisted"], [])
+        self.assertEqual(response["persisted_id_insertions"], [])
+        diagnostic = next(
+            object_(item)
+            for item in array(response["diagnostics"])
+            if object_(item)["code"] == "persisted-not-static"
+        )
+        self.assertEqual(
+            diagnostic["message"],
+            "Persisted declaration and document use different schemas",
+        )
+        codepoint = object_(object_(diagnostic["range"])["codepoint"])
+        start = wrong_schema_source.index(
+            "other_query", wrong_schema_source.index("saved = ")
+        )
+        self.assertEqual(codepoint, {"start": start, "end": start + len("other_query")})
+
+    def test_valid_opaque_persisted_ids_are_not_misdiagnosed(self) -> None:
+        source = (
+            "from graphql_desk import gql\n"
+            "query = gql('{ user { id } }')\n"
+            "saved = gql.persisted('opaque:λ', query)\n"
+        )
+        response = analyze_editor_snapshot(request(source))
+        self.assertEqual(response["diagnostics"], [])
+        self.assertEqual(response["persisted_id_insertions"], [])
+        self.assertEqual(object_(array(response["persisted"])[0])["id"], "opaque:λ")
+
     def test_type_mapping_status_uses_captured_symbols_only(self) -> None:
         payload = request("from graphql_desk import gql\nq=gql('{ date }')")
         schema = object_(array(payload["schemas"])[0])
