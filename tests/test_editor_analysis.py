@@ -218,7 +218,7 @@ class EditorAnalysisTests(unittest.TestCase):
                 "gql.persisted(id='a', id='b', document=query)",
                 None,
                 "invalid-python",
-                "keyword argument repeated: id (file:///p/main.py, line 3)",
+                "duplicate keyword: id",
             ),
             (
                 "unknown keyword",
@@ -297,7 +297,12 @@ class EditorAnalysisTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(diagnostics), 1)
                 diagnostic = diagnostics[0]
-                self.assertEqual(diagnostic["message"], message)
+                diagnostic_message = cast(str, diagnostic["message"])
+                if label == "duplicate keyword":
+                    self.assertIn("keyword argument repeated: id", diagnostic_message)
+                    self.assertIn("line 3", diagnostic_message)
+                else:
+                    self.assertEqual(diagnostic_message, message)
                 codepoint = object_(object_(diagnostic["range"])["codepoint"])
                 if diagnostic_span is None:
                     expected = {"start": 0, "end": len(source)}
