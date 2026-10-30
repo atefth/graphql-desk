@@ -384,7 +384,7 @@ from graphql_desk import read_fragment_passthrough as passthrough
 from graphql_desk import TypedDocument
 from optional import OptionalReadFragment as optional, document
 from query import Absent
-from required import RequiredReadFragment as required
+from required import RequiredReadFragment as required, document as required_document
 from outer import OuterReadFragment as outer
 from sparse import SparseReadFragment as sparse
 def bad(absent:Absent)->None:
@@ -400,6 +400,8 @@ def wrong(ref:FragmentRef[Other])->None:
  passthrough(document,ref)['title'] # error
  required([ref,None]) # error
  required([{'title':1},None]) # error
+ required([[{'title':'t'}]]) # error
+ read_fragment(required_document,[[{'title':'t'}]]) # error
 def operation(doc:TypedDocument[dict[str,str],dict[str,str]])->None:
  read_fragment(doc,{}) # error
 """
