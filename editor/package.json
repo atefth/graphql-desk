@@ -4,7 +4,7 @@
   "publisher": "graphql-desk",
   "version": "0.1.0",
   "private": true,
-  "description": "Read-only embedded GraphQL language feature foundations",
+  "description": "GraphQL language features for Python",
   "main": "./src/extension.js",
   "activationEvents": [
     "onLanguage:python",
@@ -42,12 +42,15 @@
     "vscode": "^1.141.0"
   },
   "scripts": {
-    "test": "node --test test/languageFeatures.test.cjs test/highlighting.test.cjs test/analysisWorker.test.cjs test/analysisController.test.cjs test/ownedAnalysisStub.test.cjs test/ownedAnalysisArtifacts.test.cjs test/analysisGenerations.test.cjs test/managedStubPath.test.cjs test/extensionLifecycle.test.cjs",
+    "test": "node --test test/languageFeatures.test.cjs test/highlighting.test.cjs test/analysisWorker.test.cjs test/analysisController.test.cjs test/ownedAnalysisStub.test.cjs test/ownedAnalysisArtifacts.test.cjs test/analysisGenerations.test.cjs test/managedStubPath.test.cjs test/extensionLifecycle.test.cjs test/renameLanguageClient.test.cjs",
     "test:host": "node test/run-host.cjs"
   },
   "dependencies": {
     "graphql": "16.12.0",
-    "graphql-language-service": "5.7.0"
+    "graphql-language-service": "5.7.0",
+    "vscode-languageclient": "10.1.2",
+    "vscode-languageserver": "10.1.2",
+    "vscode-languageserver-textdocument": "1.0.15"
   },
   "devDependencies": {
     "@vscode/test-electron": "3.1.0"

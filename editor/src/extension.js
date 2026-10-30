@@ -6,6 +6,7 @@ const { createHash } = require("node:crypto");
 const { fileURLToPath } = require("node:url");
 const { createAnalysisController } = require("./analysisController");
 const { registerLanguageFeatures } = require("./languageFeatures");
+const { createRenameLanguageClient } = require("./renameLanguageClient");
 const { registerHighlighting } = require("./highlighting");
 const { createManagedStubPath } = require("./managedStubPath");
 const { createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
@@ -587,6 +588,10 @@ function activate(context) {
       else status.hide();
     }, report: message => vscode.window.showInformationMessage(message) });
   language = registerLanguageFeatures(vscode, controller);
+  const renameClient = createRenameLanguageClient(vscode, language);
+  const renameStarted = renameClient.start().catch(error => {
+    output.appendLine(`Fragment rename language server failed to start: ${String(error)}`);
+  });
   highlighting = registerHighlighting(vscode, controller);
   const visible = vscode.window.onDidChangeVisibleTextEditors(() => refreshVisible());
   const configChanged = vscode.workspace.onDidChangeConfiguration(event => {
@@ -616,6 +621,8 @@ function activate(context) {
   const command = vscode.commands.registerCommand("graphqlDesk.refreshSchema", () => controller.refresh());
   const lifecycle = { async dispose() {
     if (disposed) return;
+    await renameStarted;
+    await renameClient.stop();
     disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
     configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose(); output.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));

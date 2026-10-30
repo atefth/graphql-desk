@@ -324,6 +324,152 @@ test("external fragment completion and definitions use real imported source, nev
   assert.ok(completion.some((item) => item.label === "Card"));
 });
 
+test("fragment references and rename follow imported aliases and re-exports only", async () => {
+  const fragment = { project: "p", module: "fragments", uri: "file:///workspace/fragments.py", version: 4,
+    source: "from graphql_desk import gql\n# Card is incidental\nLABEL = 'Card'\ncard = gql('fragment Card on User { id }')", is_package: false };
+  const exports = { project: "p", module: "exports", uri: "file:///workspace/exports.py", version: 7,
+    source: "from fragments import card as aliased\n", is_package: false };
+  const source = "from graphql_desk import gql\nfrom exports import aliased as public_card\nLABEL = 'Card'\nq = gql('query Q { user { ...Card } }', [public_card])";
+  const value = bundle(source, { modules: [fragment, exports] });
+  const service = createLanguageFeatures(options(value));
+  const main = document(value);
+  const spread = source.indexOf("...Card") + 4;
+  const symbol = await service.prepareRename(main, spread);
+  assert.equal(symbol.placeholder, "Card");
+  assert.equal(main.text.slice(symbol.range.start, symbol.range.end), "Card");
+  const references = await service.references(main, spread, true);
+  assert.deepEqual(references.map((item) => item.module.uri).sort(), [fragment.uri, main.uri].sort());
+  assert.equal(references.some((item) => item.range.start === source.indexOf("Card")), false);
+  const fragmentDocument = { uri: fragment.uri, version: fragment.version, text: fragment.source };
+  const fragmentDefinition = fragment.source.indexOf("fragment Card") + "fragment ".length;
+  assert.equal((await service.prepareRename(fragmentDocument, fragmentDefinition)).placeholder, "Card");
+  assert.equal((await service.references(fragmentDocument, fragmentDefinition, true)).length, 2);
+  assert.equal((await service.rename(fragmentDocument, fragmentDefinition, "HeaderCard")).length, 2);
+  const edits = await service.rename(main, spread, "UserCard");
+  assert.equal(edits.length, 2);
+  for (const item of edits) {
+    const owner = value.request.modules.find((module) => module.uri === item.module.uri);
+    assert.equal(owner.version, item.module.version);
+    assert.equal(owner.source.slice(item.range.start, item.range.end), "Card");
+    assert.equal(item.replacement, "UserCard");
+    assert.ok(item.positionRange.start && item.positionRange.end);
+  }
+  assert.equal(await service.prepareRename(main, source.indexOf("LABEL") + 1), null);
+  assert.equal(await service.rename(main, spread, "not-valid"), null);
+  const readOnly = createLanguageFeatures(options(value, { isCurrent: async () => false }));
+  assert.equal(await readOnly.rename(main, spread, "UserCard"), null);
+});
+
+test("fragment rename refuses ambiguous spreads and preserves escaped host text", async () => {
+  const fragment = { project: "p", module: "fragments", uri: "file:///workspace/fragments.py", version: 4,
+    source: "from graphql_desk import gql\ncard = gql('fragment C\\u0061rd on User { id }')", is_package: false };
+  const source = "from graphql_desk import gql\nfrom fragments import card\nq=gql('query Q { user { ...Card } }',[card])\nLABEL='Card'";
+  const value = bundle(source, { modules: [fragment] });
+  const service = createLanguageFeatures(options(value));
+  const snapshot = document(value);
+  const edits = await service.rename(snapshot, source.indexOf("...Card") + 4, "UserCard");
+  assert.equal(edits.length, 2);
+  const fragmentEdit = edits.find((item) => item.module.uri === fragment.uri);
+  assert.ok(fragmentEdit);
+  assert.equal(fragment.source.slice(fragmentEdit.range.start, fragmentEdit.range.end), "C\\u0061rd");
+  assert.equal(fragment.source.slice(0, fragmentEdit.range.start) + "UserCard" +
+    fragment.source.slice(fragmentEdit.range.end), "from graphql_desk import gql\ncard = gql('fragment UserCard on User { id }')");
+  assert.equal((await service.references(snapshot, source.indexOf("...Card") + 4, false)).some((item) => item.module.uri === fragment.uri), false);
+
+  const ambiguous = bundle("from graphql_desk import gql\nfrom left import card as a\nfrom right import card as b\nq=gql('{ user { ...Card } }',[a,b])", {
+    modules: ["left", "right"].map((module) => ({ project: "p", module, uri: `file:///workspace/${module}.py`, version: 1, is_package: false,
+      source: `from graphql_desk import gql\ncard=gql('fragment Card on User { ${module === "left" ? "id" : "name"} }')` })),
+  });
+  const ambiguousDoc = document(ambiguous);
+  assert.deepEqual(await createLanguageFeatures(options(ambiguous)).references(ambiguousDoc,
+    ambiguousDoc.text.indexOf("...Card") + 4, true), []);
+  assert.equal(await createLanguageFeatures(options(ambiguous)).rename(ambiguousDoc,
+    ambiguousDoc.text.indexOf("...Card") + 4, "UserCard"), null);
+
+  const collisionSource = "from graphql_desk import gql\nq=gql('fragment Card on User { id } fragment UserCard on User { name } query Q { user { ...Card } }')";
+  const collision = bundle(collisionSource);
+  assert.equal(await createLanguageFeatures(options(collision)).rename(document(collision),
+    collisionSource.indexOf("...Card") + 4, "UserCard"), null);
+});
+
+test("same-named fragments from another schema are isolated from references and rename", async () => {
+  const source = "from shop import graphql as shop\nfrom users import graphql as users\n" +
+    "shop_card=shop('fragment Card on User { id }')\nusers_card=users('fragment Card on User { name }')\n" +
+    "query=shop('{ user { ...Card } }',[shop_card])";
+  const extra = {
+    includeDefaultSchema: false,
+    schemaNames: ["shop", "users"], defaultSchema: null,
+    factories: [
+      { module: "shop", export: "graphql", schema_name: "shop" },
+      { module: "users", export: "graphql", schema_name: "users" },
+    ],
+    schemas: ["shop", "users"].map((schema_name, index) => ({ project: "p", schema_name,
+      uri: `file:///workspace/${schema_name}.graphql`, version: index + 2, token: `${schema_name}-schema`,
+      format: "sdl", text: "type User { id: ID name: String } type Query { user: User }" })),
+  };
+  const value = bundle(source, extra);
+  const service = createLanguageFeatures(options(value));
+  const snapshot = document(value);
+  const spread = source.indexOf("...Card") + 4;
+  const references = await service.references(snapshot, spread, true);
+  assert.equal(references.length, 2);
+  const usersName = source.indexOf("fragment Card", source.indexOf("fragment Card") + 1) + "fragment ".length;
+  assert.equal((await service.prepareRename(snapshot, usersName)).placeholder, "Card");
+  const usersReferences = await service.references(snapshot, usersName, true);
+  assert.equal(usersReferences.length, 1);
+  assert.equal(usersReferences[0].range.start, usersName);
+  const edits = await service.rename(snapshot, spread, "ShopCard");
+  assert.equal(edits.length, 2);
+  assert.equal(edits.some((item) => item.range.start === usersName), false);
+});
+
+test("registered fragment rename exposes fresh plans for the LSP bridge", async () => {
+  const fragment = { project: "p", module: "fragments", uri: "file:///workspace/fragments.py", version: 4,
+    source: "from graphql_desk import gql\ncard=gql('fragment Card on User { id }')", is_package: false };
+  const source = "from graphql_desk import gql\nfrom fragments import card\nq=gql('{ user { ...Card } }',[card])";
+  const value = bundle(source, { modules: [fragment] });
+  const providers = {};
+  const openDocuments = new Map();
+  const noop = () => ({ dispose() {} });
+  const vscode = {
+    Uri: { parse(value) { return { toString: () => value }; } },
+    Range: class { constructor(start, end) { Object.assign(this, { start, end }); } },
+    Location: class { constructor(uri, range) { Object.assign(this, { uri, range }); } },
+    Diagnostic: class {},
+    CodeAction: class {},
+    CodeActionKind: { QuickFix: 1 },
+    languages: {
+      createDiagnosticCollection: noop,
+      registerCompletionItemProvider(_selector, value) { providers.complete = value; return noop(); },
+      registerHoverProvider(_selector, value) { providers.hover = value; return noop(); },
+      registerDefinitionProvider(_selector, value) { providers.definition = value; return noop(); },
+      registerReferenceProvider(_selector, value) { providers.references = value; return noop(); },
+      registerDocumentSymbolProvider(_selector, value) { providers.symbols = value; return noop(); },
+      registerCodeActionsProvider(_selector, value) { providers.actions = value; return noop(); },
+    },
+    workspace: { textDocuments: [], async openTextDocument(uri) { return openDocuments.get(uri.toString()); } },
+  };
+  const registration = registerLanguageFeatures(vscode, options(value));
+  const mainModule = value.request.modules[0];
+  const documentFor = (module) => ({ uri: { toString: () => module.uri }, version: module.version,
+    languageId: "python", getText: () => module.source, positionAt: (offset) => ({ offset }), offsetAt: (position) => position.offset });
+  const main = documentFor(mainModule);
+  const fragmentDocument = documentFor(fragment);
+  openDocuments.set(mainModule.uri, main);
+  openDocuments.set(fragment.uri, fragmentDocument);
+  vscode.workspace.textDocuments = [main, fragmentDocument];
+  const spread = source.indexOf("...Card") + 4;
+  const prepared = await registration.prepareRename(main, { offset: spread });
+  assert.equal(prepared.placeholder, "Card");
+  const references = await providers.references.provideReferences(main, { offset: spread }, { includeDeclaration: true });
+  assert.equal(references.length, 2);
+  const plan = await registration.rename(main, { offset: spread }, "UserCard");
+  assert.equal(plan.length, 2);
+  assert.deepEqual([...new Set(plan.map(item => item.module.uri))].sort(), [fragment.uri, mainModule.uri].sort());
+  assert.ok(plan.every(item => item.replacement === "UserCard" && item.sourceText.length > 0));
+  registration.dispose();
+});
+
 test("document symbols expose multi-operation and fragment ranges inside embedded Python", async () => {
   const source = "# 😀\r\nfrom graphql_desk import gql\r\nquery = gql('query ReadUser { user { id } } query UpdateUser { user { name } } fragment UserCard on User { id name }')";
   const value = bundle(source);
@@ -496,7 +642,10 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   let disposed = 0;
   const handle = () => ({ dispose() { disposed += 1; } });
   const vscode = {
+    Uri: { parse(value) { return { toString: () => value }; } },
     Range: class { constructor(start, end) { this.start = start; this.end = end; } },
+    Location: class { constructor(uri, range) { Object.assign(this, { uri, range }); } },
+    TextEdit: { replace(range, newText) { return { range, newText }; } },
     CompletionItem: class { constructor(label) { this.label = label; } },
     Diagnostic: class { constructor(range, message, severity) { Object.assign(this, { range, message, severity }); } },
     CodeAction: class { constructor(title, kind) { Object.assign(this, { title, kind }); } },
@@ -507,6 +656,7 @@ test("VS Code registration supplements Python services and ignores old diagnosti
       registerCompletionItemProvider(selector, provider) { providers.complete = provider; assert.equal(selector[0].language, "python"); return handle(); },
       registerHoverProvider(_selector, provider) { providers.hover = provider; return handle(); },
       registerDefinitionProvider(_selector, provider) { providers.definition = provider; return handle(); },
+      registerReferenceProvider(_selector, provider) { providers.references = provider; return handle(); },
       registerDocumentSymbolProvider(_selector, provider) { providers.symbols = provider; return handle(); },
       registerCodeActionsProvider(_selector, provider) { providers.actions = provider; return handle(); },
     },
@@ -531,7 +681,7 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   assert.ok(publications[0].some(item => item.code === "graphql.validation"));
   const persistedDiagnostic = publications[0].find(item => item.code === "graphql-desk.persisted-hash-mismatch");
   assert.ok(persistedDiagnostic);
-  assert.deepEqual(Object.keys(providers).sort(), ["actions", "complete", "definition", "hover", "symbols"]);
+  assert.deepEqual(Object.keys(providers).sort(), ["actions", "complete", "definition", "hover", "references", "symbols"]);
   const codeActions = await providers.actions.provideCodeActions(doc, undefined,
     { diagnostics: [persistedDiagnostic] });
   assert.equal(codeActions.length, 1);
@@ -542,7 +692,7 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   const documentSymbols = await providers.symbols.provideDocumentSymbols(doc);
   assert.deepEqual(documentSymbols.map(item => [item.name, item.detail, item.kind]), [["Check", "query", 11]]);
   registered.dispose();
-  assert.equal(disposed, 6);
+  assert.equal(disposed, 7);
   let releaseFinal;
   let enteredFinal;
   const reachedFinal = new Promise((resolve) => { enteredFinal = resolve; });

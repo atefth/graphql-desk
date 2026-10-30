@@ -150,6 +150,8 @@ jobs:
         working-directory: editor
       - run: node --check test/features.host.cjs
         working-directory: editor
+      - run: node --check test/renameProtocol.host.cjs
+        working-directory: editor
       - run: node --check test/discovery.host.cjs
         working-directory: editor
       - run: node --check test/restartRecovery.host.cjs
@@ -164,11 +166,15 @@ jobs:
         working-directory: editor
       - run: xvfb-run -a node test/run-host.cjs 1.141.0 features
         working-directory: editor
+      - run: xvfb-run -a node test/run-host.cjs 1.141.0 renameProtocol
+        working-directory: editor
       - run: xvfb-run -a node test/run-host.cjs 1.141.0 activation
         working-directory: editor
       - run: xvfb-run -a node test/run-host.cjs 1.142.0 discovery
         working-directory: editor
       - run: xvfb-run -a node test/run-host.cjs 1.142.0 features
+        working-directory: editor
+      - run: xvfb-run -a node test/run-host.cjs 1.142.0 renameProtocol
         working-directory: editor
       - run: xvfb-run -a node test/run-host.cjs 1.142.0 activation
         working-directory: editor
