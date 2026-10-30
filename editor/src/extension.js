@@ -593,6 +593,10 @@ function activate(context) {
   const renameStarted = renameClient.start().catch(error => {
     output.appendLine(`Fragment rename language server failed to start: ${String(error)}`);
   });
+  const extractFragment = vscode.commands.registerCommand("graphqlDesk.extractFragment", async params => {
+    await renameStarted;
+    try { return await renameClient.extract(params); } catch { return false; }
+  });
   highlighting = registerHighlighting(vscode, controller);
   const visible = vscode.window.onDidChangeVisibleTextEditors(() => refreshVisible());
   const configChanged = vscode.workspace.onDidChangeConfiguration(event => {
@@ -624,7 +628,7 @@ function activate(context) {
     if (disposed) return;
     await renameStarted;
     await renameClient.stop();
-    disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
+    disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
     configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose(); output.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
     outputs.clear();

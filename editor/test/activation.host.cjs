@@ -30,6 +30,7 @@ async function run() {
     "main.py": 'raise RuntimeError("PROJECT_MUST_NOT_EXECUTE")\nfrom graphql_desk import gql\nq=gql("{ user { missing old } }")\n',
     "recovery.py": ["# 😀", "from graphql_desk import gql", String.raw`q=gql("query Read { user(id: \"m\u0061😀\") { name`].join("\r\n"),
     "outline.py": "from graphql_desk import gql\nq=gql('query Main { user { id } }')\n",
+    "extract.py": "from graphql_desk import gql\nq=gql('query Extract { user { id name } }')\n",
     "partial.py": 'from graphql_desk import gql\nq=gql("{ user { na")\n',
     "selected.py": 'outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql("{ user { name @local ...Card } }",[card])\n',
     "fragments.py": 'from graphql_desk import gql\ncard=gql("fragment Card on User { id }")\n',
@@ -67,6 +68,23 @@ async function run() {
   const resolvedEnvironment = await pythonApi.environments.resolveEnvironment(selectedEnvironment);
   assert.equal(resolvedEnvironment.executable.uri.scheme, "file");
   assert.equal((await fs.realpath(resolvedEnvironment.executable.uri.fsPath)).toLowerCase(), (await fs.realpath(process.env.GRAPHQL_DESK_PYTHON)).toLowerCase());
+  assert.ok((await vscode.commands.getCommands(true)).includes("graphqlDesk.extractFragment"));
+  const extractDoc = documents.get("extract.py");
+  await vscode.window.showTextDocument(extractDoc);
+  const extractStart = extractDoc.getText().indexOf("id name");
+  const extractRange = new vscode.Range(extractDoc.positionAt(extractStart), extractDoc.positionAt(extractStart + 7));
+  const extractActions = await until(
+    () => vscode.commands.executeCommand("vscode.executeCodeActionProvider", extractDoc.uri, extractRange),
+    values => Array.isArray(values) && values.some(item => item.title === "Extract GraphQL fragment"),
+    "Activated extraction code action",
+  );
+  const extractAction = extractActions.find(item => item.title === "Extract GraphQL fragment");
+  assert.equal(extractAction.command.command, "graphqlDesk.extractFragment");
+  assert.equal(await vscode.commands.executeCommand(extractAction.command.command, ...extractAction.command.arguments), true);
+  assert.match(extractDoc.getText(), /user_fields = gql\(source="fragment UserFields on User/);
+  assert.match(extractDoc.getText(), /\.\.\.UserFields/);
+  await vscode.commands.executeCommand("undo");
+  assert.equal(extractDoc.getText(), fixtures["extract.py"]);
   const diagnostics = document => vscode.languages.getDiagnostics(document.uri).filter(item => item.source === "GraphQL Desk");
   const main = documents.get("main.py");
   await vscode.window.showTextDocument(main);
@@ -175,6 +193,8 @@ async function run() {
   for (const [name, text] of Object.entries(fixtures)) assert.equal(await fs.readFile(path.join(workspace, name), "utf8"), text);
   await assert.rejects(fs.stat(unsavedPath), { code: "ENOENT" });
   await assert.rejects(fs.stat(path.join(workspace, "graphql_desk_generated")), { code: "ENOENT" });
+  await require("../src/extension").deactivate();
+  assert.ok(!(await vscode.commands.getCommands(true)).includes("graphqlDesk.extractFragment"));
   await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-activation-observed", vscode: vscode.version, actualActivation: true, actualWorker: true, officialSelectedEnvironment: true, blankInterpreterOverride: true, diagnostics: true, configurationDiagnostics: true, completion: true, hover: true, definitions: true, configuredDirectives: true, dirtyConfiguration: true, dirtyFragment: true, sourceRepair: true, incompleteGraphqlRecovery: true, recoveryDirtyBufferPreserved: true, dirtySchema: true, associatedUntitled: true, explicitRemoteRefresh: true, remoteTypingRetention: true, noAutomaticHttp: true, nativePylanceCoexistence: true, diskUnchanged: true, dirtyBuffersPreserved: true }, null, 2));
 }
 module.exports = { run };

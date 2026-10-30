@@ -5,9 +5,13 @@ const { RequestType } = require("vscode-languageserver/node");
 const PREPARE_METHOD = "graphqlDesk/prepareFragmentRename";
 const PLAN_METHOD = "graphqlDesk/fragmentRenamePlan";
 const SYNC_METHOD = "graphqlDesk/confirmRenameDocumentSync";
+const EXTRACT_METHOD = "graphqlDesk/extractFragment";
+const EXTRACT_PLAN_METHOD = "graphqlDesk/fragmentExtractPlan";
 const PREPARE_REQUEST = new RequestType(PREPARE_METHOD);
 const PLAN_REQUEST = new RequestType(PLAN_METHOD);
 const SYNC_REQUEST = new RequestType(SYNC_METHOD);
+const EXTRACT_REQUEST = new RequestType(EXTRACT_METHOD);
+const EXTRACT_PLAN_REQUEST = new RequestType(EXTRACT_PLAN_METHOD);
 
 function cancelled(token) {
   return token?.isCancellationRequested === true;
@@ -50,13 +54,18 @@ function createRenameBridge(vscode, language, { beforeReturn = async () => {},
       };
     },
 
-    async plan(params, token) {
-      if (cancelled(token) || !isTrusted() || typeof params.newName !== "string") return null;
+    async plan(params, token, extraction = false) {
+      if (cancelled(token) || !isTrusted() || typeof params?.textDocument?.uri !== "string" ||
+          (!extraction && typeof params.newName !== "string")) return null;
       const origin = await open(params.textDocument.uri);
       if (!origin || cancelled(token)) return null;
-      const position = new vscode.Position(params.position.line, params.position.character);
+      if (extraction && (!Number.isInteger(params.version) || origin.version !== params.version ||
+          !Number.isInteger(params.selection?.start) || !Number.isInteger(params.selection?.end))) return null;
+      const position = extraction ? null : new vscode.Position(params.position.line, params.position.character);
+      const calculate = () => extraction ? language.extractFragment(origin, params.selection, token)
+        : language.rename(origin, position, params.newName, token);
       const originSnapshot = snapshot(origin);
-      const initial = await language.rename(origin, position, params.newName, token);
+      const initial = await calculate();
       if (!initial?.length || cancelled(token) || origin.version !== originSnapshot.version ||
           origin.getText() !== originSnapshot.text) return null;
 
@@ -73,7 +82,7 @@ function createRenameBridge(vscode, language, { beforeReturn = async () => {},
 
       // Re-run analysis after opening closed targets: the plan must be based on
       // the exact versions/text that will be synchronized to the LSP server.
-      const fresh = await language.rename(origin, position, params.newName, token);
+      const fresh = await calculate();
       if (!fresh?.length || cancelled(token) || origin.version !== originSnapshot.version ||
           origin.getText() !== originSnapshot.text || !samePlan(initial, fresh)) return null;
 
@@ -103,8 +112,9 @@ function createRenameBridge(vscode, language, { beforeReturn = async () => {},
           })) return null;
       return { targets };
     },
+    async extract(params, token) { return this.plan(params, token, true); },
   };
 }
 
 module.exports = { PREPARE_METHOD, PLAN_METHOD, SYNC_METHOD, PREPARE_REQUEST, PLAN_REQUEST,
-  SYNC_REQUEST, createRenameBridge, samePlan };
+  SYNC_REQUEST, EXTRACT_REQUEST, EXTRACT_PLAN_REQUEST, createRenameBridge, samePlan };

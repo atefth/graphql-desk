@@ -1,7 +1,8 @@
 "use strict";
 
 const path = require("node:path");
-const { PREPARE_REQUEST, PLAN_REQUEST, SYNC_REQUEST, createRenameBridge } = require("./renameBridge");
+const { PREPARE_REQUEST, PLAN_REQUEST, SYNC_REQUEST, EXTRACT_REQUEST, EXTRACT_PLAN_REQUEST,
+  createRenameBridge } = require("./renameBridge");
 
 async function stopLanguageClient(client, outputChannel) {
   const server = client.serverProcess;
@@ -36,13 +37,16 @@ function createRenameLanguageClient(vscode, language, { documentSelector = [{ la
     outputChannel,
   });
   client.onRequest(PREPARE_REQUEST, (params, token) => bridge.prepare(params, token));
-  client.onRequest(PLAN_REQUEST, async (params, token) => {
-    const plan = await bridge.plan(params, token);
+  async function synchronizedPlan(plan, token) {
     if (!plan || token?.isCancellationRequested) return null;
     try {
       const synchronized = await client.sendRequest(SYNC_REQUEST, plan.targets, token);
       return synchronized === true && !token?.isCancellationRequested ? plan : null;
     } catch { return null; }
+  }
+  client.onRequest(PLAN_REQUEST, async (params, token) => synchronizedPlan(await bridge.plan(params, token), token));
+  client.onRequest(EXTRACT_PLAN_REQUEST, async (params, token) => {
+    return synchronizedPlan(await bridge.extract(params, token), token);
   });
   let startPromise;
   let stopPromise;
@@ -52,6 +56,7 @@ function createRenameLanguageClient(vscode, language, { documentSelector = [{ la
       if (!startPromise) startPromise = client.start();
       return startPromise;
     },
+    extract(params) { return client.sendRequest(EXTRACT_REQUEST, params); },
     async stop() {
       if (!stopPromise) stopPromise = stopLanguageClient(client, outputChannel);
       await stopPromise;

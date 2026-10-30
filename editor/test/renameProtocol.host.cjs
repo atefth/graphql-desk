@@ -9,6 +9,7 @@ const { PrepareRenameRequest, RenameRequest } = require("vscode-languageclient/n
 const { createLanguageFeatures } = require("../src/languageFeatures");
 const { bundle, options } = require("./featureFixtures.cjs");
 const { createRenameLanguageClient } = require("../src/renameLanguageClient");
+const { EXTRACT_REQUEST } = require("../src/renameBridge");
 
 function featureService() {
   function occurrences(text) {
@@ -94,6 +95,31 @@ async function pythonDocuments(directory) {
   return { documents, service: createLanguageFeatures(options(value)) };
 }
 
+async function pythonExtractionDocument(directory) {
+  const folder = path.join(root, directory);
+  await fs.mkdir(folder, { recursive: true });
+  const file = path.join(folder, "main.py");
+  const source = "from graphql_desk import gql\nquery = gql('query Read { user { id name } }')\n";
+  await fs.writeFile(file, source, { flag: "wx" });
+  let document = await vscode.workspace.openTextDocument(Uri.file(file));
+  if (document.languageId !== "python") document = await vscode.languages.setTextDocumentLanguage(document, "python");
+  const value = bundle(source, { uri: document.uri.toString(), version: document.version });
+  const service = createLanguageFeatures(options(value));
+  return { document, source, language: {
+    extractFragment: (item, selection, token) => service.extractFragment(
+      { uri: item.uri.toString(), version: item.version, text: item.getText() }, selection, token),
+  } };
+}
+
+async function requestExtract(client, document, token) {
+  const start = document.getText().indexOf("id name");
+  assert.notEqual(start, -1);
+  return client.sendRequest(EXTRACT_REQUEST, {
+    textDocument: { uri: document.uri.toString() }, version: document.version,
+    selection: { start, end: start + "id name".length },
+  }, token);
+}
+
 function positionOf(document, text) {
   const offset = document.getText().indexOf(text);
   assert.notEqual(offset, -1);
@@ -114,7 +140,8 @@ async function run() {
   assert.ok(root && path.isAbsolute(root));
   assert.ok(resultPath && path.isAbsolute(resultPath));
   const observed = { outcome: "fragment-rename-lsp-unverified", step: "setup", twoFileSuccess: false,
-    closedTargetOpened: false, staleTargetRejectedWithoutPartialEdit: false, cancellation: false, shutdown: false };
+    closedTargetOpened: false, staleTargetRejectedWithoutPartialEdit: false, cancellation: false,
+    extractRoundtripUndo: false, extractStaleRejected: false, extractCancellation: false, shutdown: false };
   const clients = [];
   try {
     const basic = await writePair("success");
@@ -241,6 +268,64 @@ async function run() {
     assert.equal(cancellation.files["fragments.txt"].getText(), targetBeforeCancel);
     observed.cancellation = true;
     await cancelClient.stop();
+
+    observed.step = "extract-roundtrip-undo";
+    const extraction = await pythonExtractionDocument("extract");
+    const extractClient = createRenameLanguageClient(vscode, extraction.language, { isTrusted: () => true });
+    clients.push(extractClient);
+    await extractClient.start();
+    await vscode.window.showTextDocument(extraction.document);
+    assert.equal(await requestExtract(extractClient.client, extraction.document), true);
+    assert.match(extraction.document.getText(), /user_fields = gql\(source="fragment UserFields on User/);
+    assert.match(extraction.document.getText(), /\.\.\.UserFields/);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(extraction.document.getText(), extraction.source);
+    observed.extractRoundtripUndo = true;
+    await extractClient.stop();
+
+    observed.step = "extract-stale";
+    const staleExtract = await pythonExtractionDocument("extract-stale");
+    let rejectedExtraction = false;
+    const staleExtractClient = createRenameLanguageClient(vscode, staleExtract.language, {
+      isTrusted: () => true,
+      middleware: { workspace: { async handleApplyEdit(params, next) {
+        const external = new vscode.WorkspaceEdit();
+        const start = staleExtract.document.getText().indexOf("name");
+        external.replace(staleExtract.document.uri,
+          new Range(staleExtract.document.positionAt(start), staleExtract.document.positionAt(start + 4)), "id");
+        assert.ok(await vscode.workspace.applyEdit(external));
+        const result = await next(params);
+        rejectedExtraction = result?.applied === false;
+        return result;
+      } } },
+    });
+    clients.push(staleExtractClient);
+    await staleExtractClient.start();
+    assert.equal(await requestExtract(staleExtractClient.client, staleExtract.document), false);
+    assert.equal(rejectedExtraction, true);
+    assert.equal(staleExtract.document.getText(), staleExtract.source.replace("id name", "id id"));
+    observed.extractStaleRejected = true;
+    await staleExtractClient.stop();
+
+    observed.step = "extract-cancellation";
+    const cancelledExtract = await pythonExtractionDocument("extract-cancel");
+    let capturedExtract, releaseExtract;
+    const capturedExtractPromise = new Promise(resolve => { capturedExtract = resolve; });
+    const extractGate = new Promise(resolve => { releaseExtract = resolve; });
+    const cancelledExtractClient = createRenameLanguageClient(vscode, cancelledExtract.language, {
+      isTrusted: () => true, beforeReturn: async () => { capturedExtract(); await extractGate; },
+    });
+    clients.push(cancelledExtractClient);
+    await cancelledExtractClient.start();
+    const extractToken = new CancellationTokenSource();
+    const pendingExtract = requestExtract(cancelledExtractClient.client, cancelledExtract.document, extractToken.token);
+    await capturedExtractPromise;
+    extractToken.cancel();
+    releaseExtract();
+    await pendingExtract.catch(() => false);
+    assert.equal(cancelledExtract.document.getText(), cancelledExtract.source);
+    observed.extractCancellation = true;
+    await cancelledExtractClient.stop();
 
     assert.ok(clients.every(item => !item.client.needsStop()));
     observed.step = "shutdown";
