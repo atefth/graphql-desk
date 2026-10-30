@@ -58,7 +58,7 @@ test("stale persisted hashes produce an exact fix only for direct ID literals", 
   ]), []);
 });
 
-test("missing persisted ID action is limited to explicit document keywords", async () => {
+test("missing persisted ID action uses only unambiguous document arguments", async () => {
   const source = "from graphql_desk import gql\nquery = gql('query Q { user { id } }')\nsaved = gql.persisted(document=query)\n";
   const value = bundle(source);
   const snapshot = document(value);
@@ -74,13 +74,20 @@ test("missing persisted ID action is limited to explicit document keywords", asy
   assert.deepEqual(await service.persistedIdActions(snapshot, [{ code: diagnostic.code,
     range: { start: diagnostic.range.start + 1, end: diagnostic.range.end } }]), []);
 
-  const positional = bundle(source.replace("gql.persisted(document=query)", "gql.persisted(query)"));
+  const positionalSource = source.replace("gql.persisted(document=query)", "gql.persisted(query)");
+  const positional = bundle(positionalSource);
+  const positionalSnapshot = document(positional);
   const positionalService = createLanguageFeatures(options(positional));
-  const positionalDiagnostic = (await positionalService.diagnostics(document(positional)))
-    .find(item => item.code === "graphql-desk.persisted-id-missing");
-  if (positionalDiagnostic) assert.deepEqual(await positionalService.persistedIdActions(document(positional), [
+  const positionalDiagnostic = (await positionalService.diagnostics(positionalSnapshot)).find(item =>
+    item.code === "graphql-desk.persisted-id-missing");
+  assert.ok(positionalDiagnostic);
+  const positionalActions = await positionalService.persistedIdActions(positionalSnapshot, [
     { code: positionalDiagnostic.code, range: positionalDiagnostic.range },
-  ]), []);
+  ]);
+  assert.equal(positionalActions.length, 1);
+  const argumentStart = positionalSource.indexOf("gql.persisted(query)") + "gql.persisted(".length;
+  assert.deepEqual(positionalActions[0].range, { start: argumentStart, end: argumentStart });
+  assert.match(positionalActions[0].replacement, /^"sha256:[0-9a-f]{64}", $/);
 });
 
 test("dynamic factory source is diagnosed while valid sibling operations remain indexed", async () => {

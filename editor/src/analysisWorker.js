@@ -98,8 +98,9 @@ function validReply(reply, request) {
     const persisted = value => keys(value, ["module", "range", "id_range", "id", "expected_id", "id_is_literal"]) &&
       module(value.module) && sourceRange(value.range) && sourceRange(value.id_range) &&
       string(value.id) && string(value.expected_id) && typeof value.id_is_literal === "boolean";
-    const persistedInsertion = value => keys(value, ["module", "range", "insertion", "expected_id"]) &&
+    const persistedInsertion = value => keys(value, ["module", "range", "insertion", "expected_id", "positional"]) &&
       module(value.module) && sourceRange(value.range) && sourceRange(value.insertion) &&
+      typeof value.positional === "boolean" &&
       value.insertion.codepoint.start === value.insertion.codepoint.end &&
       value.insertion.utf16.start === value.insertion.utf16.end &&
       value.range.codepoint.start <= value.insertion.codepoint.start && value.insertion.codepoint.end <= value.range.codepoint.end &&
@@ -109,8 +110,10 @@ function validReply(reply, request) {
         [source.project, source.module, source.uri].every(string) && Number.isSafeInteger(source.version) &&
         source.version >= 0 && typeof source.source === "string" && typeof source.is_package === "boolean" &&
         sameModule(source, value.module) &&
-        value.insertion.utf16.start <= source.source.length - "document".length &&
-        source.source.slice(value.insertion.utf16.start, value.insertion.utf16.start + "document".length) === "document");
+        (value.positional
+          ? value.insertion.utf16.start > 0 && source.source[value.insertion.utf16.start - 1] === "("
+          : value.insertion.utf16.start <= source.source.length - "document".length &&
+            source.source.slice(value.insertion.utf16.start, value.insertion.utf16.start + "document".length) === "document"));
     const sameModule = (left, right) => left.project === right.project && left.module === right.module &&
       left.uri === right.uri && left.version === right.version;
     return keys(reply, ["ok", "id", "request", "response", "unavailable_schemas", "remote_schemas"]) && reply.id === request.id &&

@@ -131,6 +131,7 @@ class PersistedIdInsertion:
     range: Span
     insertion: Span
     document: DocumentIdentity
+    positional: bool = False
 
 
 @dataclass(frozen=True)
@@ -1757,6 +1758,39 @@ class _Graph:
         document_node = (
             node.args[1] if len(node.args) == 2 else keywords.get("document")
         )
+        if len(node.args) == 1 and not keywords:
+            try:
+                positional_document = self.expression(
+                    module, node.args[0], (node.lineno, node.col_offset), set()
+                )
+            except (_Unresolved, RecursionError):
+                positional_document = None
+            if (
+                positional_document is not None
+                and positional_document.kind == "document"
+                and positional_document.document is not None
+                and (
+                    callable_.schema_name is None
+                    or positional_document.schema_name is None
+                    or callable_.schema_name == positional_document.schema_name
+                )
+            ):
+                call_open = re.match(
+                    r"\s*\(", module.snapshot.source[module.span(node.func).end :]
+                )
+                if call_open is None:
+                    raise _PersistedFailure(
+                        "Persisted call layout cannot be safely edited",
+                        module.span(node),
+                    )
+                insertion = module.span(node.func).end + call_open.end()
+                return PersistedIdInsertion(
+                    module.identity,
+                    module.span(node),
+                    Span(insertion, insertion),
+                    positional_document.document,
+                    positional=True,
+                )
         if id_node is None and document_node is not None:
             document_range = module.span(document_node)
             try:
@@ -1785,11 +1819,11 @@ class _Graph:
             document_keyword = next(
                 item for item in node.keywords if item.arg == "document"
             )
-            insertion = module.span(document_keyword)
+            keyword_insertion = module.span(document_keyword)
             return PersistedIdInsertion(
                 module.identity,
                 module.span(node),
-                Span(insertion.start, insertion.start),
+                Span(keyword_insertion.start, keyword_insertion.start),
                 document.document,
             )
         if id_node is None or document_node is None:

@@ -68,7 +68,7 @@ def array(value: object) -> list[object]:
 
 
 class EditorAnalysisTests(unittest.TestCase):
-    def test_missing_persisted_id_exposes_only_explicit_keyword_insertion(self) -> None:
+    def test_missing_persisted_id_insertion_requires_a_resolved_document(self) -> None:
         source = (
             "from graphql_desk import gql\n"
             "from fragments import card\n"
@@ -83,6 +83,7 @@ class EditorAnalysisTests(unittest.TestCase):
                 "card = gql('fragment Card on User { name }')\n",
             )
         )
+        fragment_module = array(payload["modules"])[-1]
         response = analyze_editor_snapshot(payload)
         insertion = object_(array(response["persisted_id_insertions"])[0])
         expected = editor_sha256_id(
@@ -104,10 +105,44 @@ class EditorAnalysisTests(unittest.TestCase):
         self.assertEqual(diagnostic_codepoint["end"], source.index("\n", call_start))
 
         ambiguous = request(
-            source.replace("gql.persisted(document=query)", "gql.persisted(query)")
+            source.replace(
+                "gql.persisted(document=query)",
+                "gql.persisted(make_document())",
+            )
         )
         ambiguous_response = analyze_editor_snapshot(ambiguous)
         self.assertEqual(ambiguous_response["persisted_id_insertions"], [])
+
+        positional_source = source.replace(
+            "gql.persisted(document=query)", "gql.persisted(query)"
+        )
+        positional = request(positional_source)
+        array(positional["modules"]).append(fragment_module)
+        positional_response = analyze_editor_snapshot(positional)
+        positional_insertion = object_(
+            array(positional_response["persisted_id_insertions"])[0]
+        )
+        self.assertTrue(positional_insertion["positional"])
+        positional_range = object_(positional_insertion["insertion"])
+        self.assertEqual(
+            object_(positional_range["codepoint"])["start"],
+            positional_source.index("gql.persisted(query)") + len("gql.persisted("),
+        )
+
+        grouped_source = positional_source.replace(
+            "gql.persisted(query)", "gql.persisted((query))"
+        )
+        grouped = request(grouped_source)
+        array(grouped["modules"]).append(fragment_module)
+        grouped_response = analyze_editor_snapshot(grouped)
+        grouped_insertion = object_(
+            array(grouped_response["persisted_id_insertions"])[0]
+        )
+        grouped_range = object_(grouped_insertion["insertion"])
+        self.assertEqual(
+            object_(grouped_range["codepoint"])["start"],
+            grouped_source.index("gql.persisted((") + len("gql.persisted("),
+        )
 
     def test_persisted_editor_snapshot_reports_stale_hash_and_exact_literal_action(
         self,

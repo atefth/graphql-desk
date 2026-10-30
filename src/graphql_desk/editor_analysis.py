@@ -617,6 +617,7 @@ def analyze_editor_snapshot_details(
                 "range": range_(insertion.module, insertion.range),
                 "insertion": range_(insertion.module, insertion.insertion),
                 "expected_id": expected_id,
+                "positional": insertion.positional,
             }
         )
     response: dict[str, object] = {
