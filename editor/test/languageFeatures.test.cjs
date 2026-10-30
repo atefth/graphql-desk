@@ -449,6 +449,20 @@ test("quick fixes replace only suggested names and explicit valid deprecated fie
   assert.deepEqual(escapedCodeActions, [], "escaped Python source is never rewritten as decoded text");
 });
 
+test("deprecated replacement suggestions reject fields deprecated with an empty reason", async () => {
+  const source = "from graphql_desk import gql\nq=gql('query { user { old } }')";
+  const value = bundle(source, { schema: schema.replace(
+    "name: String! old: String @deprecated(reason:\"Use name\")",
+    "name: String! @deprecated(reason:\"\") old: String @deprecated(reason:\"Use name\")",
+  ) });
+  const snapshot = document(value);
+  const service = createLanguageFeatures(options(value));
+  const diagnostics = await service.diagnostics(snapshot);
+  const deprecation = diagnostics.find((item) => item.code === "graphql.deprecation" && /old/.test(item.message));
+  assert.ok(deprecation);
+  assert.deepEqual(await service.codeActions(snapshot, [deprecation]), []);
+});
+
 test("configured client directives complete only in directive-name context", async () => {
   const source = "from graphql_desk import gql\nq=gql('{ user @loc { name } }')";
   const value = bundle(source);

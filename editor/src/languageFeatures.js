@@ -303,7 +303,7 @@ function suggestionActions(bundle, snapshot, diagnostics, calls) {
       const replacement = deprecatedReplacement(warning.message);
       const parent = parentTypes.get(node);
       const definition = parent?.getFields?.()[replacement];
-      if (!replacement || replacement === node.name.value || !definition || definition.deprecationReason) continue;
+      if (!replacement || replacement === node.name.value || !definition || definition.deprecationReason != null) continue;
       const range = editableRange(bundle, call.call, node.name.loc, snapshot);
       if (range && diagnosticMatches(diagnostics, "graphql.deprecation", range, warning.message)) {
         result.push({ title: `Replace deprecated field '${node.name.value}' with '${replacement}'`, range, replacement });
