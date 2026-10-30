@@ -147,6 +147,33 @@ function highlightNode(node) {
   return node.kind !== gql.Kind.VARIABLE && node.name ? node.name : node.variable ?? node;
 }
 
+function outlineAst(source) {
+  try { return gql.parse(new gql.Source(source)); }
+  catch (error) {
+    if (!(error instanceof gql.GraphQLError)) return null;
+    const failure = error.positions?.[0] ?? source.length;
+    try { return gql.parse(new gql.Source(source.slice(0, failure))); }
+    catch {}
+    const lexer = new gql.Lexer(new gql.Source(source));
+    const starts = [];
+    let depth = 0;
+    try {
+      while (lexer.token.kind !== gql.TokenKind.EOF) {
+        const token = lexer.advance();
+        if (token.start > failure) break;
+        if (depth === 0 && token.kind === gql.TokenKind.NAME &&
+          ["query", "mutation", "subscription", "fragment"].includes(token.value)) starts.push(token.start);
+        if (token.kind === gql.TokenKind.BRACE_L) depth += 1;
+        if (token.kind === gql.TokenKind.BRACE_R) depth -= 1;
+      }
+    } catch {}
+    const incompleteStart = starts.at(-1);
+    if (incompleteStart === undefined) return null;
+    try { return gql.parse(new gql.Source(source.slice(0, incompleteStart))); }
+    catch { return null; }
+  }
+}
+
 function hoverInformation(schema, text, offset) {
   const position = gls.offsetToPosition(text, offset);
   let contents = gls.getHoverInformation(schema, text, position, undefined, { useMarkdown: true });
@@ -310,16 +337,20 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         for (const call of bundle.response.calls) {
           const owner = moduleSource(bundle, call.identity.module);
           if (!owner || owner.uri !== snapshot.uri || owner.version !== snapshot.version) continue;
-          let ast;
-          try { ast = gql.parse(new gql.Source(call.source, documentKey(call.identity))); }
-          catch (error) { if (error instanceof gql.GraphQLError) continue; throw error; }
+          const ast = outlineAst(call.source);
+          if (!ast) continue;
           const callRange = call.identity.call_range.utf16;
           for (const node of ast.definitions) {
             if (!node.name?.loc || ![gql.Kind.OPERATION_DEFINITION, gql.Kind.FRAGMENT_DEFINITION].includes(node.kind)) continue;
-            const origins = toHost(bundle, call, node.name.loc);
-            if (origins.length !== 1 || origins[0].module.uri !== snapshot.uri || origins[0].module.version !== snapshot.version) continue;
-            const selectionRange = origins[0].range;
-            if (selectionRange.start < callRange.start || selectionRange.end > callRange.end) continue;
+            const origins = toHost(bundle, call, node.loc);
+            const names = toHost(bundle, call, node.name.loc);
+            if (origins.length !== 1 || names.length !== 1 ||
+              origins[0].module.uri !== snapshot.uri || origins[0].module.version !== snapshot.version ||
+              names[0].module.uri !== snapshot.uri || names[0].module.version !== snapshot.version) continue;
+            const definitionRange = origins[0].range;
+            const selectionRange = names[0].range;
+            if (definitionRange.start < callRange.start || definitionRange.end > callRange.end ||
+              selectionRange.start < definitionRange.start || selectionRange.end > definitionRange.end) continue;
             const kind = node.kind === gql.Kind.FRAGMENT_DEFINITION ? "fragment" : "operation";
             const symbolKey = key([node.name.value, kind, origins[0].module.uri, origins[0].module.version, selectionRange]);
             if (seen.has(symbolKey)) continue;
@@ -328,7 +359,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
               name: node.name.value,
               detail: kind === "fragment" ? `fragment on ${node.typeCondition.name.value}` : node.operation,
               kind,
-              range: callRange,
+              range: definitionRange,
               selectionRange,
             });
           }

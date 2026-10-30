@@ -324,19 +324,30 @@ test("external fragment completion and definitions use real imported source, nev
   assert.ok(completion.some((item) => item.label === "Card"));
 });
 
-test("document symbols expose named operations and fragments at their embedded Python locations", async () => {
-  const source = "# 😀\r\nfrom graphql_desk import gql\r\nquery = gql('query ReadUser { user { id } }')\r\ncard = gql('fragment UserCard on User { id name }')";
+test("document symbols expose multi-operation and fragment ranges inside embedded Python", async () => {
+  const source = "# 😀\r\nfrom graphql_desk import gql\r\nquery = gql('query ReadUser { user { id } } query UpdateUser { user { name } } fragment UserCard on User { id name }')";
   const value = bundle(source);
   const symbols = await createLanguageFeatures(options(value)).symbols(document(value));
   assert.deepEqual(symbols.map(item => [item.name, item.detail, item.kind]), [
-    ["ReadUser", "query", "operation"], ["UserCard", "fragment on User", "fragment"],
+    ["ReadUser", "query", "operation"], ["UpdateUser", "query", "operation"], ["UserCard", "fragment on User", "fragment"],
   ]);
   for (const item of symbols) {
     assert.equal(source.slice(item.selectionRange.start, item.selectionRange.end), item.name);
-    assert.equal(source.slice(item.range.start, item.range.end),
-      item.name === "ReadUser" ? "gql('query ReadUser { user { id } }')" : "gql('fragment UserCard on User { id name }')");
+    assert.equal(source.slice(item.range.start, item.range.end), item.name === "ReadUser" ? "query ReadUser { user { id } }" :
+      item.name === "UpdateUser" ? "query UpdateUser { user { name } }" : "fragment UserCard on User { id name }");
     assert.ok(item.range.start <= item.selectionRange.start && item.selectionRange.end <= item.range.end);
   }
+});
+
+test("document symbols recover complete definitions before an incomplete tail and reject stale snapshots", async () => {
+  const source = "from graphql_desk import gql\nq=gql('query Read { user { id } } query Broken {')\nr=gql('query List { user { name } } ?')";
+  const value = bundle(source);
+  const symbols = await createLanguageFeatures(options(value)).symbols(document(value));
+  assert.deepEqual(symbols.map(item => [item.name, source.slice(item.range.start, item.range.end)]), [
+    ["Read", "query Read { user { id } }"],
+    ["List", "query List { user { name } }"]
+  ]);
+  assert.deepEqual(await createLanguageFeatures(options(value, { isCurrent: async () => false })).symbols(document(value)), []);
 });
 
 test("document symbols skip invalid GraphQL and source names outside their containing call", async () => {

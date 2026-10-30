@@ -23,7 +23,8 @@ function bundle(source, extra = {}) {
       token: extra.schemaToken ?? "schema-2", format: extra.schemaFormat ?? "sdl", text: extra.schema ?? schema }],
   };
   const result = spawnSync(python, ["-I", "-X", "utf8", "-c",
-    "import sys; from graphql_desk.editor_analysis import analyze_editor_json; sys.stdout.write(analyze_editor_json(sys.stdin.read()))"],
+    "import sys; sys.path.insert(0, sys.argv[1]); from graphql_desk.editor_analysis import analyze_editor_json; sys.stdout.write(analyze_editor_json(sys.stdin.read()))",
+    path.join(root, "src")],
     { input: JSON.stringify(request), encoding: "utf8", cwd: root });
   assert.equal(result.status, 0, result.stderr);
   return { request, response: JSON.parse(result.stdout) };
