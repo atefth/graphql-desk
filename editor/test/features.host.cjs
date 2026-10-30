@@ -35,7 +35,7 @@ async function run() {
     "lexicalEscaped.py": ["# 😀", "from graphql_desk import gql", String.raw`q=gql("query Q { user(name: \"m\u0061😀\") { name`].join("\r\n"),
     "recovery.py": ["# 😀", "from graphql_desk import gql", String.raw`q=gql("query Read { user(id: \"m\u0061😀\") { name`].join("\r\n"),
     "selected.py": "outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql('{ user { name ...Card } }',[card])\n",
-    "fragments.py": "from graphql_desk import gql\ncard=gql('fragment Card on User { id }')\n",
+    "fragments.py": "from graphql_desk import gql\n# Card is incidental Python text\ncard=gql('fragment Card on User { id }')\n",
     "other.py": "# 😀\r\nfrom graphql_desk import gql\r\ncard=gql('fragment Card on User { name }')\r\n",
     "ambiguous.py": "# 😀\r\nfrom graphql_desk import gql\r\nfrom fragments import card as a\r\nfrom other import card as b\r\nq=gql('{ user { name ...Card } }',[a,b])\r\n",
     "duplicate.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('{ user { name ...Card } } fragment Card on User { id } fragment Card on User { name }')\r\n",
@@ -99,7 +99,8 @@ async function run() {
     provideHover() { return new vscode.Hover("native-python-fixture"); },
   });
   const observations = { outcome: "read-only-features-observed", vscode: vscode.version, diagnostics: false, completion: false, boundaryCompletion: false, hover: false,
-    schemaDefinition: false, fragmentDefinition: false, ambiguousFragmentDefinition: false, nativeCoexistence: false,
+    schemaDefinition: false, fragmentDefinition: false, fragmentReferences: false, fragmentRename: false,
+    ambiguousFragmentDefinition: false, nativeCoexistence: false,
     highlighting: false, lexicalHighlighting: false, escapedLexicalHighlighting: false, highlightRecovery: false,
     nativePythonHover: false, untrustedNoAnalysis: false, persistedIdAction: false, persistedIdInsertion: false,
     diskUnchanged: false, cleanBuffers: false, progress: "fixtures-ready" };
@@ -232,6 +233,13 @@ async function run() {
       selected.positionAt(selected.getText().indexOf("...Card") + 4));
     assert.ok(fragments.map(locationTarget).some((item) => item.uri.toString() === fragmentDoc.uri.toString() && fragmentDoc.getText(item.range) === "Card"));
     observations.fragmentDefinition = true;
+    const spreadPosition = selected.positionAt(selected.getText().indexOf("...Card") + 4);
+    const references = await vscode.commands.executeCommand("vscode.executeReferenceProvider", selected.uri, spreadPosition, { includeDeclaration: true });
+    assert.equal(references.filter(item => {
+      const location = locationTarget(item);
+      return location.uri.toString() === fragmentDoc.uri.toString() || location.uri.toString() === selected.uri.toString();
+    }).length, 2);
+    observations.fragmentReferences = true;
     for (const [filename, code] of [["ambiguous.py", "conflicting-fragment"], ["duplicate.py", "duplicate-definition"]]) {
       const document = documents.get(filename);
       const targets = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", document.uri,

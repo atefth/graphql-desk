@@ -91,8 +91,7 @@ function schemaFor(bundle, call) {
   return gql.buildClientSchema(data.data ?? data);
 }
 
-function fragmentRegistry(bundle, call) {
-  const calls = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item]));
+function fragmentRegistry(bundle, call, calls = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item])), asts = new Map()) {
   const entries = call.index ? [call.index] : call.fragments
     .map((reference) => calls.get(documentKey(reference.target))?.index).filter(Boolean);
   const result = [];
@@ -102,8 +101,10 @@ function fragmentRegistry(bundle, call) {
       if (fact.kind !== "fragment" || documentKey(fact.document) === documentKey(call.identity)) continue;
       const owner = calls.get(documentKey(fact.document));
       const ownerKey = documentKey(fact.document);
-      if (!owner?.index || seen.has(`${ownerKey}:${fact.name}`)) continue;
-      const ast = gql.parse(new gql.Source(owner.source, ownerKey));
+      if (!owner?.index || owner.index.schema_name !== entry.schema_name ||
+          owner.index.context_token !== entry.context_token || seen.has(`${ownerKey}:${fact.name}`)) continue;
+      const ast = parseCall(owner, asts);
+      if (!ast) continue;
       const definition = ast.definitions.find((node) => node.kind === gql.Kind.FRAGMENT_DEFINITION && node.name.value === fact.name);
       if (definition) {
         result.push(definition);
@@ -112,6 +113,117 @@ function fragmentRegistry(bundle, call) {
     }
   }
   return result;
+}
+
+function schemaContext(call) {
+  return call.index && [call.identity.module.project, call.index.schema_name, call.index.context_token];
+}
+
+function fragmentNodes(bundle, call, ast, calls = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item])), asts = new Map()) {
+  const nodes = [...ast.definitions.filter((item) => item.kind === gql.Kind.FRAGMENT_DEFINITION),
+    ...fragmentRegistry(bundle, call, calls, asts)];
+  return nodes.flatMap((node) => {
+    const owner = calls.get(node.loc?.source?.name);
+    return owner ? [{ node, owner }] : [];
+  });
+}
+
+function parseCall(call, asts = new Map()) {
+  const id = documentKey(call.identity);
+  if (asts.has(id)) return asts.get(id);
+  try {
+    const ast = gql.parse(new gql.Source(call.source, id));
+    asts.set(id, ast);
+    return ast;
+  } catch { asts.set(id, null); return null; }
+}
+
+function fragmentSymbolAt(bundle, call, offset, calls, asts) {
+  const ast = parseCall(call, asts);
+  if (!ast) return null;
+  const context = schemaContext(call);
+  if (!context) return null;
+  const nameNode = [];
+  gql.visit(ast, {
+    FragmentDefinition(node) { if (node.name.loc.start <= offset && offset < node.name.loc.end) nameNode.push({ node, definition: true }); },
+    FragmentSpread(node) { if (node.name.loc.start <= offset && offset < node.name.loc.end) nameNode.push({ node, definition: false }); },
+  });
+  if (nameNode.length !== 1) return null;
+  const selected = nameNode[0];
+  const definitions = fragmentNodes(bundle, call, ast, calls, asts).filter((item) => item.owner.index?.schema_name === context[1] &&
+    item.owner.index.context_token === context[2] && item.node.name.value === selected.node.name.value);
+  if (selected.definition) {
+    const ownerKey = documentKey(call.identity);
+    const matches = definitions.filter((item) => documentKey(item.owner.identity) === ownerKey &&
+      item.node.name.loc.start === selected.node.name.loc.start);
+    return matches.length === 1 ? { name: selected.node.name.value, target: matches[0],
+      selected: { node: selected.node.name, owner: call }, context } : null;
+  }
+  return definitions.length === 1 ? { name: selected.node.name.value, target: definitions[0],
+    selected: { node: selected.node.name, owner: call }, context } : null;
+}
+
+function fragmentOccurrences(bundle, symbol, includeDeclaration, calls, asts) {
+  const [project, schema, token] = symbol.context;
+  const targetKey = documentKey(symbol.target.owner.identity);
+  const result = [];
+  for (const call of bundle.response.calls) {
+    const context = schemaContext(call);
+    if (!context || context[0] !== project || context[1] !== schema || context[2] !== token) continue;
+    const ast = parseCall(call, asts);
+    if (!ast) continue;
+    const definitions = fragmentNodes(bundle, call, ast, calls, asts).filter((item) => item.owner.index?.schema_name === schema &&
+      item.owner.index.context_token === token && item.node.name.value === symbol.name);
+    const definition = definitions.find((item) => documentKey(item.owner.identity) === targetKey &&
+      item.node.name.loc.start === symbol.target.node.name.loc.start);
+    if (includeDeclaration && definition && documentKey(definition.owner.identity) === documentKey(call.identity)) {
+      result.push({ call: definition.owner, node: definition.node.name });
+    }
+    gql.visit(ast, {
+      FragmentSpread(node) {
+        const matches = definitions.filter((item) => item.node.name.value === node.name.value);
+        if (matches.length === 1 && documentKey(matches[0].owner.identity) === targetKey &&
+            matches[0].node.name.loc.start === symbol.target.node.name.loc.start) {
+          result.push({ call, node: node.name });
+        }
+      },
+    });
+  }
+  return result;
+}
+
+function hostFragmentOccurrence(bundle, item) {
+  const snapshot = moduleSource(bundle, item.call.identity.module);
+  if (!snapshot) return null;
+  const modules = unique(item.call.map.utf16.filter((atom) => atom.decoded.start < item.node.loc.end &&
+    item.node.loc.start < atom.decoded.end).map((atom) => atom.host.module));
+  if (modules.length !== 1 || modules[0].uri !== snapshot.uri || modules[0].version !== snapshot.version) return null;
+  const parts = callMappedParts(item.call, item.node.loc, modules[0]);
+  if (!parts) return null;
+  const range = { start: parts[0].range.start, end: parts.at(-1).range.end };
+  if (parts.some((part) => part.linear && item.call.source.slice(part.decoded.start, part.decoded.end) !==
+      snapshot.source.slice(part.range.start, part.range.end))) return null;
+  return { module: item.call.identity.module, range, name: item.node.value,
+    sourceText: snapshot.source,
+    positionRange: { start: positionAt(snapshot.source, range.start), end: positionAt(snapshot.source, range.end) } };
+}
+
+function callMappedParts(call, span, module) {
+  const parts = call.map.utf16.flatMap((atom) => {
+    if (key(atom.host.module) !== key(module)) return [];
+    if (!atom.linear && (atom.decoded.start < span.start || atom.decoded.end > span.end)) return [];
+    const ranges = projectSpan(span, atom.decoded, atom.host.range, atom.linear);
+    return ranges.map((range) => ({ decoded: projectSpan(span, atom.decoded,
+      { start: atom.decoded.start, end: atom.decoded.end }, true)[0], range, linear: atom.linear }));
+  }).filter((part) => part.range.end > part.range.start)
+    .sort((a, b) => a.decoded.start - b.decoded.start || a.range.start - b.range.start);
+  let decoded = span.start;
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part.decoded.start !== decoded || (index && parts[index - 1].range.end !== part.range.start)) return null;
+    decoded = part.decoded.end;
+  }
+  return decoded === span.end ? parts : null;
 }
 
 function wordRange(text, offset) {
@@ -327,6 +439,57 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
           });
       }, []);
     },
+    async references(snapshot, offset, includeDeclaration, token) {
+      return at(snapshot, offset, token, (bundle, call, _schema, decoded) => {
+        const calls = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item]));
+        const asts = new Map();
+        const symbol = fragmentSymbolAt(bundle, call, decoded, calls, asts);
+        if (!symbol) return [];
+        return unique(fragmentOccurrences(bundle, symbol, includeDeclaration, calls, asts)
+          .map((item) => hostFragmentOccurrence(bundle, item)).filter(Boolean));
+      }, []);
+    },
+    async prepareRename(snapshot, offset, token) {
+      return at(snapshot, offset, token, (bundle, call, _schema, decoded) => {
+        const symbol = fragmentSymbolAt(bundle, call, decoded);
+        if (!symbol) return null;
+        const item = hostFragmentOccurrence(bundle, {
+          call: symbol.selected.owner, node: symbol.selected.node,
+        });
+        return item && item.module.uri === snapshot.uri && item.module.version === snapshot.version
+          ? { range: item.range, positionRange: item.positionRange, placeholder: item.name } : null;
+      }, null);
+    },
+    async rename(snapshot, offset, newName, token) {
+      if (!/^[_A-Za-z][_0-9A-Za-z]*$/.test(newName)) return null;
+      return at(snapshot, offset, token, (bundle, call, _schema, decoded) => {
+        const calls = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item]));
+        const asts = new Map();
+        const symbol = fragmentSymbolAt(bundle, call, decoded, calls, asts);
+        if (!symbol) return null;
+        const [project, schema, contextToken] = symbol.context;
+        const targetKey = documentKey(symbol.target.owner.identity);
+        const targetPosition = symbol.target.node.name.loc.start;
+        for (const candidate of bundle.response.calls) {
+          const context = schemaContext(candidate);
+          if (!context || context[0] !== project || context[1] !== schema || context[2] !== contextToken) continue;
+          const ast = parseCall(candidate, asts);
+          if (!ast) continue;
+          const definitions = fragmentNodes(bundle, candidate, ast, calls, asts);
+          const targetPresent = definitions.some((item) => documentKey(item.owner.identity) === targetKey &&
+            item.node.name.loc.start === targetPosition);
+          const collision = definitions.some((item) => item.node.name.value === newName &&
+            (documentKey(item.owner.identity) !== targetKey || item.node.name.loc.start !== targetPosition));
+          if (targetPresent && collision) return null;
+        }
+        const occurrences = fragmentOccurrences(bundle, symbol, true, calls, asts);
+        const edits = occurrences.map((item) => hostFragmentOccurrence(bundle, item));
+        if (!edits.length || edits.some((item) => !item)) return null;
+        const uniqueEdits = unique(edits);
+        return uniqueEdits.length === edits.length
+          ? uniqueEdits.map(({ module, range, positionRange, sourceText }) => ({ module, range, positionRange, sourceText, replacement: newName })) : null;
+      }, null);
+    },
     async symbols(snapshot, token) {
       try {
         const bundle = await load(snapshot, token);
@@ -505,6 +668,14 @@ function registerLanguageFeatures(vscode, options) {
           new vscode.Range(item.positionRange.start, item.positionRange.end)));
       },
     }),
+    vscode.languages.registerReferenceProvider(selector, {
+      async provideReferences(document, position, context, token) {
+        const items = await service.references(snapshot(document), document.offsetAt(position),
+          Boolean(context.includeDeclaration), token);
+        return items.map((item) => new vscode.Location(options.resolveUri ? options.resolveUri(item.module.uri) : vscode.Uri.parse(item.module.uri),
+          new vscode.Range(item.positionRange.start, item.positionRange.end)));
+      },
+    }),
     vscode.languages.registerDocumentSymbolProvider(selector, {
       async provideDocumentSymbols(document, token) {
         return (await service.symbols(snapshot(document), token)).map(item => new vscode.DocumentSymbol(
@@ -535,6 +706,14 @@ function registerLanguageFeatures(vscode, options) {
     }),
   ];
   return {
+    async prepareRename(document, position, token) {
+      if (disposed || cancelled(token)) return null;
+      return service.prepareRename(snapshot(document), document.offsetAt(position), token);
+    },
+    async rename(document, position, newName, token) {
+      if (disposed || cancelled(token)) return null;
+      return service.rename(snapshot(document), document.offsetAt(position), newName, token);
+    },
     async refresh(document, token) {
       if (disposed) return;
       const uri = document.uri.toString();
@@ -555,4 +734,5 @@ function registerLanguageFeatures(vscode, options) {
   };
 }
 
-module.exports = { createLanguageFeatures, registerLanguageFeatures, toHost, toDecoded, positionAt, boundary, documentKey };
+module.exports = { createLanguageFeatures, registerLanguageFeatures, toHost, toDecoded, positionAt, boundary, documentKey,
+  };
