@@ -126,14 +126,26 @@ exports.run = async () => {
         observed.hiddenNameErrors = lineDiagnostics("hidden_name");
         observed.hiddenNameRejected = observed.hiddenNameErrors.some(message => /"name" is not a defined key/.test(message));
         observed.positiveErrors = lineDiagnostics("fragment_name_ok");
+        observed.partialNameErrors = lineDiagnostics("partial_name");
+        observed.partialIdErrors = lineDiagnostics("partial_id_ok");
+        observed.completeNameErrors = lineDiagnostics("complete_name_ok");
+        observed.partialNameRejected = observed.partialNameErrors.some(message => /"name" is not a defined key/.test(message));
         return observed.visibleNameType === "String" && observed.hiddenNameRejected &&
-          observed.positiveErrors.length === 0;
-      }, "Pylance masks spread-only fragment fields until the generated reader is used", 60000);
+          observed.positiveErrors.length === 0 && observed.partialNameRejected &&
+          observed.partialIdErrors.length === 0 && observed.completeNameErrors.length === 0;
+      }, "Pylance applies exact tuple read_result typing and keeps omitted nested fragment fields masked", 60000);
       assert.ok(ready, JSON.stringify(observed));
       results.pylance = { ...results.pylance, ...observed };
       const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
       results.lifecycle.configuredStubPath = settings["python.analysis.stubPath"];
       results.lifecycle.activeStubRoot = path.resolve(workspace, results.lifecycle.configuredStubPath);
+      const helperStub = path.join(results.lifecycle.activeStubRoot, "graphql_desk-stubs", "testing.pyi");
+      const helperText = await fs.readFile(helperStub, "utf8");
+      assert.match(helperText, /def read_result\(/, "the managed Pylance root publishes the helper overload");
+      results.lifecycle.managedTestingStubPublished = true;
+      const generatedTypes = await fs.readdir(path.join(results.lifecycle.activeStubRoot, "graphql_desk_generated", "testing"));
+      assert.ok(generatedTypes.some(name => /^call_[a-f0-9]+\.pyi$/.test(name)), "the selected generation contains per-callsite exact typing modules");
+      results.lifecycle.perCallsiteTypesPublished = true;
       results.outcome = "fragment-masking-live-typing-observed";
       return;
     }

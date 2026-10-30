@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import keyword
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -14,6 +14,11 @@ if TYPE_CHECKING:
 _Result = TypeVar("_Result")
 _Variables = TypeVar("_Variables")
 _Input = TypeVar("_Input", bound=Mapping[str, object])
+
+
+def read_result(document: object, data: object, fragments: Sequence[object]) -> object:
+    """Return data unchanged; editor stubs type it for an exact tuple registry."""
+    return data
 
 
 def unsafe_read_result(

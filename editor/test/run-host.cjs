@@ -212,7 +212,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     const source = [
       "from graphql_desk import TypedDocument",
       "from graphql_desk_generated.default import graphql",
-      ...(suite === "fragmentTyping" ? ["from fragments import card"] : []),
+      ...(suite === "fragmentTyping" ? ["from fragments import card, inner, outer", "from graphql_desk.testing import read_result"] : []),
       "from typing import TypeVar",
       ...(suite === "externalMappings" ? [
         "from graphql_desk_generated.beta import graphql as beta",
@@ -290,6 +290,14 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
         "from graphql_desk_generated.sources.fragments import read_card",
         "visible_name = read_card(fragment_result['user'])['name']",
         "fragment_name_ok: str = visible_name",
+        "helper_doc = graphql('query HelperRead { user { id ...Outer } }', (outer, inner))",
+        "partial_helper = read_result(helper_doc, {'user': {'id': 'u', 'name': 'Ada'}}, (outer,))",
+        "partial_id = partial_helper['user']['id']",
+        "partial_id_ok: str = partial_id",
+        "partial_name = partial_helper['user']['name']",
+        "complete_helper = read_result(helper_doc, {'user': {'id': 'u', 'name': 'Ada'}}, (outer, inner))",
+        "complete_name = complete_helper['user']['name']",
+        "complete_name_ok: str = complete_name",
       ] : []),
       "",
     ].join("\n");
@@ -311,7 +319,9 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
         "from graphql_desk_generated.default import graphql\nseed = graphql('query Seed { selected }')\n")] : []),
       ...(["typingMatrix", "parserOverlay"].includes(suite) ? [fs.writeFile(path.join(workspace, "parser_consumer.py"),
         "from graphql_desk import parse\ndocument = parse('query ParserQuery { selected }')\nparsed_name = document.definitions[0].name.value\n")] : []),
-      fs.writeFile(path.join(workspace, "fragments.py"), "from graphql_desk_generated.default import graphql\ncard = graphql('fragment Card on User { name }')\n"),
+      fs.writeFile(path.join(workspace, "fragments.py"), suite === "fragmentTyping"
+        ? "from graphql_desk_generated.default import graphql\ninner = graphql('fragment Inner on User { name }')\ncard = graphql('fragment Card on User { name }')\nouter = graphql('fragment Outer on User { id ...Inner }', (inner,))\n"
+        : "from graphql_desk_generated.default import graphql\ncard = graphql('fragment Card on User { name }')\n"),
       ...(suite === "lifecycle" ? [fs.writeFile(path.join(workspace, "lifecycle_calls.py"), "from graphql_desk_generated.default import graphql\nextra = graphql('query Extra { user { id } }')\n")] : []),
       ...(suite === "lifecycle" ? [fs.writeFile(path.join(workspace, "preserved_user.py"), "value = 'saved'\n")] : []),
     ]);

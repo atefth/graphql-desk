@@ -53,6 +53,81 @@ _SOURCE = """
 
 
 class OperationTypesTests(unittest.TestCase):
+    def test_static_registry_unmasks_only_supplied_fragments(self) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema(
+                "type User { id: ID! title: String! name: String! } "
+                "type Query { user: User! }"
+            ),
+            "v1",
+        )
+        sources = (
+            ModuleSnapshot(
+                "p",
+                "title",
+                "file:///title.py",
+                1,
+                "from graphql_desk import gql\n"
+                'title = gql("fragment Title on User { title }")\n',
+            ),
+            ModuleSnapshot(
+                "p",
+                "name",
+                "file:///name.py",
+                1,
+                "from graphql_desk import gql\n"
+                'name = gql("fragment Name on User { name }")\n',
+            ),
+            ModuleSnapshot(
+                "p",
+                "query",
+                "file:///query.py",
+                1,
+                "from graphql_desk import gql\nfrom title import title\n"
+                "from name import name\nquery = gql("
+                '"query Read { user { id ...Title ...Name } }", [title, name])\n',
+            ),
+        )
+        index = index_fragments(
+            resolve_project(sources), schemas={("p", None): context}
+        )
+        self.assertEqual(index.diagnostics, ())
+        document = next(
+            item for item in index.documents if item.call.binding == "query"
+        )
+        full = render_indexed_operation_types(
+            context,
+            document,
+            name="Read",
+            fragment_index=index,
+            fixture_input=True,
+            unmasked_fragments=frozenset({"Title", "Name"}),
+        )
+        partial = render_indexed_operation_types(
+            context,
+            document,
+            name="Read",
+            fragment_index=index,
+            fixture_input=True,
+            unmasked_fragments=frozenset({"Title"}),
+        )
+        full_operation = full.split("\nReadFragment_Name =")[0]
+        partial_operation = partial.split("\nReadFragment_Name =")[0]
+        self.assertIn("'title': 'String'", full_operation)
+        self.assertIn("'name': 'String'", full_operation)
+        self.assertIn("'title': 'String'", partial_operation)
+        self.assertNotIn("'name': 'String'", partial_operation)
+        self.assertIn("_graphql_desk_φ", partial_operation)
+        with self.assertRaisesRegex(ValueError, "belong to the indexed document"):
+            render_indexed_operation_types(
+                context,
+                document,
+                name="Read",
+                fragment_index=index,
+                unmasked_fragments=frozenset({"NotPresent"}),
+            )
+
     def test_fixture_ignored_transitive_keys_do_not_expand_conditional_powerset(
         self,
     ) -> None:

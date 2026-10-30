@@ -144,6 +144,7 @@ def _render_operation_types(
     client_directives: tuple[str, ...] = (),
     disable_masking: bool = False,
     fragment_keys: dict[str, str] | None = None,
+    unmasked_fragments: frozenset[str] = frozenset(),
     selected_fragment: str | None = None,
     reader_branches: list[FragmentReaderBranch] | None = None,
     fixture_input: bool = False,
@@ -329,6 +330,7 @@ def _render_operation_types(
                     and mask_spreads
                     and not disable_masking
                     and fragment_keys is not None
+                    and node.name.value not in unmasked_fragments
                     and "_unmask" not in _directives(definition)
                 ):
                     marker = FieldNode(
@@ -900,6 +902,7 @@ def render_indexed_operation_types(
     disable_masking: bool = False,
     fragment_index: FragmentIndex | None = None,
     fixture_input: bool = False,
+    unmasked_fragments: frozenset[str] = frozenset(),
 ) -> str:
     """Render trusted index facts with their selected operation and context.
 
@@ -907,6 +910,11 @@ def render_indexed_operation_types(
     identities only; it neither reparses authored source nor loads project code.
     """
     keys = _indexed_fragment_keys(context, document, fragment_index, disable_masking)
+    definition_names = {
+        fact.name for fact in document.definitions if fact.kind == "fragment"
+    }
+    if not unmasked_fragments <= definition_names:
+        raise ValueError("Unmasked fragment names must belong to the indexed document")
     call = document.call
     selected = document.selected_operation
     if (
@@ -927,6 +935,7 @@ def render_indexed_operation_types(
         client_directives=client_directives,
         disable_masking=disable_masking,
         fragment_keys=keys,
+        unmasked_fragments=unmasked_fragments,
         fixture_input=fixture_input,
     )
 

@@ -6,7 +6,9 @@ const { createHash, randomUUID } = require("node:crypto");
 const { createOwnedAnalysisArtifacts, renderOwnedAnalysisArtifact } = require("./ownedAnalysisArtifacts");
 
 const MANIFEST = "complete.json";
+const STAGING_SUFFIX = ".staging.json";
 const FORMAT = 2;
+const STAGING_FORMAT = 1;
 const MAX_FILES = 4096;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 32 * 1024 * 1024;
@@ -23,6 +25,26 @@ const same = (left, right) => left.dev === right.dev && left.ino === right.ino;
 
 const exactKeys = (value, keys) => value && Object.getPrototypeOf(value) === Object.prototype &&
   Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+const validArtifactPath = value => typeof value === "string" && !value.includes("\\") && !value.includes("\0") &&
+  !path.posix.isAbsolute(value) &&
+  (["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/testing.pyi", "graphql_desk-stubs/py.typed"].includes(value) ||
+    value.split("/").every((part, index) => /^[A-Za-z_]\w*$/.test(part) || index === value.split("/").length - 1 && /^[A-Za-z_]\w*\.pyi?$/.test(part)) && /\.pyi?$/.test(value));
+function readStagingMarker(markerPath, id) {
+  const stat = fs.lstatSync(markerPath);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 8 * 1024 * 1024) throw new Error("Invalid staging marker");
+  const bytes = fs.readFileSync(markerPath);
+  const marker = JSON.parse(bytes.toString("utf8"));
+  const sequence = Number(/^g-(\d+)-/.exec(id)?.[1]);
+  if (!exactKeys(marker, ["owner", "format", "id", "sequence", "token", "files"]) ||
+      marker.owner !== "graphql-desk-analysis-staging" || marker.format !== STAGING_FORMAT || marker.id !== id ||
+      !Number.isSafeInteger(sequence) || marker.sequence !== sequence ||
+      !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(marker.token) ||
+      !Array.isArray(marker.files) || marker.files.length > MAX_FILES ||
+      marker.files.some(item => !exactKeys(item, ["path", "sha256"]) || !validArtifactPath(item.path) || !/^[a-f0-9]{64}$/.test(item.sha256)) ||
+      new Set(marker.files.map(item => item.path)).size !== marker.files.length ||
+      marker.files.some((item, index) => index > 0 && marker.files[index - 1].path >= item.path)) throw new Error("Invalid staging marker");
+  return { marker, bytes, identity: stat, fingerprint: digest(bytes) };
+}
 const validSpan = value => exactKeys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 &&
   Number.isSafeInteger(value.end) && value.end >= value.start;
 const validModule = value => exactKeys(value, ["project", "module", "uri", "version"]) &&
@@ -113,7 +135,7 @@ function generationFiles(vscode, workspace, directory) {
   for (const item of manifest.files) {
     if (!item || typeof item.path !== "string" || typeof item.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(item.sha256) ||
         item.path.includes("\\") || item.path.includes("\0") || path.posix.isAbsolute(item.path) ||
-        !(["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/py.typed"].includes(item.path) ||
+        !(["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/testing.pyi", "graphql_desk-stubs/py.typed"].includes(item.path) ||
           item.path.split("/").every((part, index, parts) => /^[A-Za-z_]\w*$/.test(part) || index === parts.length - 1 && /^[A-Za-z_]\w*\.pyi?$/.test(part)) && /\.pyi?$/.test(item.path)) ||
         expected.has(item.path)) throw new Error("Invalid generation manifest");
     const file = path.join(directory, ...item.path.split("/"));
@@ -211,6 +233,188 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
         !same(parentIdentity, fs.lstatSync(generationsRoot))) throw new Error("Analysis generation root changed; preserved");
   }
 
+  function hasDirtyDocument(file) {
+    return vscode.workspace.textDocuments.some(document => document.isDirty &&
+      ["file", "untitled"].includes(document.uri.scheme) &&
+      (document.uri.fsPath && normalized(document.uri.fsPath) === normalized(file) ||
+        document.uri.toString() === vscode.Uri.file(file).toString()));
+  }
+
+  function cleanupStagingTemporary(managed, id, fingerprint) {
+    const entry = managed.stagingEntries?.()?.[id];
+    const name = entry?.fingerprint === fingerprint ? entry.markerTemporary : null;
+    if (typeof name !== "string" || !/^\.graphql-desk-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}-marker-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp$/i.test(name)) return false;
+    const temporary = path.join(generationsRoot, name);
+    if (path.dirname(temporary) !== generationsRoot) return false;
+    let identity;
+    let bytes;
+    try {
+      identity = fs.lstatSync(temporary);
+      if (identity.isSymbolicLink() || !identity.isFile() || identity.size > 8 * 1024 * 1024) return false;
+      bytes = fs.readFileSync(temporary);
+    } catch (error) { return error.code === "ENOENT"; }
+    if (hasDirtyDocument(temporary)) return false;
+    verifyRoot();
+    const current = fs.lstatSync(temporary);
+    if (!same(identity, current) || current.isSymbolicLink() || !bytes.equals(fs.readFileSync(temporary))) return false;
+    fs.unlinkSync(temporary);
+    return true;
+  }
+
+  async function cleanupStagedGeneration(managed, markerName) {
+    if (!/^g-[0-9]+-[0-9a-f-]{36}\.staging\.json$/i.test(markerName)) return false;
+    verifyRoot();
+    const id = markerName.slice(0, -STAGING_SUFFIX.length);
+    const directory = path.join(generationsRoot, id);
+    const markerPath = path.join(generationsRoot, markerName);
+    let marker;
+    try { marker = readStagingMarker(markerPath, id); } catch { return false; }
+    const markerOwned = managed.ownsStaging?.(directory, marker.fingerprint) === true;
+    let directoryStat;
+    try {
+      directoryStat = fs.lstatSync(directory);
+      if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) return false;
+    } catch (error) { if (error.code !== "ENOENT") return false; }
+    if (!cleanupStagingTemporary(managed, id, marker.fingerprint)) return false;
+    if (!directoryStat) {
+      if (!markerOwned) return false;
+      verifyRoot();
+      const current = fs.lstatSync(markerPath);
+      if (!same(marker.identity, current) || !marker.bytes.equals(fs.readFileSync(markerPath)) || hasDirtyDocument(markerPath)) return false;
+      fs.unlinkSync(markerPath);
+      await managed.forgetStaging?.(directory, marker.fingerprint);
+      return true;
+    }
+    if (!markerOwned) return false;
+    const manifestPath = path.join(directory, MANIFEST);
+    if (fs.existsSync(manifestPath)) {
+      let completed;
+      try { completed = generationFiles(vscode, workspace, directory); } catch { return false; }
+      const stagedFiles = new Map(marker.marker.files.map(item => [item.path, item.sha256]));
+      if (stagedFiles.size !== completed.manifest.files.length ||
+          completed.manifest.files.some(item => stagedFiles.get(item.path) !== item.sha256)) return false;
+      if (!managed.ownsGeneration(directory, completed.manifestFingerprint) &&
+          !await managed.recordGeneration(directory, completed.manifestFingerprint)) return false;
+      verifyRoot();
+      const current = fs.lstatSync(markerPath);
+      if (!same(marker.identity, current) || !marker.bytes.equals(fs.readFileSync(markerPath)) || hasDirtyDocument(markerPath)) return false;
+      fs.unlinkSync(markerPath);
+      await managed.forgetStaging?.(directory, marker.fingerprint);
+      return true;
+    }
+
+    const expected = new Map(marker.marker.files.map(item => [item.path, item.sha256]));
+    const expectedDirectories = new Set();
+    for (const relative of expected.keys()) {
+      let parent = path.posix.dirname(relative);
+      while (parent !== ".") { expectedDirectories.add(parent); parent = path.posix.dirname(parent); }
+    }
+    const files = [];
+    const directories = [];
+    let safe = true;
+    const uuidPattern = "[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}";
+    const stagingPattern = new RegExp(`^\\.graphql-desk-${marker.marker.token}-([0-9a-f]{16})-${uuidPattern}\\.tmp$`, "i");
+    const manifestPattern = new RegExp(`^\\.graphql-desk-${marker.marker.token}-manifest-${uuidPattern}\\.tmp$`, "i");
+    function visit(folder, relative = "") {
+      for (const name of fs.readdirSync(folder)) {
+        const file = path.join(folder, name);
+        const stat = fs.lstatSync(file);
+        if (stat.isSymbolicLink()) { safe = false; return; }
+        const childRelative = relative ? `${relative}/${name}` : name;
+        if (stat.isDirectory()) {
+          if (!expectedDirectories.has(childRelative)) { safe = false; return; }
+          directories.push({ file, stat });
+          visit(file, childRelative);
+          if (!safe) return;
+          continue;
+        }
+        if (!stat.isFile()) { safe = false; return; }
+        let staging = false;
+        if (childRelative === MANIFEST) { safe = false; return; }
+        if (name.match(manifestPattern) && relative === "") {
+          if (stat.size > MAX_GENERATION_MANIFEST_BYTES) { safe = false; return; }
+          staging = true;
+        }
+        else {
+          const match = stagingPattern.exec(name);
+          if (match) {
+            staging = [...expected.keys()].some(target =>
+              path.posix.dirname(target) === (relative || ".") &&
+              createHash("sha256").update(target).digest("hex").slice(0, 16) === match[1].toLowerCase());
+            if (stat.size > MAX_FILE_BYTES + 160) { safe = false; return; }
+          }
+        }
+        const expectedDigest = expected.get(childRelative);
+        if (!staging && expectedDigest === undefined) { safe = false; return; }
+        if (!staging) {
+          const bytes = fs.readFileSync(file);
+          if (bytes.length > MAX_FILE_BYTES + 160 || digest(bytes) !== expectedDigest) { safe = false; return; }
+        }
+        if (vscode.workspace.textDocuments.some(document => document.isDirty &&
+            document.uri.fsPath && normalized(document.uri.fsPath) === normalized(file))) { safe = false; return; }
+        files.push({ file, bytes: fs.readFileSync(file), stat });
+      }
+    }
+    try { visit(directory); } catch { return false; }
+    if (!safe) return false;
+    for (const item of files) {
+      verifyRoot();
+      const current = fs.lstatSync(item.file);
+      if (!same(item.stat, current) || current.isSymbolicLink() || !item.bytes.equals(fs.readFileSync(item.file))) return false;
+      fs.unlinkSync(item.file);
+    }
+    for (const item of directories.reverse()) {
+      verifyRoot();
+      const current = fs.lstatSync(item.file);
+      if (!same(item.stat, current) || current.isSymbolicLink() || fs.readdirSync(item.file).length) return false;
+      fs.rmdirSync(item.file);
+    }
+    verifyRoot();
+    const currentDirectory = fs.lstatSync(directory);
+    if (!same(directoryStat, currentDirectory) || fs.readdirSync(directory).length) return false;
+    fs.rmdirSync(directory);
+    verifyRoot();
+    const currentMarker = fs.lstatSync(markerPath);
+    if (!same(marker.identity, currentMarker) || !marker.bytes.equals(fs.readFileSync(markerPath)) || hasDirtyDocument(markerPath)) return false;
+    fs.unlinkSync(markerPath);
+    await managed.forgetStaging?.(directory, marker.fingerprint);
+    return true;
+  }
+
+  async function cleanupStagedGenerations(managed) {
+    if (!managed?.ownsSetting) return;
+    verifyRoot();
+    const names = fs.readdirSync(generationsRoot);
+    for (const name of names) {
+      if (name.endsWith(STAGING_SUFFIX)) await cleanupStagedGeneration(managed, name);
+    }
+    for (const [id, entry] of Object.entries(managed.stagingEntries?.() ?? {})) {
+      const fingerprint = entry?.fingerprint;
+      if (!/^g-[0-9]+-[0-9a-f-]{36}$/i.test(id) || !/^[a-f0-9]{64}$/.test(fingerprint ?? "")) continue;
+      if (!cleanupStagingTemporary(managed, id, fingerprint)) continue;
+      if (names.includes(`${id}${STAGING_SUFFIX}`)) continue;
+      const directory = path.join(generationsRoot, id);
+      let exists = true;
+      try {
+        const stat = fs.lstatSync(directory);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+      } catch (error) {
+        if (error.code !== "ENOENT") continue;
+        exists = false;
+      }
+      if (!exists) {
+        await managed.forgetStaging(directory, fingerprint);
+        continue;
+      }
+      try {
+        const generation = generationFiles(vscode, workspace, directory);
+        if (managed.ownsGeneration(directory, generation.manifestFingerprint)) {
+          await managed.forgetStaging(directory, fingerprint);
+        }
+      } catch { /* Preserve unverified staging state and its directory. */ }
+    }
+  }
+
   function removeGeneration(generation) {
     verifyRoot();
     const preflight = generationFiles(vscode, workspace, generation.directory);
@@ -267,6 +471,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
         typeof inputFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(inputFingerprint) ||
         typeof savedSourceFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(savedSourceFingerprint) ||
         !validOperationManifest(operationManifest)) return false;
+    await cleanupStagedGenerations(managed);
     verifyRoot();
     const newest = currentGenerations(managed).find(item => item.manifest.inputFingerprint === inputFingerprint &&
       item.manifest.savedSourceFingerprint === savedSourceFingerprint &&
@@ -282,6 +487,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
         typeof inputFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(inputFingerprint) ||
         typeof savedSourceFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(savedSourceFingerprint) ||
         !validOperationManifest(operationManifest)) return false;
+    await cleanupStagedGenerations(managed);
     verifyRoot();
     const existing = currentGenerations(managed);
     const groups = [...packages].filter(([, files]) => files.length).sort(([a], [b]) => a.localeCompare(b));
@@ -294,7 +500,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
       for (const file of files) {
         const parts = file.relative_path.split("/");
         const bytes = Buffer.byteLength(file.text, "utf8");
-        const parserOverlayFile = packageName === "graphql_desk-stubs" && ["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/py.typed"].includes(file.relative_path);
+        const parserOverlayFile = packageName === "graphql_desk-stubs" && ["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/testing.pyi", "graphql_desk-stubs/py.typed"].includes(file.relative_path);
         if (paths.has(file.relative_path) || !file.relative_path.startsWith(prefix) || !parserOverlayFile &&
         (parts.some((part, index) => !/^[A-Za-z_]\w*$/.test(part) && !(index === parts.length - 1 && /^[A-Za-z_]\w*\.pyi?$/.test(part))) || !/\.pyi?$/.test(file.relative_path)) ||
         bytes > MAX_FILE_BYTES || totalInputBytes + bytes > MAX_TOTAL_BYTES) throw new Error("Invalid or oversized generation artifact");
@@ -323,19 +529,44 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
     if (!Number.isSafeInteger(sequence)) throw new Error("Analysis generation sequence is exhausted");
     const id = `g-${sequence}-${randomUUID()}`;
     const directory = path.join(generationsRoot, id);
+    const stagingToken = randomUUID();
+    const markerPath = path.join(generationsRoot, `${id}${STAGING_SUFFIX}`);
+    const markerTemporaryName = `.graphql-desk-${stagingToken}-marker-${randomUUID()}.tmp`;
+    const markerTemporary = path.join(generationsRoot, markerTemporaryName);
+    const stagingFiles = [...outputFiles].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+    const markerBytes = Buffer.from(`${JSON.stringify({
+      owner: "graphql-desk-analysis-staging",
+      format: STAGING_FORMAT,
+      id,
+      sequence,
+      token: stagingToken,
+      files: stagingFiles,
+    }, null, 2)}\n`, "utf8");
+    let markerIdentity;
     if (isCurrent() !== true) return false;
     verifyRoot();
-    fs.mkdirSync(directory);
-    const directoryIdentity = fs.lstatSync(directory);
     const handles = [];
     let completed = false;
     let manifestTemporary;
     let manifestTemporaryBytes;
     let temporaryIdentity;
+    let stagingRecorded = false;
     try {
+      if (!await managed.recordStaging(directory, digest(markerBytes), markerTemporaryName)) throw new Error("Could not record staging ownership");
+      stagingRecorded = true;
+      const markerDescriptor = fs.openSync(markerTemporary, "wx");
+      try { fs.writeFileSync(markerDescriptor, markerBytes); fs.fsyncSync(markerDescriptor); }
+      finally { fs.closeSync(markerDescriptor); }
+      fs.linkSync(markerTemporary, markerPath);
+      markerIdentity = fs.lstatSync(markerPath);
+      fs.unlinkSync(markerTemporary);
+      if (isCurrent() !== true) throw new Error("Superseded analysis");
+      verifyRoot();
+      fs.mkdirSync(directory);
+      const directoryIdentity = fs.lstatSync(directory);
       for (const [packageName, files] of groups) {
         if (isCurrent() !== true) throw new Error("Superseded analysis");
-        handles.push(createOwnedAnalysisArtifacts(vscode, workspace, directory, packageName, files));
+        handles.push(createOwnedAnalysisArtifacts(vscode, workspace, directory, packageName, files, stagingToken));
       }
       const manifestFiles = [];
       for (const [packageName, files] of groups) for (const item of files) {
@@ -355,7 +586,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
         inputFingerprint, savedSourceFingerprint, artifactFingerprint, files: manifestFiles };
       const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
       manifestTemporaryBytes = manifestBytes;
-      manifestTemporary = path.join(directory, `.graphql-desk-${randomUUID()}.tmp`);
+      manifestTemporary = path.join(directory, `.graphql-desk-${stagingToken}-manifest-${randomUUID()}.tmp`);
       const descriptor = fs.openSync(manifestTemporary, "wx");
       temporaryIdentity = fs.fstatSync(descriptor);
       try { fs.writeFileSync(descriptor, manifestBytes); fs.fsyncSync(descriptor); }
@@ -367,6 +598,11 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
       if (isCurrent() !== true) return false;
       verifyRoot();
       if (!await managed.recordGeneration(directory, verified.manifestFingerprint)) return false;
+      verifyRoot();
+      const currentMarker = fs.lstatSync(markerPath);
+      if (!markerIdentity || !same(markerIdentity, currentMarker) || !markerBytes.equals(fs.readFileSync(markerPath)) || hasDirtyDocument(markerPath)) throw new Error("Analysis staging marker changed or is open with unsaved edits; preserved");
+      fs.unlinkSync(markerPath);
+      await managed.forgetStaging(directory, digest(markerBytes));
       if (isCurrent() !== true) return false;
       const selected = await managed.selectGeneration(directory, isCurrent, verified);
       if (!selected) return false;
@@ -387,11 +623,29 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
               !vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.fsPath && normalized(document.uri.fsPath) === normalized(manifestTemporary))) fs.unlinkSync(manifestTemporary);
         } catch { /* Preserve unverified staging data. */ }
         for (const handle of handles.reverse()) try { await handle.cleanup(); } catch { /* Preserve any changed artifact. */ }
-        try {
+        try { await cleanupStagedGeneration(managed, `${id}${STAGING_SUFFIX}`); } catch { /* Preserve incomplete or changed staging data for manual inspection. */ }
+        if (markerIdentity && !fs.existsSync(directory)) try {
           verifyRoot();
-          const current = fs.lstatSync(directory);
-          if (same(directoryIdentity, current) && fs.readdirSync(directory).length === 0) fs.rmdirSync(directory);
-        } catch { /* Preserve incomplete or changed staging data for manual inspection. */ }
+          const current = fs.lstatSync(markerPath);
+          const bytes = fs.readFileSync(markerPath);
+          if (same(markerIdentity, current) && bytes.length <= markerBytes.length && markerBytes.subarray(0, bytes.length).equals(bytes) && !hasDirtyDocument(markerPath)) fs.unlinkSync(markerPath);
+        } catch { /* Preserve unverified marker bytes. */ }
+        if (stagingRecorded && !fs.existsSync(markerPath) && !fs.existsSync(directory)) {
+          if (cleanupStagingTemporary(managed, id, digest(markerBytes))) {
+            await managed.forgetStaging(directory, digest(markerBytes));
+          }
+        } else if (stagingRecorded && fs.existsSync(markerPath)) {
+          try {
+            const existing = readStagingMarker(markerPath, id);
+            if (existing.fingerprint !== digest(markerBytes) && cleanupStagingTemporary(managed, id, digest(markerBytes))) {
+              await managed.forgetStaging(directory, digest(markerBytes));
+            }
+          } catch {
+            if (cleanupStagingTemporary(managed, id, digest(markerBytes))) {
+              await managed.forgetStaging(directory, digest(markerBytes));
+            }
+          }
+        }
       }
       throw error;
     }

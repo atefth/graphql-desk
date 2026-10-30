@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
 const { createAnalysisGenerations, validOperationManifest } = require("../src/analysisGenerations");
+const { renderOwnedAnalysisArtifact } = require("../src/ownedAnalysisArtifacts");
 
 function fixture(t) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "graphql-desk-generations-"));
@@ -13,6 +14,7 @@ function fixture(t) {
   fs.mkdirSync(root, { recursive: true });
   fs.writeFileSync(path.join(root, "user.txt"), "keep");
   const owned = new Map();
+  const stagingOwned = new Map();
   const vscode = { Uri: { file: value => ({ scheme: "file", fsPath: value, toString: () => value }) }, workspace: {
     isTrusted: true, textDocuments: [], getWorkspaceFolder: () => ({ uri: { fsPath: workspace } }),
   } };
@@ -20,6 +22,10 @@ function fixture(t) {
     ownsGeneration(directory, fingerprint) { return owned.get(path.basename(directory)) === fingerprint; },
     async recordGeneration(directory, fingerprint) { owned.set(path.basename(directory), fingerprint); return true; },
     async forgetGeneration(directory, fingerprint) { if (owned.get(path.basename(directory)) === fingerprint) owned.delete(path.basename(directory)); return true; },
+    ownsStaging(directory, fingerprint) { return stagingOwned.get(path.basename(directory))?.fingerprint === fingerprint; },
+    async recordStaging(directory, fingerprint, markerTemporary) { stagingOwned.set(path.basename(directory), { fingerprint, markerTemporary }); return this.ownsStaging(directory, fingerprint); },
+    async forgetStaging(directory, fingerprint) { if (stagingOwned.get(path.basename(directory))?.fingerprint === fingerprint) stagingOwned.delete(path.basename(directory)); return true; },
+    stagingEntries() { return Object.fromEntries(stagingOwned); },
     async selectGeneration(directory, isCurrent = () => true, verification) {
     if (isCurrent() !== true) return false;
     if (!this.ownsGeneration(directory, verification.manifestFingerprint)) return false;
@@ -36,6 +42,7 @@ const files = text => new Map([["graphql_desk_generated", [
   { relative_path: "graphql_desk_generated/_documents/default/d0.pyi", text: `class Result: value: ${text}\n` },
 ]], ["graphql_desk-stubs", [
   { relative_path: "graphql_desk-stubs/__init__.pyi", text: "from graphql import DocumentNode as _DocumentNode\ndef parse(source: str) -> _DocumentNode: ...\n" },
+  { relative_path: "graphql_desk-stubs/testing.pyi", text: "def read_result(...): ...\n" },
   { relative_path: "graphql_desk-stubs/py.typed", text: "partial\n" },
 ]]]);
 const fingerprint = packages => createHash("sha256").update(JSON.stringify(
@@ -57,6 +64,12 @@ const publish = (f, packages, id, isCurrent = () => true, inputFingerprint = fin
   f.publisher.publish(packages, id, isCurrent, f.managed, inputFingerprint, savedSourceFingerprint, manifest);
 const recover = (publisher, managed, packages, isCurrent = () => true, manifest = operationManifest()) =>
   publisher.recover(managed, isCurrent, fingerprint(packages), savedSourceFingerprint, manifest);
+const markerBytes = (id, files, token = "11111111-1111-4111-8111-111111111111") => Buffer.from(`${JSON.stringify({
+  owner: "graphql-desk-analysis-staging", format: 1, id,
+  sequence: Number(/^g-(\d+)-/.exec(id)?.[1]), token, files,
+}, null, 2)}\n`);
+const markerPath = (root, id) => path.join(root, "generations", `${id}.staging.json`);
+const markerTemporaryName = ".graphql-desk-11111111-1111-4111-8111-111111111111-marker-22222222-2222-4222-8222-222222222222.tmp";
 
 test("publishes immutable complete generations and recovers the latest verified one", async t => {
   const f = fixture(t);
@@ -361,6 +374,187 @@ test("duplicate paths and abandoned incomplete generations are never adopted or 
   assert.equal(await publish(f, files("str"), "analysis-2"), true);
   assert.equal(fs.readFileSync(partialFile, "utf8"), "partial user-visible bytes");
   assert.equal(fs.readdirSync(path.join(f.root, "generations")).length, 2);
+});
+
+test("restart removes only an owned incomplete generation and its named partial staging files", async t => {
+  const f = fixture(t);
+  const id = "g-7-00000000-0000-0000-0000-000000000000";
+  const directory = path.join(f.root, "generations", id);
+  const token = "11111111-1111-4111-8111-111111111111";
+  const target = "graphql_desk_generated/default.pyi";
+  const expected = renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "selected: str\n");
+  const entries = [{ path: target, sha256: createHash("sha256").update(expected).digest("hex") }];
+  const bytes = markerBytes(id, entries, token);
+  const marker = markerPath(f.root, id);
+  fs.writeFileSync(marker, bytes);
+  await f.managed.recordStaging(directory, createHash("sha256").update(bytes).digest("hex"), markerTemporaryName);
+  const packageRoot = path.join(directory, "graphql_desk_generated");
+  fs.mkdirSync(packageRoot, { recursive: true });
+  const temporary = path.join(packageRoot,
+    `.graphql-desk-${token}-${createHash("sha256").update(target).digest("hex").slice(0, 16)}-22222222-2222-4222-8222-222222222222.tmp`);
+  fs.writeFileSync(temporary, "partial write before simulated process crash");
+
+  assert.equal(await recover(f.publisher, f.managed, files("str")), false);
+  assert.equal(fs.existsSync(directory), false);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(f.managed.ownsStaging(directory, createHash("sha256").update(bytes).digest("hex")), false);
+});
+
+test("staging marker ordering is deterministic for case-distinct nested paths", async t => {
+  const f = fixture(t);
+  const id = "g-7-00000000-0000-0000-0000-000000000002";
+  const directory = path.join(f.root, "generations", id);
+  const paths = ["graphql_desk_generated/a_.pyi", "graphql_desk_generated/A.pyi"];
+  const entries = paths.map(relative => {
+    const bytes = renderOwnedAnalysisArtifact("graphql_desk_generated", relative.split("/").at(-1), "value: str\n");
+    return { relative, bytes, sha256: createHash("sha256").update(bytes).digest("hex") };
+  });
+  const markerFiles = entries.map(({ relative, sha256 }) => ({ path: relative, sha256 }))
+    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const bytes = markerBytes(id, markerFiles);
+  const marker = markerPath(f.root, id);
+  fs.writeFileSync(marker, bytes);
+  await f.managed.recordStaging(directory, createHash("sha256").update(bytes).digest("hex"), markerTemporaryName);
+  for (const entry of entries) {
+    const file = path.join(directory, ...entry.relative.split("/"));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, entry.bytes);
+  }
+
+  assert.equal(await recover(f.publisher, f.managed, files("str")), false);
+  assert.equal(fs.existsSync(directory), false);
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test("unowned or edited staging markers and outputs are preserved", async t => {
+  const f = fixture(t);
+  const id = "g-8-00000000-0000-0000-0000-000000000000";
+  const directory = path.join(f.root, "generations", id);
+  const target = "graphql_desk_generated/default.pyi";
+  const expected = renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "selected: str\n");
+  const entries = [{ path: target, sha256: createHash("sha256").update(expected).digest("hex") }];
+  const bytes = markerBytes(id, entries);
+  const marker = markerPath(f.root, id);
+  fs.writeFileSync(marker, bytes);
+  const foreignFile = path.join(f.root, "generations", "foreign.txt");
+  fs.writeFileSync(foreignFile, "foreign data");
+  assert.equal(await recover(f.publisher, f.managed, files("str")), false);
+  assert.equal(fs.readFileSync(marker).toString("utf8"), bytes.toString("utf8"));
+  assert.equal(fs.readFileSync(foreignFile, "utf8"), "foreign data");
+
+  fs.unlinkSync(marker);
+  fs.unlinkSync(foreignFile);
+  fs.mkdirSync(path.join(directory, "graphql_desk_generated"), { recursive: true });
+  const artifact = path.join(directory, ...target.split("/"));
+  fs.writeFileSync(artifact, "edited by another owner");
+  fs.writeFileSync(marker, bytes);
+  await f.managed.recordStaging(directory, createHash("sha256").update(bytes).digest("hex"), markerTemporaryName);
+  assert.equal(await recover(f.publisher, f.managed, files("str")), false);
+  assert.equal(fs.readFileSync(artifact, "utf8"), "edited by another owner");
+  assert.ok(fs.existsSync(marker));
+});
+
+test("a syntactically valid foreign marker without durable ownership is preserved", async t => {
+  const f = fixture(t);
+  const id = "g-8-00000000-0000-0000-0000-000000000001";
+  const target = "graphql_desk_generated/default.pyi";
+  const expected = renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "selected: str\n");
+  const marker = markerPath(f.root, id);
+  const bytes = markerBytes(id, [{ path: target, sha256: createHash("sha256").update(expected).digest("hex") }]);
+  fs.writeFileSync(marker, bytes);
+
+  assert.equal(await recover(f.publisher, f.managed, files("str")), false);
+  assert.equal(fs.existsSync(path.join(f.root, "generations", id)), false);
+  assert.deepEqual(fs.readFileSync(marker), bytes);
+  assert.equal(f.managed.ownsStaging(path.join(f.root, "generations", id), createHash("sha256").update(bytes).digest("hex")), false);
+});
+
+test("startup cleans an owned truncated marker after a crash before atomic publication", async t => {
+  const f = fixture(t);
+  const id = "g-8-00000000-0000-0000-0000-000000000003";
+  const directory = path.join(f.root, "generations", id);
+  const bytes = markerBytes(id, []);
+  const fingerprint = createHash("sha256").update(bytes).digest("hex");
+  await f.managed.recordStaging(directory, fingerprint, markerTemporaryName);
+  fs.writeFileSync(path.join(f.root, "generations", markerTemporaryName), "{\"owner\":");
+
+  assert.equal(await recover(f.publisher, f.managed, files("str")), false);
+  assert.equal(fs.existsSync(markerPath(f.root, id)), false);
+  assert.equal(fs.existsSync(path.join(f.root, "generations", markerTemporaryName)), false);
+  assert.equal(fs.existsSync(directory), false);
+  assert.equal(f.managed.ownsStaging(directory, fingerprint), false);
+});
+
+test("startup preserves an owned marker temporary with an open dirty buffer", async t => {
+  const f = fixture(t);
+  const id = "g-8-00000000-0000-0000-0000-000000000004";
+  const directory = path.join(f.root, "generations", id);
+  const bytes = markerBytes(id, []);
+  const fingerprint = createHash("sha256").update(bytes).digest("hex");
+  const temporary = path.join(f.root, "generations", markerTemporaryName);
+  const contents = Buffer.from("user-edited marker data");
+  await f.managed.recordStaging(directory, fingerprint, markerTemporaryName);
+  fs.writeFileSync(temporary, contents);
+  f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(temporary), isDirty: true });
+
+  assert.equal(await recover(f.publisher, f.managed, files("str")), false);
+  assert.deepEqual(fs.readFileSync(temporary), contents);
+  assert.equal(fs.existsSync(directory), false);
+});
+
+test("staging marker cleanup preserves dirty buffers for missing, complete and incomplete generations", async t => {
+  {
+    const f = fixture(t);
+    const id = "g-8-00000000-0000-0000-0000-000000000005";
+    const directory = path.join(f.root, "generations", id);
+    const bytes = markerBytes(id, []);
+    const marker = markerPath(f.root, id);
+    fs.writeFileSync(marker, bytes);
+    await f.managed.recordStaging(directory, createHash("sha256").update(bytes).digest("hex"), markerTemporaryName);
+    f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(marker), isDirty: true });
+
+    await recover(f.publisher, f.managed, files("str"));
+    assert.deepEqual(fs.readFileSync(marker), bytes);
+    assert.equal(fs.existsSync(directory), false);
+  }
+
+  {
+    const f = fixture(t);
+    await publish(f, files("str"), "complete-before-cleanup");
+    const directory = path.resolve(f.workspace, f.managed.selectedSetting);
+    const id = path.basename(directory);
+    const manifest = JSON.parse(fs.readFileSync(path.join(directory, "complete.json"), "utf8"));
+    const markerFiles = [...manifest.files].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+    const bytes = markerBytes(id, markerFiles);
+    const marker = markerPath(f.root, id);
+    fs.writeFileSync(marker, bytes);
+    await f.managed.recordStaging(directory, createHash("sha256").update(bytes).digest("hex"), markerTemporaryName);
+    f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(marker), isDirty: true });
+
+    await recover(f.publisher, f.managed, files("str"));
+    assert.deepEqual(fs.readFileSync(marker), bytes);
+    assert.equal(fs.existsSync(path.join(directory, "complete.json")), true);
+  }
+
+  {
+    const f = fixture(t);
+    const id = "g-8-00000000-0000-0000-0000-000000000006";
+    const directory = path.join(f.root, "generations", id);
+    const target = "graphql_desk_generated/default.pyi";
+    const artifact = renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "selected: str\n");
+    const bytes = markerBytes(id, [{ path: target, sha256: createHash("sha256").update(artifact).digest("hex") }]);
+    const marker = markerPath(f.root, id);
+    fs.writeFileSync(marker, bytes);
+    await f.managed.recordStaging(directory, createHash("sha256").update(bytes).digest("hex"), markerTemporaryName);
+    const file = path.join(directory, ...target.split("/"));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, artifact);
+    f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(marker), isDirty: true });
+
+    await recover(f.publisher, f.managed, files("str"));
+    assert.deepEqual(fs.readFileSync(marker), bytes);
+    assert.equal(fs.existsSync(directory), false);
+  }
 });
 
 test("forged complete generations without an extension ownership record are never adopted or deleted", async t => {

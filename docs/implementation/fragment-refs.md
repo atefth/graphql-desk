@@ -94,5 +94,34 @@ typed fixture aliases or generated bound helpers. Unknown extra mixed-node liter
 keys remain unsupported; wider typed fixtures can retain extra data. The
 JSON-object boundary is narrower than upstream's non-null `{}`
 primitive/array acceptance. Python omission represents upstream optional-key
-`undefined`, without introducing a JSON sentinel. Complete reader precision,
-arbitrary-fragment masking and registry-aware `read_result` remain open.
+`undefined`, without introducing a JSON sentinel.
+
+## Tuple-based fixture helpers
+
+The editor worker now resolves explicit `mask_fragments` and `read_result`
+call sites without executing project Python. Each fixed tuple registry gets an
+exact overload and a generated operation view; supplied fragments are expanded
+and omitted fragments retain opaque markers, including nested references. The
+renderer accepts only names present in the indexed document closure. Per-callsite
+output avoids generating every possible registry subset.
+
+Mutable lists remain accepted by the runtime identity helpers, but their static
+registry members are not recoverable. A list or dynamic registry therefore gets
+an actionable diagnostic and the conservative `object` fallback. `mask_fragments`
+uses the intersection of its fragment result inputs and returns the combined
+`FragmentRef` identity; its generated overloads preserve `None` and one outer
+sequence with nullable elements. Both helpers return the original data object.
+
+The current checker fixtures prove full, strict-subset and empty tuples, an
+omitted nested fragment, a dynamic-list fallback, and `mask_fragments`
+identity/nullable-sequence behavior in Pyright and mypy. This is not the complete
+fragment acceptance matrix: abstract-type narrowing, conditional alternatives,
+cross-project schema isolation and broader lifecycle/performance behavior remain
+open before the FRAG gate can pass.
+
+The editor publishes the package-level helper overloads and per-callsite type
+modules in its owned Pylance generation. Mypy remains opt-in: it does not read
+Pylance's `stubPath`, so projects must expose an importable `graphql_desk`
+typing package plus the generated callsite modules on `MYPYPATH`. The checker
+fixture supplies this adapter explicitly; the extension does not edit mypy
+configuration or claim a stable automatic mypy path.

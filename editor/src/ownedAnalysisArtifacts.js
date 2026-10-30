@@ -49,7 +49,7 @@ function artifactEntries(files, generatedPackage) {
       ? file.relative_path.slice(prefix.length) : "";
     const parts = relativePath.split("/");
     const bytes = typeof file.text === "string" ? Buffer.byteLength(file.text, "utf8") : MAX_FILE_BYTES + 1;
-    if (!relativePath || generatedPackage === "graphql_desk-stubs" && !["__init__.pyi", "py.typed"].includes(relativePath) || parts.some((part, index) => index === parts.length - 1
+    if (!relativePath || generatedPackage === "graphql_desk-stubs" && !["__init__.pyi", "testing.pyi", "py.typed"].includes(relativePath) || parts.some((part, index) => index === parts.length - 1
       ? !(generatedPackage === "graphql_desk-stubs" && part === "py.typed") && !/^[A-Za-z_][A-Za-z_0-9]*\.pyi?$/.test(part)
       : !/^[A-Za-z_][A-Za-z_0-9]*$/.test(part)) ||
         bytes > MAX_FILE_BYTES || result.has(relativePath)) {
@@ -67,9 +67,10 @@ function artifactEntries(files, generatedPackage) {
   return result;
 }
 
-function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generatedPackage, files) {
+function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generatedPackage, files, stagingToken = null) {
   const packageNames = packageParts(generatedPackage);
-  if (!packageNames || !path.isAbsolute(workspaceRoot) || !path.isAbsolute(stubRoot)) throw new Error("Invalid analysis location");
+  if (!packageNames || !path.isAbsolute(workspaceRoot) || !path.isAbsolute(stubRoot) ||
+      stagingToken !== null && !/^[0-9a-f-]{36}$/.test(stagingToken)) throw new Error("Invalid analysis location");
   const workspace = path.resolve(workspaceRoot);
   const root = path.resolve(stubRoot);
   const relative = path.relative(workspace, root);
@@ -193,7 +194,8 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
     makeDirectories([...artifacts.keys()]);
     for (const [relativePath, text] of artifacts) {
       const bytes = renderOwnedAnalysisArtifact(generatedPackage, relativePath, text);
-      const temporary = path.join(path.dirname(target(relativePath)), `.graphql-desk-${randomUUID()}.tmp`);
+      const token = stagingToken ? `${stagingToken}-${createHash("sha256").update(relativePath).digest("hex").slice(0, 16)}-` : "";
+      const temporary = path.join(path.dirname(target(relativePath)), `.graphql-desk-${token}${randomUUID()}.tmp`);
       const stat = writeExclusive(temporary, bytes);
       initial.set(relativePath, { temporary, bytes, identity: stat });
     }
