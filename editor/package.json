@@ -4,7 +4,7 @@
   "publisher": "graphql-desk",
   "version": "0.1.0",
   "private": true,
-  "description": "Read-only embedded GraphQL language feature foundations",
+  "description": "GraphQL language features for Python",
   "main": "./src/extension.js",
   "activationEvents": [
     "onLanguage:python",

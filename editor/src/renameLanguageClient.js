@@ -1,11 +1,11 @@
 "use strict";
 
 const path = require("node:path");
-const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 const { PREPARE_REQUEST, PLAN_REQUEST, SYNC_REQUEST, createRenameBridge } = require("./renameBridge");
 
 function createRenameLanguageClient(vscode, language, { documentSelector = [{ language: "python", scheme: "file" }],
   middleware, ...bridgeOptions } = {}) {
+  const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
   const server = {
     run: { module: path.join(__dirname, "renameServer.js"), transport: TransportKind.ipc },
     debug: { module: path.join(__dirname, "renameServer.js"), transport: TransportKind.ipc,
