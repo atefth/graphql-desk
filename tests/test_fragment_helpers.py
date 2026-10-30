@@ -9,7 +9,7 @@ import unittest
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, SupportsIndex, cast, overload
 
 from graphql import build_schema
 
@@ -170,6 +170,26 @@ class FragmentHelpersTests(unittest.TestCase):
             def __getattribute__(self, name: str) -> object:
                 raise AssertionError(name)
 
+        class NoTraversalDict(dict[str, object]):
+            def __getitem__(self, key: str) -> object:
+                raise AssertionError(key)
+
+            def __iter__(self) -> NoReturn:
+                raise AssertionError("mapping traversal")
+
+        class NoTraversalList(list[object]):
+            @overload
+            def __getitem__(self, index: SupportsIndex) -> object: ...
+
+            @overload
+            def __getitem__(self, index: slice) -> list[object]: ...
+
+            def __getitem__(self, index: SupportsIndex | slice) -> object:
+                raise AssertionError(index)
+
+            def __iter__(self) -> NoReturn:
+                raise AssertionError("list traversal")
+
         call = cast(Callable[[object, object], object], read_fragment)
         passthrough = cast(
             Callable[[object, object], object], read_fragment_passthrough
@@ -188,6 +208,8 @@ class FragmentHelpersTests(unittest.TestCase):
             list[object](),
             [dict[str, object](), None],
             [{"title": "t"}, None],
+            NoTraversalDict(nested=NoReads()),
+            NoTraversalList([NoReads()]),
             NoReads(),
         )
         for value in values:
@@ -279,6 +301,7 @@ def check(query:QueryResult, absent:Absent, include:bool)->None:
  assert_type(read_optional({}),OptionalResult)
  assert_type(read_fragment(required,{}),FragmentAbsent)
  assert_type(read_fragment(optional,{}),OptionalResult)
+ assert_type(read_fragment(required,{'title':'t'}),RequiredResult|FragmentAbsent)
  assert_type(read_optional({'title':'t'}),OptionalResult)
  assert_type(read_optional([{'title':'t'},None]),Sequence[OptionalResult|None])
  assert_type(read_required(None),None)
@@ -337,14 +360,22 @@ def nullable_absent(
 )->None:
  assert_type(read_required(values),Sequence[RequiredResult|FragmentAbsent|None])
 
-def nullable_abstract(query:QueryResult)->None:
+def nullable_abstract(query:QueryResult,include:bool)->None:
  user:MappedUserInput={'__typename':'User','when':b'date'}
  assert_type(user['when'],bytes|None)
  assert_type(read_mapped(user),MappedUserResult)
  assert_type(read_fragment(mapped,user),MappedUserResult)
+ assert_type(read_mapped(user)['when'],bytes|None)
+ assert_type(read_fragment(mapped,user)['when'],bytes|None)
  values:Sequence[MappedUserInput]=[user]
  assert_type(read_mapped(values),Sequence[MappedUserResult])
  assert_type(read_fragment(mapped,values),Sequence[MappedUserResult])
+ nullable_values:Sequence[MappedUserInput|None]=[user,None]
+ assert_type(read_fragment(mapped,nullable_values),Sequence[MappedUserResult|None])
+ assert_type(
+  read_fragment(mapped,nullable_values if include else None),
+  Sequence[MappedUserResult|None]|None,
+ )
 
 def nullable_mapped(values:Sequence[MappedUserInput|None]|None)->None:
  assert_type(read_mapped(values),Sequence[MappedUserResult|None]|None)
@@ -387,9 +418,12 @@ from query import Absent
 from required import RequiredReadFragment as required, document as required_document
 from outer import OuterReadFragment as outer
 from sparse import SparseReadFragment as sparse
+from mapped import MappedReadFragment as mapped
+from mapped import MappedUserInput
 def bad(absent:Absent)->None:
  required(absent)['title'] # error
  required({'title':1}) # error
+ read_fragment(required_document,{'title':1}) # error
  outer({'title':'x','friend':{'title':'y'},'friends':[]}) # error
  outer({'title':'x','friend':None,'friends':[{}]}) # error
  sparse({'__typename':'Org'})['name'] # error
@@ -402,6 +436,8 @@ def wrong(ref:FragmentRef[Other])->None:
  required([{'title':1},None]) # error
  required([[{'title':'t'}]]) # error
  read_fragment(required_document,[[{'title':'t'}]]) # error
+ user:MappedUserInput={'__typename':'User','when':b'date'}
+ value:str=read_fragment(mapped,user)['when'] # error
 def operation(doc:TypedDocument[dict[str,str],dict[str,str]])->None:
  read_fragment(doc,{}) # error
 """
