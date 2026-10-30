@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createLanguageFeatures, registerLanguageFeatures, positionAt, toDecoded } = require("../src/languageFeatures");
-const { bundle, document, options } = require("./featureFixtures.cjs");
+const { bundle, document, options, schema } = require("./featureFixtures.cjs");
 const gql = require("graphql");
 const gls = require("graphql-language-service");
 
@@ -39,7 +39,7 @@ test("stale persisted hashes produce an exact fix only for direct ID literals", 
   const stale = diagnostics.find(item => item.code === "graphql-desk.persisted-hash-mismatch");
   assert.ok(stale);
   assert.match(snapshot.text.slice(stale.range.start, stale.range.end), /^["']sha256:/);
-  const actions = await service.persistedIdActions(snapshot, [{ code: stale.code, range: stale.range }]);
+  const actions = await service.codeActions(snapshot, [{ code: stale.code, range: stale.range }]);
   assert.equal(actions.length, 1);
   assert.equal(snapshot.text.slice(actions[0].range.start, actions[0].range.end), snapshot.text.slice(stale.range.start, stale.range.end));
   assert.match(actions[0].replacement, /^"sha256:[0-9a-f]{64}"$/);
@@ -53,7 +53,7 @@ test("stale persisted hashes produce an exact fix only for direct ID literals", 
   const aliasDiagnostic = (await aliasService.diagnostics(document(aliased)))
     .find(item => item.code === "graphql-desk.persisted-hash-mismatch");
   assert.ok(aliasDiagnostic);
-  assert.deepEqual(await aliasService.persistedIdActions(document(aliased), [
+  assert.deepEqual(await aliasService.codeActions(document(aliased), [
     { code: aliasDiagnostic.code, range: aliasDiagnostic.range },
   ]), []);
 });
@@ -67,11 +67,11 @@ test("missing persisted ID action uses only unambiguous document arguments", asy
     item.code === "graphql-desk.persisted-id-missing");
   assert.ok(diagnostic);
   assert.equal(snapshot.text.slice(diagnostic.range.start, diagnostic.range.end), "gql.persisted(document=query)");
-  const actions = await service.persistedIdActions(snapshot, [{ code: diagnostic.code, range: diagnostic.range }]);
+  const actions = await service.codeActions(snapshot, [{ code: diagnostic.code, range: diagnostic.range }]);
   assert.equal(actions.length, 1);
   assert.deepEqual(actions[0].range, { start: source.indexOf("document"), end: source.indexOf("document") });
   assert.match(actions[0].replacement, /^id="sha256:[0-9a-f]{64}", $/);
-  assert.deepEqual(await service.persistedIdActions(snapshot, [{ code: diagnostic.code,
+  assert.deepEqual(await service.codeActions(snapshot, [{ code: diagnostic.code,
     range: { start: diagnostic.range.start + 1, end: diagnostic.range.end } }]), []);
 
   const positionalSource = source.replace("gql.persisted(document=query)", "gql.persisted(query)");
@@ -81,7 +81,7 @@ test("missing persisted ID action uses only unambiguous document arguments", asy
   const positionalDiagnostic = (await positionalService.diagnostics(positionalSnapshot)).find(item =>
     item.code === "graphql-desk.persisted-id-missing");
   assert.ok(positionalDiagnostic);
-  const positionalActions = await positionalService.persistedIdActions(positionalSnapshot, [
+  const positionalActions = await positionalService.codeActions(positionalSnapshot, [
     { code: positionalDiagnostic.code, range: positionalDiagnostic.range },
   ]);
   assert.equal(positionalActions.length, 1);
@@ -570,6 +570,45 @@ test("schema argument/value errors and client directive filtering retain schema 
   assert.equal(diagnostics.some((item) => /Unknown directive/.test(item.message)), false);
 });
 
+test("quick fixes replace only suggested names and explicit valid deprecated field replacements", async () => {
+  const source = "from graphql_desk import gql\nq=gql('query { user { alias: nam old old2 } }')";
+  const value = bundle(source, { schema: schema.replace(
+    "old: String @deprecated(reason:\"Use name\")",
+    "old: String @deprecated(reason:\"Use name\") old2: String @deprecated(reason:\"Use missing\")",
+  ) });
+  const snapshot = document(value);
+  const service = createLanguageFeatures(options(value));
+  const diagnostics = await service.diagnostics(snapshot);
+  const actions = await service.codeActions(snapshot,
+    diagnostics.filter((item) => ["graphql.validation", "graphql.deprecation"].includes(item.code)));
+  assert.deepEqual(actions.map((item) => [item.title, snapshot.text.slice(item.range.start, item.range.end), item.replacement]), [
+    ["Change 'nam' to 'name'", "nam", "name"],
+    ["Replace deprecated field 'old' with 'name'", "old", "name"],
+  ]);
+
+  const escaped = "from graphql_desk import gql\nq=gql('query { user { na\\u006d } }')";
+  const escapedValue = bundle(escaped);
+  const escapedSnapshot = document(escapedValue);
+  const escapedDiagnostics = await createLanguageFeatures(options(escapedValue)).diagnostics(escapedSnapshot);
+  const escapedCodeActions = await createLanguageFeatures(options(escapedValue)).codeActions(escapedSnapshot,
+    escapedDiagnostics.filter((item) => item.code === "graphql.validation"));
+  assert.deepEqual(escapedCodeActions, [], "escaped Python source is never rewritten as decoded text");
+});
+
+test("deprecated replacement suggestions reject fields deprecated with an empty reason", async () => {
+  const source = "from graphql_desk import gql\nq=gql('query { user { old } }')";
+  const value = bundle(source, { schema: schema.replace(
+    "name: String! old: String @deprecated(reason:\"Use name\")",
+    "name: String! @deprecated(reason:\"\") old: String @deprecated(reason:\"Use name\")",
+  ) });
+  const snapshot = document(value);
+  const service = createLanguageFeatures(options(value));
+  const diagnostics = await service.diagnostics(snapshot);
+  const deprecation = diagnostics.find((item) => item.code === "graphql.deprecation" && /old/.test(item.message));
+  assert.ok(deprecation);
+  assert.deepEqual(await service.codeActions(snapshot, [deprecation]), []);
+});
+
 test("configured client directives complete only in directive-name context", async () => {
   const source = "from graphql_desk import gql\nq=gql('{ user @loc { name } }')";
   const value = bundle(source);
@@ -636,7 +675,7 @@ test("cancellation during the final freshness await cannot publish", async () =>
 });
 
 test("VS Code registration supplements Python services and ignores old diagnostic refreshes", async () => {
-  const value = bundle(`from graphql_desk import gql\nq=gql('query Check {user{missing}}')\np=gql.persisted("sha256:${"0".repeat(64)}", q)`);
+  const value = bundle(`from graphql_desk import gql\nq=gql('query Check {user{nam}}')\np=gql.persisted("sha256:${"0".repeat(64)}", q)`);
   const publications = [];
   const providers = {};
   let disposed = 0;
@@ -689,6 +728,14 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   assert.equal(codeActions[0].edit.changes[0][0], doc.uri);
   assert.equal(codeActions[0].edit.changes[0][1].start.offset, persistedDiagnostic.range.start.offset);
   assert.match(codeActions[0].edit.changes[0][2], /^"sha256:[0-9a-f]{64}"$/);
+  const validationDiagnostic = publications[0].find(item => item.code === "graphql.validation");
+  assert.ok(validationDiagnostic);
+  const validationActions = await providers.actions.provideCodeActions(doc, undefined,
+    { diagnostics: [validationDiagnostic] });
+  assert.equal(validationActions.length, 1);
+  assert.equal(doc.getText().slice(validationActions[0].edit.changes[0][1].start.offset,
+    validationActions[0].edit.changes[0][1].end.offset), "nam");
+  assert.equal(validationActions[0].edit.changes[0][2], "name");
   const documentSymbols = await providers.symbols.provideDocumentSymbols(doc);
   assert.deepEqual(documentSymbols.map(item => [item.name, item.detail, item.kind]), [["Check", "query", 11]]);
   registered.dispose();
@@ -707,7 +754,7 @@ test("VS Code registration supplements Python services and ignores old diagnosti
     },
   }));
   doc.offsetAt = (position) => position.offset;
-  const completion = providers.complete.provideCompletionItems(doc, { offset: item.source.indexOf("missing") + 2 });
+  const completion = providers.complete.provideCompletionItems(doc, { offset: item.source.indexOf("nam") + 2 });
   await reachedFinal;
   pendingRegistration.dispose();
   releaseFinal();
