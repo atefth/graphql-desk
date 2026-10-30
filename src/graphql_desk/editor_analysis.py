@@ -1,13 +1,20 @@
 """Pure JSON boundary for editor snapshots; no discovery, imports or transport."""
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit
 
 from .config import ScalarMapping
 from .editor_refactor import extraction_contexts
-from .fragments import DefinitionFact, FragmentIndex, SchemaContext, index_fragments
+from .fragments import (
+    DefinitionFact,
+    FragmentIndex,
+    SchemaContext,
+    index_fragments,
+    unused_colocated_fragment_diagnostics,
+)
 from .persisted import editor_sha256_id
 from .persisted_manifest import collect_persisted_manifests
 from .schema_loading import load_from_introspection, load_from_sdl
@@ -130,6 +137,7 @@ def analyze_editor_snapshot(
     *,
     resolver: IncrementalResolver | None = None,
     external_mapping_modules: tuple[ModuleSnapshot, ...] = (),
+    colocated_fragment_checks: Mapping[str, bool] | None = None,
 ) -> dict[str, object]:
     """Resolve supplied facts without reading files or executing project Python.
 
@@ -142,6 +150,7 @@ def analyze_editor_snapshot(
         request,
         resolver=resolver,
         external_mapping_modules=external_mapping_modules,
+        colocated_fragment_checks=colocated_fragment_checks,
     ).response
 
 
@@ -176,6 +185,7 @@ def analyze_editor_snapshot_details(
     *,
     resolver: IncrementalResolver | None = None,
     external_mapping_modules: tuple[ModuleSnapshot, ...] = (),
+    colocated_fragment_checks: Mapping[str, bool] | None = None,
 ) -> EditorAnalysis:
     payload = _object(
         request, {"request_id", "modules", "bindings", "schemas"}, "request"
@@ -286,7 +296,17 @@ def analyze_editor_snapshot_details(
             )
         )
     resolve = resolve_project if resolver is None else resolver.resolve
-    sources = resolve(tuple(modules), bindings=tuple(bindings))
+    enabled_colocated_projects = {
+        project
+        for project in projects
+        if colocated_fragment_checks is None
+        or colocated_fragment_checks.get(project, True)
+    }
+    sources = resolve(
+        tuple(modules),
+        bindings=tuple(bindings),
+        collect_document_imports=bool(enabled_colocated_projects),
+    )
     schemas: dict[tuple[str, str | None], SchemaContext] = {}
     schema_facts: list[dict[str, object]] = []
     seen_schemas: set[tuple[str, str]] = set()
@@ -340,6 +360,11 @@ def analyze_editor_snapshot_details(
             }
         )
     index = index_fragments(sources, schemas=schemas)
+    colocated_diagnostics = tuple(
+        diagnostic
+        for diagnostic in unused_colocated_fragment_diagnostics(sources, index)
+        if diagnostic.module.project in enabled_colocated_projects
+    )
     persisted_collection = collect_persisted_manifests(sources, index)
     mapping_diagnostics: list[GraphDiagnostic] = []
     for project, project_mappings in type_mappings.items():
@@ -484,6 +509,8 @@ def analyze_editor_snapshot_details(
             require(reference.target.module, reference.target.call_range)
             require(reference.reference_module, reference.range)
     for diagnostic in index.diagnostics:
+        require(diagnostic.module, diagnostic.range)
+    for diagnostic in colocated_diagnostics:
         require(diagnostic.module, diagnostic.range)
     for diagnostic in persisted_collection.diagnostics:
         require(diagnostic.module, diagnostic.range)
@@ -638,6 +665,7 @@ def analyze_editor_snapshot_details(
         "diagnostics": [
             editor_diagnostic(item, snapshots) for item in index.diagnostics
         ]
+        + [editor_diagnostic(item, snapshots) for item in colocated_diagnostics]
         + [
             editor_diagnostic(item, snapshots)
             for item in persisted_collection.diagnostics

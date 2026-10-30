@@ -68,6 +68,28 @@ def array(value: object) -> list[object]:
 
 
 class EditorAnalysisTests(unittest.TestCase):
+    def test_colocated_fragment_warning_defaults_on_and_can_be_disabled(self) -> None:
+        payload = request(
+            "from fragments import card as ui_card\n"
+            "from graphql_desk import gql\nquery=gql('{ user { id } }')"
+        )
+        array(payload["modules"]).append(
+            module(
+                "fragments",
+                "from graphql_desk import gql\n"
+                "card=gql('fragment Card on User { id }')",
+            )
+        )
+        diagnostics = array(analyze_editor_snapshot(payload)["diagnostics"])
+        self.assertEqual(
+            [object_(item)["code"] for item in diagnostics],
+            ["unused-colocated-fragment"],
+        )
+        disabled = analyze_editor_snapshot(
+            payload, colocated_fragment_checks={"p": False}
+        )
+        self.assertEqual(disabled["diagnostics"], [])
+
     def test_missing_persisted_id_insertion_requires_a_resolved_document(self) -> None:
         source = (
             "from graphql_desk import gql\n"

@@ -25,6 +25,12 @@ Root `init_graphql` calls resolve static schema strings/constants and preserve b
 
 Literal fragment argument lists/tuples resolve imported, reexported, qualified and inline document calls. `ResolvedCall.fragments` preserves caller order, including repeated references. Each `FragmentReference` carries an exact `DocumentIdentity(module, call_range)` target and the referring module/span; transitive dependencies retain actual URI/version facts. Source text is not concatenated. Static Python binding cycles, unresolved references and conflicting known schemas are diagnosed. GraphQL fragment definitions, spreads, type conditions and operation-as-fragment errors belong to #34, rather than these Python reference records.
 
+## Co-located fragment import warnings
+
+The editor warns by default when a statically resolved module-level import or re-export resolves to a valid fragment document but no valid GraphQL document in that same Python module and schema composes it. Composition follows document identity through aliases, re-exports, and module-qualified imports; a same-named fragment from another module or schema does not count as use. This is a Python import/document-graph warning, separate from GraphQL's `NoUnusedFragments` validation.
+
+`check_colocated_fragments = false` disables the warning. Dynamic imports, wildcard imports, unresolved/rebound aliases, invalid fragments, modules without a valid GraphQL document, and imports that are only re-exported without local documents are excluded to avoid guessing. The diagnostic points to the containing import statement. Import collection runs only when this editor check is enabled; the analysis does not claim general Python unused-import detection.
+
 Document resolution caches are local to one invocation and are populated only after mutation guards. Writes through document AST aliases, projections and literal containers invalidate affected origins; ordinary `client.execute(document)` or `document.ast` consumption is allowed. This finite analysis does not prove the behavior of arbitrary external Python code. Traversal failures discard affected dependent records instead of publishing dangling fragment targets.
 
 `IncrementalResolver.resolve(modules, *, bindings=())` adds explicit in-memory

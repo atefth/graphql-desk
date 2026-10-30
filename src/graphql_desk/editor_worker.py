@@ -850,6 +850,10 @@ class EditorWorker:
             request,
             resolver=self._resolver,
             external_mapping_modules=snapshot.external_mapping_modules,
+            colocated_fragment_checks={
+                config.path.as_uri(): config.check_colocated_fragments
+                for config in snapshot.project_configs
+            },
         )
         self._analysis = analysis
         self._snapshot = self._previous = snapshot

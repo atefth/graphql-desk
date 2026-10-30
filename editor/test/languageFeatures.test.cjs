@@ -23,6 +23,18 @@ test("actual Python source maps give exact schema/deprecation diagnostics and cl
   assert.deepEqual(await createLanguageFeatures(options(fixed)).diagnostics(document(fixed)), []);
 });
 
+test("unused imported fragments are reported as warnings", async () => {
+  const source = "from graphql_desk import gql\nfrom fragments import card as Card\nq=gql('{ user { id } }')";
+  const fragment = { project: "p", module: "fragments", uri: "file:///workspace/fragments.py", version: 1,
+    source: "from graphql_desk import gql\ncard=gql('fragment Card on User { name }')", is_package: false };
+  const value = bundle(source, { modules: [fragment] });
+  const diagnostic = (await createLanguageFeatures(options(value)).diagnostics(document(value)))
+    .find(item => item.code === "graphql-desk.unused-colocated-fragment");
+  assert.ok(diagnostic);
+  assert.equal(diagnostic.severity, 2);
+  assert.equal(source.slice(diagnostic.range.start, diagnostic.range.end), "from fragments import card as Card");
+});
+
 test("stale persisted hashes produce an exact fix only for direct ID literals", async () => {
   const source = [
     "from graphql_desk import gql",
