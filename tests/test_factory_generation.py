@@ -149,6 +149,87 @@ if TYPE_CHECKING:
         self.assertIn("generated/sources/first/shared.pyi", paths)
         self.assertIn("generated/sources/second/shared.pyi", paths)
 
+    def test_unmask_transitive_conditional_abstract_results_per_schema(self) -> None:
+        config, _, _, _ = self.multi_schema()
+        config = replace(
+            config, schemas=tuple(replace(item, scalars=()) for item in config.schemas)
+        )
+        sdl = (
+            "interface Node { id: ID! } "
+            "type User implements Node { id: ID! name: String! } "
+            "type Org implements Node { id: ID! } "
+            "type Query { node: Node! }"
+        )
+        contexts = tuple(
+            SchemaContext(name, build_schema(sdl), "unmask:" + name)
+            for name in ("alpha", "beta")
+        )
+        source = """from typing import TYPE_CHECKING
+from typing_extensions import assert_type
+from graphql_desk import read_fragment
+from generated.alpha import graphql as alpha
+from generated.beta import graphql as beta
+from generated.sources.main import AlphaQueryResult, BetaQueryResult
+alpha_leaf=alpha("fragment Leaf on User { name }")
+alpha_outer=alpha("fragment Outer on Node @_unmask @local { id ...Leaf }",(alpha_leaf,))
+alpha_query=alpha("query A($show:Boolean!){node{__typename "
+                  "...Outer @include(if:$show)}}",(alpha_outer,))
+beta_leaf=beta("fragment Leaf on User { name }")
+beta_outer=beta("fragment Outer on Node { id ...Leaf }",(beta_leaf,))
+beta_query=beta("query B($show:Boolean!){node{__typename "
+                "...Outer @include(if:$show)}}",(beta_outer,))
+if TYPE_CHECKING:
+ alpha_absent:AlphaQueryResult={'node':{'__typename':'User'}}
+ beta_absent:BetaQueryResult={'node':{'__typename':'User'}}
+ def inspect(a:AlphaQueryResult,b:BetaQueryResult)->None:
+  if a['node']['__typename']=='User':
+   if 'id' in a['node']:
+    assert_type(a['node']['id'],str)
+   hidden=a['node']['name'] # error
+  if b['node']['__typename']=='User' and 'name' in b['node']:
+   assert_type(b['node']['name'],str)
+   assert_type(b['node']['id'],str)
+  if b['node']['__typename']=='Org':
+   wrong=b['node']['name'] # error
+if not TYPE_CHECKING:
+ from graphql import print_ast
+ text=print_ast(alpha_outer.ast)
+ assert '@_unmask' not in text and '@local' in text
+ payload={'name':'Ada'}
+ values=[payload,None]
+ assert read_fragment(beta_leaf,payload) is payload
+ assert read_fragment(beta_leaf,values) is values
+"""
+        modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
+        resolved = resolve_project(
+            modules, bindings=(project_bindings(config, project_id="p"),)
+        )
+        index = index_fragments(
+            resolved, schemas={("p", item.schema_name): item for item in contexts}
+        )
+        self.assertEqual(index.diagnostics, ())
+        artifacts = generate_project_factory_artifacts(
+            config, contexts, index, modules=modules, project_id="p"
+        )
+        self.assertEqual(artifacts.diagnostics, ())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, artifacts, modules)
+            self.check(
+                root,
+                {
+                    "main.py": {
+                        n
+                        for n, line in enumerate(source.splitlines(), 1)
+                        if "# error" in line
+                    }
+                },
+            )
+            runtime = subprocess.run(
+                [sys.executable, "main.py"], cwd=root, capture_output=True, text=True
+            )
+            self.assertEqual(runtime.returncode, 0, runtime.stdout + runtime.stderr)
+
     def test_persisted_factories_preserve_typed_documents_per_schema(self) -> None:
         config, contexts, base_modules, _ = self.multi_schema()
         source = (
