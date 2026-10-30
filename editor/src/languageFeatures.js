@@ -344,15 +344,15 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
             if (!node.name?.loc || ![gql.Kind.OPERATION_DEFINITION, gql.Kind.FRAGMENT_DEFINITION].includes(node.kind)) continue;
             const origins = toHost(bundle, call, node.loc);
             const names = toHost(bundle, call, node.name.loc);
-            if (origins.length !== 1 || names.length !== 1 ||
-              origins[0].module.uri !== snapshot.uri || origins[0].module.version !== snapshot.version ||
-              names[0].module.uri !== snapshot.uri || names[0].module.version !== snapshot.version) continue;
-            const definitionRange = origins[0].range;
+            if (names.length !== 1 || names[0].module.uri !== snapshot.uri ||
+              names[0].module.version !== snapshot.version || origins.some((item) =>
+                item.module.uri !== snapshot.uri || item.module.version !== snapshot.version ||
+                item.range.start < callRange.start || item.range.end > callRange.end)) continue;
+            const definitionRange = origins.length === 1 ? origins[0].range : callRange;
             const selectionRange = names[0].range;
-            if (definitionRange.start < callRange.start || definitionRange.end > callRange.end ||
-              selectionRange.start < definitionRange.start || selectionRange.end > definitionRange.end) continue;
+            if (selectionRange.start < definitionRange.start || selectionRange.end > definitionRange.end) continue;
             const kind = node.kind === gql.Kind.FRAGMENT_DEFINITION ? "fragment" : "operation";
-            const symbolKey = key([node.name.value, kind, origins[0].module.uri, origins[0].module.version, selectionRange]);
+            const symbolKey = key([node.name.value, kind, names[0].module.uri, names[0].module.version, selectionRange]);
             if (seen.has(symbolKey)) continue;
             seen.add(symbolKey);
             result.push({

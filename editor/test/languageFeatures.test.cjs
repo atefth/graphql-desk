@@ -350,6 +350,16 @@ test("document symbols recover complete definitions before an incomplete tail an
   assert.deepEqual(await createLanguageFeatures(options(value, { isCurrent: async () => false })).symbols(document(value)), []);
 });
 
+test("document symbols use the call range when an adjacent-literal definition has split origins", async () => {
+  const source = "from graphql_desk import gql\nq=gql('query Read { user { ' 'id } }')";
+  const value = bundle(source);
+  const symbols = await createLanguageFeatures(options(value)).symbols(document(value));
+  assert.equal(symbols.length, 1);
+  assert.equal(symbols[0].name, "Read");
+  assert.equal(source.slice(symbols[0].selectionRange.start, symbols[0].selectionRange.end), "Read");
+  assert.equal(source.slice(symbols[0].range.start, symbols[0].range.end), "gql('query Read { user { ' 'id } }')");
+});
+
 test("document symbols skip invalid GraphQL and source names outside their containing call", async () => {
   const source = "from graphql_desk import gql\nTEXT='query Read { user { id } }'\nfirst=gql(TEXT)\nsecond=gql(TEXT)\nbad=gql('query Broken {')";
   const value = bundle(source);
