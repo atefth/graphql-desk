@@ -28,6 +28,7 @@ async function run() {
     "main.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('{ user { missing old } }')\r\n",
     "persisted.py": `from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted("sha256:${"0".repeat(64)}", query)\n`,
     "missingPersisted.py": "from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted(document=query)\n",
+    "missingPersistedPositional.py": "from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted(query)\n",
     "partial.py": "from graphql_desk import gql\nq=gql('{ user { na')\n",
     "blank.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''\r\n\r\n''')\r\n",
     "lexical.py": "from graphql_desk import gql\nq=gql('''query Read { user { name",
@@ -161,6 +162,21 @@ async function run() {
     assert.match(insertEdit.newText, /^id="sha256:[0-9a-f]{64}", $/);
     observations.persistedIdInsertion = true;
     await recordProgress("persisted-id-insertion-action");
+    const positionalDocument = documents.get("missingPersistedPositional.py");
+    await registration.refresh(positionalDocument);
+    const positionalMissing = vscode.languages.getDiagnostics(positionalDocument.uri)
+      .find(item => item.code === "graphql-desk.persisted-id-missing");
+    assert.ok(positionalMissing);
+    const positionalActions = await codeActionProvider.provideCodeActions(positionalDocument, positionalMissing.range,
+      { diagnostics: [positionalMissing] });
+    const positionalInsert = positionalActions.find(item => /Insert persisted ID/.test(item.title));
+    assert.ok(positionalInsert);
+    const positionalEdit = positionalInsert.edit.entries()
+      .find(([uri]) => uri.toString() === positionalDocument.uri.toString())?.[1]?.[0];
+    assert.ok(positionalEdit);
+    assert.equal(positionalDocument.getText(positionalEdit.range), "");
+    assert.match(positionalEdit.newText, /^"sha256:[0-9a-f]{64}", $/);
+    observations.positionalPersistedIdInsertion = true;
     const partial = documents.get("partial.py");
     const completion = await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", partial.uri,
       partial.positionAt(partial.getText().indexOf("na'") + 2));

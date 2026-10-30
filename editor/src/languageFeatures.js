@@ -366,7 +366,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
           .map((item) => ({
             title: "Insert persisted ID for current document hash",
             range: item.insertion.utf16,
-            replacement: `id=${JSON.stringify(item.expected_id)}, `,
+            replacement: item.positional ? `${JSON.stringify(item.expected_id)}, ` : `id=${JSON.stringify(item.expected_id)}, `,
           }));
         return [...stale, ...insertions];
       } catch { return []; }
