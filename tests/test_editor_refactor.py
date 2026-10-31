@@ -44,7 +44,6 @@ class EditorRefactorTests(unittest.TestCase):
             "q = gql('x', fragments=dynamic)\n",
             "q = get_factory()('x')\n",
             "consume(gql('x'))\n",
-            "def read():\n    q = gql('x')\n",
             "from templates import custom\nq = custom(source='x')\n",
         ):
             self.assertEqual(extraction_contexts(source), {}, source)
@@ -57,6 +56,49 @@ class EditorRefactorTests(unittest.TestCase):
         contexts = extraction_contexts(source)
         self.assertEqual(len(contexts), 1)
         self.assertEqual(next(iter(contexts.values()))["factory"], "factory")
+
+    def test_function_local_assignments_keep_suite_indentation_and_comment(
+        self,
+    ) -> None:
+        source = (
+            "# 😀\r\nfrom graphql_desk import gql\r\ndef read():\r\n"
+            "    # local query\r\n"
+            "    query: object = gql('query { user { name } }', ())\r\n"
+            "async def fetch():\r\n    query = gql('{ user { id } }')\r\n"
+        )
+        contexts = extraction_contexts(source)
+        self.assertEqual(len(contexts), 2)
+        local, async_local = contexts.values()
+        self.assertEqual(local["indent"], "    ")
+        self.assertEqual(local["newline"], "\r\n")
+        self.assertEqual(local["fragment_mode"], "empty_tuple")
+        self.assertEqual(local["scope"], "function")
+        self.assertEqual(
+            local["statement_start"],
+            convert_offset(source, source.index("    # local query")),
+        )
+        self.assertEqual(async_local["indent"], "    ")
+        self.assertEqual(async_local["fragment_mode"], "new")
+        self.assertEqual(async_local["scope"], "function")
+        module = extraction_contexts("from graphql_desk import gql\nq=gql('x')\n")
+        self.assertEqual(next(iter(module.values()))["scope"], "module")
+
+    def test_function_local_extraction_rejects_scope_ambiguity(self) -> None:
+        for source in (
+            "from graphql_desk import gql\ndef read(gql):\n    q=gql('x')\n",
+            "from graphql_desk import gql\n"
+            "def read():\n    q=gql('x')\n    gql=custom\n",
+            "from graphql_desk import gql\n"
+            "def read():\n    if flag:\n        q=gql('x')\n",
+            "from graphql_desk import gql\n"
+            "def read():\n    def nested():\n        q=gql('x')\n",
+            "from graphql_desk import gql\n"
+            "def read():\n    global value\n    q=gql('x')\n",
+            "from graphql_desk import gql\n"
+            "def read():\n    value=locals()\n    q=gql('x')\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(extraction_contexts(source), {}, source)
 
     def test_rebound_builtin_and_initializer_are_rejected(self) -> None:
         for source in (

@@ -110,8 +110,33 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             node.end_lineno, node.end_col_offset
         )
 
+    extractable: list[ast.stmt] = list(tree.body)
+    function_assignments: set[int] = set()
+    for definition in tree.body:
+        if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        scope: list[ast.AST] = list(definition.body)
+        safe = True
+        while scope:
+            node = scope.pop()
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+            ):
+                continue
+            if isinstance(node, (ast.Global, ast.Nonlocal)) or (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in {"locals", "vars"}
+            ):
+                safe = False
+                break
+            scope.extend(ast.iter_child_nodes(node))
+        if safe:
+            extractable.extend(definition.body)
+            function_assignments.update(id(item) for item in definition.body)
+
     result: dict[tuple[int, int], dict[str, object]] = {}
-    for statement in tree.body:
+    for statement in extractable:
         value: ast.expr | None
         if isinstance(statement, ast.Assign):
             if len(statement.targets) != 1 or not isinstance(
@@ -191,10 +216,11 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
         line_index = statement.lineno - 1
         line_start = starts[line_index]
         indent = source[line_start:statement_start]
-        if indent.strip():
+        if not re.fullmatch(r"[ \t]*", indent):
             continue
         while line_index and re.fullmatch(
-            r"[ \t]*#[^\r\n]*", lines[line_index - 1].rstrip("\r\n")
+            re.escape(indent) + r"#[^\r\n]*",
+            lines[line_index - 1].rstrip("\r\n"),
         ):
             line_index -= 1
             line_start = starts[line_index]
@@ -206,5 +232,6 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             "indent": indent,
             "newline": ending.group() if ending else "\n",
             "factory": factory,
+            "scope": "function" if id(statement) in function_assignments else "module",
         }
     return result

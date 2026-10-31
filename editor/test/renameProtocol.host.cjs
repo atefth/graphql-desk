@@ -95,11 +95,11 @@ async function pythonDocuments(directory) {
   return { documents, service: createLanguageFeatures(options(value)) };
 }
 
-async function pythonExtractionDocument(directory) {
+async function pythonExtractionDocument(directory,
+  source = "from graphql_desk import gql\nquery = gql('query Read { user { id name } }')\n") {
   const folder = path.join(root, directory);
   await fs.mkdir(folder, { recursive: true });
   const file = path.join(folder, "main.py");
-  const source = "from graphql_desk import gql\nquery = gql('query Read { user { id name } }')\n";
   await fs.writeFile(file, source, { flag: "wx" });
   let document = await vscode.workspace.openTextDocument(Uri.file(file));
   if (document.languageId !== "python") document = await vscode.languages.setTextDocumentLanguage(document, "python");
@@ -141,7 +141,8 @@ async function run() {
   assert.ok(resultPath && path.isAbsolute(resultPath));
   const observed = { outcome: "fragment-rename-lsp-unverified", step: "setup", twoFileSuccess: false,
     closedTargetOpened: false, staleTargetRejectedWithoutPartialEdit: false, cancellation: false,
-    extractRoundtripUndo: false, extractStaleRejected: false, extractCancellation: false, shutdown: false };
+    extractRoundtripUndo: false, extractFunctionRoundtripUndo: false, extractStaleRejected: false,
+    extractCancellation: false, shutdown: false };
   const clients = [];
   try {
     const basic = await writePair("success");
@@ -282,6 +283,21 @@ async function run() {
     assert.equal(extraction.document.getText(), extraction.source);
     observed.extractRoundtripUndo = true;
     await extractClient.stop();
+
+    observed.step = "extract-function-roundtrip-undo";
+    const localSource = "# 😀\r\nfrom graphql_desk import gql\r\ndef read():\r\n    # local query\r\n    query: object = gql('query Read { user { id name } }')\r\n";
+    const localExtraction = await pythonExtractionDocument("extract-function", localSource);
+    const localClient = createRenameLanguageClient(vscode, localExtraction.language, { isTrusted: () => true });
+    clients.push(localClient);
+    await localClient.start();
+    await vscode.window.showTextDocument(localExtraction.document);
+    assert.equal(await requestExtract(localClient.client, localExtraction.document), true);
+    assert.match(localExtraction.document.getText(), /fragments=\[gql\(source="fragment UserFields on User/);
+    assert.match(localExtraction.document.getText(), /\r\n    # local query\r\n    query: object = gql\(.*fragments=\[gql\(source=/);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(localExtraction.document.getText(), localSource);
+    observed.extractFunctionRoundtripUndo = true;
+    await localClient.stop();
 
     observed.step = "extract-stale";
     const staleExtract = await pythonExtractionDocument("extract-stale");
