@@ -141,7 +141,8 @@ async function run() {
   assert.ok(resultPath && path.isAbsolute(resultPath));
   const observed = { outcome: "fragment-rename-lsp-unverified", step: "setup", twoFileSuccess: false,
     closedTargetOpened: false, staleTargetRejectedWithoutPartialEdit: false, cancellation: false,
-    extractRoundtripUndo: false, extractFunctionRoundtripUndo: false, extractStaleRejected: false,
+    extractRoundtripUndo: false, extractFunctionRoundtripUndo: false,
+    extractQualifiedRoundtripUndo: false, extractStaleRejected: false,
     extractCancellation: false, shutdown: false };
   const clients = [];
   try {
@@ -298,6 +299,29 @@ async function run() {
     assert.equal(localExtraction.document.getText(), localSource);
     observed.extractFunctionRoundtripUndo = true;
     await localClient.stop();
+
+    observed.step = "extract-module-qualified-roundtrip-undo";
+    const qualifiedSource = "# 😀\r\nimport graphql_desk as desk\r\nquery = desk.gql('query Read { user { id name } }')\r\n";
+    const qualifiedExtraction = await pythonExtractionDocument("extract-module-qualified", qualifiedSource);
+    const qualifiedClient = createRenameLanguageClient(vscode, qualifiedExtraction.language, { isTrusted: () => true });
+    clients.push(qualifiedClient);
+    await qualifiedClient.start();
+    await vscode.window.showTextDocument(qualifiedExtraction.document);
+    assert.equal(await requestExtract(qualifiedClient.client, qualifiedExtraction.document), true);
+    assert.match(qualifiedExtraction.document.getText(), /user_fields = desk\.gql\(source="fragment UserFields on User/);
+    assert.match(qualifiedExtraction.document.getText(), /\.\.\.UserFields/);
+    const transformedSource = qualifiedExtraction.document.getText();
+    const reparsed = bundle(transformedSource, {
+      uri: qualifiedExtraction.document.uri.toString(),
+      version: qualifiedExtraction.document.version,
+    });
+    assert.equal(reparsed.response.calls.length, 2);
+    assert.ok(reparsed.response.calls.every(item => item.index));
+    assert.deepEqual(reparsed.response.diagnostics, []);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(qualifiedExtraction.document.getText(), qualifiedSource);
+    observed.extractQualifiedRoundtripUndo = true;
+    await qualifiedClient.stop();
 
     observed.step = "extract-stale";
     const staleExtract = await pythonExtractionDocument("extract-stale");

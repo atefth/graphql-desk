@@ -57,6 +57,172 @@ class EditorRefactorTests(unittest.TestCase):
         self.assertEqual(len(contexts), 1)
         self.assertEqual(next(iter(contexts.values()))["factory"], "factory")
 
+    def test_module_qualified_graphql_desk_factories_are_supported(self) -> None:
+        for source, expected in (
+            (
+                "import graphql_desk as desk\n"
+                "query = desk.gql('query { user { id } }')\n",
+                "desk.gql",
+            ),
+            (
+                "import graphql_desk\n"
+                "async def fetch():\n"
+                "    query = graphql_desk.graphql('query { user { id } }')\n",
+                "graphql_desk.graphql",
+            ),
+            (
+                "import graphql_desk as desk\n"
+                "factory = desk.init_graphql('default')\n"
+                "query = factory('query { user { id } }')\n",
+                "factory",
+            ),
+        ):
+            with self.subTest(source=source):
+                contexts = extraction_contexts(source)
+                self.assertEqual(len(contexts), 1)
+                self.assertEqual(next(iter(contexts.values()))["factory"], expected)
+
+    def test_module_qualified_factory_mutation_and_rebinding_are_rejected(self) -> None:
+        for source in (
+            "import graphql_desk as desk\ndesk = other\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\ndesk.gql = other\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\n"
+            "def patch():\n    del desk.gql\n"
+            "q = desk.gql('x')\n",
+            "import graphql_desk as desk\n"
+            "setattr(desk, 'gql', other)\nq = desk.gql('x')\n",
+            "import builtins\nimport graphql_desk as desk\n"
+            "builtins.setattr(desk, 'gql', other)\nq = desk.gql('x')\n",
+            "from builtins import setattr as set_attr\n"
+            "import graphql_desk as desk\n"
+            "set_attr(desk, 'gql', other)\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\nmutate(desk)\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\nmutate((desk,))\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\nimport graphql_desk as api\n"
+            "mutate(api)\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\nmutate(desk.__dict__)\nq = desk.gql('x')\n",
+            "import sys\nimport graphql_desk as desk\n"
+            "sys.modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import sys\nruntime = sys\nimport graphql_desk as desk\n"
+            "runtime.modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import sys\nruntime = sys\nregistry = runtime\n"
+            "import graphql_desk as desk\n"
+            "registry.modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import graphql_desk as desk\n"
+            "__builtins__['__import__']('graphql_desk').gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "runtime.modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "getattr(runtime, 'modules')['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from builtins import getattr as get_attr\n"
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "get_attr(runtime, 'modules')['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import builtins as b\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "b.getattr(runtime, 'modules')['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "vars(runtime)['modules']['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from builtins import vars as get_vars\n"
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "get_vars(runtime)['modules']['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import builtins as b\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "b.vars(runtime)['modules']['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "vars()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from builtins import vars as get_vars\n"
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "get_vars()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import builtins as b\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "b.vars()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from builtins import globals as get_globals\n"
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "get_globals()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "g = globals\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "g()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import builtins as b\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "b.globals()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import builtins\nbi = builtins\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "bi.locals()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from builtins import locals as get_locals\n"
+            "namespace = get_locals\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "namespace()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "namespace = locals\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "namespace()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "runtime.__dict__['modules']['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from sys import modules as registry\n"
+            "import graphql_desk as desk\n"
+            "registry['graphql_desk'].gql = replacement\nq = desk.gql('x')\n",
+            "import importlib as loader\nimport graphql_desk as desk\n"
+            "loader.import_module('graphql_desk').gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import importlib\nloader = importlib\n"
+            "import graphql_desk as desk\n"
+            "loader.import_module('graphql_desk').gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from importlib import import_module as load_module\n"
+            "import graphql_desk as desk\n"
+            "load_module('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
+            "from importlib import import_module as load_module\n"
+            "importer = load_module\nimport graphql_desk as desk\n"
+            "importer('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
+            "import sys as runtime\nregistry = runtime.modules\n"
+            "import graphql_desk as desk\n"
+            "registry['graphql_desk'].gql = replacement\nq = desk.gql('x')\n",
+            "from builtins import getattr as get_attr\n"
+            "lookup = get_attr\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "lookup(runtime, 'modules')['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from builtins import getattr as lookup\n"
+            "from builtins import vars as lookup\n"
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "lookup(runtime)['modules']['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import builtins\nbi = builtins\nimport graphql_desk as desk\n"
+            "bi.__import__('graphql_desk').gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import graphql_desk as desk\n"
+            "__import__('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
+            "from builtins import __import__ as load\n"
+            "import graphql_desk as desk\n"
+            "load('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
+            "import builtins as b\nimport graphql_desk as desk\n"
+            "b.__import__('graphql_desk').gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import graphql_desk as desk\nfrom other import *\nq = desk.gql('x')\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(extraction_contexts(source), {}, source)
+
     def test_function_local_assignments_keep_suite_indentation_and_comment(
         self,
     ) -> None:
@@ -106,7 +272,6 @@ class EditorRefactorTests(unittest.TestCase):
             "from graphql_desk import gql\nfrom other import gql\nq = gql('x')\n",
             "import graphql_desk as g\ng = custom\nq = g.gql('x')\n",
             "import graphql_desk as g\ng.gql = custom\nq = g.gql('x')\n",
-            "import graphql_desk as g\nq = g.gql('x')\n",
             "from graphql_desk import init_graphql as init\n"
             "init = custom\nf = init('s')\nq = f('x')\n",
             "from graphql_desk import init_graphql as init\n"
@@ -114,7 +279,22 @@ class EditorRefactorTests(unittest.TestCase):
             "from graphql_desk import gql\nfrom other import *\nq = gql('x')\n",
             "from graphql_desk import gql\nexec(code)\nq = gql('x')\n",
             "from graphql_desk import gql\neval(code)\nq = gql('x')\n",
+            "from graphql_desk import gql\nrun = exec\nrun('gql = custom')\n"
+            "q = gql('x')\n",
+            "from graphql_desk import gql\nrun = eval\nrun('gql')\nq = gql('x')\n",
+            "from builtins import exec as run\n"
+            "from graphql_desk import gql\nrun('gql = custom')\nq = gql('x')\n",
+            "from builtins import eval as run\n"
+            "runner = run\nfrom graphql_desk import gql\n"
+            "runner('gql')\nq = gql('x')\n",
+            "import builtins as b\n"
+            "from graphql_desk import gql\nb.exec('gql = custom')\nq = gql('x')\n",
+            "import builtins\nbi = builtins\n"
+            "from graphql_desk import gql\nrunner = bi.eval\n"
+            "runner('gql')\nq = gql('x')\n",
             "from graphql_desk import gql\nglobals()['gql'] = custom\nq = gql('x')\n",
+            "from graphql_desk import gql\n"
+            "__builtins__['exec']('gql = custom')\nq = gql('x')\n",
             "q = gql('x')\nfrom graphql_desk import gql\n",
             "from graphql_desk import init_graphql as init\n"
             "q = f('x')\nf = init('s')\n",
