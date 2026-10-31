@@ -399,6 +399,14 @@ def extraction_contexts(
                 result.extend(nested_functions(statement.body))
                 continue
             if isinstance(statement, ast.ClassDef):
+                methods = [
+                    item
+                    for item in statement.body
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                ]
+                for method in methods:
+                    result.append(method)
+                    result.extend(nested_functions(method.body))
                 continue
             for suite in nested_suites(statement):
                 result.extend(nested_functions(suite))
@@ -418,6 +426,12 @@ def extraction_contexts(
                 for method in methods
                 for candidate in (method, *nested_functions(method.body))
             ]
+            candidates.extend(
+                candidate
+                for statement in definition.body
+                if isinstance(statement, ast.ClassDef)
+                for candidate in nested_functions([statement])
+            )
         else:
             continue
         for candidate in candidates:
