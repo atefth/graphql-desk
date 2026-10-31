@@ -21,11 +21,18 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
 
     documents: set[str] = set()
     initializers: set[str] = set()
+    module_aliases: set[str] = set()
+    module_imports: set[str] = set()
     binding_lines: dict[str, int] = {}
     # A factory must have a single static binding throughout the source. This
     # deliberately rejects shadowing in nested scopes too, rather than guessing
     # which binding a transformed call will execute.
     bindings: dict[str, int] = {}
+
+    def attribute_root(node: ast.AST) -> str | None:
+        while isinstance(node, ast.Attribute):
+            node = node.value
+        return node.id if isinstance(node, ast.Name) else None
 
     def bound(name: str) -> None:
         bindings[name] = bindings.get(name, 0) + 1
@@ -52,11 +59,42 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 bound(alias.asname or alias.name.split(".")[0])
+                if alias.name == "graphql_desk":
+                    module_imports.add(alias.asname or alias.name)
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name == "*":
                     return {}
                 bound(alias.asname or alias.name)
+
+    mutated_modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(
+            node.ctx, (ast.Store, ast.Del)
+        ):
+            root = attribute_root(node)
+            if root in module_imports:
+                mutated_modules.add(root)
+        if isinstance(node, ast.Attribute) and node.attr == "__dict__":
+            root = attribute_root(node)
+            if root in module_imports:
+                mutated_modules.add(root)
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in {
+                "setattr",
+                "delattr",
+            }:
+                if node.args and isinstance(node.args[0], ast.Name):
+                    if node.args[0].id in module_imports:
+                        mutated_modules.add(node.args[0].id)
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "vars"
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in module_imports
+            ):
+                mutated_modules.add(node.args[0].id)
 
     for statement in tree.body:
         if (
@@ -75,12 +113,37 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                     if bindings.get(name) == 1:
                         initializers.add(name)
                         binding_lines[name] = statement.lineno
+        elif isinstance(statement, ast.Import):
+            for alias in statement.names:
+                name = alias.asname or alias.name.split(".")[0]
+                if (
+                    alias.name == "graphql_desk"
+                    and bindings.get(name) == 1
+                    and name not in mutated_modules
+                ):
+                    module_aliases.add(name)
+                    binding_lines[name] = statement.lineno
 
-    def builtin(node: ast.expr, names: set[str]) -> bool:
+    def builtin(
+        node: ast.expr,
+        names: set[str],
+        *,
+        module_document: bool = False,
+        module_initializer: bool = False,
+    ) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in names and binding_lines[node.id] < node.lineno
         return (
-            isinstance(node, ast.Name)
-            and node.id in names
-            and binding_lines[node.id] < node.lineno
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in module_aliases
+            and binding_lines.get(node.value.id, node.lineno) < node.lineno
+            and (
+                module_document
+                and node.attr in {"gql", "graphql"}
+                or module_initializer
+                and node.attr == "init_graphql"
+            )
         )
 
     factories: set[str] = set()
@@ -93,7 +156,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             if (
                 bindings.get(statement.targets[0].id) == 1
                 and isinstance(statement.value, ast.Call)
-                and builtin(statement.value.func, initializers)
+                and builtin(statement.value.func, initializers, module_initializer=True)
             ):
                 factories.add(statement.targets[0].id)
                 binding_lines[statement.targets[0].id] = statement.lineno
@@ -154,7 +217,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             isinstance(arg, ast.Starred) for arg in value.args
         ):
             continue
-        if not builtin(value.func, documents | factories):
+        if not builtin(value.func, documents | factories, module_document=True):
             continue
         factory = ast.get_source_segment(source, value.func)
         if factory is None or not re.fullmatch(

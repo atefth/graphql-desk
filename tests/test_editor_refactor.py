@@ -57,6 +57,46 @@ class EditorRefactorTests(unittest.TestCase):
         self.assertEqual(len(contexts), 1)
         self.assertEqual(next(iter(contexts.values()))["factory"], "factory")
 
+    def test_module_qualified_graphql_desk_factories_are_supported(self) -> None:
+        for source, expected in (
+            (
+                "import graphql_desk as desk\n"
+                "query = desk.gql('query { user { id } }')\n",
+                "desk.gql",
+            ),
+            (
+                "import graphql_desk\n"
+                "async def fetch():\n"
+                "    query = graphql_desk.graphql('query { user { id } }')\n",
+                "graphql_desk.graphql",
+            ),
+            (
+                "import graphql_desk as desk\n"
+                "factory = desk.init_graphql('default')\n"
+                "query = factory('query { user { id } }')\n",
+                "factory",
+            ),
+        ):
+            with self.subTest(source=source):
+                contexts = extraction_contexts(source)
+                self.assertEqual(len(contexts), 1)
+                self.assertEqual(next(iter(contexts.values()))["factory"], expected)
+
+    def test_module_qualified_factory_mutation_and_rebinding_are_rejected(self) -> None:
+        for source in (
+            "import graphql_desk as desk\ndesk = other\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\ndesk.gql = other\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\n"
+            "def patch():\n    del desk.gql\n"
+            "q = desk.gql('x')\n",
+            "import graphql_desk as desk\n"
+            "setattr(desk, 'gql', other)\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\nmutate(desk.__dict__)\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\nfrom other import *\nq = desk.gql('x')\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(extraction_contexts(source), {}, source)
+
     def test_function_local_assignments_keep_suite_indentation_and_comment(
         self,
     ) -> None:
@@ -106,7 +146,6 @@ class EditorRefactorTests(unittest.TestCase):
             "from graphql_desk import gql\nfrom other import gql\nq = gql('x')\n",
             "import graphql_desk as g\ng = custom\nq = g.gql('x')\n",
             "import graphql_desk as g\ng.gql = custom\nq = g.gql('x')\n",
-            "import graphql_desk as g\nq = g.gql('x')\n",
             "from graphql_desk import init_graphql as init\n"
             "init = custom\nf = init('s')\nq = f('x')\n",
             "from graphql_desk import init_graphql as init\n"
