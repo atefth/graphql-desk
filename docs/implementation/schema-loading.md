@@ -8,7 +8,19 @@
 
 Invalid content and unreadable files raise `ValueError`. Introspection construction errors suppress upstream exception chains that can contain the raw response. Local SDL diagnostics retain parser context. This backend refuses URLs, does not fetch data, execute project code, write files or cache old schemas. Its caller must enforce project/workspace path boundaries; the explicit-path loader can read any caller-selected local file.
 
-Configuration/routing (#27), authenticated remote loading (#59), watch/refresh integration and advanced preprocessing/output utilities (#76) remain separate work. Eight focused tests cover successful round trips, malformed inputs, sanitized tracebacks, local errors and rereading changed files. This is a local-loader foundation, not completion of SCHEMA-01.
+Focused local-loader tests cover successful round trips, malformed inputs, sanitized tracebacks, local errors and rereading changed files. Advanced preprocessing/output utilities and the consolidated `graphql_desk.internal` export surface remain tracked by #76. This module alone does not complete SCHEMA-01.
+
+## Authenticated URL loading and refresh
+
+`graphql_desk.schema_url.get_url_config(origin)` accepts a `SchemaOrigin` or `None`
+and returns the same origin for a valid HTTP(S) URL. Local paths, mixed local/URL
+origins, unsupported schemes and unsafe URLs return `None`. Header templates stay
+unresolved; this helper does not inspect the environment or contact the network.
+The existing origin record hides URLs and headers from its `repr`.
+This independently callable discriminator supplies the `getURLConfig` capability
+from the pinned upstream advanced API. Current editor discovery already returns
+typed origins, so it passes those directly to the loader; both entrypoints share
+the same URL validation. The future combined loader/export surface is tracked by #76.
 
 `graphql_desk.schema_url.load_from_url(origin, environment=..., timeout=10.0,
 max_response_bytes=16777216)` explicitly loads one configured URL origin without
@@ -24,8 +36,28 @@ and accepts UTF-8 JSON only. Transport framing headers and response encoding rem
 loader-owned. Errors suppress response bodies, credentials and upstream exception
 chains. The socket timeout is not a total elapsed-time or cancellation guarantee.
 
-Nine HTTP-server tests cover modern/legacy feature support, configured header
-precedence, credential isolation, redirects, authentication failure, malformed
-responses, encoding, framing, size limits and timeout behavior. Real TLS certificate
-fixtures, refresh/watch integration, caching, CLI dispatch and the full authenticated
-schema workflow remain open; this slice does not close #59 or a broad gate.
+The production editor refresh path captures only the configured header environment
+variables. It binds a fetched schema to its project, configuration and opaque
+credential revision. Source edits can retain a current fetched schema without
+another HTTP request. A failed refresh exposes an unavailable/stale state; retained
+last-good data is never supplied as current analysis or substituted into another
+schema. Changed credentials or configuration invalidate the prior context. Explicit
+retry can recover it. Polling requires a trusted workspace and an explicitly positive
+`schema_refresh_interval`; its cancellation and retirement abort pending worker
+requests and reject late responses.
+
+Issue #59 acceptance uses these existing and extended fixtures:
+
+| Behavior | Acceptance fixture |
+| --- | --- |
+| Pure URL configuration, modern/legacy negotiation, header precedence, redaction, HTTP/GraphQL/partial-introspection errors, framing, size and socket limits | `tests/test_schema_url.py` |
+| Real verified TLS with a trusted test CA; rejection of untrusted, expired and wrong-host certificates; HTTPS downgrade rejection before credentials reach HTTP | `tests/test_schema_url.py`, `tests/fixtures/tls/` |
+| Captured remote facts, stale rejection, unchanged-config retention, secret-safe metadata and last-good isolation across credentials/projects/configuration | `tests/test_editor_snapshot.py`, `tests/test_editor_worker.py` |
+| Trusted opt-in polling, explicit refresh, disabled polling, current credential capture, cancelled/retired requests and rejection of late replies | `editor/test/analysisController.test.cjs`, `editor/test/analysisWorker.test.cjs` |
+| Installed extension authenticated refresh, failure and recovery, credential rotation, opt-in polling and preservation of dirty buffers/disk files | `editor/test/activation.host.cjs` on both pinned VS Code hosts |
+
+The socket loader intentionally has no ambient cache or asynchronous cancellation
+API; the editor owns retention, scheduling and worker cancellation. Completing this
+story requires the listed focused tests and both host checks to pass. CLI dispatch,
+the remaining advanced utility exports and broad SCHEMA-01 acceptance are separate
+stories; a URL-loader or editor-refresh pass does not close those gates.

@@ -164,6 +164,17 @@ def _url(value: str) -> tuple[str, str, int]:
         raise ValueError("Invalid schema URL.") from None
 
 
+def get_url_config(origin: SchemaOrigin | None) -> SchemaOrigin | None:
+    """Return a valid URL origin unchanged, without resolving headers or fetching."""
+    if origin is None or origin.local_path is not None or origin.url is None:
+        return None
+    try:
+        _url(origin.url)
+    except ValueError:
+        return None
+    return origin
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(
         self,
