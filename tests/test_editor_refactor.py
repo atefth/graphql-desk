@@ -269,6 +269,24 @@ class EditorRefactorTests(unittest.TestCase):
         self.assertEqual({item["indent"] for item in contexts.values()}, {"        "})
         self.assertEqual({item["newline"] for item in contexts.values()}, {"\r\n"})
 
+    def test_nested_function_suites_are_extractable(self) -> None:
+        source = (
+            "from graphql_desk import gql\n"
+            "def outer():\n"
+            "    def read():\n"
+            "        query = gql('query Read { user { id name } }')\n"
+            "        if enabled:\n"
+            "            async def fetch():\n"
+            "                query = gql('query Fetch { user { id } }')\n"
+        )
+        contexts = extraction_contexts(source)
+        self.assertEqual(len(contexts), 2)
+        self.assertEqual({item["scope"] for item in contexts.values()}, {"function"})
+        self.assertEqual(
+            {item["indent"] for item in contexts.values()},
+            {"        ", "                "},
+        )
+
     def test_function_local_loop_exception_with_and_match_suites_are_extractable(
         self,
     ) -> None:
@@ -329,8 +347,6 @@ class EditorRefactorTests(unittest.TestCase):
             "from graphql_desk import gql\n"
             "def read():\n    q=gql('x')\n    gql=custom\n",
             "from graphql_desk import gql\n"
-            "def read():\n    def nested():\n        q=gql('x')\n",
-            "from graphql_desk import gql\n"
             "def read():\n    global value\n    q=gql('x')\n",
             "from graphql_desk import gql\n"
             "def read():\n    value=locals()\n    q=gql('x')\n",
@@ -344,6 +360,21 @@ class EditorRefactorTests(unittest.TestCase):
             "    if flag:\n"
             "        class Nested:\n"
             "            q=gql('x')\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(extraction_contexts(source), {}, source)
+
+    def test_nested_function_extraction_rejects_ambiguous_bodies(self) -> None:
+        for source in (
+            "from graphql_desk import gql\n"
+            "def outer():\n    def nested():\n"
+            "        global value\n        q=gql('x')\n",
+            "from graphql_desk import gql\n"
+            "def outer():\n    def nested():\n"
+            "        value=locals()\n        q=gql('x')\n",
+            "from graphql_desk import gql\n"
+            "def outer():\n    class Nested:\n"
+            "        def read(self):\n            q=gql('x')\n",
         ):
             with self.subTest(source=source):
                 self.assertEqual(extraction_contexts(source), {}, source)

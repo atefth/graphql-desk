@@ -300,6 +300,21 @@ async function run() {
     observed.extractFunctionRoundtripUndo = true;
     await localClient.stop();
 
+    observed.step = "extract-nested-function-roundtrip-undo";
+    const nestedSource = "# 😀\r\nfrom graphql_desk import gql\r\ndef outer():\r\n    def read():\r\n        # nested query\r\n        query = gql('query Read { user { id name } }')\r\n";
+    const nestedExtraction = await pythonExtractionDocument("extract-nested-function", nestedSource);
+    const nestedClient = createRenameLanguageClient(vscode, nestedExtraction.language, { isTrusted: () => true });
+    clients.push(nestedClient);
+    await nestedClient.start();
+    await vscode.window.showTextDocument(nestedExtraction.document);
+    assert.equal(await requestExtract(nestedClient.client, nestedExtraction.document), true);
+    assert.match(nestedExtraction.document.getText(), /fragments=\[gql\(source="fragment UserFields on User/);
+    assert.match(nestedExtraction.document.getText(), /\r\n        # nested query\r\n        query = gql\(.*fragments=\[gql\(source=/);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(nestedExtraction.document.getText(), nestedSource);
+    observed.extractNestedFunctionRoundtripUndo = true;
+    await nestedClient.stop();
+
     observed.step = "extract-module-qualified-roundtrip-undo";
     const qualifiedSource = "# 😀\r\nimport graphql_desk as desk\r\nquery = desk.gql('query Read { user { id name } }')\r\n";
     const qualifiedExtraction = await pythonExtractionDocument("extract-module-qualified", qualifiedSource);

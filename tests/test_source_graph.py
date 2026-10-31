@@ -2825,6 +2825,46 @@ alias('{ id }')
         self.assertEqual(shadowed.calls, ())
         self.assertEqual(shadowed.diagnostics, ())
 
+    def test_nested_functions_resolve_only_module_globals_and_literals(self) -> None:
+        source = (
+            "from graphql_desk import gql, parse\n"
+            "TEXT='{ id }'\n"
+            "def outer():\n"
+            "    def inner():\n"
+            "        query = gql(TEXT)\n"
+            "        parsed = parse(TEXT)\n"
+            "    return inner\n"
+        )
+        result = resolve_project((module("main", source),))
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual([item.source for item in result.calls], ["{ id }"])
+        snapshot = module("main", source)
+        self.assertEqual(
+            result, source_graph.IncrementalResolver().resolve((snapshot,))
+        )
+        self.assertEqual(
+            [item.source for item in resolve_parse_sources((snapshot,)).calls],
+            ["{ id }"],
+        )
+
+        for body in (
+            "def outer():\n    TEXT='{ other }'\n"
+            "    def inner():\n        return gql(TEXT)\n",
+            "def outer():\n    def inner():\n"
+            "        nonlocal TEXT\n        return gql(TEXT)\n",
+            "def outer():\n    class Inner:\n"
+            "        def read(self):\n            return gql('{ id }')\n",
+        ):
+            rejected = resolve_project(
+                (
+                    module(
+                        "main", "from graphql_desk import gql\nTEXT='{ id }'\n" + body
+                    ),
+                )
+            )
+            self.assertEqual(rejected.calls, ())
+            self.assertTrue(rejected.diagnostics)
+
     def test_function_inputs_never_substitute_module_globals_for_local_names(
         self,
     ) -> None:
@@ -2927,7 +2967,6 @@ alias('{ id }')
             " global OTHER\n return CALL(TEXT)",
             " seed=1\n def helper():\n  global TEXT\n  TEXT='changed'\n"
             " return CALL(TEXT)",
-            " def helper():\n  return CALL(TEXT)\n return helper",
             " seed=1\n def helper():\n  nonlocal seed\n  return CALL(TEXT)\n"
             " return helper",
         ):
