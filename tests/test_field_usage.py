@@ -506,6 +506,132 @@ class FieldUsageTests(unittest.TestCase):
             + "        result = execute(query, {})\n"
             + "        super().render_data(result)\n"
         )
+        conditional_mutator_aliases_do_not_escape = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + "            if flag:\n"
+            + "                patch = delattr\n"
+            + "            else:\n"
+            + "                patch = harmless_patch\n"
+            + '            patch(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        rebound_conditional_mutator_alias_does_not_escape = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove(patch=delattr):\n"
+            + "            if flag:\n"
+            + "                patch = harmless_patch\n"
+            + '            patch(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        walrus_mutator_alias_does_not_escape = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + '            (delete := delattr)(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        loop_and_try_mutator_aliases_do_not_escape = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + "            patch = harmless_patch\n"
+            + "            for _ in items:\n"
+            + "                patch = delattr\n"
+            + "            try:\n"
+            + "                patch = delattr\n"
+            + "            except Exception:\n"
+            + "                patch = harmless_patch\n"
+            + '            patch(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        destructured_loop_mutator_alias_does_not_escape = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + "            for patch, backup in ((delattr, None),):\n"
+            + '                patch(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        conditional_expression_mutator_alias_does_not_escape = (
+            PREFIX
+            + "import builtins\n"
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + "            patch = builtins.delattr if flag else harmless_patch\n"
+            + '            patch(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        conditional_callable_mutator_does_not_escape = (
+            PREFIX
+            + "import builtins\n"
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + "            (builtins.delattr if flag else harmless_patch)(\n"
+            + '                BaseView, "render_data"\n'
+            + "            )\n"
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        definite_rebind_after_conditional_does_not_escape = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + "            if flag:\n"
+            + "                patch = delattr\n"
+            + "            patch = harmless_patch\n"
+            + '            patch(BaseView, "render_data", replacement)\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
         unrelated_default_alias_does_not_escape = (
             PREFIX
             + "def unused(patch=delattr): pass\n"
@@ -547,12 +673,24 @@ class FieldUsageTests(unittest.TestCase):
         self.assertEqual(warnings(forward_mutator_alias), [])
         self.assertEqual(warnings(module_mutator_alias), [])
         self.assertEqual(warnings(destructured_mutator_alias), [])
+        self.assertEqual(warnings(conditional_mutator_aliases_do_not_escape), [])
+        self.assertEqual(
+            warnings(rebound_conditional_mutator_alias_does_not_escape), []
+        )
+        self.assertEqual(warnings(walrus_mutator_alias_does_not_escape), [])
+        self.assertEqual(warnings(loop_and_try_mutator_aliases_do_not_escape), [])
+        self.assertEqual(warnings(destructured_loop_mutator_alias_does_not_escape), [])
+        self.assertEqual(
+            warnings(conditional_expression_mutator_alias_does_not_escape), []
+        )
+        self.assertEqual(warnings(conditional_callable_mutator_does_not_escape), [])
         for source in (
             unrelated_default_alias_does_not_escape,
             shadowed_builtin_alias_does_not_escape,
             rebound_default_mutator_alias_does_not_escape,
             rebound_imported_mutator_alias_does_not_escape,
             rebound_module_mutator_alias_does_not_escape,
+            definite_rebind_after_conditional_does_not_escape,
         ):
             with self.subTest(source=source):
                 found = warnings(source)

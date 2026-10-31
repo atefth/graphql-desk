@@ -889,10 +889,10 @@ class _Flow:
 
         class _MutationBindings(ast.NodeVisitor):
             def __init__(self) -> None:
-                self.assignments: list[tuple[str, ast.expr]] = []
+                self.assignments: list[tuple[str, ast.expr | None, bool]] = []
+                self.module_assignments: list[tuple[str, ast.expr | None, bool]] = []
+                self.conditional_depth = 0
                 self.attribute_writes: list[ast.expr] = []
-                self.imported_mutators: set[str] = set()
-                self.imported_modules: set[str] = set()
                 self.calls: list[ast.Call] = []
                 self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
                 self.classes: list[ast.ClassDef] = []
@@ -900,7 +900,9 @@ class _Flow:
             def visit_Assign(self, node: ast.Assign) -> None:
                 def collect(target: ast.expr, value: ast.expr) -> None:
                     if isinstance(target, ast.Name):
-                        self.assignments.append((target.id, value))
+                        conditional = bool(self.conditional_depth)
+                        self.assignments.append((target.id, value, conditional))
+                        self.module_assignments.append((target.id, value, conditional))
                     elif (
                         isinstance(target, (ast.Tuple, ast.List))
                         and isinstance(value, (ast.Tuple, ast.List))
@@ -920,9 +922,21 @@ class _Flow:
 
             def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
                 if isinstance(node.target, ast.Name) and node.value is not None:
-                    self.assignments.append((node.target.id, node.value))
+                    conditional = bool(self.conditional_depth)
+                    self.assignments.append((node.target.id, node.value, conditional))
+                    self.module_assignments.append(
+                        (node.target.id, node.value, conditional)
+                    )
                 elif isinstance(node.target, ast.Attribute):
                     self.attribute_writes.append(node.target.value)
+                self.generic_visit(node)
+
+            def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+                conditional = bool(self.conditional_depth)
+                self.assignments.append((node.target.id, node.value, conditional))
+                self.module_assignments.append(
+                    (node.target.id, node.value, conditional)
+                )
                 self.generic_visit(node)
 
             def visit_AugAssign(self, node: ast.AugAssign) -> None:
@@ -940,18 +954,94 @@ class _Flow:
 
             def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
                 if node.module == "builtins":
-                    self.imported_mutators.update(
+                    imported = {
                         item.asname or item.name
                         for item in node.names
                         if item.name in mutator_names
+                    }
+                    self.assignments.extend(
+                        (name, None, bool(self.conditional_depth)) for name in imported
                     )
 
             def visit_Import(self, node: ast.Import) -> None:
-                self.imported_modules.update(
+                imported = {
                     item.asname or item.name.split(".")[0]
                     for item in node.names
                     if item.name == "builtins"
+                }
+                self.module_assignments.extend(
+                    (name, None, bool(self.conditional_depth)) for name in imported
                 )
+
+            def visit_If(self, node: ast.If) -> None:
+                self._visit_conditional(node)
+
+            def _visit_conditional(self, node: ast.AST) -> None:
+                self.conditional_depth += 1
+                self.generic_visit(node)
+                self.conditional_depth -= 1
+
+            def visit_For(self, node: ast.For) -> None:
+                self._record_loop_aliases(node.target, node.iter)
+                self._visit_conditional(node)
+
+            def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+                self._record_loop_aliases(node.target, node.iter)
+                self._visit_conditional(node)
+
+            def _record_loop_aliases(
+                self, target: ast.expr, iterable: ast.expr
+            ) -> None:
+                def add(name: str, value: ast.expr | None) -> None:
+                    self.assignments.append((name, value, True))
+                    self.module_assignments.append((name, value, True))
+
+                def collect(target_node: ast.expr, value: ast.expr) -> None:
+                    if isinstance(target_node, ast.Name):
+                        add(target_node.id, value)
+                    elif (
+                        isinstance(target_node, (ast.Tuple, ast.List))
+                        and isinstance(value, (ast.Tuple, ast.List))
+                        and len(target_node.elts) == len(value.elts)
+                    ):
+                        for target_item, value_item in zip(
+                            target_node.elts, value.elts, strict=True
+                        ):
+                            collect(target_item, value_item)
+                    else:
+                        for name in ast.walk(target_node):
+                            if isinstance(name, ast.Name) and isinstance(
+                                name.ctx, ast.Store
+                            ):
+                                add(name.id, None)
+
+                if isinstance(iterable, (ast.Tuple, ast.List)):
+                    for value in iterable.elts:
+                        collect(target, value)
+                else:
+                    for name in ast.walk(target):
+                        if isinstance(name, ast.Name) and isinstance(
+                            name.ctx, ast.Store
+                        ):
+                            add(name.id, None)
+
+            def visit_While(self, node: ast.While) -> None:
+                self._visit_conditional(node)
+
+            def visit_Try(self, node: ast.Try) -> None:
+                self._visit_conditional(node)
+
+            def visit_TryStar(self, node: ast.AST) -> None:
+                self._visit_conditional(node)
+
+            def visit_With(self, node: ast.With) -> None:
+                self._visit_conditional(node)
+
+            def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+                self._visit_conditional(node)
+
+            def visit_Match(self, node: ast.Match) -> None:
+                self._visit_conditional(node)
 
             def visit_Call(self, node: ast.Call) -> None:
                 self.calls.append(node)
@@ -1009,6 +1099,13 @@ class _Flow:
             return (
                 isinstance(node, ast.Name)
                 and node.id in aliases
+                or isinstance(node, ast.NamedExpr)
+                and direct_mutator_expression(node.value, aliases, modules)
+                or isinstance(node, ast.IfExp)
+                and (
+                    direct_mutator_expression(node.body, aliases, modules)
+                    or direct_mutator_expression(node.orelse, aliases, modules)
+                )
                 or isinstance(node, ast.Attribute)
                 and isinstance(node.value, ast.Name)
                 and node.value.id in modules
@@ -1033,8 +1130,6 @@ class _Flow:
                 bound.update(_local_names(node))
             aliases = inherited_aliases - bound
             modules = inherited_modules - bound
-            aliases.update(bindings.imported_mutators)
-            modules.update(bindings.imported_modules)
             for target in bindings.attribute_writes:
                 mark_mutated_class(target)
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -1048,7 +1143,6 @@ class _Flow:
                     if direct_mutator_expression(
                         default, inherited_aliases, inherited_modules
                     )
-                    and argument.arg not in writes.names
                 )
                 aliases.update(
                     argument.arg
@@ -1059,38 +1153,33 @@ class _Flow:
                     and direct_mutator_expression(
                         default, inherited_aliases, inherited_modules
                     )
-                    and argument.arg not in writes.names
                 )
             if isinstance(node, ast.Module):
                 aliases.update(mutator_names - bound)
                 if "builtins" not in bound:
                     modules.add("builtins")
-            changed = True
-            while changed:
-                before = len(aliases)
-                aliases.update(
-                    name
-                    for name, expression in bindings.assignments
-                    if direct_mutator_expression(expression, aliases, modules)
+            for name, expression, conditional in bindings.module_assignments:
+                is_module = expression is None or (
+                    isinstance(expression, ast.Name) and expression.id in modules
                 )
-                changed = len(aliases) != before
-            last_assignments = {
-                name: expression for name, expression in bindings.assignments
-            }
-            for name, expression in last_assignments.items():
-                if not direct_mutator_expression(expression, aliases, modules):
+                if is_module or conditional:
+                    if is_module:
+                        modules.add(name)
+                else:
+                    modules.discard(name)
+            for name, expression, conditional in bindings.assignments:
+                is_mutator = expression is None or direct_mutator_expression(
+                    expression, aliases, modules
+                )
+                if is_mutator or conditional:
+                    if is_mutator:
+                        aliases.add(name)
+                else:
                     aliases.discard(name)
-                modules.discard(name)
             for call in bindings.calls:
                 called_function = call.func
-                is_mutator = (
-                    isinstance(called_function, ast.Name)
-                    and called_function.id in aliases
-                ) or (
-                    isinstance(called_function, ast.Attribute)
-                    and isinstance(called_function.value, ast.Name)
-                    and called_function.value.id in modules
-                    and called_function.attr in mutator_names
+                is_mutator = direct_mutator_expression(
+                    called_function, aliases, modules
                 )
                 if is_mutator and call.args:
                     mark_mutated_class(call.args[0])
