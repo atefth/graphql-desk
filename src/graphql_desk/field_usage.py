@@ -756,6 +756,9 @@ class _Flow:
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.class_functions: set[int] = set()
         self.unsafe_local_class_functions: set[int] = set()
+        self.function_captures: dict[int, dict[str, _Value]] = {}
+        self.class_capture_scope: dict[str, _Value] | None = None
+        self.current_function: ast.FunctionDef | ast.AsyncFunctionDef | None = None
         self.in_function = False
         self.class_depth = 0
         self.captured: set[str] = set()
@@ -1157,11 +1160,17 @@ class _Flow:
                     self.functions.append(node)
                     if self.class_depth:
                         self.class_functions.add(id(node))
-                        if (
-                            self.in_function
-                            and _captures([node]) & self.current_function_locals
-                        ):
-                            self.unsafe_local_class_functions.add(id(node))
+                        captures = _captures([node]) & self.current_function_locals
+                        if captures:
+                            if self.class_capture_scope is None or not captures <= set(
+                                self.class_capture_scope
+                            ):
+                                self.unsafe_local_class_functions.add(id(node))
+                            else:
+                                self.function_captures[id(node)] = {
+                                    name: self.class_capture_scope[name]
+                                    for name in captures
+                                }
             elif isinstance(node, ast.ClassDef):
                 for expression in (*node.decorator_list, *node.bases):
                     _consume(self.expression(expression, env))
@@ -1171,11 +1180,49 @@ class _Flow:
                 annotations = _ClassAnnotations(self, class_env)
                 for statement in node.body:
                     annotations.visit(statement)
+                previous_capture_scope = self.class_capture_scope
+                self.class_capture_scope = None
+                if (
+                    self.in_function
+                    and self.class_depth == 0
+                    and self.current_function is not None
+                    and node in self.current_function.body
+                ):
+                    capture_names = _captures(node.body) & self.current_function_locals
+                    later_writes = _Writes()
+                    for statement in statements[position + 1 :]:
+                        later_writes.visit(statement)
+                    invalid_captures = capture_names & set(later_writes.names)
+                    invalid_captures.update(
+                        child.target.id
+                        for statement in statements[position + 1 :]
+                        for child in ast.walk(statement)
+                        if isinstance(child, ast.NamedExpr)
+                        and child.target.id in capture_names
+                    )
+                    for child in ast.walk(self.current_function):
+                        if isinstance(child, (ast.Global, ast.Nonlocal)):
+                            invalid_captures.update(capture_names & set(child.names))
+                    for child in ast.walk(node):
+                        if isinstance(child, ast.Call) and (
+                            isinstance(child.func, ast.Name)
+                            and child.func.id in {"exec", "eval", "locals", "vars"}
+                            or isinstance(child.func, ast.Attribute)
+                            and child.func.attr in {"exec", "eval", "locals", "vars"}
+                        ):
+                            invalid_captures.update(capture_names)
+                    safe_captures = {
+                        name: env[name]
+                        for name in capture_names - invalid_captures
+                        if isinstance(env.get(name), (_Document, _Callable))
+                    }
+                    self.class_capture_scope = safe_captures
                 self.class_depth += 1
                 try:
                     self.block(node.body, class_env)
                 finally:
                     self.class_depth -= 1
+                    self.class_capture_scope = previous_capture_scope
                 writes = _Writes()
                 outer_writes = _OuterWrites()
                 for statement in node.body:
@@ -1248,6 +1295,7 @@ class _Flow:
             self.captured = _captures(function.body)
             for name in names:
                 local[name] = None
+            local.update(self.function_captures.get(id(function), {}))
             if id(function) in self.class_functions:
                 local["__class__"] = None
             if any(
@@ -1257,7 +1305,9 @@ class _Flow:
                 for value in local.values():
                     _consume(value)
                 continue
+            self.current_function = function
             self.block(function.body, local)
+            self.current_function = None
             functions.extend(self.functions)
             self.functions.clear()
 

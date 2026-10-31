@@ -39,14 +39,17 @@ consumption produces no field-use warning. Cross-file reads are not analyzed.
 
 This bounded implementation analyzes module statements, top-level function
 bodies, methods in module-scope classes, and methods in function-local classes
-as independent scopes. Function-local class methods are analyzed only when
-their operation and typed execution function resolve from module scope; methods
-that capture the enclosing function's locals stay silent. It does not infer
-class dispatch, inherited overrides, or data stored on instances. Class-suite
-assignments are treated as escapes because a metaclass may retain assigned
-values. Signature imports nested under a recognized `typing.TYPE_CHECKING` or
-`typing_extensions.TYPE_CHECKING` guard are available to the same-file signature
-resolver; the guard body is not treated as runtime code.
+as independent scopes. A function-local class method may use a captured local
+document or statically resolved callable only when its binding is known at class
+definition and is not rebound later in the containing function. Captured result
+objects and other local values remain unsupported, as do methods nested in
+conditional class declarations when their captured environment is ambiguous. It
+does not infer class dispatch, inherited overrides, or data stored on instances.
+Class-suite assignments are treated as escapes because a metaclass may retain
+assigned values. Signature imports nested under a recognized
+`typing.TYPE_CHECKING` or `typing_extensions.TYPE_CHECKING` guard are available
+to the same-file signature resolver; the guard body is not treated as runtime
+code.
 Container method escapes consume their contained results, and comprehension
 assignment expressions invalidate enclosing bindings conservatively.
 Python list literals consume contained results and do not retain callable or
