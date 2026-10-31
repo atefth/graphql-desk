@@ -755,9 +755,11 @@ class _Flow:
         self.states = states
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.class_functions: set[int] = set()
+        self.unsafe_local_class_functions: set[int] = set()
         self.in_function = False
         self.class_depth = 0
         self.captured: set[str] = set()
+        self.current_function_locals: set[str] = set()
 
     def target_value(self, target: _Target) -> _Value:
         if isinstance(target, tuple) and isinstance(target[1], ast.Call):
@@ -1151,10 +1153,15 @@ class _Flow:
                 ):
                     if default is not None:
                         _consume(self.expression(default, env))
-                if not self.in_function:
+                if not self.in_function or self.class_depth:
                     self.functions.append(node)
                     if self.class_depth:
                         self.class_functions.add(id(node))
+                        if (
+                            self.in_function
+                            and _captures([node]) & self.current_function_locals
+                        ):
+                            self.unsafe_local_class_functions.add(id(node))
             elif isinstance(node, ast.ClassDef):
                 for expression in (*node.decorator_list, *node.bases):
                     _consume(self.expression(expression, env))
@@ -1229,9 +1236,15 @@ class _Flow:
         self.block(self.owner.tree.body, env)
         functions, self.functions = self.functions, []
         self.in_function = True
-        for function in functions:
+        position = 0
+        while position < len(functions):
+            function = functions[position]
+            position += 1
+            if id(function) in self.unsafe_local_class_functions:
+                continue
             local = dict(env)
             names = _local_names(function)
+            self.current_function_locals = names
             self.captured = _captures(function.body)
             for name in names:
                 local[name] = None
@@ -1245,6 +1258,8 @@ class _Flow:
                     _consume(value)
                 continue
             self.block(function.body, local)
+            functions.extend(self.functions)
+            self.functions.clear()
 
 
 def field_usage_diagnostics(

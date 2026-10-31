@@ -38,13 +38,15 @@ An invalid Python/GraphQL document, mutation/subscription, or result with no loc
 consumption produces no field-use warning. Cross-file reads are not analyzed.
 
 This bounded implementation analyzes module statements, top-level function
-bodies, and methods in module-scope classes as independent scopes. It does not
-infer class dispatch, inherited overrides, methods in function-local classes,
-or data stored on instances. Class-suite assignments are treated as escapes
-because a metaclass may retain assigned values. Signature imports nested under
-a recognized `typing.TYPE_CHECKING` or `typing_extensions.TYPE_CHECKING` guard
-are available to the same-file signature resolver; the guard body is not
-treated as runtime code.
+bodies, methods in module-scope classes, and methods in function-local classes
+as independent scopes. Function-local class methods are analyzed only when
+their operation and typed execution function resolve from module scope; methods
+that capture the enclosing function's locals stay silent. It does not infer
+class dispatch, inherited overrides, or data stored on instances. Class-suite
+assignments are treated as escapes because a metaclass may retain assigned
+values. Signature imports nested under a recognized `typing.TYPE_CHECKING` or
+`typing_extensions.TYPE_CHECKING` guard are available to the same-file signature
+resolver; the guard body is not treated as runtime code.
 Container method escapes consume their contained results, and comprehension
 assignment expressions invalidate enclosing bindings conservatively.
 Python list literals consume contained results and do not retain callable or
