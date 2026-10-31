@@ -118,3 +118,38 @@ class DocumentValidationTests(unittest.TestCase):
                 validate_indexed_document(
                     context, self.document, fragment_index=index, modules=modules
                 )
+
+    def test_deprecation_warnings_are_opt_in(self) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema(
+                'type Query { old: String @deprecated(reason: "Use current") '
+                "current: String }"
+            ),
+            "v1",
+        )
+        module = ModuleSnapshot(
+            "p",
+            "query",
+            "file:///query.py",
+            1,
+            'from graphql_desk import graphql\nquery=graphql("{ old }")\n',
+        )
+        sources = resolve_project(
+            (module,), bindings=(ProjectBindings("p", ("main",), "main"),)
+        )
+        index = index_fragments(sources, schemas={("p", "main"): context})
+        document = index.documents[0]
+
+        default = validate_indexed_document(
+            context, document, fragment_index=index, modules=(module,)
+        )
+        self.assertEqual(default, ())
+        warnings = validate_indexed_document(
+            context,
+            document,
+            fragment_index=index,
+            modules=(module,),
+            include_deprecations=True,
+        )
+        self.assertEqual([item.code for item in warnings], ["graphql-deprecation"])

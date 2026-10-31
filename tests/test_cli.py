@@ -44,7 +44,12 @@ class CLITests(unittest.TestCase):
             "graphql_desk.cli.effective_project",
             side_effect=AssertionError("No discovery"),
         ):
-            for argv in (["--help"], ["doctor", "--help"], ["--version"]):
+            for argv in (
+                ["--help"],
+                ["doctor", "--help"],
+                ["check", "--help"],
+                ["--version"],
+            ):
                 code, out, err = self.invoke(argv)
                 self.assertEqual(code, 0)
                 self.assertTrue(out)
