@@ -46,6 +46,7 @@ _PROJECT_KEYS = _SCHEMA_KEYS | {
     "generated_package",
     "cache_enabled",
     "template",
+    "template_fragment_composition",
     "track_field_usage",
     "reserved_keys",
     "check_colocated_fragments",
@@ -127,6 +128,7 @@ class ProjectConfig:
     generated_package: str
     schemas: tuple[SchemaConfig, ...]
     template: str | None
+    template_fragment_composition: bool
     track_field_usage: bool
     check_colocated_fragments: bool
     client_directives: tuple[str, ...]
@@ -450,6 +452,11 @@ def parse_project_settings(
             raise ValueError("generated_package must lie below the project root")
     if not _boolean(table, "templateIsCallExpression", True):
         raise ValueError("templateIsCallExpression must be true for Python calls")
+    template_fragment_composition = _boolean(
+        table, "template_fragment_composition", False
+    )
+    if template_fragment_composition and "template" not in table:
+        raise ValueError("template_fragment_composition requires template")
     cache_enabled = _boolean(table, "cache_enabled", False)
     if cache_enabled:
         raise ValueError("Persistent cache is not implemented; disable cache_enabled")
@@ -555,6 +562,7 @@ def parse_project_settings(
         template=_symbol(table["template"], "template")
         if "template" in table
         else None,
+        template_fragment_composition=template_fragment_composition,
         track_field_usage=_boolean(table, "track_field_usage", True),
         reserved_keys=reserved_keys,
         check_colocated_fragments=_boolean(table, "check_colocated_fragments", True),

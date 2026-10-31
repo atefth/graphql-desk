@@ -63,6 +63,7 @@ def graph_inputs(
                     cast(str, factory["module"]),
                     cast(str, factory["export"]),
                     cast(str | None, factory["schema_name"]),
+                    cast(bool, factory["fragment_composition"]),
                 )
                 for factory in cast(list[dict[str, object]], item["factories"])
             ),

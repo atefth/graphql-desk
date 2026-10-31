@@ -205,12 +205,20 @@ def analyze_editor_snapshot_details(
         )
         factories: list[FactoryBinding] = []
         for factory in _array(item["factories"], "factories"):
-            record = _object(factory, {"module", "export", "schema_name"}, "factory")
+            record = _object(
+                factory,
+                {"module", "export", "schema_name", "fragment_composition"},
+                "factory",
+            )
+            fragment_composition = record["fragment_composition"]
+            if not isinstance(fragment_composition, bool):
+                raise ValueError("Factory fragment_composition must be a boolean")
             factories.append(
                 FactoryBinding(
                     _string(record["module"], "Factory module"),
                     _string(record["export"], "Factory export"),
                     _optional_string(record["schema_name"], "Factory schema"),
+                    fragment_composition,
                 )
             )
         mapping_facts: list[dict[str, object]] = []
@@ -500,7 +508,9 @@ def analyze_editor_snapshot_details(
         (call, build_source_map(call, tuple(modules))) for call in sources.calls
     ]
     refactor_contexts = {
-        module: extraction_contexts(snapshots[module])
+        module: extraction_contexts(
+            snapshots[module], projects[module.project].factories
+        )
         for module in {call.module for call, _ in mappings}
     }
     points: dict[ModuleDependency, set[int]] = {item: set() for item in snapshots}

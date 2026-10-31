@@ -109,6 +109,8 @@ schemas=[{name="shop",schema="shop.graphql",schema_output="generated/types/shop.
         self.assertEqual(facts.default_schema, "default")
         self.assertNotIn("SECRET", repr(facts))
         self.assertFalse(any(item.export == "gql" for item in facts.factories))
+        configured = next(item for item in facts.factories if item.module == "custom")
+        self.assertFalse(configured.fragment_composition)
         for source in (
             'from custom import query\nresult=query("{ id }")',
             'from graphql_desk import gql\nresult=gql("{ id }")',
@@ -135,6 +137,7 @@ schemas=[{name="shop",schema="shop.graphql",schema_output="generated/types/shop.
         facts = project_bindings(config, project_id="one")
         self.assertEqual(len(facts.factories), 1)
         self.assertEqual(facts.factories[0].schema_name, "default")
+        self.assertTrue(facts.factories[0].fragment_composition)
         with self.assertRaises(ValueError):
             project_bindings(
                 replace(config, template="graphql_desk.init_graphql"), project_id="one"
@@ -165,6 +168,19 @@ schemas=[{name="shop",schema="shop.graphql",schema_output="generated/types/shop.
         self.assertEqual(results.diagnostics, ())
         with self.assertRaises(ValueError):
             schema_for_call(config, results.calls[1], project_id="one")
+
+    def test_custom_template_fragment_composition_requires_explicit_opt_in(
+        self,
+    ) -> None:
+        config = self.config(
+            self.root,
+            _BASE + 'template="custom.query"\ntemplate_fragment_composition=true\n',
+        )
+        factory = project_bindings(config, project_id="project").factories[-1]
+        self.assertEqual((factory.module, factory.export), ("custom", "query"))
+        self.assertTrue(factory.fragment_composition)
+        with self.assertRaisesRegex(ValueError, "requires template"):
+            self.config(self.root, _BASE + "template_fragment_composition=true\n")
 
     def test_effective_project_selects_whole_configs_before_fallback_validation(
         self,

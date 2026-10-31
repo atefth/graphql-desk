@@ -180,8 +180,17 @@ class EditorWorkerTests(unittest.TestCase):
         config_change = fingerprint()
         self.assertNotEqual(config_change, source_change)
 
+        self.config.write_text(
+            self.config.read_text()
+            + 'template="templates.graphql"\n'
+            + "template_fragment_composition=true\n",
+            encoding="utf8",
+        )
+        composition_change = fingerprint()
+        self.assertNotEqual(composition_change, config_change)
+
         self.schema.write_text("type Query { disk: Int }", encoding="utf8")
-        self.assertNotEqual(fingerprint(), config_change)
+        self.assertNotEqual(fingerprint(), composition_change)
 
     def test_analysis_fingerprint_does_not_expose_remote_credentials(self) -> None:
         self.config.write_text(

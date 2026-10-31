@@ -582,6 +582,7 @@ def acquire_editor_snapshot(
                         "module": f.module,
                         "export": f.export,
                         "schema_name": f.schema_name,
+                        "fragment_composition": f.fragment_composition,
                     }
                     for f in facts.factories
                 ],

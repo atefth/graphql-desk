@@ -657,6 +657,50 @@ test("extracting complete sibling fields creates a colocated fragment and compos
   assert.equal(refreshed.response.calls[1].fragments.length, 1);
 });
 
+test("fragment extraction reuses opted-in custom and generated factory aliases", async () => {
+  const cases = [
+    {
+      alias: "custom",
+      source: "from custom_templates import make_document as custom\nq = custom('query Read { user { id name } }')\n",
+      factory: { module: "custom_templates", export: "make_document", schema_name: "default", fragment_composition: true },
+    },
+    {
+      alias: "typed",
+      source: "from graphql_desk_generated.default import graphql as typed\nq = typed('query Read { user { id name } }')\n",
+      factory: { module: "graphql_desk_generated.default", export: "graphql", schema_name: "default", fragment_composition: true },
+    },
+  ];
+  for (const { alias, source, factory } of cases) {
+    const value = bundle(source, { factories: [factory] });
+    const start = source.indexOf("id name");
+    const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), { start, end: start + 7 });
+    assert.equal(plan.length, 3, alias);
+    const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+      .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+    assert.match(updated, new RegExp(`user_fields = ${alias}\\(source="fragment UserFields on User`));
+    assert.match(updated, new RegExp(`q = ${alias}\\('query Read .*fragments=\\[user_fields\\]\\)`));
+    const refreshed = bundle(updated, { factories: [factory] });
+    assert.deepEqual(refreshed.response.diagnostics, [], alias);
+    assert.equal(refreshed.response.calls.length, 2, alias);
+    assert.equal(refreshed.response.calls[1].fragments.length, 1, alias);
+  }
+});
+
+test("custom factory extraction remains off unless composition is configured and binding is intact", async () => {
+  const source = "from custom_templates import make_document as custom\nq = custom('query Read { user { id name } }')\n";
+  const factory = { module: "custom_templates", export: "make_document", schema_name: "default", fragment_composition: false };
+  const value = bundle(source, { factories: [factory] });
+  const start = source.indexOf("id name");
+  assert.equal(await createLanguageFeatures(options(value)).extractFragment(document(value), { start, end: start + 7 }), null);
+  const rebound = bundle(source.replace("q = custom", "custom = replacement\nq = custom"), {
+    factories: [{ ...factory, fragment_composition: true }],
+  });
+  const reboundStart = rebound.request.modules[0].source.indexOf("id name");
+  assert.equal(await createLanguageFeatures(options(rebound)).extractFragment(document(rebound), {
+    start: reboundStart, end: reboundStart + 7,
+  }), null);
+});
+
 test("extraction preserves existing composition and avoids Python and GraphQL names", async () => {
   const source = "from graphql_desk import gql\nuser_fields = 1\ncard = gql('fragment UserFields on User { id }')\nq = gql('query Read { user { name ...UserFields } }', [card])\n";
   const value = bundle(source);
