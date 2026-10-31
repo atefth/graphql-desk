@@ -127,6 +127,48 @@ class _Writes(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+class _OuterWrites(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_Global(self, node: ast.Global) -> None:
+        self.names.update(node.names)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        self.names.update(node.names)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        return
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
+class _ClassAnnotations(ast.NodeVisitor):
+    def __init__(self, flow: _Flow, env: dict[str, _Value]) -> None:
+        self.flow = flow
+        self.env = env
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        _consume(self.flow.expression(node.annotation, self.env))
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        return
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
 def _local_names(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> set[str]:
     writes = _Writes()
     if not isinstance(node, ast.Lambda):
@@ -186,7 +228,37 @@ class _Module:
         writes.visit(tree)
         self.blocked = {name for name, count in writes.names.items() if count != 1}
         self.star = writes.star
+        checking_names = {
+            name
+            for item in tree.body
+            if isinstance(item, (ast.Import, ast.ImportFrom))
+            for name, imported in self.imports(item).items()
+            if imported in ("typing.TYPE_CHECKING", "typing_extensions.TYPE_CHECKING")
+            and name not in self.blocked
+        }
+        typing_modules = {
+            name
+            for item in tree.body
+            if isinstance(item, ast.Import)
+            for name, imported in self.imports(item).items()
+            if imported in ("typing", "typing_extensions") and name not in self.blocked
+        }
+        exports = list(tree.body)
         for item in tree.body:
+            if not isinstance(item, ast.If):
+                continue
+            test = item.test
+            is_type_checking = (
+                isinstance(test, ast.Name) and test.id in checking_names
+            ) or (
+                isinstance(test, ast.Attribute)
+                and test.attr == "TYPE_CHECKING"
+                and isinstance(test.value, ast.Name)
+                and test.value.id in typing_modules
+            )
+            if is_type_checking:
+                exports.extend(item.body)
+        for item in exports:
             if isinstance(item, (ast.Import, ast.ImportFrom)):
                 self.exports.update(self.imports(item))
             elif isinstance(
@@ -682,7 +754,9 @@ class _Flow:
         self.documents = documents
         self.states = states
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+        self.class_functions: set[int] = set()
         self.in_function = False
+        self.class_depth = 0
         self.captured: set[str] = set()
 
     def target_value(self, target: _Target) -> _Value:
@@ -998,6 +1072,8 @@ class _Flow:
 
     def bind(self, node: ast.expr, value: _Value, env: dict[str, _Value]) -> None:
         if isinstance(node, ast.Name):
+            if self.class_depth:
+                _consume(value)
             env[node.id] = value
             if node.id in self.captured:
                 _consume(value)
@@ -1077,6 +1153,33 @@ class _Flow:
                         _consume(self.expression(default, env))
                 if not self.in_function:
                     self.functions.append(node)
+                    if self.class_depth:
+                        self.class_functions.add(id(node))
+            elif isinstance(node, ast.ClassDef):
+                for expression in (*node.decorator_list, *node.bases):
+                    _consume(self.expression(expression, env))
+                for keyword in node.keywords:
+                    _consume(self.expression(keyword.value, env))
+                class_env = dict(env)
+                annotations = _ClassAnnotations(self, class_env)
+                for statement in node.body:
+                    annotations.visit(statement)
+                self.class_depth += 1
+                try:
+                    self.block(node.body, class_env)
+                finally:
+                    self.class_depth -= 1
+                writes = _Writes()
+                outer_writes = _OuterWrites()
+                for statement in node.body:
+                    writes.visit(statement)
+                    outer_writes.visit(statement)
+                for name in writes.names:
+                    _consume(class_env.get(name))
+                for name in outer_writes.names & writes.names.keys():
+                    _consume(env.get(name))
+                    env[name] = None
+                env[node.name] = None
             elif isinstance(node, ast.Expr):
                 _consume(self.expression(node.value, env))
             elif isinstance(node, ast.Return):
@@ -1132,6 +1235,8 @@ class _Flow:
             self.captured = _captures(function.body)
             for name in names:
                 local[name] = None
+            if id(function) in self.class_functions:
+                local["__class__"] = None
             if any(
                 isinstance(item, (ast.Global, ast.Nonlocal))
                 for item in ast.walk(function)

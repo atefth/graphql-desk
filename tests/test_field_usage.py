@@ -182,15 +182,82 @@ class FieldUsageTests(unittest.TestCase):
             [],
         )
 
-    def test_class_method_consumption_is_explicitly_outside_bounded_analysis(
-        self,
-    ) -> None:
+    def test_class_method_consumption_is_analyzed_in_its_own_scope(self) -> None:
         source = (
             PREFIX + "class Screen:\n    def show(self):\n"
             "        result = execute(query, {})\n"
             '        print(result["user"]["name"])'
         )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
+
+    def test_class_methods_do_not_resolve_implicit_class_cell_as_a_global(self) -> None:
+        source = (
+            PREFIX
+            + "__class__ = execute\n"
+            + "class Screen:\n    def show(self):\n"
+            + "        result = __class__(query, {})\n"
+            + '        print(result["user"]["name"])'
+        )
         self.assertEqual(warnings(source), [])
+
+    def test_class_expressions_conservatively_consume_result_subtrees(self) -> None:
+        base = (
+            PREFIX.replace(
+                '"{ user { id name email } }"',
+                '"{ user { id name email } other { id name email } }"',
+            )
+            + "result = execute(query, {})\n"
+            + 'print(result["other"]["name"])\n'
+        )
+        metaclass = base + "class Screen(metaclass=choose(result['user'])): pass"
+        annotation = (
+            base
+            + "class Screen:\n    if enabled:\n"
+            + "        field: choose(result['user'])"
+        )
+        namespace_escape = (
+            base
+            + "class Screen(metaclass=CaptureMeta):\n"
+            + "    stored = result['user']\n"
+            + "    stored = None"
+        )
+        global_write = (
+            PREFIX
+            + "result = execute(query, {})\n"
+            + "class Screen:\n    global result\n    result = unrelated\n"
+            + 'print(result["user"]["name"])'
+        )
+        for source in (metaclass, annotation, namespace_escape):
+            with self.subTest(source=source):
+                found = warnings(source)
+                self.assertEqual([field for field, _ in found], ["other"])
+                self.assertIn("other.email", found[0][1])
+        self.assertEqual(warnings(global_write), [])
+
+    def test_type_checking_signature_imports_resolve_with_both_guard_forms(
+        self,
+    ) -> None:
+        source = PREFIX.replace(
+            "from typing import TypeVar", "from typing import TYPE_CHECKING, TypeVar"
+        ).replace(
+            "from graphql_desk import gql, TypedDocument",
+            "from graphql_desk import gql",
+        )
+        source = source.replace(
+            "def execute(document: TypedDocument[R, V], variables: V) -> R: ...",
+            "if TYPE_CHECKING:\n    from graphql_desk import TypedDocument\n\n"
+            "def execute(document: TypedDocument[R, V], variables: V) -> R: ...",
+        )
+        source += 'result = execute(query, {})\nprint(result["user"]["name"])'
+        self.assertEqual([field for field, _ in warnings(source)], ["user"])
+
+        qualified = source.replace(
+            "from typing import TYPE_CHECKING, TypeVar",
+            "import typing as t\nfrom typing import TypeVar",
+        ).replace("if TYPE_CHECKING:", "if t.TYPE_CHECKING:")
+        self.assertEqual([field for field, _ in warnings(qualified)], ["user"])
 
     def test_response_aliases_use_schema_names_for_reserved_fields(self) -> None:
         source = (
