@@ -886,91 +886,214 @@ class _Flow:
                     self.mutated_classes.add(id(target))
 
         mutator_names = {"setattr", "delattr"}
-        mutator_aliases = set(mutator_names)
-        builtin_modules = {"builtins"}
 
-        def mutator_expression(node: ast.expr) -> str | None:
-            if isinstance(node, ast.Name) and node.id in mutator_aliases:
-                return node.id
-            if (
-                isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Name)
-                and node.value.id in builtin_modules
-                and node.attr in mutator_names
-            ):
-                return node.attr
-            return None
+        class _MutationBindings(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.assignments: list[tuple[str, ast.expr]] = []
+                self.attribute_writes: list[ast.expr] = []
+                self.imported_mutators: set[str] = set()
+                self.imported_modules: set[str] = set()
+                self.calls: list[ast.Call] = []
+                self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+                self.classes: list[ast.ClassDef] = []
 
-        for child in ast.walk(owner.tree):
-            if isinstance(child, ast.ImportFrom) and child.module == "builtins":
-                mutator_aliases.update(
-                    item.asname or item.name
-                    for item in child.names
-                    if item.name in {"setattr", "delattr"}
+            def visit_Assign(self, node: ast.Assign) -> None:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        self.assignments.append((target.id, node.value))
+                    elif isinstance(target, ast.Attribute):
+                        self.attribute_writes.append(target.value)
+                self.generic_visit(node)
+
+            def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+                if isinstance(node.target, ast.Name) and node.value is not None:
+                    self.assignments.append((node.target.id, node.value))
+                elif isinstance(node.target, ast.Attribute):
+                    self.attribute_writes.append(node.target.value)
+                self.generic_visit(node)
+
+            def visit_AugAssign(self, node: ast.AugAssign) -> None:
+                if isinstance(node.target, ast.Attribute):
+                    self.attribute_writes.append(node.target.value)
+                self.generic_visit(node)
+
+            def visit_Delete(self, node: ast.Delete) -> None:
+                self.attribute_writes.extend(
+                    target.value
+                    for target in node.targets
+                    if isinstance(target, ast.Attribute)
                 )
-            elif isinstance(child, ast.Import):
-                builtin_modules.update(
+                self.generic_visit(node)
+
+            def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+                if node.module == "builtins":
+                    self.imported_mutators.update(
+                        item.asname or item.name
+                        for item in node.names
+                        if item.name in mutator_names
+                    )
+
+            def visit_Import(self, node: ast.Import) -> None:
+                self.imported_modules.update(
                     item.asname or item.name.split(".")[0]
-                    for item in child.names
+                    for item in node.names
                     if item.name == "builtins"
                 )
-            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                positional = (*child.args.posonlyargs, *child.args.args)
-                default_parameters = positional[
-                    len(positional) - len(child.args.defaults) :
-                ]
-                mutator_aliases.update(
+
+            def visit_Call(self, node: ast.Call) -> None:
+                self.calls.append(node)
+                self.generic_visit(node)
+
+            def visit_FunctionDef(
+                self, node: ast.FunctionDef | ast.AsyncFunctionDef
+            ) -> None:
+                self.functions.append(node)
+                for expression in (
+                    *node.decorator_list,
+                    *node.args.defaults,
+                    *(item for item in node.args.kw_defaults if item is not None),
+                    *(
+                        argument.annotation
+                        for argument in (
+                            *node.args.posonlyargs,
+                            *node.args.args,
+                            *node.args.kwonlyargs,
+                            *(
+                                (node.args.vararg,)
+                                if node.args.vararg is not None
+                                else ()
+                            ),
+                            *(
+                                (node.args.kwarg,)
+                                if node.args.kwarg is not None
+                                else ()
+                            ),
+                        )
+                        if argument.annotation is not None
+                    ),
+                    *((node.returns,) if node.returns is not None else ()),
+                ):
+                    self.visit(expression)
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                self.classes.append(node)
+                for expression in (*node.decorator_list, *node.bases):
+                    self.visit(expression)
+                for keyword in node.keywords:
+                    self.visit(keyword.value)
+
+        def scope_bindings(statements: list[ast.stmt]) -> _MutationBindings:
+            bindings = _MutationBindings()
+            for statement in statements:
+                bindings.visit(statement)
+            return bindings
+
+        def direct_mutator_expression(
+            node: ast.expr, aliases: set[str], modules: set[str]
+        ) -> bool:
+            return (
+                isinstance(node, ast.Name)
+                and node.id in aliases
+                or isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in modules
+                and node.attr in mutator_names
+            )
+
+        def scan_scope(
+            node: ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
+            inherited_aliases: set[str],
+            inherited_modules: set[str],
+            *,
+            method_aliases: set[str] | None = None,
+            method_modules: set[str] | None = None,
+        ) -> None:
+            statements = node.body
+            bindings = scope_bindings(statements)
+            writes = _Writes()
+            for statement in statements:
+                writes.visit(statement)
+            bound = set(writes.names)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                bound.update(_local_names(node))
+            aliases = inherited_aliases - bound
+            modules = inherited_modules - bound
+            aliases.update(bindings.imported_mutators)
+            modules.update(bindings.imported_modules)
+            for target in bindings.attribute_writes:
+                mark_mutated_class(target)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                positional = (*node.args.posonlyargs, *node.args.args)
+                defaults = positional[len(positional) - len(node.args.defaults) :]
+                aliases.update(
                     argument.arg
                     for argument, default in zip(
-                        default_parameters, child.args.defaults, strict=True
+                        defaults, node.args.defaults, strict=True
                     )
-                    if mutator_expression(default)
+                    if direct_mutator_expression(
+                        default, inherited_aliases, inherited_modules
+                    )
                 )
-                mutator_aliases.update(
+                aliases.update(
                     argument.arg
                     for argument, default in zip(
-                        child.args.kwonlyargs, child.args.kw_defaults, strict=True
+                        node.args.kwonlyargs, node.args.kw_defaults, strict=True
                     )
-                    if default is not None and mutator_expression(default)
+                    if default is not None
+                    and direct_mutator_expression(
+                        default, inherited_aliases, inherited_modules
+                    )
+                )
+            changed = True
+            while changed:
+                before = len(aliases)
+                aliases.update(
+                    name
+                    for name, expression in bindings.assignments
+                    if direct_mutator_expression(expression, aliases, modules)
+                )
+                changed = len(aliases) != before
+            if isinstance(node, ast.Module):
+                aliases.update(mutator_names - bound)
+                if "builtins" not in bound:
+                    modules.add("builtins")
+            for call in bindings.calls:
+                called_function = call.func
+                is_mutator = (
+                    isinstance(called_function, ast.Name)
+                    and called_function.id in aliases
+                ) or (
+                    isinstance(called_function, ast.Attribute)
+                    and isinstance(called_function.value, ast.Name)
+                    and called_function.value.id in modules
+                    and called_function.attr in mutator_names
+                )
+                if is_mutator and call.args:
+                    mark_mutated_class(call.args[0])
+            if isinstance(node, ast.ClassDef):
+                child_function_aliases = method_aliases or inherited_aliases
+                child_function_modules = method_modules or inherited_modules
+            else:
+                child_function_aliases = aliases
+                child_function_modules = modules
+            for nested_function in bindings.functions:
+                scan_scope(
+                    nested_function,
+                    child_function_aliases,
+                    child_function_modules,
+                )
+            for class_node in bindings.classes:
+                scan_scope(
+                    class_node,
+                    aliases,
+                    modules,
+                    method_aliases=aliases,
+                    method_modules=modules,
                 )
 
-        for child in ast.walk(owner.tree):
-            if isinstance(child, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-                targets = (
-                    child.targets if isinstance(child, ast.Assign) else [child.target]
-                )
-                for target in targets:
-                    if isinstance(target, ast.Attribute):
-                        mark_mutated_class(target.value)
-                if isinstance(child, ast.Assign) and mutator_expression(child.value):
-                    mutator_aliases.update(
-                        target.id
-                        for target in child.targets
-                        if isinstance(target, ast.Name)
-                    )
-                elif (
-                    isinstance(child, ast.AnnAssign)
-                    and isinstance(child.target, ast.Name)
-                    and child.value is not None
-                    and mutator_expression(child.value)
-                ):
-                    mutator_aliases.add(child.target.id)
-            elif isinstance(child, ast.Call):
-                mutator = None
-                if (
-                    isinstance(child.func, ast.Name)
-                    and child.func.id in mutator_aliases
-                ):
-                    mutator = child.func.id
-                elif (
-                    isinstance(child.func, ast.Attribute)
-                    and isinstance(child.func.value, ast.Name)
-                    and child.func.value.id in builtin_modules
-                    and child.func.attr in {"setattr", "delattr"}
-                ):
-                    mutator = child.func.attr
-                if mutator and child.args:
-                    mark_mutated_class(child.args[0])
+        scan_scope(owner.tree, set(), set())
         self.in_function = False
         self.class_depth = 0
         self.captured: set[str] = set()

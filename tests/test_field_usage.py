@@ -418,6 +418,46 @@ class FieldUsageTests(unittest.TestCase):
             + "        result = execute(query, {})\n"
             + "        super().render_data(result)\n"
         )
+        forward_mutator_alias = (
+            PREFIX
+            + "import builtins\n"
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "def remove():\n"
+            + '    patch(BaseView, "render_data", replacement)\n'
+            + "patch = builtins.setattr\n"
+            + "remove()\n"
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        unrelated_default_alias_does_not_escape = (
+            PREFIX
+            + "def unused(patch=delattr): pass\n"
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        patch = harmless_patch\n"
+            + '        patch(BaseView, "render_data", replacement)\n'
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        shadowed_builtin_alias_does_not_escape = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        setattr = harmless_patch\n"
+            + '        setattr(BaseView, "render_data", replacement)\n'
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
         self.assertEqual(warnings(multiple_inheritance), [])
         self.assertEqual(warnings(dynamic_instance_dispatch), [])
         self.assertEqual(warnings(shadowed_super), [])
@@ -431,6 +471,15 @@ class FieldUsageTests(unittest.TestCase):
         self.assertEqual(warnings(attribute_mutator_alias), [])
         self.assertEqual(warnings(annotated_attribute_mutator_alias), [])
         self.assertEqual(warnings(default_mutator_alias), [])
+        self.assertEqual(warnings(forward_mutator_alias), [])
+        for source in (
+            unrelated_default_alias_does_not_escape,
+            shadowed_builtin_alias_does_not_escape,
+        ):
+            with self.subTest(source=source):
+                found = warnings(source)
+                self.assertEqual([field for field, _ in found], ["user"])
+                self.assertIn("user.email", found[0][1])
 
     def test_comprehension_walrus_makes_method_name_local_not_captured(self) -> None:
         source = (
