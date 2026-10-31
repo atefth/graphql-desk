@@ -63,6 +63,39 @@ class CheckCLITests(unittest.TestCase):
         self.assertIn("error [graphql-validation]", stderr)
         self.assertIn("operation:2:", stderr)
 
+    def test_utf8_bom_does_not_hide_invalid_graphql(self) -> None:
+        source = (
+            "from graphql_desk import graphql\n"
+            'query = graphql("query { absent }")\n'
+        )
+        (self.root / "operation.py").write_bytes(
+            b"\xef\xbb\xbf" + source.encode("utf-8")
+        )
+
+        diagnostics = check(config=self.config)
+        self.assertEqual([item.code for item in diagnostics], ["graphql-validation"])
+        self.assertEqual([item.severity for item in diagnostics], ["error"])
+        code, stdout, stderr = self.invoke(["check"])
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("error [graphql-validation]", stderr)
+
+    def test_deprecated_fields_are_warnings(self) -> None:
+        self.schema.write_text(
+            'type Query { old: String @deprecated(reason: "Use current") '
+            "current: String }",
+            encoding="utf-8",
+        )
+        (self.root / "operation.py").write_text(
+            'from graphql_desk import graphql\nquery = graphql("query { old }")\n',
+            encoding="utf-8",
+        )
+
+        diagnostics = check(config=self.config)
+        self.assertEqual([item.code for item in diagnostics], ["graphql-deprecation"])
+        self.assertEqual([item.severity for item in diagnostics], ["warn"])
+        self.assertIn("Use current", diagnostics[0].message)
+
     def test_warning_visibility_does_not_change_failure_policy(self) -> None:
         (self.root / "operation.py").write_text(
             "from graphql_desk import graphql\nquery = graphql(build_query())\n",

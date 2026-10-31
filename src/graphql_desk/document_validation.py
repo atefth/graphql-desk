@@ -13,7 +13,7 @@ from .fragments import DefinitionFact, FragmentIndex, IndexedDocument, SchemaCon
 from .source import Span
 from .source_graph import DocumentIdentity, GraphDiagnostic, ModuleSnapshot
 from .source_maps import SourceMap, build_source_map
-from .validation import validate_document
+from .validation import validate_deprecations, validate_document
 
 
 def validate_indexed_document(
@@ -97,11 +97,18 @@ def validate_indexed_document(
             raise ValueError("Indexed definition differs from original source")
         nodes.append(original_node)
     diagnostics: list[GraphDiagnostic] = []
-    for error in validate_document(
-        context.schema,
-        DocumentNode(definitions=tuple(nodes)),
-        client_directives=client_directives,
-    ):
+    validated = DocumentNode(definitions=tuple(nodes))
+    errors = (
+        (error, "graphql-validation")
+        for error in validate_document(
+            context.schema, validated, client_directives=client_directives
+        )
+    )
+    warnings = (
+        (error, "graphql-deprecation")
+        for error in validate_deprecations(context.schema, validated)
+    )
+    for error, code in (*errors, *warnings):
         located = False
         for error_node in error.nodes or ():
             if error_node.loc is None:
@@ -114,7 +121,7 @@ def validate_indexed_document(
             ):
                 diagnostics.append(
                     GraphDiagnostic(
-                        host.module, "graphql-validation", error.message, host.range
+                        host.module, code, error.message, host.range
                     )
                 )
                 located = True
@@ -122,7 +129,7 @@ def validate_indexed_document(
             diagnostics.append(
                 GraphDiagnostic(
                     document.call.module,
-                    "graphql-validation",
+                    code,
                     error.message,
                     document.call.range,
                 )

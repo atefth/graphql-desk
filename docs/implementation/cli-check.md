@@ -4,8 +4,9 @@
 GraphQL Desk project, loads its configured schema or schemas, and reports
 GraphQL source and validation diagnostics. It uses the shared Python source
 resolver, fragment index, persisted manifest validator, field-use analyzer,
-colocated-fragment diagnostics, and schema validator; it never imports project
-code. Project preferences control field-use and colocated-fragment warnings.
+colocated-fragment diagnostics, schema validator, and deprecated-field/argument
+warnings; it never imports project code. Project preferences control field-use
+and colocated-fragment warnings.
 
 `graphql_desk.cli.check(config=None, schema=None, environment=None)` is the
 callable form. It returns structured diagnostics with severity, code, message,

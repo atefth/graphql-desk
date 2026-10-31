@@ -13,6 +13,7 @@ from graphql import (
     specified_rules,
     validate,
 )
+from graphql.validation.rules.custom.no_deprecated import NoDeprecatedCustomRule
 
 # GraphQLSP's pinned built-in unknown-directive suppression list.
 _CLIENT_DIRECTIVES = frozenset(
@@ -82,3 +83,10 @@ def validate_document(
             ],
         )
     )
+
+
+def validate_deprecations(
+    schema: GraphQLSchema, document: DocumentNode
+) -> tuple[GraphQLError, ...]:
+    """Return GraphiQL-compatible deprecated field/argument warnings."""
+    return tuple(validate(schema, document, (NoDeprecatedCustomRule,)))

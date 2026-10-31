@@ -96,6 +96,7 @@ _WARNING_CODES = frozenset(
         "source-too-complex",
         "persisted-not-static",
         "unused-colocated-fragment",
+        "graphql-deprecation",
         "52005",
     }
 )
@@ -453,7 +454,7 @@ def check(
                 source.module,
                 source.path.as_uri(),
                 1,
-                source.path.read_text(encoding="utf-8"),
+                source.path.read_text(encoding="utf-8-sig"),
                 source.is_package,
             )
             for source in files
