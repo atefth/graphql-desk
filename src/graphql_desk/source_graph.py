@@ -2070,7 +2070,7 @@ class _CallScopes(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         previous = self.scoped, self.function_body, self.class_method, self.shadowed
-        allow_methods = not self.scoped
+        allow_methods = not self.scoped and node in self.module.tree.body
         self.scoped = True
         self.function_body = False
         self.class_method = False

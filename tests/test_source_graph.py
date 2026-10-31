@@ -2896,6 +2896,20 @@ alias('{ id }')
         )
         self.assertEqual(rejected.calls, ())
         self.assertTrue(rejected.diagnostics)
+        guarded = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "if TYPE_CHECKING:\n"
+                    "    class Guarded:\n"
+                    "        def read(self):\n"
+                    "            return gql('{ id }')\n",
+                ),
+            )
+        )
+        self.assertEqual(guarded.calls, ())
+        self.assertTrue(guarded.diagnostics)
 
     def test_function_inputs_never_substitute_module_globals_for_local_names(
         self,
