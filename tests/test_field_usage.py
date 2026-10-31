@@ -312,11 +312,49 @@ class FieldUsageTests(unittest.TestCase):
             + "        result = execute(query, {})\n"
             + "        super().render_data(result)\n"
         )
+        local_base_shadow = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "def build(BaseView):\n"
+            + "    class Screen(BaseView):\n"
+            + "        def render(self):\n"
+            + "            result = execute(query, {})\n"
+            + "            super().render_data(result)\n"
+        )
+        destructured_method_override = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "    render_data, spare = replacement, None\n"
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        nested_method_deletion = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + '            delattr(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
         self.assertEqual(warnings(multiple_inheritance), [])
         self.assertEqual(warnings(dynamic_instance_dispatch), [])
         self.assertEqual(warnings(shadowed_super), [])
         self.assertEqual(warnings(class_mutation), [])
         self.assertEqual(warnings(global_method), [])
+        self.assertEqual(warnings(local_base_shadow), [])
+        self.assertEqual(warnings(destructured_method_override), [])
+        self.assertEqual(warnings(nested_method_deletion), [])
 
     def test_comprehension_walrus_makes_method_name_local_not_captured(self) -> None:
         source = (

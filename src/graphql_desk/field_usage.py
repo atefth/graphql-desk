@@ -896,7 +896,7 @@ class _Flow:
             elif (
                 isinstance(child, ast.Call)
                 and isinstance(child.func, ast.Name)
-                and child.func.id == "setattr"
+                and child.func.id in {"setattr", "delattr"}
                 and child.args
             ):
                 mark_mutated_class(child.args[0])
@@ -965,6 +965,8 @@ class _Flow:
         if (
             self.current_class is None
             or self.current_function is None
+            or id(self.current_class)
+            not in {id(item) for item in self.class_definitions.values()}
             or self.current_function.decorator_list
             or isinstance(self.current_function, ast.AsyncFunctionDef)
             or not (
@@ -1014,21 +1016,15 @@ class _Flow:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and item.name == name
             ]
-            conflicting_bindings = any(
-                isinstance(item, (ast.Assign, ast.AnnAssign))
-                and any(
-                    isinstance(target, ast.Name) and target.id == name
-                    for target in (
-                        item.targets if isinstance(item, ast.Assign) else [item.target]
-                    )
-                )
-                or isinstance(item, (ast.Import, ast.ImportFrom))
-                and any(
-                    (alias.asname or alias.name.split(".")[0]) == name
-                    for alias in item.names
-                )
-                for item in base.body
-            )
+            conflicting_bindings = False
+            for item in base.body:
+                if members and item is members[0]:
+                    continue
+                writes = _Writes()
+                writes.visit(item)
+                if name in writes.names:
+                    conflicting_bindings = True
+                    break
             if members:
                 if (
                     len(members) != 1
