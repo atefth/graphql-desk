@@ -16,7 +16,11 @@ sequence. Documents rejected by fragment indexing are omitted from definitions
 and their diagnostics remain attached to the graph; a stale call/index mismatch
 is diagnosed and omitted. Conflicting fragment names
 within one project/schema receive diagnostics; a spread is retained by name and
-is never bound arbitrarily to one conflicting definition.
+is never bound arbitrarily to one conflicting definition. Fragment spreads
+produce explicit edges from the referring definition ID to the fragment ID
+selected by that call's validated composition facts. This preserves explicit
+fragment imports when an unrelated module has a same-named fragment; unresolved
+or ambiguous targets produce no edge.
 
 The module graph includes every selected Python module, including isolated
 modules. Absolute and relative imports only create edges to selected project

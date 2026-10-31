@@ -18,7 +18,7 @@ from graphql import (
 )
 from graphql.language import FragmentSpreadNode, Node, Visitor, visit
 
-from .fragments import FragmentIndex
+from .fragments import FragmentIndex, IndexedDocument
 from .source import Span
 from .source_graph import (
     DocumentIdentity,
@@ -70,9 +70,16 @@ class ScanModule:
 
 
 @dataclass(frozen=True)
+class ScanFragmentEdge:
+    source_id: str
+    target_id: str
+
+
+@dataclass(frozen=True)
 class ScanGraph:
     definitions: tuple[ScanDefinition, ...]
     modules: tuple[ScanModule, ...]
+    fragment_edges: tuple[ScanFragmentEdge, ...]
     diagnostics: tuple[GraphDiagnostic, ...]
 
 
@@ -155,7 +162,9 @@ def _definition_base(item: ScanDefinition) -> str:
     return f"{item.project}:{item.schema_name}:{item.kind}:{name}"
 
 
-def _assign_ids(items: list[ScanDefinition]) -> tuple[ScanDefinition, ...]:
+def _assign_ids(
+    items: list[ScanDefinition],
+) -> tuple[tuple[ScanDefinition, ...], dict[int, str]]:
     ordered = sorted(
         items,
         key=lambda item: (
@@ -169,13 +178,16 @@ def _assign_ids(items: list[ScanDefinition]) -> tuple[ScanDefinition, ...]:
     )
     counts: dict[str, int] = defaultdict(int)
     result: list[ScanDefinition] = []
+    assigned_ids: dict[int, str] = {}
     for item in ordered:
         base = _definition_base(item)
         counts[base] += 1
         suffix = counts[base]
+        identity = base if suffix == 1 else f"{base}~{suffix}"
+        assigned_ids[id(item)] = identity
         result.append(
             ScanDefinition(
-                id=base if suffix == 1 else f"{base}~{suffix}",
+                id=identity,
                 kind=item.kind,
                 name=item.name,
                 project=item.project,
@@ -188,7 +200,45 @@ def _assign_ids(items: list[ScanDefinition]) -> tuple[ScanDefinition, ...]:
                 type_condition=item.type_condition,
             )
         )
-    return tuple(result)
+    return tuple(result), assigned_ids
+
+
+def _fragment_edges(
+    definitions: list[ScanDefinition],
+    contexts: Mapping[int, IndexedDocument],
+    printed: Mapping[int, str],
+    assigned_ids: Mapping[int, str],
+) -> tuple[ScanFragmentEdge, ...]:
+    targets: dict[tuple[DocumentIdentity, str, str, str], list[ScanDefinition]] = (
+        defaultdict(list)
+    )
+    for definition in definitions:
+        if definition.kind == "fragment" and definition.name is not None:
+            context = contexts[id(definition)]
+            document = DocumentIdentity(context.call.module, context.call.range)
+            targets[
+                (document, definition.kind, definition.name, printed[id(definition)])
+            ].append(definition)
+    edges: set[ScanFragmentEdge] = set()
+    for definition in definitions:
+        context = contexts[id(definition)]
+        for name in definition.fragment_spreads:
+            facts = [
+                fact
+                for fact in context.definitions
+                if fact.kind == "fragment" and fact.name == name
+            ]
+            if len(facts) != 1:
+                continue
+            fact = facts[0]
+            candidates = targets.get((fact.document, fact.kind, name, fact.printed), [])
+            if len(candidates) == 1:
+                edges.add(
+                    ScanFragmentEdge(
+                        assigned_ids[id(definition)], assigned_ids[id(candidates[0])]
+                    )
+                )
+    return tuple(sorted(edges, key=lambda item: (item.source_id, item.target_id)))
 
 
 def _module_facts(
@@ -335,6 +385,8 @@ def build_scan_graph(
         for item in index.documents
     }
     definitions: list[ScanDefinition] = []
+    definition_contexts: dict[int, IndexedDocument] = {}
+    definition_printed: dict[int, str] = {}
     origins: list[tuple[ScanDefinition, ModuleDependency, Span, str]] = []
     diagnostics = [*sources.diagnostics, *index.diagnostics]
     for call in sources.calls:
@@ -378,33 +430,32 @@ def build_scan_graph(
             definition_span = Span(node.loc.start, node.loc.end)
             locations = _source_locations(source_map, definition_span, snapshots)
             host_ranges = source_map.to_host(definition_span)
-            definitions.append(
-                ScanDefinition(
-                    id="",
-                    kind=kind,
-                    name=name,
-                    project=call.module.project,
-                    schema_name=indexed_document.schema_identity[1],
-                    module=call.module.module,
-                    locations=locations,
-                    variables=_variables(node)
-                    if isinstance(node, OperationDefinitionNode)
-                    else (),
-                    fragment_spreads=_direct_spreads(node),
-                    hash=hashlib.sha256(print_ast(node).encode("utf-8")).hexdigest()[
-                        :16
-                    ],
-                    type_condition=(
-                        node.type_condition.name.value
-                        if isinstance(node, FragmentDefinitionNode)
-                        else None
-                    ),
-                )
+            definition = ScanDefinition(
+                id="",
+                kind=kind,
+                name=name,
+                project=call.module.project,
+                schema_name=indexed_document.schema_identity[1],
+                module=call.module.module,
+                locations=locations,
+                variables=_variables(node)
+                if isinstance(node, OperationDefinitionNode)
+                else (),
+                fragment_spreads=_direct_spreads(node),
+                hash=hashlib.sha256(print_ast(node).encode("utf-8")).hexdigest()[:16],
+                type_condition=(
+                    node.type_condition.name.value
+                    if isinstance(node, FragmentDefinitionNode)
+                    else None
+                ),
             )
+            definitions.append(definition)
+            definition_contexts[id(definition)] = indexed_document
+            definition_printed[id(definition)] = print_ast(node)
             if host_ranges:
                 origins.append(
                     (
-                        definitions[-1],
+                        definition,
                         host_ranges[0].module,
                         host_ranges[0].range,
                         print_ast(node),
@@ -444,14 +495,18 @@ def build_scan_graph(
             ),
         )
     )
+    ordered_definitions, assigned_ids = _assign_ids(definitions)
     return ScanGraph(
-        _assign_ids(definitions),
+        ordered_definitions,
         _module_facts(
             modules,
             paths,
             roots,
             {} if source_roots is None else source_roots,
             {} if entrypoints is None else entrypoints,
+        ),
+        _fragment_edges(
+            definitions, definition_contexts, definition_printed, assigned_ids
         ),
         ordered_diagnostics,
     )
