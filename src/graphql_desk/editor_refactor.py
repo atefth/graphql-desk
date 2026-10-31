@@ -29,7 +29,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
     import_module_aliases: set[str] = set()
     builtins_aliases: set[str] = set()
     builtin_import_aliases: set[str] = set()
-    builtin_reflection_aliases: set[str] = set()
+    builtin_reflection_aliases: dict[str, str] = {}
     binding_lines: dict[str, int] = {}
     # A factory must have a single static binding throughout the source. This
     # deliberately rejects shadowing in nested scopes too, rather than guessing
@@ -82,7 +82,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 elif node.module == "builtins" and alias.name == "__import__":
                     builtin_import_aliases.add(name)
                 elif node.module == "builtins" and alias.name in {"getattr", "vars"}:
-                    builtin_reflection_aliases.add(name)
+                    builtin_reflection_aliases[name] = alias.name
 
     dynamic_module_access = False
     for node in ast.walk(tree):
@@ -93,15 +93,30 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             and node.value.id in sys_aliases
         ) or (isinstance(node, ast.Name) and node.id in sys_modules_aliases):
             dynamic_module_access = True
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in {"getattr", "vars"} | builtin_reflection_aliases
-            and node.args
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id in sys_aliases
-        ):
-            dynamic_module_access = True
+        if isinstance(node, ast.Call):
+            reflection_name: str | None = None
+            if isinstance(node.func, ast.Name):
+                reflection_name = node.func.id
+                if reflection_name not in {"getattr", "vars"}:
+                    reflection_name = builtin_reflection_aliases.get(reflection_name)
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"getattr", "vars"}
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in builtins_aliases
+            ):
+                reflection_name = node.func.attr
+            else:
+                reflection_name = None
+            if reflection_name == "vars" and not node.args:
+                dynamic_module_access = True
+            elif (
+                reflection_name is not None
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in sys_aliases
+            ):
+                dynamic_module_access = True
         if isinstance(node, ast.Call) and (
             isinstance(node.func, ast.Name)
             and node.func.id
