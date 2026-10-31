@@ -207,6 +207,45 @@ class _OuterWrites(ast.NodeVisitor):
         return
 
 
+class _NonlocalCaptures(ast.NodeVisitor):
+    def __init__(self, function: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.scopes = [self._locals(function)]
+        self.names: set[str] = set()
+
+    @staticmethod
+    def _locals(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+        names = _local_names(function)
+        declarations = _OuterWrites()
+        for statement in function.body:
+            declarations.visit(statement)
+        return names - declarations.names
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        for name in node.names:
+            for depth in range(len(self.scopes) - 1, -1, -1):
+                if name in self.scopes[depth]:
+                    if depth == 0:
+                        self.names.add(name)
+                    break
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.scopes.append(self._locals(node))
+        try:
+            for statement in node.body:
+                self.visit(statement)
+        finally:
+            self.scopes.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for statement in node.body:
+            self.visit(statement)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
 class _ClassAnnotations(ast.NodeVisitor):
     def __init__(self, flow: _Flow, env: dict[str, _Value]) -> None:
         self.flow = flow
@@ -1268,9 +1307,10 @@ class _Flow:
                     for statement in statements[position + 1 :]:
                         later_writes.visit(statement)
                     invalid_captures = capture_names & set(later_writes.names)
-                    for child in ast.walk(self.current_function):
-                        if isinstance(child, (ast.Global, ast.Nonlocal)):
-                            invalid_captures.update(capture_names & set(child.names))
+                    nonlocal_captures = _NonlocalCaptures(self.current_function)
+                    for statement in self.current_function.body:
+                        nonlocal_captures.visit(statement)
+                    invalid_captures.update(capture_names & nonlocal_captures.names)
                     for child in ast.walk(node):
                         if isinstance(child, ast.Call) and (
                             isinstance(child.func, ast.Name)
@@ -1366,10 +1406,10 @@ class _Flow:
             local.update(self.function_captures.get(id(function), {}))
             if id(function) in self.class_functions:
                 local["__class__"] = None
-            if any(
-                isinstance(item, (ast.Global, ast.Nonlocal))
-                for item in ast.walk(function)
-            ):
+            declarations = _OuterWrites()
+            for statement in function.body:
+                declarations.visit(statement)
+            if declarations.names:
                 for value in local.values():
                     _consume(value)
                 continue

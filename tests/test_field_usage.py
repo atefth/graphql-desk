@@ -248,6 +248,34 @@ class FieldUsageTests(unittest.TestCase):
         self.assertEqual([field for field, _ in found], ["user"])
         self.assertIn("user.email", found[0][1])
 
+    def test_nested_global_does_not_invalidate_function_local_capture(self) -> None:
+        source = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])\n'
+            + "    def update():\n"
+            + "        global local_query\n"
+            + "        local_query = unrelated\n"
+        )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
+
+    def test_direct_global_declaration_stays_conservative(self) -> None:
+        source = (
+            PREFIX
+            + "class Screen:\n"
+            + "    def show(self):\n"
+            + "        global query\n"
+            + "        result = execute(query, {})\n"
+            + '        print(result["user"]["name"])'
+        )
+        self.assertEqual(warnings(source), [])
+
     def test_function_local_class_methods_skip_unsupported_captures(self) -> None:
         result_capture = (
             PREFIX
@@ -309,12 +337,30 @@ class FieldUsageTests(unittest.TestCase):
             + "            result = execute(local_query, {})\n"
             + '            print(result["user"]["name"])\n'
         )
+        intermediate_nonlocal_rebind = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])\n'
+            + "    def update():\n"
+            + "        local_query = unrelated\n"
+            + "        def replace():\n"
+            + "            nonlocal local_query\n"
+            + "            local_query = another\n"
+            + "        replace()\n"
+        )
         self.assertEqual(warnings(result_capture), [])
         self.assertEqual(warnings(rebind_after_class), [])
         self.assertEqual(warnings(nonlocal_rebind), [])
         self.assertEqual(warnings(comprehension_rebind), [])
         self.assertEqual(warnings(annotation_rebind), [])
         self.assertEqual(warnings(annotation_rebind_before_class), [])
+        found = warnings(intermediate_nonlocal_rebind)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
 
     def test_class_methods_do_not_resolve_implicit_class_cell_as_a_global(self) -> None:
         source = (
