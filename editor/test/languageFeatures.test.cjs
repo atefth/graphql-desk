@@ -769,6 +769,42 @@ test("extraction in an if suite remains inline and reanalyzes", async () => {
   assert.equal(refreshed.response.calls[1].index.primary_fragment.name, "UserFields");
 });
 
+test("extraction plans cover loop, try, with, and match suites", async () => {
+  const source = [
+    "from graphql_desk import gql",
+    "def read(items, ready, enabled):",
+    "    for item in items:",
+    "        loop_query = gql('query Loop { user { id name } }')",
+    "    while ready:",
+    "        while_query = gql('query While { user { id name } }')",
+    "        break",
+    "    try:",
+    "        try_query = gql('query Try { user { id name } }')",
+    "    except ValueError:",
+    "        except_query = gql('query Except { user { id name } }')",
+    "    else:",
+    "        try_else_query = gql('query TryElse { user { id name } }')",
+    "    finally:",
+    "        finally_query = gql('query Finally { user { id name } }')",
+    "    with manager() as value:",
+    "        with_query = gql('query With { user { id name } }')",
+    "    match enabled:",
+    "        case True:",
+    "            match_query = gql('query Match { user { id name } }')",
+    "        case _:",
+    "            match_else_query = gql('query MatchElse { user { id name } }')",
+  ].join("\n") + "\n";
+  const value = bundle(source);
+  const service = createLanguageFeatures(options(value));
+  for (const name of ["Loop", "While", "Try", "Except", "TryElse", "Finally", "With", "Match", "MatchElse"]) {
+    const queryStart = source.indexOf(`query ${name}`);
+    const start = source.indexOf("id name", queryStart);
+    const plan = await service.extractFragment(document(value), { start, end: start + 7 });
+    assert.equal(plan.length, 2, name);
+    assert.match(plan[0].replacement + plan[1].replacement, /fragments=\[gql\(source=/, name);
+  }
+});
+
 test("extraction rejects partial, shared, escaped, invalid and stale selections", async () => {
   const cases = [
     ["from graphql_desk import gql\nq=gql('query { user { name id } }')", "ame id"],

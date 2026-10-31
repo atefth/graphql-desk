@@ -4,6 +4,7 @@ import ast
 import io
 import re
 import tokenize
+from typing import cast
 
 from .source_maps import convert_offset
 
@@ -342,13 +343,33 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
     extractable: list[ast.stmt] = list(tree.body)
     function_assignments: set[int] = set()
 
-    def conditional_suite(statements: list[ast.stmt]) -> list[ast.stmt]:
+    try_star_type = getattr(ast, "TryStar", None)
+
+    def nested_suites(statement: ast.stmt) -> tuple[list[ast.stmt], ...]:
+        if isinstance(statement, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+            return statement.body, statement.orelse
+        if isinstance(statement, (ast.With, ast.AsyncWith)):
+            return (statement.body,)
+        if isinstance(statement, ast.Try) or (
+            try_star_type is not None and isinstance(statement, try_star_type)
+        ):
+            try_statement = cast(ast.Try, statement)
+            return (
+                try_statement.body,
+                *(handler.body for handler in try_statement.handlers),
+                try_statement.orelse,
+                try_statement.finalbody,
+            )
+        if isinstance(statement, ast.Match):
+            return tuple(case.body for case in statement.cases)
+        return ()
+
+    def function_suites(statements: list[ast.stmt]) -> list[ast.stmt]:
         result: list[ast.stmt] = []
         for statement in statements:
             result.append(statement)
-            if isinstance(statement, ast.If):
-                result.extend(conditional_suite(statement.body))
-                result.extend(conditional_suite(statement.orelse))
+            for suite in nested_suites(statement):
+                result.extend(function_suites(suite))
         return result
 
     for definition in tree.body:
@@ -371,7 +392,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 break
             scope.extend(ast.iter_child_nodes(node))
         if safe:
-            assignments = conditional_suite(definition.body)
+            assignments = function_suites(definition.body)
             extractable.extend(assignments)
             function_assignments.update(id(item) for item in assignments)
 

@@ -1,3 +1,4 @@
+import sys
 import unittest
 
 from graphql_desk.editor_refactor import extraction_contexts
@@ -268,19 +269,81 @@ class EditorRefactorTests(unittest.TestCase):
         self.assertEqual({item["indent"] for item in contexts.values()}, {"        "})
         self.assertEqual({item["newline"] for item in contexts.values()}, {"\r\n"})
 
+    def test_function_local_loop_exception_with_and_match_suites_are_extractable(
+        self,
+    ) -> None:
+        source = (
+            "from graphql_desk import gql\n"
+            "def read(items, ready, enabled):\n"
+            "    for item in items:\n"
+            "        loop_query = gql('query Loop { user { id } }')\n"
+            "    else:\n"
+            "        for_else_query = gql('query ForElse { user { id } }')\n"
+            "    while ready:\n"
+            "        while_query = gql('query While { user { id } }')\n"
+            "        break\n"
+            "    else:\n"
+            "        while_else_query = gql('query WhileElse { user { id } }')\n"
+            "    try:\n"
+            "        try_query = gql('query Try { user { id } }')\n"
+            "    except ValueError:\n"
+            "        except_query = gql('query Except { user { id } }')\n"
+            "    else:\n"
+            "        try_else_query = gql('query TryElse { user { id } }')\n"
+            "    finally:\n"
+            "        finally_query = gql('query Finally { user { id } }')\n"
+            "    with manager() as value:\n"
+            "        with_query = gql('query With { user { id } }')\n"
+            "    match enabled:\n"
+            "        case True:\n"
+            "            match_query = gql('query Match { user { id } }')\n"
+            "        case _:\n"
+            "            match_else_query = gql('query MatchElse { user { id } }')\n"
+            "async def read_async(items):\n"
+            "    async for item in items:\n"
+            "        async_for_query = gql('query AsyncFor { user { id } }')\n"
+            "    async with manager() as value:\n"
+            "        async_with_query = gql('query AsyncWith { user { id } }')\n"
+        )
+        contexts = extraction_contexts(source)
+        self.assertEqual(len(contexts), 13)
+        self.assertEqual({item["scope"] for item in contexts.values()}, {"function"})
+        self.assertEqual(
+            {item["indent"] for item in contexts.values()}, {"        ", "            "}
+        )
+        self.assertEqual({item["newline"] for item in contexts.values()}, {"\n"})
+        if sys.version_info >= (3, 11):
+            except_star = (
+                "from graphql_desk import gql\n"
+                "def read():\n"
+                "    try:\n"
+                "        pass\n"
+                "    except* ValueError:\n"
+                "        query = gql('query ExceptStar { user { id } }')\n"
+            )
+            self.assertEqual(len(extraction_contexts(except_star)), 1)
+
     def test_function_local_extraction_rejects_scope_ambiguity(self) -> None:
         for source in (
             "from graphql_desk import gql\ndef read(gql):\n    q=gql('x')\n",
             "from graphql_desk import gql\n"
             "def read():\n    q=gql('x')\n    gql=custom\n",
             "from graphql_desk import gql\n"
-            "def read():\n    for flag in values:\n        q=gql('x')\n",
-            "from graphql_desk import gql\n"
             "def read():\n    def nested():\n        q=gql('x')\n",
             "from graphql_desk import gql\n"
             "def read():\n    global value\n    q=gql('x')\n",
             "from graphql_desk import gql\n"
             "def read():\n    value=locals()\n    q=gql('x')\n",
+            "from graphql_desk import gql\n"
+            "def read(items):\n"
+            "    for item in items:\n"
+            "        value=locals()\n"
+            "        q=gql('x')\n",
+            "from graphql_desk import gql\n"
+            "def read(flag):\n"
+            "    if flag:\n"
+            "        class Nested:\n"
+            "            q=gql('x')\n",
         ):
             with self.subTest(source=source):
                 self.assertEqual(extraction_contexts(source), {}, source)
