@@ -32,7 +32,14 @@ distances follow importer-to-imported edges. Closed import cycles remain
 unreachable unless an entrypoint reaches them. Areas are the module's
 project-relative parent directory, with `(root)` for the project root.
 
-This implements graph data only. The eight scan rules, terminal/JSON/graph
-renderers, CLI integration, upstream conformance corpus, and product-scale
-performance acceptance remain in their separate stories; SCAN-01 and overall
-gql.tada parity remain open.
+The bounded `field-usage` rule is implemented in
+`graphql_desk.scan_rules.field_usage_rule`. It counts each schema coordinate
+once per operation or fragment, expands resolved fragment edges to reaching
+operations, and unions reverse-import reach, areas, and entrypoints. Results
+are schema-qualified and omit unused and introspection fields. When a project
+has no entrypoints, weight falls back to the number of reached modules.
+
+This rule is a data-layer slice only; it is not wired to CLI output yet. The
+other seven scan rules, terminal/JSON/graph renderers, CLI integration, upstream
+conformance corpus, and product-scale performance acceptance remain in their
+separate stories. SCAN-01 and overall gql.tada parity remain open.
