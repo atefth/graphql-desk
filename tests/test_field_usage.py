@@ -192,6 +192,30 @@ class FieldUsageTests(unittest.TestCase):
         self.assertEqual([field for field, _ in found], ["user"])
         self.assertIn("user.email", found[0][1])
 
+    def test_function_local_class_methods_use_module_scope_documents(self) -> None:
+        source = (
+            PREFIX
+            + "def build_screen():\n    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(query, {})\n"
+            + '            print(result["user"]["name"])'
+        )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
+
+    def test_function_local_class_methods_do_not_guess_captured_documents(self) -> None:
+        source = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])'
+        )
+        self.assertEqual(warnings(source), [])
+
     def test_class_methods_do_not_resolve_implicit_class_cell_as_a_global(self) -> None:
         source = (
             PREFIX
