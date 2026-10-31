@@ -110,8 +110,24 @@ class EditorRefactorTests(unittest.TestCase):
             "import sys as runtime\nimport graphql_desk as desk\n"
             "getattr(runtime, 'modules')['graphql_desk'].gql = replacement\n"
             "q = desk.gql('x')\n",
+            "from builtins import getattr as get_attr\n"
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "get_attr(runtime, 'modules')['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import builtins as b\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "b.getattr(runtime, 'modules')['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
             "import sys as runtime\nimport graphql_desk as desk\n"
             "vars(runtime)['modules']['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from builtins import vars as get_vars\n"
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "get_vars(runtime)['modules']['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import builtins as b\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "b.vars(runtime)['modules']['graphql_desk'].gql = replacement\n"
             "q = desk.gql('x')\n",
             "import sys as runtime\nimport graphql_desk as desk\n"
             "runtime.__dict__['modules']['graphql_desk'].gql = replacement\n"

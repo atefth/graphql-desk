@@ -29,6 +29,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
     import_module_aliases: set[str] = set()
     builtins_aliases: set[str] = set()
     builtin_import_aliases: set[str] = set()
+    builtin_reflection_aliases: set[str] = set()
     binding_lines: dict[str, int] = {}
     # A factory must have a single static binding throughout the source. This
     # deliberately rejects shadowing in nested scopes too, rather than guessing
@@ -80,6 +81,8 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                     import_module_aliases.add(name)
                 elif node.module == "builtins" and alias.name == "__import__":
                     builtin_import_aliases.add(name)
+                elif node.module == "builtins" and alias.name in {"getattr", "vars"}:
+                    builtin_reflection_aliases.add(name)
 
     dynamic_module_access = False
     for node in ast.walk(tree):
@@ -93,7 +96,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id in {"getattr", "vars"}
+            and node.func.id in {"getattr", "vars"} | builtin_reflection_aliases
             and node.args
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id in sys_aliases
@@ -109,6 +112,10 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             and node.func.value.id in importlib_aliases
             or isinstance(node.func, ast.Attribute)
             and node.func.attr == "__import__"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in builtins_aliases
+            or isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"getattr", "vars"}
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id in builtins_aliases
         ):
