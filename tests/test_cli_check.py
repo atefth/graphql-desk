@@ -264,6 +264,34 @@ class CheckCLITests(unittest.TestCase):
         self.assertIn("error [graphql-validation]", stderr)
         self.assertNotIn(str(source_root), stdout + stderr)
 
+    def test_nested_config_annotations_use_workspace_relative_paths(self) -> None:
+        project = self.root / "packages" / "api"
+        project.mkdir(parents=True)
+        (project / "schema.graphql").write_text(
+            "type Query { title: String }", encoding="utf-8"
+        )
+        config = project / "pyproject.toml"
+        config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n',
+            encoding="utf-8",
+        )
+        (project / "operation.py").write_text(
+            'from graphql_desk import graphql\nquery = graphql("query { absent }")\n',
+            encoding="utf-8",
+        )
+
+        with patch.dict(
+            os.environ,
+            {"GITHUB_ACTIONS": "true", "GITHUB_WORKSPACE": str(self.root)},
+        ):
+            code, stdout, stderr = self.invoke(["check", "--config", str(config)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("::error file=packages/api/operation.py,line=2,col=26,", stdout)
+        self.assertIn("error [graphql-validation]", stderr)
+        self.assertNotIn(str(self.root), stdout)
+
     def test_json_mode_keeps_annotations_separate_and_callable_is_silent(self) -> None:
         (self.root / "operation.py").write_text(
             'from graphql_desk import graphql\nquery = graphql("query { absent }")\n',

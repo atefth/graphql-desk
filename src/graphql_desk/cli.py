@@ -89,6 +89,7 @@ class CheckDiagnostic:
     file: str | None = None
     end_line: int | None = None
     end_column: int | None = None
+    workflow_file: str | None = None
 
 
 _WARNING_CODES = frozenset(
@@ -109,6 +110,7 @@ def _check_diagnostic(
     diagnostic: GraphDiagnostic,
     source_texts: Mapping[tuple[str, str, str, int], str],
     source_files: Mapping[tuple[str, str, str, int], str],
+    workflow_files: Mapping[tuple[str, str, str, int], str],
 ) -> CheckDiagnostic:
     identity = (
         diagnostic.module.project,
@@ -142,6 +144,7 @@ def _check_diagnostic(
         file=source_files.get(identity),
         end_line=end_line,
         end_column=end_column,
+        workflow_file=workflow_files.get(identity),
     )
 
 
@@ -503,16 +506,27 @@ def check(
         for item in modules
     }
     project_root = project_config.root.resolve()
+    workspace_root = Path(os.environ.get("GITHUB_WORKSPACE", str(Path.cwd()))).resolve()
     source_files: dict[tuple[str, str, str, int], str] = {}
+    workflow_files: dict[tuple[str, str, str, int], str] = {}
     for source in files:
+        identity = (project_id, source.module, source.path.as_uri(), 1)
         try:
             relative = source.path.resolve().relative_to(project_root).as_posix()
         except ValueError:
+            pass
+        else:
+            source_files[identity] = relative
+        try:
+            workflow_relative = (
+                source.path.resolve().relative_to(workspace_root).as_posix()
+            )
+        except ValueError:
             continue
-        source_files[(project_id, source.module, source.path.as_uri(), 1)] = relative
+        workflow_files[identity] = workflow_relative
 
     def check_diagnostic(item: GraphDiagnostic) -> CheckDiagnostic:
-        return _check_diagnostic(item, source_texts, source_files)
+        return _check_diagnostic(item, source_texts, source_files, workflow_files)
 
     diagnostics = [check_diagnostic(item) for item in sources.diagnostics]
     schema_contexts: dict[tuple[str, str | None], SchemaContext] = {}
@@ -822,15 +836,18 @@ def _escape_workflow_value(value: str, *, property_value: bool = False) -> str:
 
 
 def _workflow_annotation(diagnostic: CheckDiagnostic) -> str | None:
-    if diagnostic.module is not None and diagnostic.file is None:
+    annotation_file = diagnostic.workflow_file
+    if diagnostic.module is not None and annotation_file is None:
         return None
+    if diagnostic.module is None:
+        annotation_file = diagnostic.file
     command = {"error": "error", "warn": "warning", "info": "notice"}[
         diagnostic.severity
     ]
     properties: list[tuple[str, str]] = []
-    if diagnostic.file is not None:
+    if annotation_file is not None:
         for key, value in (
-            ("file", diagnostic.file),
+            ("file", annotation_file),
             ("line", str(diagnostic.line) if diagnostic.line is not None else None),
             ("col", str(diagnostic.column) if diagnostic.column is not None else None),
             (

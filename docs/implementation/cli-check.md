@@ -23,11 +23,12 @@ When `GITHUB_ACTIONS=true`, text mode also emits one escaped GitHub Actions
 annotation per visible diagnostic on stdout. `--format json` emits structured
 diagnostics on stdout without workflow commands; `--annotations-output PATH`
 writes the visible annotations separately for a later CI step. Locations use
-project-relative paths and 1-based columns, with source-exclusive ends converted
-to inclusive positions. The callable `check()` API returns data and never
-prints annotations. Source diagnostics outside the project cannot be assigned a
-safe workspace-relative location, so they remain in text/JSON output and are
-omitted from workflow annotations rather than being misattributed to `.github`.
+project-relative paths in JSON and `GITHUB_WORKSPACE`-relative paths in workflow
+annotations, with 1-based columns and source-exclusive ends converted to
+inclusive positions. The callable `check()` API returns data and never prints
+annotations. Source diagnostics outside the workspace cannot be assigned a safe
+workspace-relative location, so they remain in text/JSON output and are omitted
+from workflow annotations rather than being misattributed to `.github`.
 
 The command currently checks resolvable embedded documents and schema
 validation. Dynamic source expressions are reported as warnings when static
