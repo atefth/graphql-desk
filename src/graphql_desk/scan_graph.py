@@ -249,6 +249,8 @@ def _module_facts(
     entrypoints: Mapping[str, tuple[str, ...] | None],
 ) -> tuple[ScanModule, ...]:
     identities = {(item.project, item.module): item for item in modules}
+    if len(identities) != len(modules):
+        raise ValueError("Scan modules must have unique project/module identities")
     relative_paths: dict[tuple[str, str], str] = {}
     areas: dict[tuple[str, str], str] = {}
     path_owners: dict[tuple[str, str], tuple[str, str]] = {}
@@ -384,6 +386,8 @@ def build_scan_graph(
         DocumentIdentity(item.call.module, item.call.range): item
         for item in index.documents
     }
+    if len(indexed) != len(index.documents):
+        raise ValueError("Indexed scan documents must have unique identities")
     definitions: list[ScanDefinition] = []
     definition_contexts: dict[int, IndexedDocument] = {}
     definition_printed: dict[int, str] = {}
