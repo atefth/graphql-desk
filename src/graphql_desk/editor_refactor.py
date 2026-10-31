@@ -29,11 +29,6 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
     # which binding a transformed call will execute.
     bindings: dict[str, int] = {}
 
-    def attribute_root(node: ast.AST) -> str | None:
-        while isinstance(node, ast.Attribute):
-            node = node.value
-        return node.id if isinstance(node, ast.Name) else None
-
     def bound(name: str) -> None:
         bindings[name] = bindings.get(name, 0) + 1
 
@@ -67,34 +62,25 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                     return {}
                 bound(alias.asname or alias.name)
 
-    mutated_modules: set[str] = set()
+    parents = {
+        child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
+    }
+    escaped_modules: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and isinstance(
-            node.ctx, (ast.Store, ast.Del)
+        if not isinstance(node, ast.Name) or node.id not in module_imports:
+            continue
+        attribute = parents.get(node)
+        call = parents.get(attribute) if isinstance(attribute, ast.Attribute) else None
+        if not (
+            isinstance(attribute, ast.Attribute)
+            and attribute.value is node
+            and attribute.attr in {"gql", "graphql", "init_graphql"}
+            and isinstance(call, ast.Call)
+            and call.func is attribute
         ):
-            root = attribute_root(node)
-            if root in module_imports:
-                mutated_modules.add(root)
-        if isinstance(node, ast.Attribute) and node.attr == "__dict__":
-            root = attribute_root(node)
-            if root in module_imports:
-                mutated_modules.add(root)
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in {
-                "setattr",
-                "delattr",
-            }:
-                if node.args and isinstance(node.args[0], ast.Name):
-                    if node.args[0].id in module_imports:
-                        mutated_modules.add(node.args[0].id)
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id == "vars"
-                and node.args
-                and isinstance(node.args[0], ast.Name)
-                and node.args[0].id in module_imports
-            ):
-                mutated_modules.add(node.args[0].id)
+            # Module values are mutable and callers may alias builtins setters.
+            # Trust only direct factory receivers; any other use may escape.
+            escaped_modules.add(node.id)
 
     for statement in tree.body:
         if (
@@ -119,7 +105,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 if (
                     alias.name == "graphql_desk"
                     and bindings.get(name) == 1
-                    and name not in mutated_modules
+                    and not escaped_modules
                 ):
                     module_aliases.add(name)
                     binding_lines[name] = statement.lineno

@@ -91,6 +91,15 @@ class EditorRefactorTests(unittest.TestCase):
             "q = desk.gql('x')\n",
             "import graphql_desk as desk\n"
             "setattr(desk, 'gql', other)\nq = desk.gql('x')\n",
+            "import builtins\nimport graphql_desk as desk\n"
+            "builtins.setattr(desk, 'gql', other)\nq = desk.gql('x')\n",
+            "from builtins import setattr as set_attr\n"
+            "import graphql_desk as desk\n"
+            "set_attr(desk, 'gql', other)\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\nmutate(desk)\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\nmutate((desk,))\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\nimport graphql_desk as api\n"
+            "mutate(api)\nq = desk.gql('x')\n",
             "import graphql_desk as desk\nmutate(desk.__dict__)\nq = desk.gql('x')\n",
             "import graphql_desk as desk\nfrom other import *\nq = desk.gql('x')\n",
         ):
