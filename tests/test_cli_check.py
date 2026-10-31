@@ -26,11 +26,18 @@ class CheckCLITests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def invoke(self, argv: list[str]) -> tuple[int, str, str]:
+    def invoke(
+        self, argv: list[str], *, github_actions: bool = False
+    ) -> tuple[int, str, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
-        with patch.object(Path, "cwd", return_value=self.root):
-            with redirect_stdout(stdout), redirect_stderr(stderr):
-                code = main(argv)
+        with patch.dict(os.environ, {"GITHUB_WORKSPACE": str(self.root)}):
+            if github_actions:
+                os.environ["GITHUB_ACTIONS"] = "true"
+            else:
+                os.environ.pop("GITHUB_ACTIONS", None)
+            with patch.object(Path, "cwd", return_value=self.root):
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    code = main(argv)
         return code, stdout.getvalue(), stderr.getvalue()
 
     def test_valid_document_and_import_inert_project(self) -> None:
@@ -192,7 +199,7 @@ class CheckCLITests(unittest.TestCase):
         self.assertEqual([item.code for item in diagnostics], ["schema-unavailable"])
         self.assertEqual([item.severity for item in diagnostics], ["error"])
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
-            code, stdout, stderr = self.invoke(["check"])
+            code, stdout, stderr = self.invoke(["check"], github_actions=True)
         self.assertEqual(code, 1)
         self.assertEqual(
             stdout, "::error::Schema contents or access could not be checked.\n"
@@ -216,7 +223,9 @@ class CheckCLITests(unittest.TestCase):
         )
         with patch("graphql_desk.cli.check", return_value=diagnostics):
             with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
-                code, stdout, _ = self.invoke(["check", "--level", "info"])
+                code, stdout, _ = self.invoke(
+                    ["check", "--level", "info"], github_actions=True
+                )
         self.assertEqual(code, 0)
         self.assertEqual(
             stdout,
@@ -231,7 +240,7 @@ class CheckCLITests(unittest.TestCase):
             encoding="utf-8",
         )
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
-            code, stdout, stderr = self.invoke(["check"])
+            code, stdout, stderr = self.invoke(["check"], github_actions=True)
         self.assertEqual(code, 1)
         self.assertIn(
             "::error file=operation.py,line=2,col=26,endLine=2,endColumn=31::",
@@ -257,7 +266,9 @@ class CheckCLITests(unittest.TestCase):
         )
 
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
-            code, stdout, stderr = self.invoke(["check", "--config", str(self.config)])
+            code, stdout, stderr = self.invoke(
+                ["check", "--config", str(self.config)], github_actions=True
+            )
 
         self.assertEqual(code, 1)
         self.assertEqual(stdout, "")
@@ -285,7 +296,9 @@ class CheckCLITests(unittest.TestCase):
             os.environ,
             {"GITHUB_ACTIONS": "true", "GITHUB_WORKSPACE": str(self.root)},
         ):
-            code, stdout, stderr = self.invoke(["check", "--config", str(config)])
+            code, stdout, stderr = self.invoke(
+                ["check", "--config", str(config)], github_actions=True
+            )
 
         self.assertEqual(code, 1)
         self.assertIn("::error file=packages/api/operation.py,line=2,col=26,", stdout)
@@ -302,7 +315,14 @@ class CheckCLITests(unittest.TestCase):
                 diagnostics = check(config=self.config)
             output.assert_not_called()
             code, stdout, stderr = self.invoke(
-                ["check", "--format", "json", "--annotations-output", "annotations.txt"]
+                [
+                    "check",
+                    "--format",
+                    "json",
+                    "--annotations-output",
+                    "annotations.txt",
+                ],
+                github_actions=True,
             )
         self.assertEqual(code, 1)
         self.assertEqual(stderr, "")
@@ -328,7 +348,8 @@ class CheckCLITests(unittest.TestCase):
         with patch("graphql_desk.cli.check", return_value=diagnostics):
             with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
                 code, stdout, stderr = self.invoke(
-                    ["check", "--level", "error", "--fail-on-warn"]
+                    ["check", "--level", "error", "--fail-on-warn"],
+                    github_actions=True,
                 )
         self.assertEqual(code, 1)
         self.assertEqual(stdout, "::error::visible error\n")
