@@ -29,6 +29,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
     import_module_aliases: set[str] = set()
     builtins_aliases: set[str] = set()
     builtin_import_aliases: set[str] = set()
+    dynamic_code_aliases = {"exec", "eval"}
     builtin_reflection_aliases: dict[str, set[str]] = {}
     binding_lines: dict[str, int] = {}
     # A factory must have a single static binding throughout the source. This
@@ -77,6 +78,8 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 name = alias.asname or alias.name
                 if node.module == "sys" and alias.name == "modules":
                     sys_modules_aliases.add(name)
+                elif node.module == "builtins" and alias.name in {"exec", "eval"}:
+                    dynamic_code_aliases.add(name)
                 elif node.module == "importlib" and alias.name == "import_module":
                     import_module_aliases.add(name)
                 elif node.module == "builtins" and alias.name == "__import__":
@@ -99,6 +102,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
         import_module_aliases,
         builtins_aliases,
         builtin_import_aliases,
+        dynamic_code_aliases,
     )
     while True:
         added_alias = False
@@ -112,6 +116,29 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 assignment_value = node.value
             elif isinstance(node, ast.NamedExpr):
                 targets, assignment_value = (node.target,), node.value
+            if isinstance(assignment_value, ast.Attribute):
+                if (
+                    assignment_value.attr in {"exec", "eval"}
+                    and isinstance(assignment_value.value, ast.Name)
+                    and assignment_value.value.id in builtins_aliases
+                ):
+                    for target in targets:
+                        names = (
+                            [
+                                item
+                                for item in ast.walk(target)
+                                if isinstance(item, ast.Name)
+                            ]
+                            if isinstance(target, (ast.Tuple, ast.List))
+                            else [target]
+                            if isinstance(target, ast.Name)
+                            else []
+                        )
+                        for target_name in names:
+                            if target_name.id not in dynamic_code_aliases:
+                                dynamic_code_aliases.add(target_name.id)
+                                added_alias = True
+                continue
             if not isinstance(assignment_value, ast.Name):
                 continue
             source_name = assignment_value.id
@@ -150,6 +177,15 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
     dynamic_module_access = False
     dynamic_namespace_access = False
     for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and (
+            isinstance(node.func, ast.Name)
+            and node.func.id in dynamic_code_aliases
+            or isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"exec", "eval"}
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in builtins_aliases
+        ):
+            return {}
         if isinstance(node, ast.Name) and node.id == "__builtins__":
             dynamic_module_access = True
         if (
