@@ -58,7 +58,7 @@ class FieldUsageOptions:
 
 
 class _Writes(ast.NodeVisitor):
-    """Bindings in this scope, excluding nested scopes and comprehensions."""
+    """Bindings here, excluding nested scopes and comprehension iteration targets."""
 
     def __init__(self) -> None:
         self.names: dict[str, int] = {}
@@ -101,7 +101,8 @@ class _Writes(ast.NodeVisitor):
         pass
 
     def visit_ListComp(self, node: ast.AST) -> None:
-        pass
+        for name in _ComprehensionWalrusWrites().collect(node):
+            self.add(name)
 
     visit_SetComp = visit_ListComp
     visit_DictComp = visit_ListComp
@@ -125,6 +126,30 @@ class _Writes(ast.NodeVisitor):
         if node.rest:
             self.add(node.rest)
         self.generic_visit(node)
+
+
+class _ComprehensionWalrusWrites(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def collect(self, node: ast.AST) -> set[str]:
+        self.visit(node)
+        return self.names
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.names.add(node.target.id)
+        self.visit(node.value)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        pass
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        pass
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        pass
 
 
 class _OuterWrites(ast.NodeVisitor):

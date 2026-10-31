@@ -219,6 +219,19 @@ class FieldUsageTests(unittest.TestCase):
         self.assertEqual([field for field, _ in found], ["user"])
         self.assertIn("user.email", found[0][1])
 
+    def test_comprehension_walrus_makes_method_name_local_not_captured(self) -> None:
+        source = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])\n'
+            + "            [(local_query := unrelated) for _ in range(1)]\n"
+        )
+        self.assertEqual(warnings(source), [])
+
     def test_function_local_class_methods_skip_unsupported_captures(self) -> None:
         result_capture = (
             PREFIX
