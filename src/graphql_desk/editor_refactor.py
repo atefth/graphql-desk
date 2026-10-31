@@ -23,6 +23,10 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
     initializers: set[str] = set()
     module_aliases: set[str] = set()
     module_imports: set[str] = set()
+    sys_aliases: set[str] = set()
+    sys_modules_aliases: set[str] = set()
+    importlib_aliases: set[str] = set()
+    import_module_aliases: set[str] = set()
     binding_lines: dict[str, int] = {}
     # A factory must have a single static binding throughout the source. This
     # deliberately rejects shadowing in nested scopes too, rather than guessing
@@ -56,11 +60,39 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 bound(alias.asname or alias.name.split(".")[0])
                 if alias.name == "graphql_desk":
                     module_imports.add(alias.asname or alias.name)
+                elif alias.name == "sys":
+                    sys_aliases.add(alias.asname or alias.name)
+                elif alias.name == "importlib":
+                    importlib_aliases.add(alias.asname or alias.name)
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name == "*":
                     return {}
                 bound(alias.asname or alias.name)
+                name = alias.asname or alias.name
+                if node.module == "sys" and alias.name == "modules":
+                    sys_modules_aliases.add(name)
+                elif node.module == "importlib" and alias.name == "import_module":
+                    import_module_aliases.add(name)
+
+    dynamic_module_access = False
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "modules"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in sys_aliases
+        ) or (isinstance(node, ast.Name) and node.id in sys_modules_aliases):
+            dynamic_module_access = True
+        if isinstance(node, ast.Call) and (
+            isinstance(node.func, ast.Name)
+            and node.func.id in import_module_aliases | {"__import__"}
+            or isinstance(node.func, ast.Attribute)
+            and node.func.attr == "import_module"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in importlib_aliases
+        ):
+            dynamic_module_access = True
 
     parents = {
         child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
@@ -106,6 +138,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                     alias.name == "graphql_desk"
                     and bindings.get(name) == 1
                     and not escaped_modules
+                    and not dynamic_module_access
                 ):
                     module_aliases.add(name)
                     binding_lines[name] = statement.lineno

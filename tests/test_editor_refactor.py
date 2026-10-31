@@ -101,6 +101,23 @@ class EditorRefactorTests(unittest.TestCase):
             "import graphql_desk as desk\nimport graphql_desk as api\n"
             "mutate(api)\nq = desk.gql('x')\n",
             "import graphql_desk as desk\nmutate(desk.__dict__)\nq = desk.gql('x')\n",
+            "import sys\nimport graphql_desk as desk\n"
+            "sys.modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "runtime.modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from sys import modules as registry\n"
+            "import graphql_desk as desk\n"
+            "registry['graphql_desk'].gql = replacement\nq = desk.gql('x')\n",
+            "import importlib as loader\nimport graphql_desk as desk\n"
+            "loader.import_module('graphql_desk').gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from importlib import import_module as load_module\n"
+            "import graphql_desk as desk\n"
+            "load_module('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
+            "import graphql_desk as desk\n"
+            "__import__('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
             "import graphql_desk as desk\nfrom other import *\nq = desk.gql('x')\n",
         ):
             with self.subTest(source=source):
