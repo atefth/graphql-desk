@@ -11,8 +11,9 @@ Each operation and fragment retains its project/schema identity, source module,
 mapped authored locations, variables/defaults, direct fragment spreads, and a
 SHA-256 hash of its printed definition truncated to 16 lowercase hex characters.
 Definition IDs include project, schema, kind, and name; repeated names receive
-stable numeric suffixes. Anonymous operations use the same collision-safe
-sequence. Documents rejected by fragment indexing are omitted from definitions
+stable numeric suffixes, with the originating call's source range breaking ties
+for otherwise identical definitions. Anonymous operations use the same
+collision-safe sequence. Documents rejected by fragment indexing are omitted from definitions
 and their diagnostics remain attached to the graph; a stale call/index mismatch
 is diagnosed and omitted. Conflicting fragment names
 within one project/schema receive diagnostics; a spread is retained by name and

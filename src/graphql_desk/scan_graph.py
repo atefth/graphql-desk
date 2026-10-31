@@ -164,16 +164,20 @@ def _definition_base(item: ScanDefinition) -> str:
 
 def _assign_ids(
     items: list[ScanDefinition],
+    contexts: Mapping[int, IndexedDocument],
 ) -> tuple[tuple[ScanDefinition, ...], dict[int, str]]:
     ordered = sorted(
         items,
         key=lambda item: (
+            item.project,
             item.schema_name,
             item.kind,
             item.name or "",
             item.module,
             tuple((loc.uri, loc.line, loc.column) for loc in item.locations),
             item.hash,
+            contexts[id(item)].call.range.start,
+            contexts[id(item)].call.range.end,
         ),
     )
     counts: dict[str, int] = defaultdict(int)
@@ -499,7 +503,7 @@ def build_scan_graph(
             ),
         )
     )
-    ordered_definitions, assigned_ids = _assign_ids(definitions)
+    ordered_definitions, assigned_ids = _assign_ids(definitions, definition_contexts)
     return ScanGraph(
         ordered_definitions,
         _module_facts(
