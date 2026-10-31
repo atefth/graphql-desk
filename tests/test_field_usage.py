@@ -433,6 +433,79 @@ class FieldUsageTests(unittest.TestCase):
             + "        result = execute(query, {})\n"
             + "        super().render_data(result)\n"
         )
+        module_mutator_alias = (
+            PREFIX
+            + "import builtins\n"
+            + "patch = builtins.delattr\n"
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + '            patch(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        destructured_mutator_alias = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + "            delete, backup = delattr, None\n"
+            + '            delete(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        rebound_default_mutator_alias_does_not_escape = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove(patch=delattr):\n"
+            + "            patch = harmless_patch\n"
+            + '            patch(BaseView, "render_data", replacement)\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        rebound_imported_mutator_alias_does_not_escape = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + "            from builtins import delattr as patch\n"
+            + "            patch = harmless_patch\n"
+            + '            patch(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        rebound_module_mutator_alias_does_not_escape = (
+            PREFIX
+            + "import builtins as bi\n"
+            + "bi = harmless_module\n"
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + '            bi.delattr(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
         unrelated_default_alias_does_not_escape = (
             PREFIX
             + "def unused(patch=delattr): pass\n"
@@ -472,9 +545,14 @@ class FieldUsageTests(unittest.TestCase):
         self.assertEqual(warnings(annotated_attribute_mutator_alias), [])
         self.assertEqual(warnings(default_mutator_alias), [])
         self.assertEqual(warnings(forward_mutator_alias), [])
+        self.assertEqual(warnings(module_mutator_alias), [])
+        self.assertEqual(warnings(destructured_mutator_alias), [])
         for source in (
             unrelated_default_alias_does_not_escape,
             shadowed_builtin_alias_does_not_escape,
+            rebound_default_mutator_alias_does_not_escape,
+            rebound_imported_mutator_alias_does_not_escape,
+            rebound_module_mutator_alias_does_not_escape,
         ):
             with self.subTest(source=source):
                 found = warnings(source)

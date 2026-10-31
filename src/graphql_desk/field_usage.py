@@ -898,11 +898,24 @@ class _Flow:
                 self.classes: list[ast.ClassDef] = []
 
             def visit_Assign(self, node: ast.Assign) -> None:
-                for target in node.targets:
+                def collect(target: ast.expr, value: ast.expr) -> None:
                     if isinstance(target, ast.Name):
-                        self.assignments.append((target.id, node.value))
-                    elif isinstance(target, ast.Attribute):
+                        self.assignments.append((target.id, value))
+                    elif (
+                        isinstance(target, (ast.Tuple, ast.List))
+                        and isinstance(value, (ast.Tuple, ast.List))
+                        and len(target.elts) == len(value.elts)
+                    ):
+                        for target_item, value_item in zip(
+                            target.elts, value.elts, strict=True
+                        ):
+                            collect(target_item, value_item)
+
+                for target in node.targets:
+                    if isinstance(target, ast.Attribute):
                         self.attribute_writes.append(target.value)
+                    else:
+                        collect(target, node.value)
                 self.generic_visit(node)
 
             def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
@@ -1035,6 +1048,7 @@ class _Flow:
                     if direct_mutator_expression(
                         default, inherited_aliases, inherited_modules
                     )
+                    and argument.arg not in writes.names
                 )
                 aliases.update(
                     argument.arg
@@ -1045,7 +1059,12 @@ class _Flow:
                     and direct_mutator_expression(
                         default, inherited_aliases, inherited_modules
                     )
+                    and argument.arg not in writes.names
                 )
+            if isinstance(node, ast.Module):
+                aliases.update(mutator_names - bound)
+                if "builtins" not in bound:
+                    modules.add("builtins")
             changed = True
             while changed:
                 before = len(aliases)
@@ -1055,10 +1074,13 @@ class _Flow:
                     if direct_mutator_expression(expression, aliases, modules)
                 )
                 changed = len(aliases) != before
-            if isinstance(node, ast.Module):
-                aliases.update(mutator_names - bound)
-                if "builtins" not in bound:
-                    modules.add("builtins")
+            last_assignments = {
+                name: expression for name, expression in bindings.assignments
+            }
+            for name, expression in last_assignments.items():
+                if not direct_mutator_expression(expression, aliases, modules):
+                    aliases.discard(name)
+                modules.discard(name)
             for call in bindings.calls:
                 called_function = call.func
                 is_mutator = (
