@@ -84,8 +84,45 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 elif node.module == "builtins" and alias.name in {"getattr", "vars"}:
                     builtin_reflection_aliases[name] = alias.name
 
+    parents = {
+        child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
+    }
+    while True:
+        added_alias = False
+        for node in ast.walk(tree):
+            targets: tuple[ast.expr, ...] = ()
+            assignment_value: ast.expr | None = None
+            if isinstance(node, ast.Assign):
+                targets, assignment_value = tuple(node.targets), node.value
+            elif isinstance(node, ast.AnnAssign):
+                targets = (node.target,)
+                assignment_value = node.value
+            elif isinstance(node, ast.NamedExpr):
+                targets, assignment_value = (node.target,), node.value
+            if (
+                not isinstance(assignment_value, ast.Name)
+                or assignment_value.id not in sys_aliases
+            ):
+                continue
+            for target in targets:
+                names = (
+                    [item for item in ast.walk(target) if isinstance(item, ast.Name)]
+                    if isinstance(target, (ast.Tuple, ast.List))
+                    else [target]
+                    if isinstance(target, ast.Name)
+                    else []
+                )
+                for target_name in names:
+                    if target_name.id not in sys_aliases:
+                        sys_aliases.add(target_name.id)
+                        added_alias = True
+        if not added_alias:
+            break
+
     dynamic_module_access = False
     for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "__builtins__":
+            dynamic_module_access = True
         if (
             isinstance(node, ast.Attribute)
             and node.attr in {"modules", "__dict__"}
@@ -136,9 +173,6 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
         ):
             dynamic_module_access = True
 
-    parents = {
-        child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
-    }
     escaped_modules: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Name) or node.id not in module_imports:

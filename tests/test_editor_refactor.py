@@ -104,6 +104,16 @@ class EditorRefactorTests(unittest.TestCase):
             "import sys\nimport graphql_desk as desk\n"
             "sys.modules['graphql_desk'].gql = replacement\n"
             "q = desk.gql('x')\n",
+            "import sys\nruntime = sys\nimport graphql_desk as desk\n"
+            "runtime.modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import sys\nruntime = sys\nregistry = runtime\n"
+            "import graphql_desk as desk\n"
+            "registry.modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import graphql_desk as desk\n"
+            "__builtins__['__import__']('graphql_desk').gql = replacement\n"
+            "q = desk.gql('x')\n",
             "import sys as runtime\nimport graphql_desk as desk\n"
             "runtime.modules['graphql_desk'].gql = replacement\n"
             "q = desk.gql('x')\n",
