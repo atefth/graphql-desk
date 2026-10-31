@@ -46,7 +46,7 @@ def runtime_inventory(root: str) -> list[dict[str, str]]:
 if __name__ == "__main__":
     result = runtime_inventory("graphql-desk")
     expected = [
-        {"name": "graphql-core", "version": "3.3.0", "license": "MIT"},
+        {"name": "graphql-core", "version": "3.3.1", "license": "MIT"},
         {"name": "typing-extensions", "version": "4.16.0", "license": "PSF-2.0"},
     ]
     if sys.version_info < (3, 11):
