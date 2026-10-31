@@ -19,6 +19,7 @@ Precedence: command options override their corresponding project keys for that c
 | `cache_output` | Absent; required if optional persistent cache is enabled | `tadaTurboLocation`; optional acceleration only |
 | `template` | Absent; additional imported callable identity to recognize alongside supported graphql factories; resolution must not execute imports | Additional authoring callable, retained in Python form |
 | `track_field_usage` | `true` | `trackFieldUsage` |
+| `reserved_keys` | `[]`; additional GraphQL field names exempt from same-file field-use warnings, alongside `id`, `_id`, `__typename` | `reservedKeys` |
 | `check_colocated_fragments` | `true` | `shouldCheckForColocatedFragments` |
 | `client_directives` | `[]`; names without `@`; suppress schema-unknown errors only, never fabricate directive execution or selection semantics | `clientDirectives` |
 | `schema_refresh_interval` | `0` seconds (explicit refresh only); positive seconds enables remote polling after workspace trust; negative/nonfinite values rejected | Remote schema update capability |

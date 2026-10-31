@@ -47,6 +47,7 @@ _PROJECT_KEYS = _SCHEMA_KEYS | {
     "cache_enabled",
     "template",
     "track_field_usage",
+    "reserved_keys",
     "check_colocated_fragments",
     "client_directives",
     "schema_refresh_interval",
@@ -140,6 +141,7 @@ class ProjectConfig:
     source_scope: Literal["project", "explicit_cli"] = field(
         default="project", kw_only=True
     )
+    reserved_keys: tuple[str, ...] = field(default=(), kw_only=True)
 
 
 def _table(value: object, label: str) -> dict[str, object]:
@@ -496,6 +498,9 @@ def parse_project_settings(
     directives = _strings(table.get("client_directives", []), "client_directives")
     if any(not _NAME.fullmatch(name) for name in directives):
         raise ValueError("client_directives must contain GraphQL names without @")
+    reserved_keys = _strings(table.get("reserved_keys", []), "reserved_keys")
+    if any(not _NAME.fullmatch(name) for name in reserved_keys):
+        raise ValueError("reserved_keys must contain GraphQL field names")
     roots = tuple(
         dict.fromkeys(
             _path(value, root, "source_roots")
@@ -551,6 +556,7 @@ def parse_project_settings(
         if "template" in table
         else None,
         track_field_usage=_boolean(table, "track_field_usage", True),
+        reserved_keys=reserved_keys,
         check_colocated_fragments=_boolean(table, "check_colocated_fragments", True),
         client_directives=directives,
         schema_refresh_interval=interval,

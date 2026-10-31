@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 from .config import ScalarMapping
 from .editor_refactor import extraction_contexts
+from .field_usage import FieldUsageOptions, field_usage_diagnostics
 from .fragments import (
     DefinitionFact,
     FragmentIndex,
@@ -138,6 +139,7 @@ def analyze_editor_snapshot(
     resolver: IncrementalResolver | None = None,
     external_mapping_modules: tuple[ModuleSnapshot, ...] = (),
     colocated_fragment_checks: Mapping[str, bool] | None = None,
+    field_usage_options: Mapping[str, FieldUsageOptions] | None = None,
 ) -> dict[str, object]:
     """Resolve supplied facts without reading files or executing project Python.
 
@@ -151,6 +153,7 @@ def analyze_editor_snapshot(
         resolver=resolver,
         external_mapping_modules=external_mapping_modules,
         colocated_fragment_checks=colocated_fragment_checks,
+        field_usage_options=field_usage_options,
     ).response
 
 
@@ -186,6 +189,7 @@ def analyze_editor_snapshot_details(
     resolver: IncrementalResolver | None = None,
     external_mapping_modules: tuple[ModuleSnapshot, ...] = (),
     colocated_fragment_checks: Mapping[str, bool] | None = None,
+    field_usage_options: Mapping[str, FieldUsageOptions] | None = None,
 ) -> EditorAnalysis:
     payload = _object(
         request, {"request_id", "modules", "bindings", "schemas"}, "request"
@@ -360,6 +364,9 @@ def analyze_editor_snapshot_details(
             }
         )
     index = index_fragments(sources, schemas=schemas)
+    field_diagnostics = field_usage_diagnostics(
+        tuple(modules), index, schemas, field_usage_options
+    )
     colocated_diagnostics = tuple(
         diagnostic
         for diagnostic in unused_colocated_fragment_diagnostics(sources, index)
@@ -666,6 +673,7 @@ def analyze_editor_snapshot_details(
             editor_diagnostic(item, snapshots) for item in index.diagnostics
         ]
         + [editor_diagnostic(item, snapshots) for item in colocated_diagnostics]
+        + [editor_diagnostic(item, snapshots) for item in field_diagnostics]
         + [
             editor_diagnostic(item, snapshots)
             for item in persisted_collection.diagnostics
