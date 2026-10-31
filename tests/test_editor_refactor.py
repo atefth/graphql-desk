@@ -107,6 +107,15 @@ class EditorRefactorTests(unittest.TestCase):
             "import sys as runtime\nimport graphql_desk as desk\n"
             "runtime.modules['graphql_desk'].gql = replacement\n"
             "q = desk.gql('x')\n",
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "getattr(runtime, 'modules')['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "vars(runtime)['modules']['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "runtime.__dict__['modules']['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
             "from sys import modules as registry\n"
             "import graphql_desk as desk\n"
             "registry['graphql_desk'].gql = replacement\nq = desk.gql('x')\n",
@@ -118,6 +127,12 @@ class EditorRefactorTests(unittest.TestCase):
             "load_module('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
             "import graphql_desk as desk\n"
             "__import__('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
+            "from builtins import __import__ as load\n"
+            "import graphql_desk as desk\n"
+            "load('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
+            "import builtins as b\nimport graphql_desk as desk\n"
+            "b.__import__('graphql_desk').gql = replacement\n"
+            "q = desk.gql('x')\n",
             "import graphql_desk as desk\nfrom other import *\nq = desk.gql('x')\n",
         ):
             with self.subTest(source=source):

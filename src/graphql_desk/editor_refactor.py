@@ -27,6 +27,8 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
     sys_modules_aliases: set[str] = set()
     importlib_aliases: set[str] = set()
     import_module_aliases: set[str] = set()
+    builtins_aliases: set[str] = set()
+    builtin_import_aliases: set[str] = set()
     binding_lines: dict[str, int] = {}
     # A factory must have a single static binding throughout the source. This
     # deliberately rejects shadowing in nested scopes too, rather than guessing
@@ -64,6 +66,8 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                     sys_aliases.add(alias.asname or alias.name)
                 elif alias.name == "importlib":
                     importlib_aliases.add(alias.asname or alias.name)
+                elif alias.name == "builtins":
+                    builtins_aliases.add(alias.asname or alias.name)
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name == "*":
@@ -74,23 +78,39 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                     sys_modules_aliases.add(name)
                 elif node.module == "importlib" and alias.name == "import_module":
                     import_module_aliases.add(name)
+                elif node.module == "builtins" and alias.name == "__import__":
+                    builtin_import_aliases.add(name)
 
     dynamic_module_access = False
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
-            and node.attr == "modules"
+            and node.attr in {"modules", "__dict__"}
             and isinstance(node.value, ast.Name)
             and node.value.id in sys_aliases
         ) or (isinstance(node, ast.Name) and node.id in sys_modules_aliases):
             dynamic_module_access = True
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"getattr", "vars"}
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in sys_aliases
+        ):
+            dynamic_module_access = True
         if isinstance(node, ast.Call) and (
             isinstance(node.func, ast.Name)
-            and node.func.id in import_module_aliases | {"__import__"}
+            and node.func.id
+            in import_module_aliases | builtin_import_aliases | {"__import__"}
             or isinstance(node.func, ast.Attribute)
             and node.func.attr == "import_module"
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id in importlib_aliases
+            or isinstance(node.func, ast.Attribute)
+            and node.func.attr == "__import__"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in builtins_aliases
         ):
             dynamic_module_access = True
 
