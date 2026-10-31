@@ -150,6 +150,23 @@ class EditorRefactorTests(unittest.TestCase):
             "import graphql_desk as desk\n"
             "b.vars()['runtime'].modules['graphql_desk'].gql = replacement\n"
             "q = desk.gql('x')\n",
+            "from builtins import globals as get_globals\n"
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "get_globals()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import builtins as b\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "b.globals()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import builtins\nbi = builtins\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "bi.locals()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "from builtins import locals as get_locals\n"
+            "namespace = get_locals\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "namespace()['runtime'].modules['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
             "import sys as runtime\nimport graphql_desk as desk\n"
             "runtime.__dict__['modules']['graphql_desk'].gql = replacement\n"
             "q = desk.gql('x')\n",

@@ -43,7 +43,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id in {"exec", "eval", "globals"}
+            and node.func.id in {"exec", "eval"}
         ):
             return {}
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
@@ -81,7 +81,12 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                     import_module_aliases.add(name)
                 elif node.module == "builtins" and alias.name == "__import__":
                     builtin_import_aliases.add(name)
-                elif node.module == "builtins" and alias.name in {"getattr", "vars"}:
+                elif node.module == "builtins" and alias.name in {
+                    "getattr",
+                    "vars",
+                    "globals",
+                    "locals",
+                }:
                     builtin_reflection_aliases.setdefault(name, set()).add(alias.name)
 
     parents = {
@@ -143,6 +148,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             break
 
     dynamic_module_access = False
+    dynamic_namespace_access = False
     for node in ast.walk(tree):
         if isinstance(node, ast.Name) and node.id == "__builtins__":
             dynamic_module_access = True
@@ -158,13 +164,13 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             ambiguous_reflection = False
             if isinstance(node.func, ast.Name):
                 reflection_name = node.func.id
-                if reflection_name not in {"getattr", "vars"}:
+                if reflection_name not in {"getattr", "vars", "globals", "locals"}:
                     kinds = builtin_reflection_aliases.get(reflection_name, set())
                     ambiguous_reflection = len(kinds) > 1
                     reflection_name = next(iter(kinds)) if len(kinds) == 1 else None
             elif (
                 isinstance(node.func, ast.Attribute)
-                and node.func.attr in {"getattr", "vars"}
+                and node.func.attr in {"getattr", "vars", "globals", "locals"}
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id in builtins_aliases
             ):
@@ -173,6 +179,8 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 reflection_name = None
             if reflection_name == "vars" and not node.args:
                 dynamic_module_access = True
+            elif reflection_name in {"globals", "locals"}:
+                dynamic_namespace_access = True
             elif (
                 reflection_name is not None
                 and node.args
@@ -181,7 +189,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             ):
                 dynamic_module_access = True
             if ambiguous_reflection:
-                dynamic_module_access = True
+                dynamic_namespace_access = True
         if isinstance(node, ast.Call) and (
             isinstance(node.func, ast.Name)
             and node.func.id
@@ -194,12 +202,11 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             and node.func.attr == "__import__"
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id in builtins_aliases
-            or isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"getattr", "vars"}
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id in builtins_aliases
         ):
             dynamic_module_access = True
+
+    if dynamic_namespace_access:
+        return {}
 
     escaped_modules: set[str] = set()
     for node in ast.walk(tree):
