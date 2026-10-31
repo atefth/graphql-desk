@@ -35,13 +35,13 @@ async function run() {
     "partial.py": 'from graphql_desk import gql\nq=gql("{ user { na")\n',
     "selected.py": 'outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql("{ user { name @local ...Card } }",[card])\n',
     "fragments.py": 'from graphql_desk import gql\ncard=gql("fragment Card on User { id }")\n',
-    "extract-branch.py": branchFixture,
+    "extract_branch.py": branchFixture,
   };
   for (const [name, text] of Object.entries(fixtures)) await fs.writeFile(path.join(workspace, name), text, { encoding: "utf8", flag: "wx" });
   const documents = new Map();
   for (const name of Object.keys(fixtures)) {
     // Index it on disk before activation, but open it only after the outline checks.
-    if (name === "extract-branch.py") continue;
+    if (name === "extract_branch.py") continue;
     let document = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(workspace, name)));
     if (name.endsWith(".py") && document.languageId !== "python") document = await vscode.languages.setTextDocumentLanguage(document, "python");
     documents.set(name, document);
@@ -89,10 +89,10 @@ async function run() {
   assert.match(extractDoc.getText(), /\.\.\.UserFields/);
   await vscode.commands.executeCommand("undo");
   assert.equal(extractDoc.getText(), fixtures["extract.py"]);
-  const branchPath = path.join(workspace, "extract-branch.py");
+  const branchPath = path.join(workspace, "extract_branch.py");
   let branchDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(branchPath));
   if (branchDoc.languageId !== "python") branchDoc = await vscode.languages.setTextDocumentLanguage(branchDoc, "python");
-  documents.set("extract-branch.py", branchDoc);
+  documents.set("extract_branch.py", branchDoc);
   await vscode.window.showTextDocument(branchDoc);
   await until(() => documentSymbols(branchDoc), values => values.some(item => item.name === "ExtractBranch"),
     "Indexed nested-suite operation outline symbol");
