@@ -731,6 +731,24 @@ test("extraction leaves leading Python comments attached to the original query",
   assert.deepEqual(bundle(updated).response.diagnostics, []);
 });
 
+test("extraction in a function suite preserves indentation, comments and CRLF", async () => {
+  const source = "# 😀\r\nfrom graphql_desk import gql\r\ndef read():\r\n    # local query\r\n    query: object = gql('query Read { user { id name } }')\r\n";
+  const value = bundle(source), start = source.indexOf("id name");
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value),
+    { start, end: start + "id name".length });
+  assert.equal(plan.length, 2);
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+  assert.match(updated, /fragments=\[gql\(source="fragment UserFields on User/);
+  assert.match(updated, /\r\n    # local query\r\n    query: object = gql\(.*fragments=\[gql\(source=/);
+  const refreshed = bundle(updated);
+  assert.deepEqual(refreshed.response.diagnostics, []);
+  assert.equal(refreshed.response.calls.length, 2);
+  assert.equal(refreshed.response.calls[0].fragments.length, 1);
+  assert.equal(refreshed.response.calls[1].index.primary_fragment.name, "UserFields");
+  assert.equal(updated.split("\n").filter(line => line && !line.endsWith("\r")).length, 0);
+});
+
 test("extraction rejects partial, shared, escaped, invalid and stale selections", async () => {
   const cases = [
     ["from graphql_desk import gql\nq=gql('query { user { name id } }')", "ame id"],
@@ -738,7 +756,6 @@ test("extraction rejects partial, shared, escaped, invalid and stale selections"
     ["from graphql_desk import gql\nq=gql('query { user { na\\u006de } }')", "na\\u006de"],
     ["from graphql_desk import gql\nq=gql('query { user { missing } }')", "missing"],
     ["from graphql_desk import gql\nq=gql('query { user { ...Card } } fragment Card on User { id }')", "user { ...Card }"],
-    ["from graphql_desk import gql\ndef read():\n    q=gql('query { user { name } }')", "name"],
   ];
   for (const [source, selected] of cases) {
     const value = bundle(source), start = source.indexOf(selected);

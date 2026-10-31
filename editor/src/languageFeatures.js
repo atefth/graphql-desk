@@ -510,20 +510,23 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
         context.statement_start > callRange.start || context.fragment_insertion < callRange.start ||
         context.fragment_insertion > callRange.end || typeof context.indent !== "string" ||
         !/^[ \t]*$/.test(context.indent) || !["\n", "\r", "\r\n"].includes(context.newline) ||
+        !["module", "function"].includes(context.scope) ||
         !/^[_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*$/.test(context.factory) ||
         !/^[_A-Za-z][_0-9A-Za-z]*$/.test(binding)) continue;
+    const fragmentCall = `${context.factory}(source=${JSON.stringify(fragment)}, fragments=[${references.join(", ")}])`;
+    const compositionValue = context.scope === "function" ? fragmentCall : binding;
     const additions = {
-      new: `, fragments=[${binding}]`, new_trailing: ` fragments=[${binding}]`, populated: `${binding}, `,
-      empty_list: binding, empty_tuple: `${binding},`,
+      new: `, fragments=[${compositionValue}]`, new_trailing: ` fragments=[${compositionValue}]`, populated: `${compositionValue}, `,
+      empty_list: compositionValue, empty_tuple: `${compositionValue},`,
     };
     const composition = additions[context.fragment_mode];
     if (!composition || (context.fragment_insertion >= host.start && context.fragment_insertion <= host.end)) continue;
     const changes = [
       { range: host, replacement: `...${name}` },
       { range: { start: context.fragment_insertion, end: context.fragment_insertion }, replacement: composition },
-      { range: { start: context.statement_start, end: context.statement_start },
-        replacement: `${context.indent}${binding} = ${context.factory}(source=${JSON.stringify(fragment)}, fragments=[${references.join(", ")}])${context.newline}` },
     ];
+    if (context.scope === "module") changes.push({ range: { start: context.statement_start, end: context.statement_start },
+      replacement: `${context.indent}${binding} = ${fragmentCall}${context.newline}` });
     plans.push(changes.map(item => ({ ...item, module: call.identity.module, sourceText: snapshot.text,
       positionRange: { start: positionAt(snapshot.text, item.range.start), end: positionAt(snapshot.text, item.range.end) } })));
   }
