@@ -177,6 +177,11 @@ class EditorRefactorTests(unittest.TestCase):
             "import graphql_desk as desk\n"
             "lookup(runtime, 'modules')['graphql_desk'].gql = replacement\n"
             "q = desk.gql('x')\n",
+            "from builtins import getattr as lookup\n"
+            "from builtins import vars as lookup\n"
+            "import sys as runtime\nimport graphql_desk as desk\n"
+            "lookup(runtime)['modules']['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
             "import builtins\nbi = builtins\nimport graphql_desk as desk\n"
             "bi.__import__('graphql_desk').gql = replacement\n"
             "q = desk.gql('x')\n",

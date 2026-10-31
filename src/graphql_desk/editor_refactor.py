@@ -155,10 +155,12 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             dynamic_module_access = True
         if isinstance(node, ast.Call):
             reflection_name: str | None = None
+            ambiguous_reflection = False
             if isinstance(node.func, ast.Name):
                 reflection_name = node.func.id
                 if reflection_name not in {"getattr", "vars"}:
                     kinds = builtin_reflection_aliases.get(reflection_name, set())
+                    ambiguous_reflection = len(kinds) > 1
                     reflection_name = next(iter(kinds)) if len(kinds) == 1 else None
             elif (
                 isinstance(node.func, ast.Attribute)
@@ -177,6 +179,8 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 and isinstance(node.args[0], ast.Name)
                 and node.args[0].id in sys_aliases
             ):
+                dynamic_module_access = True
+            if ambiguous_reflection:
                 dynamic_module_access = True
         if isinstance(node, ast.Call) and (
             isinstance(node.func, ast.Name)
