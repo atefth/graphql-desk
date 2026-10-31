@@ -31,6 +31,7 @@ async function run() {
     "recovery.py": ["# 😀", "from graphql_desk import gql", String.raw`q=gql("query Read { user(id: \"m\u0061😀\") { name`].join("\r\n"),
     "outline.py": "from graphql_desk import gql\nq=gql('query Main { user { id } }')\n",
     "extract.py": "from graphql_desk import gql\nq=gql('query Extract { user { id name } }')\n",
+    "extract-branch.py": ["# 😀", "from graphql_desk import gql", "def read(enabled):", "    if enabled:", "        # query note", "        query = gql('query ExtractBranch { user { id name } }')", ""].join("\r\n"),
     "partial.py": 'from graphql_desk import gql\nq=gql("{ user { na")\n',
     "selected.py": 'outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql("{ user { name @local ...Card } }",[card])\n',
     "fragments.py": 'from graphql_desk import gql\ncard=gql("fragment Card on User { id }")\n',
@@ -85,6 +86,20 @@ async function run() {
   assert.match(extractDoc.getText(), /\.\.\.UserFields/);
   await vscode.commands.executeCommand("undo");
   assert.equal(extractDoc.getText(), fixtures["extract.py"]);
+  const branchDoc = documents.get("extract-branch.py");
+  await vscode.window.showTextDocument(branchDoc);
+  const branchStart = branchDoc.getText().indexOf("id name");
+  const branchRange = new vscode.Range(branchDoc.positionAt(branchStart), branchDoc.positionAt(branchStart + 7));
+  const branchActions = await until(
+    () => vscode.commands.executeCommand("vscode.executeCodeActionProvider", branchDoc.uri, branchRange),
+    values => Array.isArray(values) && values.some(item => item.title === "Extract GraphQL fragment"),
+    "Activated nested-suite extraction code action",
+  );
+  const branchAction = branchActions.find(item => item.title === "Extract GraphQL fragment");
+  assert.equal(await vscode.commands.executeCommand(branchAction.command.command, ...branchAction.command.arguments), true);
+  assert.match(branchDoc.getText(), /if enabled:\r\n        # query note\r\n        query = gql\(.*fragments=\[gql\(source=/);
+  await vscode.commands.executeCommand("undo");
+  assert.equal(branchDoc.getText(), fixtures["extract-branch.py"]);
   const diagnostics = document => vscode.languages.getDiagnostics(document.uri).filter(item => item.source === "GraphQL Desk");
   const main = documents.get("main.py");
   await vscode.window.showTextDocument(main);
