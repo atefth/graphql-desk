@@ -293,6 +293,8 @@ class EditorRefactorTests(unittest.TestCase):
             "from graphql_desk import gql\nrunner = bi.eval\n"
             "runner('gql')\nq = gql('x')\n",
             "from graphql_desk import gql\nglobals()['gql'] = custom\nq = gql('x')\n",
+            "from graphql_desk import gql\n"
+            "__builtins__['exec']('gql = custom')\nq = gql('x')\n",
             "q = gql('x')\nfrom graphql_desk import gql\n",
             "from graphql_desk import init_graphql as init\n"
             "q = f('x')\nf = init('s')\n",

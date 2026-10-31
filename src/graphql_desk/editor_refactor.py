@@ -187,7 +187,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
         ):
             return {}
         if isinstance(node, ast.Name) and node.id == "__builtins__":
-            dynamic_module_access = True
+            dynamic_namespace_access = True
         if (
             isinstance(node, ast.Attribute)
             and node.attr in {"modules", "__dict__"}
