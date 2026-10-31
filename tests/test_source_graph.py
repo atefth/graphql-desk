@@ -12,6 +12,7 @@ from graphql_desk.source_graph import (
     ModuleSnapshot,
     ProjectBindings,
     ProjectSources,
+    resolve_module_imports,
     resolve_parse_sources,
     resolve_project,
     resolve_type_symbols,
@@ -27,6 +28,49 @@ def module(
 
 
 class SourceGraphTests(unittest.TestCase):
+    def test_module_import_edges_cover_packages_relative_imports_and_cycles(
+        self,
+    ) -> None:
+        snapshots = (
+            module("main", "import pkg.a\n"),
+            module("pkg", "from . import a\n", package=True),
+            module("pkg.a", "from . import b\n"),
+            module("pkg.b", "from . import a\n"),
+            module("isolated", "import os\n"),
+        )
+        edges = resolve_module_imports(snapshots)
+        self.assertEqual(
+            {(edge.importer.module, edge.imported.module) for edge in edges},
+            {
+                ("main", "pkg"),
+                ("main", "pkg.a"),
+                ("pkg", "pkg.a"),
+                ("pkg.a", "pkg"),
+                ("pkg.a", "pkg.b"),
+                ("pkg.b", "pkg"),
+                ("pkg.b", "pkg.a"),
+            },
+        )
+        self.assertEqual(edges, resolve_module_imports(tuple(reversed(snapshots))))
+
+    def test_self_import_is_explicit_but_package_prefix_is_not_self_edge(self) -> None:
+        snapshots = (
+            module("selfmod", "import selfmod\n"),
+            module("pkg.selfmod", "from .selfmod import x\n"),
+            module("pkg", "from . import child\n", package=True),
+            module("pkg.child", "pass\n"),
+        )
+        edges = resolve_module_imports(snapshots)
+        self.assertEqual(
+            {(edge.importer.module, edge.imported.module) for edge in edges},
+            {
+                ("selfmod", "selfmod"),
+                ("pkg.selfmod", "pkg.selfmod"),
+                ("pkg.selfmod", "pkg"),
+                ("pkg", "pkg.child"),
+            },
+        )
+
     @unittest.skipUnless(sys.version_info >= (3, 12), "PEP 695 requires Python3.12")
     def test_captured_non_generic_pep695_type_aliases(self) -> None:
         models = module(

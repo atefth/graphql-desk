@@ -108,6 +108,14 @@ class DocumentImport:
 
 
 @dataclass(frozen=True)
+class ModuleImport:
+    """A statically named import edge between supplied project modules."""
+
+    importer: ModuleDependency
+    imported: ModuleDependency
+
+
+@dataclass(frozen=True)
 class ResolvedCall:
     module: ModuleDependency
     range: Span
@@ -2227,6 +2235,84 @@ def resolve_parse_sources(
         if not graph.failed_modules.intersection(call.dependencies)
     )
     return ParseSources(current, tuple(graph.diagnostics))
+
+
+def resolve_module_imports(
+    modules: tuple[ModuleSnapshot, ...],
+) -> tuple[ModuleImport, ...]:
+    """Resolve static import edges to supplied local modules without execution."""
+    snapshots: dict[tuple[str, str], ModuleSnapshot] = {}
+    for snapshot in modules:
+        key = (snapshot.project, snapshot.module)
+        if key in snapshots:
+            raise ValueError("Duplicate project module identity")
+        snapshots[key] = snapshot
+    dependencies = {
+        key: ModuleDependency(item.project, item.module, item.uri, item.version)
+        for key, item in snapshots.items()
+    }
+    edges: set[ModuleImport] = set()
+
+    def add_chain(
+        project: str,
+        name: str,
+        importer: ModuleDependency,
+        *,
+        include_self: bool = False,
+    ) -> None:
+        parts = name.split(".")
+        for index in range(1, len(parts) + 1):
+            target = ".".join(parts[:index])
+            snapshot = snapshots.get((project, target))
+            if snapshot is not None and (index == len(parts) or snapshot.is_package):
+                imported = dependencies[(project, target)]
+                if imported != importer or (include_self and target == name):
+                    edges.add(ModuleImport(importer, imported))
+
+    for snapshot in modules:
+        parsed = _parse(snapshot)
+        if parsed.tree is None:
+            continue
+        module = _Module(snapshot, parsed)
+        for node in ast.walk(module.tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    add_chain(
+                        snapshot.project,
+                        alias.name,
+                        module.identity,
+                        include_self=alias.name == snapshot.module,
+                    )
+            elif isinstance(node, ast.ImportFrom):
+                base = module.import_module(node)
+                if not base:
+                    continue
+                add_chain(
+                    snapshot.project,
+                    base,
+                    module.identity,
+                    include_self=node.module is not None and base == snapshot.module,
+                )
+                for alias in node.names:
+                    if alias.name != "*":
+                        add_chain(
+                            snapshot.project,
+                            f"{base}.{alias.name}",
+                            module.identity,
+                            include_self=f"{base}.{alias.name}" == snapshot.module,
+                        )
+    return tuple(
+        sorted(
+            edges,
+            key=lambda item: (
+                item.importer.project,
+                item.importer.module,
+                item.imported.module,
+                item.imported.uri,
+                item.imported.version,
+            ),
+        )
+    )
 
 
 def resolve_project(
