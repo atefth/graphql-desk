@@ -86,6 +86,9 @@ class CheckDiagnostic:
     schema: str | None = None
     line: int | None = None
     column: int | None = None
+    file: str | None = None
+    end_line: int | None = None
+    end_column: int | None = None
 
 
 _WARNING_CODES = frozenset(
@@ -105,17 +108,29 @@ _WARNING_CODES = frozenset(
 def _check_diagnostic(
     diagnostic: GraphDiagnostic,
     source_texts: Mapping[tuple[str, str, str, int], str],
+    source_files: Mapping[tuple[str, str, str, int], str],
 ) -> CheckDiagnostic:
-    source = source_texts.get(
-        (
-            diagnostic.module.project,
-            diagnostic.module.module,
-            diagnostic.module.uri,
-            diagnostic.module.version,
-        ),
-        "",
+    identity = (
+        diagnostic.module.project,
+        diagnostic.module.module,
+        diagnostic.module.uri,
+        diagnostic.module.version,
     )
+    source = source_texts.get(identity, "")
     before = source[: diagnostic.range.start]
+    end_position = diagnostic.range.end - 1
+    if (
+        diagnostic.range.end > diagnostic.range.start
+        and source[end_position : end_position + 1] == "\n"
+    ):
+        end_position -= 1
+        if source[end_position : end_position + 1] == "\r":
+            end_position -= 1
+    end_line = end_column = None
+    if end_position >= diagnostic.range.start:
+        through_end = source[: end_position + 1]
+        end_line = through_end.count("\n") + 1
+        end_column = len(through_end.rsplit("\n", 1)[-1].removesuffix("\r"))
     return CheckDiagnostic(
         "warn" if diagnostic.code in _WARNING_CODES else "error",
         diagnostic.code,
@@ -124,6 +139,9 @@ def _check_diagnostic(
         diagnostic.range,
         line=before.count("\n") + 1,
         column=len(before.rsplit("\n", 1)[-1].removesuffix("\r")) + 1,
+        file=source_files.get(identity),
+        end_line=end_line,
+        end_column=end_column,
     )
 
 
@@ -363,6 +381,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Return failure when warnings occur",
     )
+    check_parser.add_argument(
+        "--format", choices=("text", "json"), default="text", help="Output format"
+    )
+    check_parser.add_argument(
+        "--annotations-output",
+        metavar="PATH",
+        help="Write GitHub Actions annotations to a separate file",
+    )
     check_parser.add_argument("--artifact", help="Verify a GraphQL Desk wheel")
     return parser
 
@@ -476,9 +502,19 @@ def check(
         (item.project, item.module, item.uri, item.version): item.source
         for item in modules
     }
-    diagnostics = [
-        _check_diagnostic(item, source_texts) for item in sources.diagnostics
-    ]
+    project_root = project_config.root.resolve()
+    source_files: dict[tuple[str, str, str, int], str] = {}
+    for source in files:
+        try:
+            relative = source.path.resolve().relative_to(project_root).as_posix()
+        except ValueError:
+            continue
+        source_files[(project_id, source.module, source.path.as_uri(), 1)] = relative
+
+    def check_diagnostic(item: GraphDiagnostic) -> CheckDiagnostic:
+        return _check_diagnostic(item, source_texts, source_files)
+
+    diagnostics = [check_diagnostic(item) for item in sources.diagnostics]
     schema_contexts: dict[tuple[str, str | None], SchemaContext] = {}
     for schema_config in selected_schemas:
         try:
@@ -527,15 +563,13 @@ def check(
     )
     try:
         index = index_fragments(selected_sources, schemas=schema_contexts)
+        diagnostics.extend(check_diagnostic(item) for item in index.diagnostics)
         diagnostics.extend(
-            _check_diagnostic(item, source_texts) for item in index.diagnostics
-        )
-        diagnostics.extend(
-            _check_diagnostic(item, source_texts)
+            check_diagnostic(item)
             for item in collect_persisted_manifests(selected_sources, index).diagnostics
         )
         diagnostics.extend(
-            _check_diagnostic(item, source_texts)
+            check_diagnostic(item)
             for item in field_usage_diagnostics(
                 modules,
                 index,
@@ -556,7 +590,7 @@ def check(
         )
         if project_config.check_colocated_fragments:
             diagnostics.extend(
-                _check_diagnostic(item, source_texts)
+                check_diagnostic(item)
                 for item in unused_colocated_fragment_diagnostics(sources, index)
             )
         contexts_by_name = {item.name: item for item in selected_schemas}
@@ -571,7 +605,7 @@ def check(
             if matched_context is None:
                 continue
             diagnostics.extend(
-                _check_diagnostic(item, source_texts)
+                check_diagnostic(item)
                 for item in validate_indexed_document(
                     matched_context,
                     document,
@@ -757,11 +791,7 @@ def _report_check_diagnostics(
     *,
     level: str,
 ) -> None:
-    minimum = {"info": 0, "warn": 1, "error": 2}[level]
-    rank = {"info": 0, "warn": 1, "error": 2}
-    for diagnostic in diagnostics:
-        if rank[diagnostic.severity] < minimum:
-            continue
+    for diagnostic in _visible_check_diagnostics(diagnostics, level=level):
         location = ""
         if diagnostic.module is not None and diagnostic.range is not None:
             location = (
@@ -774,6 +804,70 @@ def _report_check_diagnostics(
             f"{diagnostic.message}",
             file=sys.stderr,
         )
+
+
+def _visible_check_diagnostics(
+    diagnostics: Sequence[CheckDiagnostic], *, level: str
+) -> tuple[CheckDiagnostic, ...]:
+    minimum = {"info": 0, "warn": 1, "error": 2}[level]
+    rank = {"info": 0, "warn": 1, "error": 2}
+    return tuple(item for item in diagnostics if rank[item.severity] >= minimum)
+
+
+def _escape_workflow_value(value: str, *, property_value: bool = False) -> str:
+    escaped = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    if property_value:
+        escaped = escaped.replace(":", "%3A").replace(",", "%2C")
+    return escaped
+
+
+def _workflow_annotation(diagnostic: CheckDiagnostic) -> str | None:
+    if diagnostic.module is not None and diagnostic.file is None:
+        return None
+    command = {"error": "error", "warn": "warning", "info": "notice"}[
+        diagnostic.severity
+    ]
+    properties: list[tuple[str, str]] = []
+    if diagnostic.file is not None:
+        for key, value in (
+            ("file", diagnostic.file),
+            ("line", str(diagnostic.line) if diagnostic.line is not None else None),
+            ("col", str(diagnostic.column) if diagnostic.column is not None else None),
+            (
+                "endLine",
+                str(diagnostic.end_line) if diagnostic.end_line is not None else None,
+            ),
+            (
+                "endColumn",
+                str(diagnostic.end_column)
+                if diagnostic.end_column is not None
+                else None,
+            ),
+        ):
+            if value is not None:
+                properties.append(
+                    (key, _escape_workflow_value(value, property_value=True))
+                )
+    suffix = " " + ",".join(f"{key}={value}" for key, value in properties)
+    if not properties:
+        suffix = ""
+    message = _escape_workflow_value(diagnostic.message)
+    return f"::{command}{suffix}::{message}"
+
+
+def _json_check_diagnostic(diagnostic: CheckDiagnostic) -> dict[str, str | int]:
+    fields: dict[str, str | int | None] = {
+        "severity": diagnostic.severity,
+        "code": diagnostic.code,
+        "message": diagnostic.message,
+        "file": diagnostic.file,
+        "line": diagnostic.line,
+        "column": diagnostic.column,
+        "end_line": diagnostic.end_line,
+        "end_column": diagnostic.end_column,
+        "schema": diagnostic.schema,
+    }
+    return {key: value for key, value in fields.items() if value is not None}
 
 
 def _generate_persisted(
@@ -1247,6 +1341,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if arguments.command == "check":
             if arguments.artifact is not None:
+                if (
+                    arguments.format != "text"
+                    or arguments.annotations_output is not None
+                ):
+                    raise ValueError(
+                        "Artifact checks do not support project output options."
+                    )
                 selected = effective_project(Path.cwd(), explicit_config=config_path)
                 if selected is None:
                     raise ValueError("No GraphQL Desk project configuration was found")
@@ -1265,10 +1366,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 schema=schema_name,
                 environment=dict(os.environ),
             )
-            _report_check_diagnostics(
-                diagnostics,
-                level=arguments.level,
+            visible = _visible_check_diagnostics(diagnostics, level=arguments.level)
+            if arguments.format == "json":
+                print(
+                    json.dumps(
+                        [_json_check_diagnostic(item) for item in visible],
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                _report_check_diagnostics(diagnostics, level=arguments.level)
+            annotations = tuple(
+                annotation
+                for item in visible
+                if (annotation := _workflow_annotation(item)) is not None
             )
+            if arguments.annotations_output is not None:
+                output_path = Path(arguments.annotations_output)
+                if not output_path.is_absolute():
+                    output_path = Path.cwd() / output_path
+                output_path.write_text(
+                    "\n".join(annotations) + ("\n" if annotations else ""),
+                    encoding="utf-8",
+                    newline="\n",
+                )
+            elif (
+                arguments.format == "text"
+                and os.environ.get("GITHUB_ACTIONS") == "true"
+            ):
+                for annotation in annotations:
+                    print(annotation)
             if any(item.severity == "error" for item in diagnostics):
                 return 1
             if arguments.fail_on_warn and any(
