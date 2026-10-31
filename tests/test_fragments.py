@@ -7,9 +7,15 @@ from unittest.mock import patch
 from graphql import build_schema, print_ast
 
 from graphql_desk import graphql
-from graphql_desk.fragments import FragmentIndex, SchemaContext, index_fragments
+from graphql_desk.fragments import (
+    FragmentIndex,
+    SchemaContext,
+    index_fragments,
+    unused_colocated_fragment_diagnostics,
+)
 from graphql_desk.source_graph import (
     DocumentIdentity,
+    FactoryBinding,
     ModuleSnapshot,
     ProjectBindings,
     ProjectSources,
@@ -25,7 +31,11 @@ type Query { user: User node: Node hello: String }
 
 
 def module(
-    name: str, source: str, version: int = 1, project: str = "p"
+    name: str,
+    source: str,
+    version: int = 1,
+    project: str = "p",
+    package: bool = False,
 ) -> ModuleSnapshot:
     return ModuleSnapshot(
         project,
@@ -33,6 +43,7 @@ def module(
         f"file:///{project}/{name}.py",
         version,
         "from graphql_desk import graphql\n" + source,
+        package,
     )
 
 
@@ -44,13 +55,16 @@ class FragmentTests(unittest.TestCase):
             ("p", "default"): self.context
         }
 
-    def resolve(self, *modules: ModuleSnapshot) -> ProjectSources:
+    def resolve(
+        self, *modules: ModuleSnapshot, collect_document_imports: bool = False
+    ) -> ProjectSources:
         result = resolve_project(
             tuple(modules),
             bindings=(
                 ProjectBindings("p", ("default",), "default"),
                 ProjectBindings("other", ("default",), "default"),
             ),
+            collect_document_imports=collect_document_imports,
         )
         self.assertEqual(result.diagnostics, ())
         return result
@@ -125,6 +139,129 @@ class FragmentTests(unittest.TestCase):
         self.assertTrue(result.diagnostics)
         self.assertEqual(result.unavailable, ())
         self.assertEqual([item.call.binding for item in result.documents], ["good"])
+
+    def test_unused_colocated_fragment_imports_are_graph_diagnostics(self) -> None:
+        fragment = module("fragments", 'card=graphql("fragment Card on User { id }")')
+        consumer = module(
+            "main",
+            'from fragments import card as ui_card\nquery=graphql("{ user { id } }")',
+        )
+        sources = self.resolve(consumer, fragment, collect_document_imports=True)
+        index = index_fragments(sources, schemas=self.schemas)
+        diagnostics = unused_colocated_fragment_diagnostics(sources, index)
+        self.assertEqual(
+            [item.code for item in diagnostics], ["unused-colocated-fragment"]
+        )
+        self.assertEqual(diagnostics[0].module.module, "main")
+        self.assertEqual(
+            consumer.source[diagnostics[0].range.start : diagnostics[0].range.end],
+            "from fragments import card as ui_card",
+        )
+
+        used = module(
+            "main",
+            "from fragments import card as ui_card\n"
+            'query=graphql("{ user { ...Card } }", [ui_card])',
+        )
+        used_sources = self.resolve(used, fragment, collect_document_imports=True)
+        used_index = index_fragments(used_sources, schemas=self.schemas)
+        self.assertEqual(
+            unused_colocated_fragment_diagnostics(used_sources, used_index), ()
+        )
+
+    def test_colocated_import_warning_ignores_reexports_and_other_modules(self) -> None:
+        fragment = module("fragments", 'card=graphql("fragment Card on User { id }")')
+        reexport = module("reexports", "from fragments import card as public_card")
+        consumer = module(
+            "main",
+            "from reexports import public_card\n"
+            'query=graphql("{ user { ...Card } }", [public_card])',
+        )
+        unused = module(
+            "unused",
+            'from fragments import card\nquery=graphql("{ hello }")',
+        )
+        other = module(
+            "other",
+            'from fragments import card\nquery=graphql("{ user { ...Card } }", [card])',
+        )
+        sources = self.resolve(
+            reexport,
+            consumer,
+            fragment,
+            unused,
+            other,
+            collect_document_imports=True,
+        )
+        index = index_fragments(sources, schemas=self.schemas)
+        diagnostics = unused_colocated_fragment_diagnostics(sources, index)
+        self.assertEqual([item.module.module for item in diagnostics], ["unused"])
+
+    def test_unaliased_dotted_import_resolves_module_exports(self) -> None:
+        package = module("pkg", "", package=True)
+        fragment = module(
+            "pkg.fragments", 'card=graphql("fragment Card on User { id }")'
+        )
+        consumer = module(
+            "main",
+            'import pkg.fragments\nquery=graphql("{ user { id } }")',
+        )
+        sources = self.resolve(
+            consumer, fragment, package, collect_document_imports=True
+        )
+        index = index_fragments(sources, schemas=self.schemas)
+        diagnostics = unused_colocated_fragment_diagnostics(sources, index)
+        self.assertEqual([item.module.module for item in diagnostics], ["main"])
+
+    def test_fragment_use_requires_exact_document_and_schema_identity(self) -> None:
+        default_fragment = module(
+            "default_fragments",
+            "from generated.default import graphql as gql\n"
+            'card=gql("fragment Card on User { id }")',
+        )
+        other_fragment = module(
+            "other_fragments",
+            "from generated.other import graphql as gql\n"
+            'card=gql("fragment Card on User { id }")',
+        )
+        consumer = module(
+            "main",
+            "from default_fragments import card as default_card\n"
+            "from other_fragments import card as other_card\n"
+            "from generated.other import graphql as gql\n"
+            'query=gql("{ user { ...Card } }", [other_card])',
+        )
+        bindings = ProjectBindings(
+            "p",
+            ("default", "other"),
+            "default",
+            (
+                FactoryBinding("generated.default", "graphql", "default"),
+                FactoryBinding("generated.other", "graphql", "other"),
+            ),
+        )
+        sources = resolve_project(
+            (default_fragment, other_fragment, consumer),
+            bindings=(bindings,),
+            collect_document_imports=True,
+        )
+        schemas: dict[tuple[str, str | None], SchemaContext] = {
+            ("p", "default"): self.context,
+            ("p", "other"): SchemaContext("other", self.schema, "other-generation"),
+        }
+        index = index_fragments(sources, schemas=schemas)
+        diagnostics = unused_colocated_fragment_diagnostics(sources, index)
+        self.assertEqual(
+            [item.message for item in diagnostics],
+            [
+                "Imported fragment 'Card' is not composed by a GraphQL document "
+                "in this module."
+            ],
+        )
+        self.assertEqual(
+            diagnostics[0].range.start,
+            consumer.source.index("from default_fragments"),
+        )
 
     def test_source_rejected_calls_preserve_ownership_through_indexing(self) -> None:
         snapshot = module("q", 'bad=graphql(dynamic)\ngood=graphql("{ hello }")')

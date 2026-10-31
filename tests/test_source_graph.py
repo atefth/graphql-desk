@@ -2586,6 +2586,56 @@ class SourceGraphTests(unittest.TestCase):
         self.assertEqual(updated.calls[0].source, "query New { name }")
         self.assertIn(2, {item.version for item in updated.calls[0].dependencies})
 
+    def test_colocated_imports_resolve_aliases_reexports_and_module_namespaces(
+        self,
+    ) -> None:
+        fragment = module(
+            "fragments",
+            'from graphql_desk import gql\nCard=gql("fragment Card on User { id }")',
+        )
+        reexport = module("reexports", "from fragments import Card as Public")
+        direct = module(
+            "direct",
+            "from reexports import Public as card\n"
+            'from graphql_desk import gql\nq=gql("{ user { ...Card } }", [card])',
+        )
+        namespace = module(
+            "namespace",
+            "import reexports as refs\n"
+            "from graphql_desk import gql\n"
+            'q=gql("{ user { ...Card } }", [refs.Public])',
+        )
+        result = resolve_project(
+            (fragment, reexport, direct, namespace),
+            bindings=(ProjectBindings("app", ("default",), "default"),),
+            collect_document_imports=True,
+        )
+        card = next(call for call in result.calls if call.binding == "Card")
+        identities = {
+            item.module.module: item.document for item in result.document_imports
+        }
+        identity = DocumentIdentity(card.module, card.range)
+        self.assertEqual(identities["reexports"], identity)
+        self.assertEqual(identities["direct"], identity)
+        self.assertEqual(identities["namespace"], identity)
+        resolver = IncrementalResolver()
+        bindings = (ProjectBindings("app", ("default",), "default"),)
+        self.assertEqual(
+            resolver.resolve((fragment, reexport), bindings=bindings).document_imports,
+            (),
+        )
+        self.assertTrue(
+            resolver.resolve(
+                (fragment, reexport),
+                bindings=bindings,
+                collect_document_imports=True,
+            ).document_imports
+        )
+        self.assertEqual(
+            resolver.resolve((fragment, reexport), bindings=bindings).document_imports,
+            (),
+        )
+
     def test_namespace_imports_aliases_same_line_and_packages(self) -> None:
         constants = module("pkg.constants", 'TEXT = "{ id }"')
         package = module("pkg", "from .constants import TEXT", package=True)

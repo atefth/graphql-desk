@@ -443,3 +443,42 @@ def index_fragments(
         ),
         sources.unavailable,
     )
+
+
+def unused_colocated_fragment_diagnostics(
+    sources: ProjectSources, index: FragmentIndex
+) -> tuple[GraphDiagnostic, ...]:
+    """Warn when an imported fragment is not composed by a document in its module."""
+    indexed = {
+        DocumentIdentity(item.call.module, item.call.range): item
+        for item in index.documents
+    }
+    used = {
+        (item.call.module, item.schema_identity, fact.document)
+        for item in index.documents
+        for fact in item.definitions
+        if fact.kind == "fragment"
+    }
+    diagnostics: list[GraphDiagnostic] = []
+    for imported in sources.document_imports:
+        fragment = indexed.get(imported.document)
+        if fragment is None or fragment.primary_fragment is None:
+            continue
+        module_documents = tuple(
+            item for item in index.documents if item.call.module == imported.module
+        )
+        if not module_documents:
+            continue
+        if (imported.module, fragment.schema_identity, imported.document) in used:
+            continue
+        name = fragment.primary_fragment.name or "<anonymous>"
+        diagnostics.append(
+            GraphDiagnostic(
+                imported.module,
+                "unused-colocated-fragment",
+                f"Imported fragment {name!r} is not composed by a GraphQL document "
+                "in this module.",
+                imported.range,
+            )
+        )
+    return tuple(diagnostics)

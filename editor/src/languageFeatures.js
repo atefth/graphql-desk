@@ -771,7 +771,8 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         const result = bundle.response.diagnostics
           .filter((item) => item.module.uri === snapshot.uri && item.module.version === snapshot.version && item.code !== "invalid-fragments")
           .map((item) => ({ range: item.range.utf16, message: item.message,
-            severity: 1, code: `graphql-desk.${item.code}`, source: "GraphQL Desk" }));
+            severity: item.code === "unused-colocated-fragment" ? 2 : 1,
+            code: `graphql-desk.${item.code}`, source: "GraphQL Desk" }));
         for (const call of bundle.response.calls) {
           const schema = schemaFor(bundle, call);
           if (!schema) continue;

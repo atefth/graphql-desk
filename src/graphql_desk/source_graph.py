@@ -100,6 +100,14 @@ class FragmentReference:
 
 
 @dataclass(frozen=True)
+class DocumentImport:
+    module: ModuleDependency
+    document: DocumentIdentity
+    symbol: str
+    range: Span
+
+
+@dataclass(frozen=True)
 class ResolvedCall:
     module: ModuleDependency
     range: Span
@@ -160,6 +168,7 @@ class ProjectSources:
     unavailable: tuple[RejectedCall, ...] = ()
     persisted: tuple[PersistedDeclaration, ...] = ()
     persisted_id_insertions: tuple[PersistedIdInsertion, ...] = ()
+    document_imports: tuple[DocumentImport, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2221,16 +2230,23 @@ def resolve_parse_sources(
 
 
 def resolve_project(
-    modules: tuple[ModuleSnapshot, ...], *, bindings: tuple[ProjectBindings, ...] = ()
+    modules: tuple[ModuleSnapshot, ...],
+    *,
+    bindings: tuple[ProjectBindings, ...] = (),
+    collect_document_imports: bool = False,
 ) -> ProjectSources:
     """Resolve stable module calls in caller-selected snapshots; no discovery."""
-    return _resolve(modules, bindings)
+    return _resolve(
+        modules, bindings, collect_document_imports=collect_document_imports
+    )
 
 
 def _resolve(
     modules: tuple[ModuleSnapshot, ...],
     bindings: tuple[ProjectBindings, ...],
     parses: dict[tuple[str, str], _Parsed] | None = None,
+    *,
+    collect_document_imports: bool = False,
 ) -> ProjectSources:
     graph = _Graph(modules, bindings, parses)
     calls: list[ResolvedCall] = []
@@ -2414,12 +2430,92 @@ def _resolve(
             graph.documents[item.document].dependencies
         )
     )
+    document_imports: set[DocumentImport] = set()
+    for module in graph.modules.values() if collect_document_imports else ():
+        for statement in module.tree.body:
+            if isinstance(statement, ast.ImportFrom):
+                aliases: list[tuple[str, str, ast.expr]] = [
+                    (
+                        alias.asname or alias.name,
+                        alias.asname or alias.name,
+                        ast.Name(id=alias.asname or alias.name, ctx=ast.Load()),
+                    )
+                    for alias in statement.names
+                    if alias.name != "*"
+                ]
+            elif isinstance(statement, ast.Import):
+                aliases = []
+                for alias in statement.names:
+                    parts = alias.name.split(".")
+                    local_name = alias.asname or parts[0]
+                    base: ast.expr = ast.Name(id=local_name, ctx=ast.Load())
+                    if not alias.asname:
+                        for part in parts[1:]:
+                            base = ast.Attribute(value=base, attr=part, ctx=ast.Load())
+                    aliases.append((local_name, local_name, base))
+            else:
+                continue
+            before = ((statement.end_lineno or statement.lineno) + 1, 0)
+            for local_name, symbol, base in aliases:
+                try:
+                    value = graph.expression(module, base, before, set())
+                except (_Unresolved, RecursionError):
+                    continue
+                if value.kind == "document" and value.document is not None:
+                    document_imports.add(
+                        DocumentImport(
+                            module.identity,
+                            value.document,
+                            symbol,
+                            module.span(statement),
+                        )
+                    )
+                    continue
+                if value.kind != "module":
+                    continue
+                target = graph.modules.get((module.snapshot.project, value.text))
+                if target is None:
+                    continue
+                for exported_name in target.bindings:
+                    try:
+                        exported = graph.expression(
+                            module,
+                            ast.Attribute(
+                                value=base,
+                                attr=exported_name,
+                                ctx=ast.Load(),
+                            ),
+                            before,
+                            set(),
+                        )
+                    except (_Unresolved, RecursionError):
+                        continue
+                    if exported.kind == "document" and exported.document is not None:
+                        document_imports.add(
+                            DocumentImport(
+                                module.identity,
+                                exported.document,
+                                f"{local_name}.{exported_name}",
+                                module.span(statement),
+                            )
+                        )
     return ProjectSources(
         current,
         tuple(graph.diagnostics),
         tuple(unavailable),
         current_persisted,
         current_persisted_id_insertions,
+        tuple(
+            sorted(
+                document_imports,
+                key=lambda item: (
+                    item.module.project,
+                    item.module.module,
+                    item.range.start,
+                    item.symbol,
+                ),
+            )
+        ),
     )
 
 
@@ -2427,6 +2523,7 @@ def _resolve(
 class _ProjectResult:
     modules: tuple[ModuleSnapshot, ...]
     bindings: tuple[ProjectBindings, ...]
+    collect_document_imports: bool
     result: ProjectSources
 
 
@@ -2451,6 +2548,7 @@ class IncrementalResolver:
         modules: tuple[ModuleSnapshot, ...],
         *,
         bindings: tuple[ProjectBindings, ...] = (),
+        collect_document_imports: bool = False,
     ) -> ProjectSources:
         _validate_request(modules, bindings)
         parses: dict[tuple[str, str], _Parsed] = {}
@@ -2469,14 +2567,23 @@ class IncrementalResolver:
             selected = tuple(snapshots)
             context = contexts.get(project, ())
             previous = self._projects.get(project)
-            if previous is not None and (previous.modules, previous.bindings) == (
-                selected,
-                context,
-            ):
+            if previous is not None and (
+                previous.modules,
+                previous.bindings,
+                previous.collect_document_imports,
+            ) == (selected, context, collect_document_imports):
                 projects[project] = previous
             else:
                 projects[project] = _ProjectResult(
-                    selected, context, _resolve(selected, context, parses)
+                    selected,
+                    context,
+                    collect_document_imports,
+                    _resolve(
+                        selected,
+                        context,
+                        parses,
+                        collect_document_imports=collect_document_imports,
+                    ),
                 )
         order = {
             (item.project, item.module): index for index, item in enumerate(modules)
@@ -2526,12 +2633,25 @@ class IncrementalResolver:
                 item.range.start,
             )
         )
+        document_imports = [
+            imported
+            for project in projects.values()
+            for imported in project.result.document_imports
+        ]
+        document_imports.sort(
+            key=lambda item: (
+                order[(item.module.project, item.module.module)],
+                item.range.start,
+                item.symbol,
+            )
+        )
         result = ProjectSources(
             tuple(calls),
             tuple(diagnostics),
             tuple(unavailable),
             tuple(persisted),
             tuple(persisted_id_insertions),
+            tuple(document_imports),
         )
         self._parses = parses
         self._projects = projects
