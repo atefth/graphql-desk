@@ -17,7 +17,7 @@ The initial slice resolves stable module-level GraphQL Desk callable aliases, st
 
 The resolver rejects ambiguous/rebound or mutation-dependent bindings and reports unsupported static-source cases at known GraphQL call sites. Ordinary imported Python functions and local lookalike modules do not become GraphQL candidates. Namespace reflection and escaped module objects may prevent a stability proof and must not yield successful precise facts.
 
-This is a separate backend from the existing one-module `extract_calls` API, whose behavior remains unchanged. Direct ordinary/async function bodies now admit proven literals and stable module globals; unsupported scopes still receive conservative diagnostics. The shared source-map backend supplies exact decoded mappings, and fragment indexing/read-only editor consumers are integrated. Complete discovery, automatic precise import attachment and live generated inference remain open. Broad SRC-01 and live-typing gates remain open.
+This is a separate backend from the existing one-module `extract_calls` API, whose behavior remains unchanged. Direct and nested ordinary/async function bodies admit proven literals and stable module globals; unsupported scopes still receive conservative diagnostics. The shared source-map backend supplies exact decoded mappings, and fragment indexing/read-only editor consumers are integrated. Complete discovery, automatic precise import attachment and live generated inference remain open. Broad SRC-01 and live-typing gates remain open.
 
 `ProjectBindings(project, schemas, default_schema=None, factories=())` supplies explicit project/schema facts; `FactoryBinding(module, export, schema_name=None)` identifies one exact imported callable. Export names are single Python identifiers. The resolver never guesses generated factories from a module prefix. Provided local template functions must remain stable and undecorated; missing, rebound or mutated supplied exports are rejected. External factory facts do not prove that an unprovided module exists or has a compatible runtime signature; static symbol integration remains separate work.
 
@@ -171,8 +171,12 @@ unchanged. Actual-source mapping fixtures pass both strict checkers and runtime
 checks without importing project modules during generation. Full Python type
 compatibility and external-symbol verification remain open.
 
-Direct module-level ordinary and async function bodies use whole-function local
-binding checks before resolving callable, source, fragment or operation inputs.
+Direct module-level ordinary and async function bodies and their nested ordinary
+and async function bodies use whole-function local binding checks before
+resolving callable, source, fragment or operation inputs. Nested calls may use
+stable module globals and literals, but any reference to an enclosing function's
+local names remains unresolved; function defaults, decorators, annotations,
+classes, lambdas and comprehensions remain outside this subset.
 Parameters, local imports/assignments, exception and pattern bindings, and named
 expressions cannot silently select a same-named module global. Rebound or later
 initial globals remain unresolved. Function calls keep their original owner/span
@@ -180,9 +184,9 @@ and may have no export binding; existing inline artifact generation handles them
 Unrelated directives inside nested helper scopes no longer disable proven outer
 calls; projectwide blocked-name checks still reject relevant global mutations.
 
-Functions with inline type parameters, closures/nested functions, classes, lambdas, comprehensions,
-calls inside default/decorator/annotation expressions and direct outer-body
-global/nonlocal declarations remain outside
-this bounded subset. Actual function/async source fixtures exercise both strict
-checkers and runtime identity. This does not complete static-source or live typing
-acceptance or authorize any generated-file publication.
+Function-local inputs captured from enclosing scopes, functions with inline type
+parameters, classes, lambdas, comprehensions, calls inside default/decorator/
+annotation expressions and direct outer-body global/nonlocal declarations remain
+outside this bounded subset. Actual function/async source fixtures exercise both
+strict checkers and runtime identity. This does not complete static-source or
+live typing acceptance or authorize any generated-file publication.

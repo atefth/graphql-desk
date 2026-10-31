@@ -2025,15 +2025,15 @@ class _CallScopes(ast.NodeVisitor):
             )
 
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        nested = self.scoped and self.function_body
         if (
-            self.scoped
-            or node not in self.module.tree.body
-            or getattr(node, "type_params", False)
-        ):
+            not nested and (self.scoped or node not in self.module.tree.body)
+        ) or getattr(node, "type_params", False):
             self.visit_unsupported_scope(node)
             return
         previous = self.scoped, self.function_body, self.shadowed
         self.scoped = True
+        self.function_body = False
         # Defaults, decorators and annotations are not function-body expressions.
         for expression in [*node.decorator_list, node.args, node.returns]:
             if expression is not None:
@@ -2044,7 +2044,7 @@ class _CallScopes(ast.NodeVisitor):
         local.update(
             item.arg for item in ast.walk(node.args) if isinstance(item, ast.arg)
         )
-        self.shadowed = local
+        self.shadowed = self.shadowed | local
         self.function_body = True
         pending: list[ast.AST] = list(node.body)
         while pending:

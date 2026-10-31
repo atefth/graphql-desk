@@ -372,29 +372,47 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 result.extend(function_suites(suite))
         return result
 
+    def nested_functions(
+        statements: list[ast.stmt],
+    ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+        result: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+        for statement in statements:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                result.append(statement)
+                result.extend(nested_functions(statement.body))
+                continue
+            if isinstance(statement, ast.ClassDef):
+                continue
+            for suite in nested_suites(statement):
+                result.extend(nested_functions(suite))
+        return result
+
     for definition in tree.body:
         if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        scope: list[ast.AST] = list(definition.body)
-        safe = True
-        while scope:
-            node = scope.pop()
-            if isinstance(
-                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
-            ):
-                continue
-            if isinstance(node, (ast.Global, ast.Nonlocal)) or (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id in {"locals", "vars"}
-            ):
-                safe = False
-                break
-            scope.extend(ast.iter_child_nodes(node))
-        if safe:
-            assignments = function_suites(definition.body)
-            extractable.extend(assignments)
-            function_assignments.update(id(item) for item in assignments)
+        candidates = [definition, *nested_functions(definition.body)]
+        for candidate in candidates:
+            scope: list[ast.AST] = list(candidate.body)
+            safe = True
+            while scope:
+                node = scope.pop()
+                if isinstance(
+                    node,
+                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda),
+                ):
+                    continue
+                if isinstance(node, (ast.Global, ast.Nonlocal)) or (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in {"locals", "vars"}
+                ):
+                    safe = False
+                    break
+                scope.extend(ast.iter_child_nodes(node))
+            if safe:
+                assignments = function_suites(candidate.body)
+                extractable.extend(assignments)
+                function_assignments.update(id(item) for item in assignments)
 
     result: dict[tuple[int, int], dict[str, object]] = {}
     for statement in extractable:
