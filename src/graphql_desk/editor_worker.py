@@ -47,6 +47,7 @@ from .source_graph import (
     ModuleDependency,
     ModuleSnapshot,
 )
+from .testing_helpers import render_testing_helper_artifacts
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
 _CAPTURE_KEYS = {"workspace", "candidates", "buffers", "documents", "editor_fallback"}
@@ -695,6 +696,8 @@ class EditorWorker:
             if self._snapshot is None or self._analysis is None:
                 raise ValueError("Artifacts require a current analyzed job")
             projects: list[dict[str, object]] = []
+            testing_result_overloads: list[str] = []
+            masking_overloads: list[str] = []
             facts = self._analysis
             snapshots = {
                 ModuleDependency(
@@ -763,7 +766,34 @@ class EditorWorker:
                 generated_files = {
                     file.relative_path: file.text for file in artifacts.files
                 }
+                testing_artifacts = render_testing_helper_artifacts(
+                    config,
+                    tuple(
+                        (schema, facts.schemas[(project, schema.name)])
+                        for schema in config.schemas
+                        if (project, schema.name) in facts.schemas
+                    ),
+                    index,
+                    project_modules,
+                    artifacts.provenance,
+                )
+                for filename, text in testing_artifacts.files:
+                    generated_files[filename] = text
+                    parts = filename.split("/")[:-1]
+                    for length in range(1, len(parts) + 1):
+                        package = "/".join(parts[:length])
+                        generated_files.setdefault(
+                            package + "/__init__.py",
+                            '"""Generated GraphQL Desk package."""\n',
+                        )
+                        generated_files.setdefault(package + "/__init__.pyi", "")
+                testing_result_overloads.append(testing_artifacts.read_result_stub)
+                masking_overloads.append(testing_artifacts.mask_fragments_stub)
                 parser_diagnostics: list[dict[str, object]] = []
+                parser_diagnostics.extend(
+                    editor_diagnostic(item, snapshots)
+                    for item in testing_artifacts.diagnostics
+                )
                 for companion in render_captured_parse_companions(
                     project_modules,
                     project_id=project,
@@ -814,6 +844,67 @@ class EditorWorker:
                     }
                 )
             overlay = render_captured_parse_overlay(facts.modules)
+            overload_imports = (
+                "from typing import overload as _graphql_desk_overload\n"
+                "from collections.abc import Sequence as _graphql_desk_Sequence\n"
+            )
+            testing_stub = (
+                overload_imports
+                + "from typing import TypeVar as _graphql_desk_TypeVar\n"
+                "from collections.abc import Mapping as _graphql_desk_Mapping\n"
+                "from graphql_desk.fragment_refs import FixtureDocument as "
+                "_GraphqlDeskFixtureDocument\n"
+                "_GraphqlDeskResult = _graphql_desk_TypeVar('_GraphqlDeskResult')\n"
+                "_GraphqlDeskVariables = _graphql_desk_TypeVar("
+                "'_GraphqlDeskVariables')\n"
+                "_GraphqlDeskInput = _graphql_desk_TypeVar('_GraphqlDeskInput', "
+                "bound=_graphql_desk_Mapping[str, object])\n"
+                "def unsafe_read_result(document: "
+                "_GraphqlDeskFixtureDocument[_GraphqlDeskResult, "
+                "_GraphqlDeskVariables, _GraphqlDeskInput], "
+                "data: _GraphqlDeskInput) -> _GraphqlDeskResult: ...\n"
+                + "".join(testing_result_overloads)
+                + "@_graphql_desk_overload\n"
+                + "def read_result(document: object, data: object, "
+                "fragments: _graphql_desk_Sequence[object]) -> object: ...\n"
+            )
+            fragment_refs_stub = (
+                "from collections.abc import Callable as _Callable, "
+                "Mapping as _Mapping\n"
+                "from typing import Generic as _Generic, TypeVar as _TypeVar\n"
+                "from typing_extensions import ReadOnly as _ReadOnly, "
+                "TypedDict as _TypedDict\n"
+                "from .typed_document import TypedDocument\n"
+                "from graphql_desk.fragments import DefinitionFact, IndexedDocument\n"
+                "_Key = _TypeVar('_Key')\n"
+                "_Identity = _TypeVar('_Identity')\n"
+                "_Identity_contra = _TypeVar('_Identity_contra', "
+                "contravariant=True)\n"
+                "_Result = _TypeVar('_Result')\n"
+                "_Variables = _TypeVar('_Variables')\n"
+                "_ReadInput = _TypeVar('_ReadInput', "
+                "bound=_Mapping[str, object])\n"
+                "class FragmentIdentity(_Generic[_Key]): ...\n"
+                "class FragmentRef(_TypedDict, _Generic[_Identity_contra]):\n"
+                "    _graphql_desk_φ: _ReadOnly[_Callable[["
+                "_Identity_contra], None]]\n"
+                "class FragmentDocument(TypedDocument[_Result, _Variables], "
+                "_Generic[_Identity, _Result, _Variables]): ...\n"
+                "class ReadableFragmentDocument(FragmentDocument["
+                "_Identity, _Result, _Variables], _Generic[_Identity, "
+                "_Result, _Variables, _ReadInput]): ...\n"
+                "class FixtureDocument(TypedDocument[_Result, _Variables], "
+                "_Generic[_Result, _Variables, _ReadInput]): ...\n"
+                "def fragment_identity_key(owner: IndexedDocument, "
+                "definition: DefinitionFact) -> str: ...\n"
+            )
+            mask_stub = (
+                overload_imports
+                + "".join(masking_overloads)
+                + "@_graphql_desk_overload\n"
+                + "def mask_fragments(fragments: _graphql_desk_Sequence[object], "
+                "data: object) -> object: ...\n"
+            )
             return {
                 "ok": True,
                 "id": self._identity,
@@ -822,8 +913,37 @@ class EditorWorker:
                 "projects": projects,
                 "parser_overlay": [
                     {
+                        "relative_path": "graphql_desk-stubs/typed_document.pyi",
+                        "text": (
+                            "from dataclasses import dataclass as _dataclass\n"
+                            "from typing import Generic as _Generic, "
+                            "TypeVar as _TypeVar\n"
+                            "from graphql import DocumentNode as _DocumentNode\n"
+                            "_Result = _TypeVar('_Result')\n"
+                            "_Variables = _TypeVar('_Variables')\n"
+                            "@_dataclass(frozen=True)\n"
+                            "class TypedDocument(_Generic[_Result, _Variables]):\n"
+                            "    def __init__(self, ast: _DocumentNode, "
+                            "operation_name: str | None = None, *, "
+                            "schema_name: str | None = None, "
+                            "persisted_id: str | None = None) -> None: ...\n"
+                            "    ast: _DocumentNode\n"
+                            "    operation_name: str | None\n"
+                            "    schema_name: str | None\n"
+                            "    persisted_id: str | None\n"
+                        ),
+                    },
+                    {
+                        "relative_path": "graphql_desk-stubs/fragment_refs.pyi",
+                        "text": fragment_refs_stub,
+                    },
+                    {
                         "relative_path": "graphql_desk-stubs/__init__.pyi",
-                        "text": overlay.stub,
+                        "text": overlay.stub + "\n" + mask_stub,
+                    },
+                    {
+                        "relative_path": "graphql_desk-stubs/testing.pyi",
+                        "text": testing_stub,
                     },
                     {
                         "relative_path": "graphql_desk-stubs/py.typed",

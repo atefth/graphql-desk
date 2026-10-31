@@ -380,18 +380,46 @@ test("replacement inodes and non-files are rejected without reading foreign cont
   }
 });
 
-test("owns only the fixed parser partial-stub package and its PEP 561 marker", async t => {
+test("owns only approved parser and helper stubs, replaces stale files, and cleans its generation", async t => {
   const f = fixture(t);
   const files = [
+    { relative_path: "graphql_desk-stubs/typed_document.pyi", text: "class TypedDocument: ...\n" },
+    { relative_path: "graphql_desk-stubs/fragment_refs.pyi", text: "class FixtureDocument: ...\n" },
     { relative_path: "graphql_desk-stubs/__init__.pyi", text: "from graphql import DocumentNode as _DocumentNode\n" },
+    { relative_path: "graphql_desk-stubs/testing.pyi", text: "def read_result(...): ...\n" },
     { relative_path: "graphql_desk-stubs/py.typed", text: "partial\n" },
   ];
   const handle = createOwnedAnalysisArtifacts(f.vscode, f.workspace, f.root, "graphql_desk-stubs", files);
   assert.match(fs.readFileSync(path.join(f.root, "graphql_desk-stubs", "__init__.pyi"), "utf8"), /DocumentNode/);
-  assert.match(fs.readFileSync(path.join(f.root, "graphql_desk-stubs", "py.typed"), "utf8"), /partial/);
+  assert.match(fs.readFileSync(path.join(f.root, "graphql_desk-stubs", "typed_document.pyi"), "utf8"), /TypedDocument/);
+  assert.match(fs.readFileSync(path.join(f.root, "graphql_desk-stubs", "fragment_refs.pyi"), "utf8"), /FixtureDocument/);
+  assert.match(fs.readFileSync(path.join(f.root, "graphql_desk-stubs", "testing.pyi"), "utf8"), /read_result/);
+  assert.equal(fs.readFileSync(path.join(f.root, "graphql_desk-stubs", "py.typed"), "utf8"), "partial\n");
+  const next = [files[0], files[1], files[2], { ...files[3], text: "def read_result(...): ...  # updated\n" }, files[4]];
+  assert.equal(await handle.publish(next, () => true), true);
+  assert.match(fs.readFileSync(path.join(f.root, "graphql_desk-stubs", "testing.pyi"), "utf8"), /updated/);
+  assert.equal(await handle.publish([files[0], files[1], files[2], files[4]], () => true), true);
+  assert.equal(fs.existsSync(path.join(f.root, "graphql_desk-stubs", "testing.pyi")), false, "obsolete helper output is removed");
+  fs.writeFileSync(path.join(f.root, "graphql_desk-stubs", "neighbor.txt"), "preserve");
+  await assert.rejects(handle.cleanup(), /Foreign analysis package entries/,
+    "a foreign neighbor blocks destructive cleanup or publication");
+  assert.equal(fs.readFileSync(path.join(f.root, "graphql_desk-stubs", "neighbor.txt"), "utf8"), "preserve");
+  fs.unlinkSync(path.join(f.root, "graphql_desk-stubs", "neighbor.txt"));
   await handle.cleanup();
   assert.equal(fs.existsSync(path.join(f.root, "graphql_desk-stubs")), false);
-  assert.throws(() => createOwnedAnalysisArtifacts(f.vscode, f.workspace, f.root, "graphql_desk-stubs", [
-    { relative_path: "graphql_desk-stubs/foreign.pyi", text: "" },
-  ]), /Invalid analysis artifact/);
+  for (const relativePath of ["foreign.pyi", "nested/testing.pyi", "testing.py"]) {
+    assert.throws(() => createOwnedAnalysisArtifacts(f.vscode, f.workspace, f.root, "graphql_desk-stubs", [
+      { relative_path: `graphql_desk-stubs/${relativePath}`, text: "" },
+    ]), /Invalid analysis artifact/);
+  }
+});
+
+test("keeps the generated graphql_desk namespace separate from its PEP 561 overlay", async t => {
+  const f = fixture(t);
+  const handle = createOwnedAnalysisArtifacts(f.vscode, f.workspace, f.root, "graphql_desk", [
+    { relative_path: "graphql_desk/default.pyi", text: "value: str\n" },
+  ]);
+  assert.match(fs.readFileSync(path.join(f.root, "graphql_desk", "default.pyi"), "utf8"), /value: str/);
+  assert.equal(fs.existsSync(path.join(f.root, "graphql_desk-stubs")), false);
+  await handle.cleanup();
 });

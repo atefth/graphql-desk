@@ -188,9 +188,12 @@ function validReply(reply, request) {
     const file = value => keys(value, ["relative_path", "text"]) && typeof value.text === "string" && string(value.relative_path) &&
       !value.relative_path.includes("\\") && !value.relative_path.includes("\0") && !path.posix.isAbsolute(value.relative_path) && !path.win32.isAbsolute(value.relative_path) &&
       /\.pyi?$/.test(value.relative_path) && value.relative_path.replace(/\.pyi?$/, "").split("/").every(identifier);
-    const parserOverlay = value => Array.isArray(value) && value.length === 2 &&
-      value[0]?.relative_path === "graphql_desk-stubs/__init__.pyi" && typeof value[0]?.text === "string" &&
-      value[1]?.relative_path === "graphql_desk-stubs/py.typed" && value[1]?.text === "partial\n";
+    const parserOverlay = value => Array.isArray(value) && value.length === 5 &&
+      value[0]?.relative_path === "graphql_desk-stubs/typed_document.pyi" && typeof value[0]?.text === "string" &&
+      value[1]?.relative_path === "graphql_desk-stubs/fragment_refs.pyi" && typeof value[1]?.text === "string" &&
+      value[2]?.relative_path === "graphql_desk-stubs/__init__.pyi" && typeof value[2]?.text === "string" &&
+      value[3]?.relative_path === "graphql_desk-stubs/testing.pyi" && typeof value[3]?.text === "string" &&
+      value[4]?.relative_path === "graphql_desk-stubs/py.typed" && value[4]?.text === "partial\n";
     return keys(reply, ["ok", "id", "input_fingerprint", "saved_source_fingerprint", "projects", "parser_overlay", "unavailable_schemas"]) && string(reply.id) && reply.id === request.id &&
       typeof reply.input_fingerprint === "string" && /^[a-f0-9]{64}$/.test(reply.input_fingerprint) &&
       typeof reply.saved_source_fingerprint === "string" && /^[a-f0-9]{64}$/.test(reply.saved_source_fingerprint) && Array.isArray(reply.projects) &&

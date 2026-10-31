@@ -883,6 +883,18 @@ if TYPE_CHECKING:
         self.assertIn(
             "Literal['query Root { root }']", overlay["graphql_desk-stubs/__init__.pyi"]
         )
+        self.assertIn(
+            "class TypedDocument(_Generic[_Result, _Variables]):",
+            overlay["graphql_desk-stubs/typed_document.pyi"],
+        )
+        self.assertIn(
+            "@_dataclass(frozen=True)",
+            overlay["graphql_desk-stubs/typed_document.pyi"],
+        )
+        self.assertIn(
+            "class FixtureDocument(TypedDocument[_Result, _Variables],",
+            overlay["graphql_desk-stubs/fragment_refs.pyi"],
+        )
         self.assertEqual(overlay["graphql_desk-stubs/py.typed"], "partial\n")
         project = cast(list[dict[str, object]], result["projects"])[0]
         self.assertEqual(project["diagnostics"], [])

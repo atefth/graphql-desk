@@ -45,6 +45,7 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
   let setting = typeof configured === "string" ? configured.trim() : "";
   const stateKey = `managed-analysis-stub:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
   const generationStateKey = `managed-analysis-generations:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
+  const stagingStateKey = `managed-analysis-staging:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
   const previousOwner = workspaceState?.get?.(stateKey);
   const inspectedSettings = [inspection?.globalValue, inspection?.workspaceValue, inspection?.workspaceFolderValue]
     .filter(value => value !== undefined);
@@ -141,6 +142,51 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
           const next = { ...records };
           delete next[path.basename(target)];
           await workspaceState?.update?.(generationStateKey, next);
+          return true;
+        };
+        const pending = generationStateQueue.then(forget, forget);
+        generationStateQueue = pending.catch(() => {});
+        return pending;
+      },
+      ownsStaging(directory, markerFingerprint) {
+        const target = path.resolve(directory);
+        const generations = path.join(root, "generations");
+        if (!ownsSetting || !inside(generations, target) || target === generations || !/^[a-f0-9]{64}$/.test(markerFingerprint ?? "")) return false;
+        const records = workspaceState?.get?.(stagingStateKey);
+        return records?.[path.basename(target)]?.fingerprint === markerFingerprint;
+      },
+      stagingEntries() {
+        const records = workspaceState?.get?.(stagingStateKey);
+        return records && typeof records === "object" && !Array.isArray(records)
+          ? Object.fromEntries(Object.entries(records).map(([id, entry]) => [id, entry && typeof entry === "object" ? { ...entry } : entry]))
+          : {};
+      },
+      recordStaging(directory, markerFingerprint, markerTemporary) {
+        const target = path.resolve(directory);
+        const generations = path.join(root, "generations");
+        if (!ownsSetting || !ownsCurrentValue(setting) || !inside(generations, target) || target === generations ||
+            !/^g-[0-9]+-[0-9a-f-]{36}$/i.test(path.basename(target)) || !/^[a-f0-9]{64}$/.test(markerFingerprint ?? "") ||
+            !/^\.graphql-desk-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}-marker-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp$/i.test(markerTemporary ?? "")) return Promise.resolve(false);
+        const record = async () => {
+          const current = workspaceState?.get?.(stagingStateKey);
+          const records = current && typeof current === "object" && !Array.isArray(current) ? current : {};
+          await workspaceState?.update?.(stagingStateKey, { ...records, [path.basename(target)]: { fingerprint: markerFingerprint, markerTemporary } });
+          return this.ownsStaging(target, markerFingerprint);
+        };
+        const pending = generationStateQueue.then(record, record);
+        generationStateQueue = pending.catch(() => {});
+        return pending;
+      },
+      forgetStaging(directory, markerFingerprint) {
+        const target = path.resolve(directory);
+        const current = workspaceState?.get?.(stagingStateKey);
+        if (!ownsSetting || !inside(path.join(root, "generations"), target) || current?.[path.basename(target)]?.fingerprint !== markerFingerprint) return Promise.resolve(false);
+        const forget = async () => {
+          const records = workspaceState?.get?.(stagingStateKey);
+          if (records?.[path.basename(target)]?.fingerprint !== markerFingerprint) return false;
+          const next = { ...records };
+          delete next[path.basename(target)];
+          await workspaceState?.update?.(stagingStateKey, next);
           return true;
         };
         const pending = generationStateQueue.then(forget, forget);

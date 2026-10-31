@@ -53,7 +53,7 @@ class ParseGenerationTests(unittest.TestCase):
         modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
         overlay = render_captured_parse_overlay(modules)
         self.assertIn("from .runtime import gql, graphql, init_graphql", overlay.stub)
-        self.assertIn("class TypedDocument", overlay.stub)
+        self.assertIn("from .typed_document import TypedDocument", overlay.stub)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

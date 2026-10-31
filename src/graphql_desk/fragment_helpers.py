@@ -148,6 +148,11 @@ def read_fragment(document: object, data: object) -> object:
     return data
 
 
+def mask_fragments(fragments: Sequence[object], data: object) -> object:
+    """Return fixture data unchanged; generated stubs supply the static view."""
+    return data
+
+
 @overload
 def read_fragment_passthrough(
     document: ReadableFragmentDocument[_Identity, _Result, _Variables, _ReadInput],
