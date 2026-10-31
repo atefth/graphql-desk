@@ -425,6 +425,111 @@ function suggestionActions(bundle, snapshot, diagnostics, calls) {
   return unique(result);
 }
 
+function extractFragmentPlan(bundle, snapshot, selection, directives) {
+  if (!boundary(snapshot.text, selection.start) || !boundary(snapshot.text, selection.end) ||
+      selection.start >= selection.end) return null;
+  const trivia = text => /^(?:[\s,\uFEFF]|#[^\r\n]*(?:\r\n|\r|\n|$))*$/.test(text);
+  const plans = [];
+  for (const call of bundle.response.calls) {
+    const context = call.extract;
+    const callRange = call.identity.call_range.utf16;
+    if (!context || !call.index || call.identity.module.uri !== snapshot.uri ||
+        call.identity.module.version !== snapshot.version || selection.start < callRange.start ||
+        selection.end > callRange.end) continue;
+    const starts = toDecoded(call, snapshot, selection.start);
+    const ends = toDecoded(call, snapshot, selection.end);
+    if (starts.length !== 1 || ends.length !== 1) continue;
+    const start = starts[0].start, end = ends[0].start;
+    if (start >= end || !editableRange(bundle, call, { start, end }, snapshot)) continue;
+    const ast = parseCall(call);
+    const schema = schemaFor(bundle, call);
+    if (!ast || !schema) continue;
+    const fragments = fragmentRegistry(bundle, call);
+    const allowed = new Set([...CLIENT_DIRECTIVES, ...directives(bundle, call)]);
+    if (validationIssues(schema, ast, fragments, allowed).errors.length) continue;
+    const info = new gql.TypeInfo(schema);
+    const matches = [];
+    gql.visit(ast, gql.visitWithTypeInfo(info, {
+      SelectionSet(node) {
+        const selected = node.selections.filter(item => start <= item.loc.start && item.loc.end <= end);
+        const overlapping = node.selections.filter(item => item.loc.start < end && start < item.loc.end);
+        if (!selected.length || selected.length !== overlapping.length ||
+            selected.some(item => item.kind !== gql.Kind.FIELD) ||
+            !trivia(call.source.slice(start, selected[0].loc.start)) ||
+            !trivia(call.source.slice(selected.at(-1).loc.end, end))) return;
+        const spreads = new Set();
+        for (const item of selected) gql.visit(item, { FragmentSpread(spread) { spreads.add(spread.name.value); } });
+        const parent = info.getParentType();
+        if (gql.isCompositeType(parent)) matches.push({ selected, parent, spreads });
+      },
+    }));
+    if (matches.length !== 1) continue;
+    const { selected, parent, spreads } = matches[0];
+    const span = { start: selected[0].loc.start, end: selected.at(-1).loc.end };
+    const host = editableRange(bundle, call, span, snapshot);
+    if (!host || host.start < callRange.start || host.end > callRange.end) continue;
+    const names = new Set();
+    for (const candidate of bundle.response.calls) {
+      const parsed = parseCall(candidate);
+      for (const definition of parsed?.definitions ?? []) {
+        if (definition.kind === gql.Kind.FRAGMENT_DEFINITION) names.add(definition.name.value);
+      }
+      for (const match of candidate.source.matchAll(/\bfragment(?:[\s,]|#[^\r\n]*(?:\r\n|\r|\n|$))+([_A-Za-z][_0-9A-Za-z]*)\b/g)) names.add(match[1]);
+    }
+    const base = `${parent.name}Fields`;
+    const pythonNames = snapshot.text.normalize("NFKC");
+    let name = base, binding, suffix = 2;
+    do {
+      binding = name.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+        .replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+      if (!names.has(name) && !pythonNames.includes(binding)) break;
+      name = `${base}${suffix++}`;
+    } while (true);
+    const calls = new Map(bundle.response.calls.map(item => [documentKey(item.identity), item]));
+    const references = [];
+    for (const spread of spreads) {
+      const matches = call.fragments.filter(reference => {
+        const target = calls.get(documentKey(reference.target));
+        return target?.index?.primary_fragment?.name === spread &&
+          reference.reference_module.uri === snapshot.uri && reference.reference_module.version === snapshot.version;
+      });
+      if (matches.length !== 1) { references.length = 0; break; }
+      const range = matches[0].range.utf16;
+      const expression = snapshot.text.slice(range.start, range.end);
+      if (range.start < callRange.start || range.end > callRange.end ||
+          !/^[_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*$/.test(expression)) { references.length = 0; break; }
+      references.push(expression);
+    }
+    if (references.length !== spreads.size) continue;
+    const fragment = `fragment ${name} on ${parent.name} {\n${call.source.slice(span.start, span.end)}\n}`;
+    const rewritten = `${call.source.slice(0, span.start)}...${name}${call.source.slice(span.end)}\n${fragment}`;
+    const rewrittenAst = gql.parse(new gql.Source(rewritten, documentKey(call.identity)));
+    if (validationIssues(schema, rewrittenAst, fragments, allowed).errors.length) continue;
+    if (!Number.isInteger(context.statement_start) || !Number.isInteger(context.fragment_insertion) ||
+        !boundary(snapshot.text, context.statement_start) || !boundary(snapshot.text, context.fragment_insertion) ||
+        context.statement_start > callRange.start || context.fragment_insertion < callRange.start ||
+        context.fragment_insertion > callRange.end || typeof context.indent !== "string" ||
+        !/^[ \t]*$/.test(context.indent) || !["\n", "\r", "\r\n"].includes(context.newline) ||
+        !/^[_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*$/.test(context.factory) ||
+        !/^[_A-Za-z][_0-9A-Za-z]*$/.test(binding)) continue;
+    const additions = {
+      new: `, fragments=[${binding}]`, new_trailing: ` fragments=[${binding}]`, populated: `${binding}, `,
+      empty_list: binding, empty_tuple: `${binding},`,
+    };
+    const composition = additions[context.fragment_mode];
+    if (!composition || (context.fragment_insertion >= host.start && context.fragment_insertion <= host.end)) continue;
+    const changes = [
+      { range: host, replacement: `...${name}` },
+      { range: { start: context.fragment_insertion, end: context.fragment_insertion }, replacement: composition },
+      { range: { start: context.statement_start, end: context.statement_start },
+        replacement: `${context.indent}${binding} = ${context.factory}(source=${JSON.stringify(fragment)}, fragments=[${references.join(", ")}])${context.newline}` },
+    ];
+    plans.push(changes.map(item => ({ ...item, module: call.identity.module, sourceText: snapshot.text,
+      positionRange: { start: positionAt(snapshot.text, item.range.start), end: positionAt(snapshot.text, item.range.end) } })));
+  }
+  return plans.length === 1 ? plans[0] : null;
+}
+
 /** All analysis and freshness authority is injected; this module never starts Python. */
 function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirectives = () => [], mapSnapshot = value => value }) {
   if (![analyze, isCurrent, isTrusted].every((item) => typeof item === "function")) throw new Error("Analysis, trust and freshness callbacks are required");
@@ -557,6 +662,15 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         return uniqueEdits.length === edits.length
           ? uniqueEdits.map(({ module, range, positionRange, sourceText }) => ({ module, range, positionRange, sourceText, replacement: newName })) : null;
       }, null);
+    },
+    async extractFragment(snapshot, selection, token) {
+      try {
+        const bundle = await load(snapshot, token);
+        if (!bundle) return null;
+        snapshot = mapSnapshot(snapshot, bundle);
+        const plan = extractFragmentPlan(bundle, snapshot, selection, clientDirectives);
+        return await finish(bundle, snapshot, token, plan, null);
+      } catch { return null; }
     },
     async symbols(snapshot, token) {
       try {
@@ -766,7 +880,10 @@ function registerLanguageFeatures(vscode, options) {
       },
     }),
     vscode.languages.registerCodeActionsProvider(selector, {
-      async provideCodeActions(document, _range, context, token) {
+      async provideCodeActions(document, selectedRange, context, token) {
+        const version = document.version;
+        const selection = selectedRange && { start: document.offsetAt(selectedRange.start), end: document.offsetAt(selectedRange.end) };
+        const current = () => !cancelled(token) && document.version === version && !document.isClosed;
         const diagnostics = context.diagnostics.filter((item) =>
           ["graphql-desk.persisted-hash-mismatch", "graphql-desk.persisted-id-missing",
             "graphql.validation", "graphql.deprecation"].includes(item.code));
@@ -778,13 +895,24 @@ function registerLanguageFeatures(vscode, options) {
             end: document.offsetAt(item.range.end),
           },
         }));
-        return (await service.codeActions(snapshot(document), items, token)).map((item) => {
+        const quickFixes = items.length && (!context.only || context.only.contains(vscode.CodeActionKind.QuickFix))
+          ? await service.codeActions(snapshot(document), items, token) : [];
+        const actions = quickFixes.map((item) => {
           const action = new vscode.CodeAction(item.title, vscode.CodeActionKind.QuickFix);
           action.edit = new vscode.WorkspaceEdit();
           action.edit.replace(document.uri, range(document, item.range), item.replacement);
           action.diagnostics = diagnostics;
           return action;
         });
+        if (!current()) return [];
+        if (document.uri.scheme === "file" && (!context.only || context.only.contains(vscode.CodeActionKind.RefactorExtract)) && selection &&
+            selection.start < selection.end && await service.extractFragment(snapshot(document), selection, token) && current()) {
+          const action = new vscode.CodeAction("Extract GraphQL fragment", vscode.CodeActionKind.RefactorExtract);
+          action.command = { command: "graphqlDesk.extractFragment", title: action.title,
+            arguments: [{ textDocument: { uri: document.uri.toString() }, version, selection }] };
+          actions.push(action);
+        }
+        return current() ? actions : [];
       },
     }),
   ];
@@ -796,6 +924,16 @@ function registerLanguageFeatures(vscode, options) {
     async rename(document, position, newName, token) {
       if (disposed || cancelled(token)) return null;
       return service.rename(snapshot(document), document.offsetAt(position), newName, token);
+    },
+    async extractFragment(document, selection, token) {
+      if (disposed || cancelled(token)) return null;
+      const source = snapshot(document);
+      const plan = await service.extractFragment(source, selection, token);
+      // Extraction only edits its originating file; use the editor's actual URI
+      // for LSP synchronization even if analysis canonicalizes filesystem case.
+      if (!plan || plan.some(item => item.sourceText !== source.text || item.module.version !== source.version ||
+          item.module.uri !== plan[0].module.uri)) return null;
+      return plan.map(item => ({ ...item, module: { ...item.module, uri: document.uri.toString() } }));
     },
     async refresh(document, token) {
       if (disposed) return;

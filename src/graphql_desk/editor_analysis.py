@@ -6,6 +6,7 @@ from typing import cast
 from urllib.parse import urlsplit
 
 from .config import ScalarMapping
+from .editor_refactor import extraction_contexts
 from .fragments import DefinitionFact, FragmentIndex, SchemaContext, index_fragments
 from .persisted import editor_sha256_id
 from .persisted_manifest import collect_persisted_manifests
@@ -466,6 +467,10 @@ def analyze_editor_snapshot_details(
     mappings = [
         (call, build_source_map(call, tuple(modules))) for call in sources.calls
     ]
+    refactor_contexts = {
+        module: extraction_contexts(snapshots[module])
+        for module in {call.module for call, _ in mappings}
+    }
     points: dict[ModuleDependency, set[int]] = {item: set() for item in snapshots}
 
     def require(module: ModuleDependency, span: Span) -> None:
@@ -569,6 +574,9 @@ def analyze_editor_snapshot_details(
                 "schema_name": call.schema_name,
                 "source": call.source,
                 "operation": call.operation,
+                "extract": refactor_contexts[call.module].get(
+                    (call.range.start, call.range.end)
+                ),
                 "dependencies": [_module(item) for item in call.dependencies],
                 "fragments": [
                     {

@@ -609,6 +609,144 @@ test("deprecated replacement suggestions reject fields deprecated with an empty 
   assert.deepEqual(await service.codeActions(snapshot, [deprecation]), []);
 });
 
+test("extracting complete sibling fields creates a colocated fragment and composes it", async () => {
+  const source = "from graphql_desk import gql\nq = gql('query Read { user { id name } }')\n";
+  const value = bundle(source);
+  const selection = { start: source.indexOf("id name"), end: source.indexOf("id name") + "id name".length };
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), selection);
+  assert.equal(plan.length, 3);
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+  assert.match(updated, /user_fields = gql\(source="fragment UserFields on User/);
+  assert.match(updated, /q = gql\('query Read \{ user \{ \.\.\.UserFields \} \}', fragments=\[user_fields\]\)/);
+  const refreshed = bundle(updated);
+  assert.deepEqual(refreshed.response.diagnostics, []);
+  assert.equal(refreshed.response.calls.length, 2);
+  assert.equal(refreshed.response.calls[1].fragments.length, 1);
+});
+
+test("extraction preserves existing composition and avoids Python and GraphQL names", async () => {
+  const source = "from graphql_desk import gql\nuser_fields = 1\ncard = gql('fragment UserFields on User { id }')\nq = gql('query Read { user { name ...UserFields } }', [card])\n";
+  const value = bundle(source);
+  const selection = { start: source.indexOf("name ..."), end: source.indexOf("name ...") + 4 };
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), selection);
+  assert.equal(plan.length, 3);
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+  assert.match(updated, /user_fields2 = gql\(source="fragment UserFields2 on User/);
+  assert.match(updated, /\[user_fields2, card\]/);
+  assert.deepEqual(bundle(updated).response.diagnostics, []);
+});
+
+test("extraction avoids Python identifiers that normalize to the generated binding", async () => {
+  const source = "from graphql_desk import gql\nｕｓｅｒ＿ｆｉｅｌｄｓ = 1\nq=gql('query { user { name } }')\n";
+  const value = bundle(source), start = source.indexOf("name");
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), { start, end: start + 4 });
+  assert.equal(plan.length, 3);
+  assert.match(plan.find(item => item.replacement.includes(" = gql"))?.replacement, /user_fields2 = gql/);
+});
+
+test("extraction preserves referenced fragments inside selected fields", async () => {
+  const source = "from graphql_desk import gql\ncard = gql('fragment Card on User { id }')\nq = gql('query Read { user { friend { ...Card } name } }', [card])\n";
+  const value = bundle(source, { schema: schema.replace("id: ID!", "id: ID! friend: User") });
+  const start = source.indexOf("friend { ...Card }");
+  const selection = { start, end: start + "friend { ...Card }".length };
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), selection);
+  assert.equal(plan.length, 3);
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+  assert.match(updated, /user_fields = gql\(source="fragment UserFields on User.*", fragments=\[card\]\)/);
+  assert.match(updated, /\[user_fields, card\]/);
+  assert.deepEqual(bundle(updated, { schema: value.request.schemas[0].text }).response.diagnostics, []);
+});
+
+test("extraction preserves aliases, CRLF, keyword arguments and variables", async () => {
+  const source = "# 😀\r\nfrom graphql_desk import gql as make\r\nq = make(source='query Read($id: ID) { user(id: $id) { name } }', fragments=())\r\n";
+  const value = bundle(source);
+  const selected = "user(id: $id) { name }", start = source.indexOf(selected);
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), { start, end: start + selected.length });
+  assert.equal(plan.length, 3);
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+  assert.match(updated, /query_fields = make\(source="fragment QueryFields on Query/);
+  assert.match(updated, /fragments=\(query_fields,\)/);
+  assert.equal(updated.split("\n").filter(line => line && !line.endsWith("\r")).length, 0);
+  assert.deepEqual(bundle(updated).response.diagnostics, []);
+});
+
+test("extraction adds composition outside grouped sources and after trailing comments", async () => {
+  for (const call of [
+    "gql((('query Read { user { id name } }')))",
+    "gql((('query Read { user { id name } }')), # trailing comment\n)",
+  ]) {
+    const source = `from graphql_desk import gql\nq=${call}\n`;
+    const value = bundle(source), start = source.indexOf("id name");
+    const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), { start, end: start + 7 });
+    assert.equal(plan.length, 3, source);
+    const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+      .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+    assert.deepEqual(bundle(updated).response.diagnostics, [], updated);
+  }
+});
+
+test("extraction leaves leading Python comments attached to the original query", async () => {
+  const source = "from graphql_desk import gql\n# Query note\nq=gql('query { user { name } }')\n";
+  const value = bundle(source), start = source.indexOf("name");
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), { start, end: start + 4 });
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+  assert.match(updated, /user_fields = gql\(.*\)\n# Query note\nq=/);
+  assert.deepEqual(bundle(updated).response.diagnostics, []);
+});
+
+test("extraction rejects partial, shared, escaped, invalid and stale selections", async () => {
+  const cases = [
+    ["from graphql_desk import gql\nq=gql('query { user { name id } }')", "ame id"],
+    ["from graphql_desk import gql\nTEXT='query { user { name } }'\nq=gql(TEXT)\nr=gql(TEXT)", "name"],
+    ["from graphql_desk import gql\nq=gql('query { user { na\\u006de } }')", "na\\u006de"],
+    ["from graphql_desk import gql\nq=gql('query { user { missing } }')", "missing"],
+    ["from graphql_desk import gql\nq=gql('query { user { ...Card } } fragment Card on User { id }')", "user { ...Card }"],
+    ["from graphql_desk import gql\ndef read():\n    q=gql('query { user { name } }')", "name"],
+  ];
+  for (const [source, selected] of cases) {
+    const value = bundle(source), start = source.indexOf(selected);
+    const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), { start, end: start + selected.length });
+    assert.equal(plan, null, source);
+  }
+  const source = "from graphql_desk import gql\nq=gql('query { user { id name } }')";
+  const value = bundle(source), start = source.indexOf("id name");
+  const selection = { start, end: start + 7 };
+  assert.equal(await createLanguageFeatures(options(value, { isCurrent: async () => false }))
+    .extractFragment(document(value), selection), null);
+  assert.equal(await createLanguageFeatures(options(value)).extractFragment(document(value), selection,
+    { isCancellationRequested: true }), null);
+});
+
+test("extraction rejects custom factories without a proven composition contract", async () => {
+  for (const [factory, call] of [
+    ["def custom(source): return source", "custom('query { user { name } }')"],
+    ["def custom(*, source, fragments=()): return source", "custom(source='query { user { name } }')"],
+  ]) {
+    const source = `from templates import custom\nq=${call}\n`;
+    const module = { project: "p", module: "templates", uri: "file:///workspace/templates.py", version: 1,
+      source: `${factory}\n`, is_package: false };
+    const value = bundle(source, { modules: [module], factories: [{ module: "templates", export: "custom", schema_name: null }] });
+    assert.equal(value.response.calls.length, 1);
+    const start = source.indexOf("name");
+    assert.equal(await createLanguageFeatures(options(value)).extractFragment(document(value), { start, end: start + 4 }), null);
+  }
+});
+
+test("extraction supports a known schema-bound initializer", async () => {
+  const source = "from graphql_desk import init_graphql\ngql = init_graphql('default')\nq=gql('query { user { name } }')\n";
+  const value = bundle(source), start = source.indexOf("name");
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), { start, end: start + 4 });
+  assert.equal(plan.length, 3);
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+  assert.deepEqual(bundle(updated).response.diagnostics, []);
+});
+
 test("configured client directives complete only in directive-name context", async () => {
   const source = "from graphql_desk import gql\nq=gql('{ user @loc { name } }')";
   const value = bundle(source);
@@ -688,7 +826,7 @@ test("VS Code registration supplements Python services and ignores old diagnosti
     CompletionItem: class { constructor(label) { this.label = label; } },
     Diagnostic: class { constructor(range, message, severity) { Object.assign(this, { range, message, severity }); } },
     CodeAction: class { constructor(title, kind) { Object.assign(this, { title, kind }); } },
-    CodeActionKind: { QuickFix: 1 },
+    CodeActionKind: { QuickFix: 1, RefactorExtract: 2 },
     WorkspaceEdit: class { constructor() { this.changes = []; } replace(...change) { this.changes.push(change); } },
     languages: {
       createDiagnosticCollection() { return { set(_uri, diagnostics) { publications.push(diagnostics); }, delete() {}, dispose() { disposed += 1; } }; },
@@ -740,6 +878,33 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   assert.deepEqual(documentSymbols.map(item => [item.name, item.detail, item.kind]), [["Check", "query", 11]]);
   registered.dispose();
   assert.equal(disposed, 7);
+  const extractValue = bundle("from graphql_desk import gql\nq=gql('query { user { id name } }')");
+  const extractRegistered = registerLanguageFeatures(vscode, options(extractValue));
+  const extractItem = extractValue.request.modules[0];
+  const extractDoc = { uri: { scheme: "file", toString: () => extractItem.uri }, version: extractItem.version,
+    getText: () => extractItem.source, positionAt: (offset) => ({ offset }), offsetAt: (position) => position.offset };
+  const start = extractItem.source.indexOf("id name");
+  const extraction = await providers.actions.provideCodeActions(extractDoc,
+    { start: { offset: start }, end: { offset: start + 7 } }, { diagnostics: [] });
+  assert.equal(extraction.length, 1);
+  assert.equal(extraction[0].kind, vscode.CodeActionKind.RefactorExtract);
+  assert.equal(extraction[0].command.command, "graphqlDesk.extractFragment");
+  assert.equal(extraction[0].command.arguments[0].version, extractDoc.version);
+  assert.equal(extraction[0].edit, undefined);
+  assert.deepEqual(await providers.actions.provideCodeActions(extractDoc,
+    { start: { offset: start }, end: { offset: start + 7 } },
+    { diagnostics: [], only: { contains: kind => kind === vscode.CodeActionKind.QuickFix } }), []);
+  extractRegistered.dispose();
+  let resumeAction;
+  const delayed = registerLanguageFeatures(vscode, options(extractValue, {
+    analyze: async () => { await new Promise(resolve => { resumeAction = resolve; }); return extractValue; },
+  }));
+  const pendingAction = providers.actions.provideCodeActions(extractDoc,
+    { start: { offset: start }, end: { offset: start + 7 } }, { diagnostics: [] });
+  extractDoc.version += 1;
+  resumeAction();
+  assert.deepEqual(await pendingAction, []);
+  delayed.dispose();
   let releaseFinal;
   let enteredFinal;
   const reachedFinal = new Promise((resolve) => { enteredFinal = resolve; });
