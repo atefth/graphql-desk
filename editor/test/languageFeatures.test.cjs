@@ -815,6 +815,22 @@ test("extraction in a nested function remains inline and reanalyzes", async () =
   assert.equal(refreshed.response.calls[1].index.primary_fragment.name, "UserFields");
 });
 
+test("extraction in a top-level class method remains inline and reanalyzes", async () => {
+  const source = "from graphql_desk import gql\nclass Service:\n    def read(self):\n        query = gql('query Read { user { id name } }')\n";
+  const value = bundle(source);
+  const start = source.indexOf("id name");
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value),
+    { start, end: start + "id name".length });
+  assert.equal(plan.length, 2);
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+  assert.match(updated, /        query = gql\(.*fragments=\[gql\(source="fragment UserFields on User/);
+  const refreshed = bundle(updated);
+  assert.deepEqual(refreshed.response.diagnostics, []);
+  assert.equal(refreshed.response.calls.length, 2);
+  assert.equal(refreshed.response.calls[1].index.primary_fragment.name, "UserFields");
+});
+
 test("extraction in an if suite remains inline and reanalyzes", async () => {
   const source = "# 😀\r\nfrom graphql_desk import gql\r\ndef read(enabled):\r\n    if enabled:\r\n        # keep this comment\r\n        query = gql('query Read { user { id name } }')\r\n";
   const value = bundle(source);
