@@ -8,11 +8,13 @@ import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import redirect_stderr
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from importlib import metadata
 from io import StringIO
 from pathlib import Path
-from typing import NoReturn
+from typing import Literal, NoReturn
+
+from graphql import GraphQLError
 
 from .config import ProjectConfig, SchemaConfig
 from .document_validation import validate_indexed_document
@@ -21,7 +23,12 @@ from .external_type_sources import (
     external_class_base_symbols,
     interpreter_type_roots,
 )
-from .fragments import SchemaContext, index_fragments
+from .field_usage import FieldUsageOptions, field_usage_diagnostics
+from .fragments import (
+    SchemaContext,
+    index_fragments,
+    unused_colocated_fragment_diagnostics,
+)
 from .persisted_bindings import generated_header, render_persisted_bindings
 from .persisted_manifest import collect_persisted_manifests
 from .project import (
@@ -40,9 +47,11 @@ from .release_artifacts import (
 from .schema_loading import load_local_schema
 from .schema_types import render_schema_types
 from .schema_url import load_from_url
+from .source import Span
 from .source_graph import (
     DocumentIdentity,
     GraphDiagnostic,
+    ModuleDependency,
     ModuleSnapshot,
     TypeSymbolResolution,
     resolve_project,
@@ -63,6 +72,64 @@ class PersistedGenerationError(ValueError):
     def __init__(self, diagnostics: Sequence[str]) -> None:
         self.diagnostics = tuple(diagnostics)
         super().__init__("Persisted generation failed")
+
+
+@dataclass(frozen=True)
+class CheckDiagnostic:
+    """One source or project diagnostic returned by :func:`check`."""
+
+    severity: Literal["info", "warn", "error"]
+    code: str
+    message: str
+    module: ModuleDependency | None = None
+    range: Span | None = None
+    schema: str | None = None
+    line: int | None = None
+    column: int | None = None
+
+
+_WARNING_CODES = frozenset(
+    {
+        "invalid-python",
+        "parse-fallback",
+        "source-not-static",
+        "source-too-complex",
+        "persisted-not-static",
+        "unused-colocated-fragment",
+        "52005",
+    }
+)
+
+
+def _check_diagnostic(
+    diagnostic: GraphDiagnostic,
+    source_texts: Mapping[tuple[str, str, str, int], str],
+) -> CheckDiagnostic:
+    source = source_texts.get(
+        (
+            diagnostic.module.project,
+            diagnostic.module.module,
+            diagnostic.module.uri,
+            diagnostic.module.version,
+        ),
+        "",
+    )
+    before = source[: diagnostic.range.start]
+    return CheckDiagnostic(
+        "warn" if diagnostic.code in _WARNING_CODES else "error",
+        diagnostic.code,
+        diagnostic.message,
+        diagnostic.module,
+        diagnostic.range,
+        line=before.count("\n") + 1,
+        column=len(before.rsplit("\n", 1)[-1].removesuffix("\r")) + 1,
+    )
+
+
+def _project_diagnostic(
+    code: str, message: str, *, schema: str | None = None
+) -> CheckDiagnostic:
+    return CheckDiagnostic("error", code, message, schema=schema)
 
 
 def _version(distribution: str) -> str:
@@ -273,11 +340,29 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Stage a source-free package tree for persisted-only releases",
     )
-    check = commands.add_parser("check", help="Verify a GraphQL Desk wheel artifact")
-    check.add_argument(
+    check_parser = commands.add_parser(
+        "check", help="Validate project GraphQL documents or a wheel artifact"
+    )
+    check_parser.add_argument(
         "-c", "--config", default=argparse.SUPPRESS, help="Select pyproject.toml"
     )
-    check.add_argument("--artifact", required=True, help="Wheel file to inspect")
+    check_parser.add_argument(
+        "--schema", default=argparse.SUPPRESS, help="Select one configured schema"
+    )
+    check_parser.add_argument(
+        "--level",
+        "-l",
+        choices=("info", "warn", "error"),
+        default="info",
+        help="Minimum diagnostic level to display",
+    )
+    check_parser.add_argument(
+        "--fail-on-warn",
+        "-w",
+        action="store_true",
+        help="Return failure when warnings occur",
+    )
+    check_parser.add_argument("--artifact", help="Verify a GraphQL Desk wheel")
     return parser
 
 
@@ -310,6 +395,221 @@ def _python_candidates(config: ProjectConfig) -> tuple[Path, ...]:
                 Path(directory) / name for name in files if name.endswith(".py")
             )
     return tuple(sorted(candidates, key=lambda item: item.as_posix()))
+
+
+def check(
+    *,
+    config: Path | str | None = None,
+    schema: str | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[CheckDiagnostic, ...]:
+    """Check statically discoverable documents without importing project code."""
+    try:
+        selected = effective_project(
+            Path.cwd(),
+            explicit_config=Path(config) if config is not None else None,
+        )
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return (
+            _project_diagnostic(
+                "project-unavailable",
+                "Project configuration could not be checked.",
+            ),
+        )
+    if selected is None:
+        return (
+            _project_diagnostic(
+                "project-unavailable",
+                "No GraphQL Desk project configuration was found.",
+            ),
+        )
+    project_config = selected.config
+    try:
+        validate_project_ownership((project_config,))
+        selected_schemas = (
+            (select_schema(project_config, binding=schema),)
+            if schema is not None
+            else project_config.schemas
+        )
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return (
+            _project_diagnostic(
+                "schema-selection-failed"
+                if schema is not None
+                else "project-unavailable",
+                "The selected schema or project configuration is unavailable.",
+            ),
+        )
+    try:
+        files = select_project_sources(
+            project_config,
+            _python_candidates(project_config),
+            validate_entrypoints=True,
+        )
+        project_id = project_config.path.as_uri()
+        modules = tuple(
+            ModuleSnapshot(
+                project_id,
+                source.module,
+                source.path.as_uri(),
+                1,
+                source.path.read_text(encoding="utf-8"),
+                source.is_package,
+            )
+            for source in files
+        )
+        sources = resolve_project(
+            modules,
+            bindings=(project_bindings(project_config, project_id=project_id),),
+            collect_document_imports=project_config.check_colocated_fragments,
+        )
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return (
+            _project_diagnostic(
+                "project-unavailable",
+                "Project configuration or Python sources could not be checked.",
+            ),
+        )
+
+    source_texts = {
+        (item.project, item.module, item.uri, item.version): item.source
+        for item in modules
+    }
+    diagnostics = [
+        _check_diagnostic(item, source_texts) for item in sources.diagnostics
+    ]
+    schema_contexts: dict[tuple[str, str | None], SchemaContext] = {}
+    for schema_config in selected_schemas:
+        try:
+            loaded = (
+                load_local_schema(schema_config.origin.local_path)
+                if schema_config.origin.local_path is not None
+                else load_from_url(
+                    schema_config.origin,
+                    environment=os.environ if environment is None else environment,
+                )
+            )
+        except (OSError, RuntimeError, ValueError):
+            diagnostics.append(
+                _project_diagnostic(
+                    "schema-unavailable",
+                    "Schema contents or access could not be checked.",
+                    schema=schema_config.name,
+                )
+            )
+            continue
+        token = f"check:{project_id}:{schema_config.name}"
+        schema_context = SchemaContext(schema_config.name, loaded, token)
+        schema_contexts[(project_id, schema_config.name)] = schema_context
+        if schema_config.name == "default":
+            schema_contexts[(project_id, None)] = schema_context
+
+    calls = tuple(
+        call
+        for call in sources.calls
+        if (
+            schema is None
+            or call.schema_name == schema
+            or (schema == "default" and call.schema_name is None)
+        )
+        and (project_id, call.schema_name) in schema_contexts
+    )
+    persisted = tuple(
+        item
+        for item in sources.persisted
+        if schema is None
+        or item.schema_name == schema
+        or (schema == "default" and item.schema_name is None)
+    )
+    selected_sources = replace(
+        sources, calls=calls, diagnostics=(), persisted=persisted
+    )
+    try:
+        index = index_fragments(selected_sources, schemas=schema_contexts)
+        diagnostics.extend(
+            _check_diagnostic(item, source_texts) for item in index.diagnostics
+        )
+        diagnostics.extend(
+            _check_diagnostic(item, source_texts)
+            for item in collect_persisted_manifests(selected_sources, index).diagnostics
+        )
+        diagnostics.extend(
+            _check_diagnostic(item, source_texts)
+            for item in field_usage_diagnostics(
+                modules,
+                index,
+                schema_contexts,
+                {
+                    project_id: FieldUsageOptions(
+                        enabled=project_config.track_field_usage,
+                        reserved_keys=project_config.reserved_keys,
+                        unmasked_schemas=tuple(
+                            item.name
+                            for item in selected_schemas
+                            if item.disable_masking
+                        ),
+                        client_directives=project_config.client_directives,
+                    )
+                },
+            )
+        )
+        if project_config.check_colocated_fragments:
+            diagnostics.extend(
+                _check_diagnostic(item, source_texts)
+                for item in unused_colocated_fragment_diagnostics(sources, index)
+            )
+        contexts_by_name = {item.name: item for item in selected_schemas}
+        for document in index.documents:
+            schema_name = document.schema_identity[1]
+            matched_schema_config = contexts_by_name.get(schema_name)
+            matched_context = (
+                schema_contexts.get((project_id, matched_schema_config.name))
+                if matched_schema_config
+                else None
+            )
+            if matched_context is None:
+                continue
+            diagnostics.extend(
+                _check_diagnostic(item, source_texts)
+                for item in validate_indexed_document(
+                    matched_context,
+                    document,
+                    fragment_index=index,
+                    modules=modules,
+                    client_directives=project_config.client_directives,
+                )
+            )
+    except (GraphQLError, OSError, RuntimeError, TypeError, ValueError):
+        diagnostics.append(
+            _project_diagnostic(
+                "analysis-unavailable",
+                "GraphQL source analysis could not be completed.",
+            )
+        )
+
+    unique: dict[tuple[object, ...], CheckDiagnostic] = {}
+    for item in diagnostics:
+        key = (
+            item.severity,
+            item.code,
+            item.message,
+            item.module,
+            item.range,
+            item.schema,
+        )
+        unique[key] = item
+    return tuple(
+        sorted(
+            unique.values(),
+            key=lambda item: (
+                item.module.module if item.module else "",
+                item.range.start if item.range else -1,
+                item.schema or "",
+                item.code,
+                item.message,
+            ),
+        )
+    )
 
 
 def _persisted_outputs(
@@ -446,6 +746,30 @@ def _report_diagnostics(
         column = len(before.rsplit("\n", 1)[-1].removesuffix("\r")) + 1
         print(
             f"{diagnostic.module.module}:{line}:{column}: {diagnostic.message}",
+            file=sys.stderr,
+        )
+
+
+def _report_check_diagnostics(
+    diagnostics: Sequence[CheckDiagnostic],
+    *,
+    level: str,
+) -> None:
+    minimum = {"info": 0, "warn": 1, "error": 2}[level]
+    rank = {"info": 0, "warn": 1, "error": 2}
+    for diagnostic in diagnostics:
+        if rank[diagnostic.severity] < minimum:
+            continue
+        location = ""
+        if diagnostic.module is not None and diagnostic.range is not None:
+            location = (
+                f"{diagnostic.module.module}:{diagnostic.line}:{diagnostic.column}: "
+            )
+        elif diagnostic.schema is not None:
+            location = f"schema {diagnostic.schema}: "
+        print(
+            f"{location}{diagnostic.severity} [{diagnostic.code}]: "
+            f"{diagnostic.message}",
             file=sys.stderr,
         )
 
@@ -920,25 +1244,42 @@ def main(argv: Sequence[str] | None = None) -> int:
                 stdout_is_terminal=sys.stdout.isatty(),
             )
         if arguments.command == "check":
-            selected = effective_project(Path.cwd(), explicit_config=config_path)
-            if selected is None:
-                raise ValueError("No GraphQL Desk project configuration was found")
-            check_wheel(
-                Path(arguments.artifact),
-                selected.config.root
-                / "build"
-                / "graphql-desk"
-                / "omitted"
-                / "manifest.json",
+            if arguments.artifact is not None:
+                selected = effective_project(Path.cwd(), explicit_config=config_path)
+                if selected is None:
+                    raise ValueError("No GraphQL Desk project configuration was found")
+                check_wheel(
+                    Path(arguments.artifact),
+                    selected.config.root
+                    / "build"
+                    / "graphql-desk"
+                    / "omitted"
+                    / "manifest.json",
+                )
+                print("Wheel matches the source-free GraphQL Desk release manifest.")
+                return 0
+            diagnostics = check(
+                config=config_path,
+                schema=schema_name,
+                environment=dict(os.environ),
             )
-            print("Wheel matches the source-free GraphQL Desk release manifest.")
+            _report_check_diagnostics(
+                diagnostics,
+                level=arguments.level,
+            )
+            if any(item.severity == "error" for item in diagnostics):
+                return 1
+            if arguments.fail_on_warn and any(
+                item.severity == "warn" for item in diagnostics
+            ):
+                return 1
             return 0
         return _doctor(config_path, schema_name, environment=dict(os.environ))
     except KeyboardInterrupt:
         message = (
             "Doctor cancelled."
             if arguments.command == "doctor"
-            else "Persisted generation cancelled."
+            else "GraphQL Desk command cancelled."
         )
         print(message, file=sys.stderr)
         return 130
