@@ -22,6 +22,7 @@ from graphql_desk.scan_graph import build_scan_graph
 from graphql_desk.source import Span
 from graphql_desk.source_graph import (
     DocumentIdentity,
+    FragmentReference,
     GraphDiagnostic,
     ModuleDependency,
     ModuleSnapshot,
@@ -327,6 +328,13 @@ class ScanGraphTests(unittest.TestCase):
     def test_conflicting_same_schema_fragments_are_reported_without_resolution(
         self,
     ) -> None:
+        operation = indexed_source(
+            "app",
+            "queries",
+            'doc = graphql("query UsesShared { user { ...Shared } }")\n',
+            "query UsesShared { user { ...Shared } }",
+            "shop",
+        )
         first = indexed_source(
             "app",
             "fragments.one",
@@ -341,14 +349,17 @@ class ScanGraphTests(unittest.TestCase):
             "fragment Shared on User { name }",
             "shop",
         )
-        snapshots = (first[0], second[0])
+        facts = (operation, first, second)
+        snapshots = tuple(item[0] for item in facts)
         result = build_scan_graph(
-            ProjectSources((first[1], second[1]), ()),
-            FragmentIndex((first[2], second[2]), ()),
+            ProjectSources(tuple(item[1] for item in facts), ()),
+            FragmentIndex(tuple(item[2] for item in facts), ()),
             snapshots,
             paths={
-                ("app", "fragments.one"): Path("fragments/one.py"),
-                ("app", "fragments.two"): Path("fragments/two.py"),
+                ("app", snapshot.module): Path(
+                    f"{snapshot.module.replace('.', '/')}.py"
+                )
+                for snapshot in snapshots
             },
             roots={"app": Path.cwd() / "scan-root"},
         )
@@ -357,12 +368,18 @@ class ScanGraphTests(unittest.TestCase):
             ["ambiguous-fragment-name", "ambiguous-fragment-name"],
         )
         self.assertEqual(
-            [item.name for item in result.definitions], ["Shared", "Shared"]
+            [item.name for item in result.definitions],
+            ["Shared", "Shared", "UsesShared"],
         )
         self.assertEqual(
             [item.id for item in result.definitions],
-            ["app:shop:fragment:Shared", "app:shop:fragment:Shared~2"],
+            [
+                "app:shop:fragment:Shared",
+                "app:shop:fragment:Shared~2",
+                "app:shop:query:UsesShared",
+            ],
         )
+        self.assertEqual(result.fragment_edges, ())
         stale = replace(first[1], source="fragment Shared on User { email }")
         stale_result = build_scan_graph(
             ProjectSources((stale,), ()),
@@ -373,6 +390,75 @@ class ScanGraphTests(unittest.TestCase):
         )
         self.assertEqual(stale_result.definitions, ())
         self.assertEqual(stale_result.diagnostics[0].code, "stale-scan-index")
+
+    def test_fragment_spreads_resolve_to_schema_qualified_edges(self) -> None:
+        operation = indexed_source(
+            "app",
+            "queries",
+            'doc = graphql("query Get { user { ...UserFields } }")\n',
+            "query Get { user { ...UserFields } }",
+            "shop",
+        )
+        shop_fragment = indexed_source(
+            "app",
+            "shop_fragments",
+            'doc = graphql("fragment UserFields on User { id }")\n',
+            "fragment UserFields on User { id }",
+            "shop",
+        )
+        unimported_fragment = indexed_source(
+            "app",
+            "unused_fragments",
+            'doc = graphql("fragment UserFields on User { email }")\n',
+            "fragment UserFields on User { email }",
+            "shop",
+        )
+        admin_fragment = indexed_source(
+            "app",
+            "admin_fragments",
+            'doc = graphql("fragment UserFields on User { name }")\n',
+            "fragment UserFields on User { name }",
+            "admin",
+        )
+        operation_call = replace(
+            operation[1],
+            fragments=(
+                FragmentReference(
+                    DocumentIdentity(shop_fragment[1].module, shop_fragment[1].range),
+                    operation[1].module,
+                    Span(0, 1),
+                ),
+            ),
+        )
+        operation_index = replace(
+            operation[2],
+            call=operation_call,
+            definitions=(*operation[2].definitions, *shop_fragment[2].definitions),
+        )
+        facts = (operation, shop_fragment, unimported_fragment, admin_fragment)
+        modules = tuple(item[0] for item in facts)
+        result = build_scan_graph(
+            ProjectSources((operation_call, *(item[1] for item in facts[1:])), ()),
+            FragmentIndex((operation_index, *(item[2] for item in facts[1:])), ()),
+            modules,
+            paths={
+                ("app", snapshot.module): Path(f"{snapshot.module}.py")
+                for snapshot in modules
+            },
+            roots={"app": Path.cwd() / "scan-root"},
+        )
+        operation_id = next(
+            item.id for item in result.definitions if item.name == "Get"
+        )
+        shop_fragment_id = next(
+            item.id
+            for item in result.definitions
+            if item.kind == "fragment" and item.schema_name == "shop"
+        )
+        self.assertEqual(
+            [(edge.source_id, edge.target_id) for edge in result.fragment_edges],
+            [(operation_id, shop_fragment_id)],
+        )
 
     def test_definition_location_preserves_crlf_python_source(self) -> None:
         graph = "\nquery Get { user { id } }\n"
