@@ -65,8 +65,7 @@ class CheckCLITests(unittest.TestCase):
 
     def test_utf8_bom_does_not_hide_invalid_graphql(self) -> None:
         source = (
-            "from graphql_desk import graphql\n"
-            'query = graphql("query { absent }")\n'
+            'from graphql_desk import graphql\nquery = graphql("query { absent }")\n'
         )
         (self.root / "operation.py").write_bytes(
             b"\xef\xbb\xbf" + source.encode("utf-8")

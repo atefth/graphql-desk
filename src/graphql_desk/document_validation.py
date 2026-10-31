@@ -125,9 +125,7 @@ def validate_indexed_document(
                 Span(error_node.loc.start, error_node.loc.end)
             ):
                 diagnostics.append(
-                    GraphDiagnostic(
-                        host.module, code, error.message, host.range
-                    )
+                    GraphDiagnostic(host.module, code, error.message, host.range)
                 )
                 located = True
         if not located:

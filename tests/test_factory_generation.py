@@ -570,9 +570,7 @@ def dynamic(name:str)->None:
                 ProjectBindings(
                     "p",
                     ("main",),
-                    factories=(
-                        FactoryBinding("generated.main", "graphql", "main"),
-                    ),
+                    factories=(FactoryBinding("generated.main", "graphql", "main"),),
                 ),
             ),
         )
