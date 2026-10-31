@@ -852,10 +852,54 @@ class _Flow:
         self.states = states
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.class_functions: set[int] = set()
+        self.function_classes: dict[int, ast.ClassDef] = {}
+        self.class_stack: list[ast.ClassDef] = []
         self.unsafe_local_class_functions: set[int] = set()
         self.function_captures: dict[int, dict[str, _Value]] = {}
         self.class_capture_scope: dict[str, _Value] | None = None
         self.current_function: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+        self.current_class: ast.ClassDef | None = None
+        self.module_env: dict[str, _Value] = {}
+        self.class_definitions = {
+            name: target
+            for name, target in owner.exports.items()
+            if isinstance(target, ast.ClassDef) and name not in owner.blocked
+        }
+        self.mutated_classes: set[int] = set()
+
+        def resolve_class(
+            name: str, seen: frozenset[str] = frozenset()
+        ) -> ast.ClassDef | None:
+            if name in seen:
+                return None
+            target = owner.exports.get(name)
+            if isinstance(target, ast.ClassDef):
+                return target
+            if isinstance(target, ast.Name):
+                return resolve_class(target.id, seen | {name})
+            return None
+
+        def mark_mutated_class(node: ast.expr) -> None:
+            if isinstance(node, ast.Name):
+                target = resolve_class(node.id)
+                if target is not None:
+                    self.mutated_classes.add(id(target))
+
+        for child in ast.walk(owner.tree):
+            if isinstance(child, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = (
+                    child.targets if isinstance(child, ast.Assign) else [child.target]
+                )
+                for target in targets:
+                    if isinstance(target, ast.Attribute):
+                        mark_mutated_class(target.value)
+            elif (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "setattr"
+                and child.args
+            ):
+                mark_mutated_class(child.args[0])
         self.in_function = False
         self.class_depth = 0
         self.captured: set[str] = set()
@@ -914,6 +958,158 @@ class _Flow:
         if shape.items is not None:
             return tuple(self.shape(state, item) for item in shape.items)
         return _Reference((_Path(state, state.root, 0, shape.wrappers),))
+
+    def _super_method(
+        self, name: str
+    ) -> tuple[ast.ClassDef, ast.FunctionDef | ast.AsyncFunctionDef] | None:
+        if (
+            self.current_class is None
+            or self.current_function is None
+            or self.current_function.decorator_list
+            or isinstance(self.current_function, ast.AsyncFunctionDef)
+            or not (
+                self.current_function.args.posonlyargs
+                or self.current_function.args.args
+            )
+        ):
+            return None
+        current = self.current_class
+        visited: set[int] = {id(current)}
+        while True:
+            if (
+                current.decorator_list
+                or current.keywords
+                or len(current.bases) != 1
+                or not isinstance(current.bases[0], ast.Name)
+            ):
+                return None
+            base = self.class_definitions.get(current.bases[0].id)
+            if (
+                base is None
+                or id(base) in visited
+                or id(current) in self.mutated_classes
+                or id(base) in self.mutated_classes
+            ):
+                return None
+            visited.add(id(base))
+            if any(
+                not isinstance(
+                    item,
+                    (
+                        ast.FunctionDef,
+                        ast.AsyncFunctionDef,
+                        ast.Assign,
+                        ast.AnnAssign,
+                        ast.Import,
+                        ast.ImportFrom,
+                        ast.Pass,
+                    ),
+                )
+                for item in base.body
+            ):
+                return None
+            members = [
+                item
+                for item in base.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == name
+            ]
+            conflicting_bindings = any(
+                isinstance(item, (ast.Assign, ast.AnnAssign))
+                and any(
+                    isinstance(target, ast.Name) and target.id == name
+                    for target in (
+                        item.targets if isinstance(item, ast.Assign) else [item.target]
+                    )
+                )
+                or isinstance(item, (ast.Import, ast.ImportFrom))
+                and any(
+                    (alias.asname or alias.name.split(".")[0]) == name
+                    for alias in item.names
+                )
+                for item in base.body
+            )
+            if members:
+                if (
+                    len(members) != 1
+                    or conflicting_bindings
+                    or members[0].decorator_list
+                    or isinstance(members[0], ast.AsyncFunctionDef)
+                    or members[0].args.vararg is not None
+                    or members[0].args.kwarg is not None
+                ):
+                    return None
+                return base, members[0]
+            current = base
+
+    def _call_super_method(
+        self, node: ast.Call, env: dict[str, _Value]
+    ) -> tuple[bool, _Value]:
+        function = node.func
+        if not (
+            isinstance(function, ast.Attribute)
+            and isinstance(function.value, ast.Call)
+            and isinstance(function.value.func, ast.Name)
+            and function.value.func.id == "super"
+            and "super" not in env
+            and not function.value.args
+            and not function.value.keywords
+            and not any(isinstance(item, ast.Starred) for item in node.args)
+            and all(item.arg is not None for item in node.keywords)
+        ):
+            return False, None
+        target = self._super_method(function.attr)
+        if target is None:
+            return False, None
+        class_node, method = target
+        parameters = (*method.args.posonlyargs, *method.args.args)
+        if not parameters or parameters[0].arg in {item.arg for item in node.keywords}:
+            return False, None
+        values = [self.expression(item, env) for item in node.args]
+        keywords = {
+            item.arg: self.expression(item.value, env) for item in node.keywords
+        }
+        bound = _bind_call(method, [None, *values], keywords)
+        if bound is None:
+            for value in (*values, *keywords.values()):
+                _consume(value)
+            return True, None
+        declarations = _OuterWrites()
+        for statement in method.body:
+            declarations.visit(statement)
+        if declarations.names:
+            for value in bound.values():
+                _consume(value)
+            return True, None
+        local = dict(self.module_env)
+        for name in _local_names(method):
+            local[name] = None
+        local.update(bound)
+        local[parameters[0].arg] = None
+        local["__class__"] = None
+        previous = (
+            self.current_function,
+            self.current_class,
+            self.current_function_locals,
+            self.captured,
+            self.in_function,
+        )
+        self.current_function = method
+        self.current_class = class_node
+        self.current_function_locals = _local_names(method)
+        self.captured = _captures(method.body)
+        self.in_function = True
+        try:
+            self.block(method.body, local)
+        finally:
+            (
+                self.current_function,
+                self.current_class,
+                self.current_function_locals,
+                self.captured,
+                self.in_function,
+            ) = previous
+        return True, None
 
     def element(self, value: _Value) -> _Value:
         if isinstance(value, _Reference) and all(
@@ -977,6 +1173,9 @@ class _Flow:
                 _consume(self.expression(list_element, env))
             return None
         if isinstance(node, ast.Call):
+            handled, value = self._call_super_method(node, env)
+            if handled:
+                return value
             document = self.documents.get(
                 DocumentIdentity(self.owner.identity, self.owner.span(node))
             )
@@ -1274,6 +1473,8 @@ class _Flow:
                     self.functions.append(node)
                     if self.class_depth:
                         self.class_functions.add(id(node))
+                        if self.class_stack:
+                            self.function_classes[id(node)] = self.class_stack[-1]
                         captures = _captures([node]) & self.current_function_locals
                         if captures:
                             if self.class_capture_scope is None or not captures <= set(
@@ -1326,9 +1527,11 @@ class _Flow:
                     }
                     self.class_capture_scope = safe_captures
                 self.class_depth += 1
+                self.class_stack.append(node)
                 try:
                     self.block(node.body, class_env)
                 finally:
+                    self.class_stack.pop()
                     self.class_depth -= 1
                     self.class_capture_scope = previous_capture_scope
                 writes = _Writes()
@@ -1389,6 +1592,7 @@ class _Flow:
         env: dict[str, _Value] = {}
         self.captured = _captures(self.owner.tree.body)
         self.block(self.owner.tree.body, env)
+        self.module_env = dict(env)
         functions, self.functions = self.functions, []
         self.in_function = True
         position = 0
@@ -1414,8 +1618,10 @@ class _Flow:
                     _consume(value)
                 continue
             self.current_function = function
+            self.current_class = self.function_classes.get(id(function))
             self.block(function.body, local)
             self.current_function = None
+            self.current_class = None
             functions.extend(self.functions)
             self.functions.clear()
 

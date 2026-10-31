@@ -219,6 +219,105 @@ class FieldUsageTests(unittest.TestCase):
         self.assertEqual([field for field, _ in found], ["user"])
         self.assertIn("user.email", found[0][1])
 
+    def test_super_method_dispatch_tracks_result_through_single_inheritance(
+        self,
+    ) -> None:
+        source = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class IntermediateView(BaseView):\n"
+            + "    pass\n"
+            + "class Screen(IntermediateView):\n"
+            + "    def render(self):\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
+
+    def test_super_dispatch_uses_nearest_override(self) -> None:
+        source = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class IntermediateView(BaseView):\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["email"])\n'
+            + "class Screen(IntermediateView):\n"
+            + "    def render(self):\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.name", found[0][1])
+        self.assertNotIn("user.email", found[0][1])
+
+    def test_ambiguous_class_dispatch_remains_an_escape(self) -> None:
+        multiple_inheritance = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class OtherView: pass\n"
+            + "class Screen(BaseView, OtherView):\n"
+            + "    def render(self):\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        dynamic_instance_dispatch = (
+            PREFIX
+            + "class Screen:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "    def render(self):\n"
+            + "        result = execute(query, {})\n"
+            + "        self.render_data(result)\n"
+        )
+        shadowed_super = (
+            PREFIX
+            + "super = fake_super\n"
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        class_mutation = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "base_alias = BaseView\n"
+            + "base_alias.render_data = replacement\n"
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        global_method = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + "        global query\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        self.assertEqual(warnings(multiple_inheritance), [])
+        self.assertEqual(warnings(dynamic_instance_dispatch), [])
+        self.assertEqual(warnings(shadowed_super), [])
+        self.assertEqual(warnings(class_mutation), [])
+        self.assertEqual(warnings(global_method), [])
+
     def test_comprehension_walrus_makes_method_name_local_not_captured(self) -> None:
         source = (
             PREFIX
