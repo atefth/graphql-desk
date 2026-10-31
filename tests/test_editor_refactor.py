@@ -159,9 +159,27 @@ class EditorRefactorTests(unittest.TestCase):
             "import importlib as loader\nimport graphql_desk as desk\n"
             "loader.import_module('graphql_desk').gql = replacement\n"
             "q = desk.gql('x')\n",
+            "import importlib\nloader = importlib\n"
+            "import graphql_desk as desk\n"
+            "loader.import_module('graphql_desk').gql = replacement\n"
+            "q = desk.gql('x')\n",
             "from importlib import import_module as load_module\n"
             "import graphql_desk as desk\n"
             "load_module('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
+            "from importlib import import_module as load_module\n"
+            "importer = load_module\nimport graphql_desk as desk\n"
+            "importer('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
+            "import sys as runtime\nregistry = runtime.modules\n"
+            "import graphql_desk as desk\n"
+            "registry['graphql_desk'].gql = replacement\nq = desk.gql('x')\n",
+            "from builtins import getattr as get_attr\n"
+            "lookup = get_attr\nimport sys as runtime\n"
+            "import graphql_desk as desk\n"
+            "lookup(runtime, 'modules')['graphql_desk'].gql = replacement\n"
+            "q = desk.gql('x')\n",
+            "import builtins\nbi = builtins\nimport graphql_desk as desk\n"
+            "bi.__import__('graphql_desk').gql = replacement\n"
+            "q = desk.gql('x')\n",
             "import graphql_desk as desk\n"
             "__import__('graphql_desk').gql = replacement\nq = desk.gql('x')\n",
             "from builtins import __import__ as load\n"

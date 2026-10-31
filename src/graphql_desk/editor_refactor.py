@@ -29,7 +29,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
     import_module_aliases: set[str] = set()
     builtins_aliases: set[str] = set()
     builtin_import_aliases: set[str] = set()
-    builtin_reflection_aliases: dict[str, str] = {}
+    builtin_reflection_aliases: dict[str, set[str]] = {}
     binding_lines: dict[str, int] = {}
     # A factory must have a single static binding throughout the source. This
     # deliberately rejects shadowing in nested scopes too, rather than guessing
@@ -82,11 +82,19 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 elif node.module == "builtins" and alias.name == "__import__":
                     builtin_import_aliases.add(name)
                 elif node.module == "builtins" and alias.name in {"getattr", "vars"}:
-                    builtin_reflection_aliases[name] = alias.name
+                    builtin_reflection_aliases.setdefault(name, set()).add(alias.name)
 
     parents = {
         child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
     }
+    alias_groups = (
+        sys_aliases,
+        sys_modules_aliases,
+        importlib_aliases,
+        import_module_aliases,
+        builtins_aliases,
+        builtin_import_aliases,
+    )
     while True:
         added_alias = False
         for node in ast.walk(tree):
@@ -99,10 +107,17 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 assignment_value = node.value
             elif isinstance(node, ast.NamedExpr):
                 targets, assignment_value = (node.target,), node.value
-            if (
-                not isinstance(assignment_value, ast.Name)
-                or assignment_value.id not in sys_aliases
-            ):
+            if not isinstance(assignment_value, ast.Name):
+                continue
+            source_name = assignment_value.id
+            reflection_kinds = builtin_reflection_aliases.get(source_name, set())
+            if source_name in {"getattr", "vars"}:
+                reflection_kinds = reflection_kinds | {source_name}
+            if source_name == "__import__":
+                # The built-in import function is itself a guarded binding.
+                builtin_import_aliases.add(source_name)
+            source_groups = [group for group in alias_groups if source_name in group]
+            if not source_groups and not reflection_kinds:
                 continue
             for target in targets:
                 names = (
@@ -113,9 +128,17 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                     else []
                 )
                 for target_name in names:
-                    if target_name.id not in sys_aliases:
-                        sys_aliases.add(target_name.id)
-                        added_alias = True
+                    for group in source_groups:
+                        if target_name.id not in group:
+                            group.add(target_name.id)
+                            added_alias = True
+                    if reflection_kinds:
+                        target_kinds = builtin_reflection_aliases.setdefault(
+                            target_name.id, set()
+                        )
+                        before = len(target_kinds)
+                        target_kinds.update(reflection_kinds)
+                        added_alias |= len(target_kinds) != before
         if not added_alias:
             break
 
@@ -135,7 +158,8 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             if isinstance(node.func, ast.Name):
                 reflection_name = node.func.id
                 if reflection_name not in {"getattr", "vars"}:
-                    reflection_name = builtin_reflection_aliases.get(reflection_name)
+                    kinds = builtin_reflection_aliases.get(reflection_name, set())
+                    reflection_name = next(iter(kinds)) if len(kinds) == 1 else None
             elif (
                 isinstance(node.func, ast.Attribute)
                 and node.func.attr in {"getattr", "vars"}
