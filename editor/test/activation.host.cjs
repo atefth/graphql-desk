@@ -109,6 +109,26 @@ async function run() {
   await vscode.commands.executeCommand("undo");
   assert.equal(branchDoc.getText(), branchFixture);
   assert.equal(await fs.readFile(branchPath, "utf8"), branchFixture);
+  const loopFixture = "from graphql_desk import gql\ndef read(items):\n    for item in items:\n        query = gql('query ExtractLoop { user { id name } }')\n";
+  await replace(extractDoc, loopFixture);
+  await until(() => documentSymbols(extractDoc), values => values.some(item => item.name === "ExtractLoop"),
+    "Indexed loop-suite operation outline symbol");
+  const loopDoc = extractDoc;
+  await vscode.window.showTextDocument(loopDoc);
+  const loopStart = loopDoc.getText().indexOf("id name");
+  const loopRange = new vscode.Range(loopDoc.positionAt(loopStart), loopDoc.positionAt(loopStart + 7));
+  const loopActions = await until(
+    () => vscode.commands.executeCommand("vscode.executeCodeActionProvider", loopDoc.uri, loopRange),
+    values => Array.isArray(values) && values.some(item => item.title === "Extract GraphQL fragment"),
+    "Activated loop-suite extraction code action",
+  );
+  const loopAction = loopActions.find(item => item.title === "Extract GraphQL fragment");
+  assert.equal(await vscode.commands.executeCommand(loopAction.command.command, ...loopAction.command.arguments), true);
+  assert.match(loopDoc.getText(), /for item in items:\n        query = gql\(.*fragments=\[gql\(source=/);
+  await vscode.commands.executeCommand("undo");
+  assert.equal(loopDoc.getText(), loopFixture);
+  await replace(loopDoc, fixtures["extract.py"]);
+  assert.equal(await fs.readFile(loopDoc.fileName, "utf8"), fixtures["extract.py"]);
   const diagnostics = document => vscode.languages.getDiagnostics(document.uri).filter(item => item.source === "GraphQL Desk");
   const main = documents.get("main.py");
   await vscode.window.showTextDocument(main);
