@@ -99,6 +99,31 @@ def indexed_source(
 
 
 class ScanGraphTests(unittest.TestCase):
+    def test_duplicate_module_and_document_identities_fail_closed(self) -> None:
+        module = ModuleSnapshot("app", "queries", "file:///queries.py", 1, "pass\n")
+        duplicate_module = replace(module, uri="file:///other-queries.py", version=2)
+        with self.assertRaisesRegex(ValueError, "unique project/module identities"):
+            build_scan_graph(
+                ProjectSources((), ()),
+                FragmentIndex((), ()),
+                (module, duplicate_module),
+                paths={("app", "queries"): Path("queries.py")},
+                roots={"app": Path.cwd() / "scan-root"},
+            )
+
+        graph = "query Get { hello }"
+        snapshot, call, indexed = indexed_source(
+            "app", "queries", f"doc = graphql({graph!r})\n", graph, "shop"
+        )
+        with self.assertRaisesRegex(ValueError, "unique identities"):
+            build_scan_graph(
+                ProjectSources((call,), ()),
+                FragmentIndex((indexed, indexed), ()),
+                (snapshot,),
+                paths={("app", "queries"): Path("queries.py")},
+                roots={"app": Path.cwd() / "scan-root"},
+            )
+
     def test_definitions_are_schema_qualified_deterministic_and_located(self) -> None:
         graph = (
             '\nquery Same($id: ID! = "x") { user(id: $id) { ...UserBits } }\n'
