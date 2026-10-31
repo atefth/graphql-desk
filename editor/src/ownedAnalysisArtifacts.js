@@ -49,7 +49,7 @@ function artifactEntries(files, generatedPackage) {
       ? file.relative_path.slice(prefix.length) : "";
     const parts = relativePath.split("/");
     const bytes = typeof file.text === "string" ? Buffer.byteLength(file.text, "utf8") : MAX_FILE_BYTES + 1;
-    if (!relativePath || generatedPackage === "graphql_desk-stubs" && !["__init__.pyi", "testing.pyi", "py.typed"].includes(relativePath) || parts.some((part, index) => index === parts.length - 1
+    if (!relativePath || generatedPackage === "graphql_desk-stubs" && !["__init__.pyi", "typed_document.pyi", "fragment_refs.pyi", "testing.pyi", "py.typed"].includes(relativePath) || parts.some((part, index) => index === parts.length - 1
       ? !(generatedPackage === "graphql_desk-stubs" && part === "py.typed") && !/^[A-Za-z_][A-Za-z_0-9]*\.pyi?$/.test(part)
       : !/^[A-Za-z_][A-Za-z_0-9]*$/.test(part)) ||
         bytes > MAX_FILE_BYTES || result.has(relativePath)) {

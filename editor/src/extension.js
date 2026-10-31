@@ -397,8 +397,14 @@ function activate(context) {
       quarantinedKeys.has(JSON.stringify(item.owner)) ? { ...item, status: "unavailable" } : item) }));
     const packages = new Map();
     for (const group of operationManifest) packages.set(group.generated_package, []);
-    packages.set("graphql_desk-stubs", [{ relative_path: "graphql_desk-stubs/__init__.pyi",
-      text: "from graphql import DocumentNode as _DocumentNode, Source as _Source\ndef parse(source: str | _Source, no_location: bool = False, max_tokens: int | None = None, experimental_fragment_arguments: bool = False) -> _DocumentNode: ...\n" },
+    packages.set("graphql_desk-stubs", [{ relative_path: "graphql_desk-stubs/typed_document.pyi",
+      text: "from dataclasses import dataclass as _dataclass\nfrom typing import Generic as _Generic, TypeVar as _TypeVar\nfrom graphql import DocumentNode as _DocumentNode\n_Result = _TypeVar('_Result')\n_Variables = _TypeVar('_Variables')\n@_dataclass(frozen=True)\nclass TypedDocument(_Generic[_Result, _Variables]):\n    def __init__(self, ast: _DocumentNode, operation_name: str | None = None, *, schema_name: str | None = None, persisted_id: str | None = None) -> None: ...\n    ast: _DocumentNode\n    operation_name: str | None\n    schema_name: str | None\n    persisted_id: str | None\n" },
+    { relative_path: "graphql_desk-stubs/fragment_refs.pyi",
+      text: "from collections.abc import Callable as _Callable\nfrom typing import Generic as _Generic, TypeVar as _TypeVar\nfrom typing_extensions import ReadOnly as _ReadOnly, TypedDict as _TypedDict\nfrom .typed_document import TypedDocument\n_Key = _TypeVar('_Key')\n_Identity = _TypeVar('_Identity')\n_Identity_contra = _TypeVar('_Identity_contra', contravariant=True)\n_Result = _TypeVar('_Result')\n_Variables = _TypeVar('_Variables')\n_ReadInput = _TypeVar('_ReadInput')\nclass FragmentIdentity(_Generic[_Key]): ...\nclass FragmentRef(_TypedDict, _Generic[_Identity_contra]):\n    _graphql_desk_φ: _ReadOnly[_Callable[[_Identity_contra], None]]\nclass FragmentDocument(TypedDocument[_Result, _Variables], _Generic[_Identity, _Result, _Variables]): ...\nclass ReadableFragmentDocument(FragmentDocument[_Identity, _Result, _Variables], _Generic[_Identity, _Result, _Variables, _ReadInput]): ...\nclass FixtureDocument(TypedDocument[_Result, _Variables], _Generic[_Result, _Variables, _ReadInput]): ...\ndef fragment_identity_key(owner: object, definition: object) -> str: ...\n" },
+    { relative_path: "graphql_desk-stubs/__init__.pyi",
+      text: "from graphql import DocumentNode as _DocumentNode, Source as _Source\nfrom .typed_document import TypedDocument\ndef parse(source: str | _Source, no_location: bool = False, max_tokens: int | None = None, experimental_fragment_arguments: bool = False) -> _DocumentNode: ...\n" },
+    { relative_path: "graphql_desk-stubs/testing.pyi",
+      text: "from collections.abc import Sequence as _Sequence\ndef read_result(document: object, data: object, fragments: _Sequence[object]) -> object: ...\n" },
     { relative_path: "graphql_desk-stubs/py.typed", text: "partial\n" }]);
     let nextProjects;
     if (reply?.ok) {
@@ -541,8 +547,7 @@ function activate(context) {
     }
   }
   const refreshVisible = (sourceUri, invalidateTypes = Boolean(sourceUri), sourceRanges = null) => {
-    generation += 1;
-    const ticket = generation;
+    const ticket = invalidateTypes ? ++generation : generation;
     const parsed = sourceUri ? vscode.Uri.parse(sourceUri) : null;
     const targetedSource = parsed?.scheme === "file" && path.extname(parsed.fsPath).toLowerCase() === ".py";
     const quarantineContext = { previousByFolder: new Map(), refined: new Set() };

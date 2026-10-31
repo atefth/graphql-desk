@@ -27,7 +27,8 @@ const exactKeys = (value, keys) => value && Object.getPrototypeOf(value) === Obj
   Object.keys(value).sort().join(",") === [...keys].sort().join(",");
 const validArtifactPath = value => typeof value === "string" && !value.includes("\\") && !value.includes("\0") &&
   !path.posix.isAbsolute(value) &&
-  (["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/testing.pyi", "graphql_desk-stubs/py.typed"].includes(value) ||
+  (["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/typed_document.pyi", "graphql_desk-stubs/fragment_refs.pyi",
+    "graphql_desk-stubs/testing.pyi", "graphql_desk-stubs/py.typed"].includes(value) ||
     value.split("/").every((part, index) => /^[A-Za-z_]\w*$/.test(part) || index === value.split("/").length - 1 && /^[A-Za-z_]\w*\.pyi?$/.test(part)) && /\.pyi?$/.test(value));
 function readStagingMarker(markerPath, id) {
   const stat = fs.lstatSync(markerPath);
@@ -135,7 +136,8 @@ function generationFiles(vscode, workspace, directory) {
   for (const item of manifest.files) {
     if (!item || typeof item.path !== "string" || typeof item.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(item.sha256) ||
         item.path.includes("\\") || item.path.includes("\0") || path.posix.isAbsolute(item.path) ||
-        !(["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/testing.pyi", "graphql_desk-stubs/py.typed"].includes(item.path) ||
+        !(["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/typed_document.pyi", "graphql_desk-stubs/fragment_refs.pyi",
+          "graphql_desk-stubs/testing.pyi", "graphql_desk-stubs/py.typed"].includes(item.path) ||
           item.path.split("/").every((part, index, parts) => /^[A-Za-z_]\w*$/.test(part) || index === parts.length - 1 && /^[A-Za-z_]\w*\.pyi?$/.test(part)) && /\.pyi?$/.test(item.path)) ||
         expected.has(item.path)) throw new Error("Invalid generation manifest");
     const file = path.join(directory, ...item.path.split("/"));
@@ -500,7 +502,8 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
       for (const file of files) {
         const parts = file.relative_path.split("/");
         const bytes = Buffer.byteLength(file.text, "utf8");
-        const parserOverlayFile = packageName === "graphql_desk-stubs" && ["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/testing.pyi", "graphql_desk-stubs/py.typed"].includes(file.relative_path);
+        const parserOverlayFile = packageName === "graphql_desk-stubs" && ["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/typed_document.pyi",
+          "graphql_desk-stubs/fragment_refs.pyi", "graphql_desk-stubs/testing.pyi", "graphql_desk-stubs/py.typed"].includes(file.relative_path);
         if (paths.has(file.relative_path) || !file.relative_path.startsWith(prefix) || !parserOverlayFile &&
         (parts.some((part, index) => !/^[A-Za-z_]\w*$/.test(part) && !(index === parts.length - 1 && /^[A-Za-z_]\w*\.pyi?$/.test(part))) || !/\.pyi?$/.test(file.relative_path)) ||
         bytes > MAX_FILE_BYTES || totalInputBytes + bytes > MAX_TOTAL_BYTES) throw new Error("Invalid or oversized generation artifact");

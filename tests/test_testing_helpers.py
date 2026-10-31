@@ -159,7 +159,7 @@ mask_fragments((card,), {"title": 1}) # error
                 target = root / f"{module.module}.py"
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(module.source, encoding="utf8")
-            for folder in ("graphql_desk-stubs", "mypy-stubs/graphql_desk"):
+            for folder in ("graphql_desk", "mypy-stubs/graphql_desk"):
                 root_stub = root / folder / "__init__.pyi"
                 root_stub.parent.mkdir(parents=True, exist_ok=True)
                 root_stub.write_text(
@@ -224,7 +224,7 @@ mask_fragments((card,), {"title": 1}) # error
                     json.dumps(
                         {
                             "include": [path.name],
-                            "stubPath": "graphql_desk-stubs",
+                            "stubPath": "graphql_desk",
                             "pythonVersion": "3.10",
                             "typeCheckingMode": "strict",
                             "reportMissingModuleSource": False,

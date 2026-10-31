@@ -36,11 +36,31 @@ function fixture(t) {
   return { workspace, root, vscode, managed, publisher: createAnalysisGenerations(vscode, workspace, root) };
 }
 
+async function rewriteGenerationAsLegacyStubPackage(f, directory, preserveUnknown = false) {
+  const legacyPackage = path.join(directory, "graphql_desk-stubs");
+  const manifestPath = path.join(directory, "complete.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  manifest.files = manifest.files.filter(item =>
+    !["graphql_desk-stubs/typed_document.pyi", "graphql_desk-stubs/fragment_refs.pyi"].includes(item.path)
+  ).sort((left, right) => left.path.localeCompare(right.path));
+  manifest.artifactFingerprint = createHash("sha256").update(JSON.stringify(manifest.files)).digest("hex");
+  for (const name of ["typed_document.pyi", "fragment_refs.pyi"]) {
+    fs.rmSync(path.join(legacyPackage, name), { force: true });
+  }
+  if (preserveUnknown) fs.writeFileSync(path.join(legacyPackage, "keep.txt"), "preserve this user file");
+  const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+  fs.writeFileSync(manifestPath, bytes);
+  await f.managed.recordGeneration(directory, createHash("sha256").update(bytes).digest("hex"));
+  return legacyPackage;
+}
+
 const files = text => new Map([["graphql_desk_generated", [
   { relative_path: "graphql_desk_generated/default.py", text: "from graphql import parse\n" },
   { relative_path: "graphql_desk_generated/default.pyi", text: `selected: ${text}\n` },
   { relative_path: "graphql_desk_generated/_documents/default/d0.pyi", text: `class Result: value: ${text}\n` },
 ]], ["graphql_desk-stubs", [
+  { relative_path: "graphql_desk-stubs/typed_document.pyi", text: "class TypedDocument: ...\n" },
+  { relative_path: "graphql_desk-stubs/fragment_refs.pyi", text: "class FixtureDocument: ...\n" },
   { relative_path: "graphql_desk-stubs/__init__.pyi", text: "from graphql import DocumentNode as _DocumentNode\ndef parse(source: str) -> _DocumentNode: ...\n" },
   { relative_path: "graphql_desk-stubs/testing.pyi", text: "def read_result(...): ...\n" },
   { relative_path: "graphql_desk-stubs/py.typed", text: "partial\n" },
@@ -93,6 +113,25 @@ test("publishes immutable complete generations and recovers the latest verified 
   assert.equal(fs.readFileSync(path.join(f.root, "user.txt"), "utf8"), "keep");
 });
 
+test("retention cleans owned legacy stub-package generations and preserves foreign entries", async t => {
+  for (const preserveUnknown of [false, true]) {
+    const f = fixture(t);
+    assert.equal(await publish(f, files("str"), "legacy-1"), true);
+    const legacy = path.resolve(f.workspace, f.managed.selectedSetting);
+    const oldPackage = await rewriteGenerationAsLegacyStubPackage(f, legacy, preserveUnknown);
+    assert.equal(f.publisher.current(f.managed).length, preserveUnknown ? 0 : 1,
+      "only a fully verified ownership-recorded legacy generation participates in retention");
+    assert.equal(await publish(f, files("int"), "legacy-2"), true);
+    assert.equal(await publish(f, files("bool"), "legacy-3"), true);
+    if (preserveUnknown) {
+      assert.equal(fs.readFileSync(path.join(oldPackage, "keep.txt"), "utf8"), "preserve this user file");
+      assert.equal(fs.existsSync(legacy), true, "unverified generation data must block cleanup");
+    } else {
+      assert.equal(fs.existsSync(legacy), false, "verified legacy output is pruned after two newer generations exist");
+    }
+  }
+});
+
 test("publication skips unowned generation directories without adopting or changing them", async t => {
   const f = fixture(t);
   assert.equal(await publish(f, files("str"), "analysis-1"), true);
@@ -127,7 +166,7 @@ test("deduplicates only when both captured inputs and generated stubs match", as
   const latest = f.publisher.current(f.managed)[0];
   assert.equal(latest.manifest.inputFingerprint, input2);
   assert.match(latest.manifest.savedSourceFingerprint, /^[a-f0-9]{64}$/);
-  assert.equal(latest.manifest.files[0].path, "graphql_desk_generated/_documents/default/d0.pyi");
+  assert.ok(latest.manifest.files.some(item => item.path === "graphql_desk_generated/_documents/default/d0.pyi"));
 });
 
 test("recovery does not select a complete generation from older captured inputs", async t => {

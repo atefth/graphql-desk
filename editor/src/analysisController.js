@@ -626,9 +626,13 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const parts = path.resolve(filename).split(path.sep);
     const lower = parts.map(part => part.toLowerCase());
     const marker = lower.lastIndexOf(".graphql-desk");
-    return marker >= 0 && lower[marker + 1] === "typings" && lower[marker + 2] === "generations" &&
-      /^g-\d+-[0-9a-f-]{36}$/i.test(parts[marker + 3] ?? "") &&
-      /^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.basename(filename));
+    if (marker < 0 || lower[marker + 1] !== "typings" || lower[marker + 2] !== "generations") return false;
+    const relative = parts.slice(marker + 3);
+    const generationId = /^g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+    if (relative.length === 1 && generationId.test(relative[0].replace(/\.staging\.json$/i, "")) && /\.staging\.json$/i.test(relative[0])) return true;
+    if (relative.length === 1 && /^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}-marker-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(relative[0])) return true;
+    return generationId.test(relative[0] ?? "") &&
+      /^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}(?:-(?:manifest-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{16}-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}))?\.tmp$/i.test(path.basename(filename));
   }
   function reconcileFolderWatches() {
     const folders = new Map((vscode.workspace.workspaceFolders ?? [])

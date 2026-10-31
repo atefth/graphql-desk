@@ -7,9 +7,9 @@ from typing import Generic, TypeVar
 
 from typing_extensions import ReadOnly, TypedDict
 
-from . import TypedDocument
 from .fragments import DefinitionFact, IndexedDocument
 from .source_graph import DocumentIdentity, ModuleDependency
+from .typed_document import TypedDocument
 
 _Key = TypeVar("_Key")
 _Identity = TypeVar("_Identity")

@@ -95,6 +95,11 @@ exports.run = async () => {
     const lineDiagnostics = name => vscode.languages.getDiagnostics(uri)
       .filter(item => item.range.start.line === position(name).line).map(item => item.message);
     const inferredType = (name, text) => text.match(new RegExp(`\\(variable\\) ${name}: ([^\\n]+)`))?.[1] || "";
+    const definitionPaths = async (anchor, symbol) => {
+      const offset = document.getText().indexOf(anchor) + anchor.indexOf(symbol) + Math.floor(symbol.length / 2);
+      const definitions = await vscode.commands.executeCommand("vscode.executeDefinitionProvider", uri, document.positionAt(offset)) || [];
+      return definitions.map(item => ({ uri: item.uri.toString(), range: item.range }));
+    };
     const observed = {};
     if (process.env.GRAPHQL_DESK_TEST_SUITE === "mixedLists") {
       const ready = await until(async () => {
@@ -120,9 +125,42 @@ exports.run = async () => {
       return;
     }
     if (process.env.GRAPHQL_DESK_TEST_SUITE === "fragmentTyping") {
+      const resolution = async () => ({
+        stubPath: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ""),
+        readResult: await definitionPaths("partial_helper = read_result", "read_result"),
+        readCard: await definitionPaths("visible_name = read_card", "read_card"),
+        graphql: await definitionPaths("fragment_doc = graphql", "graphql"),
+        typedDocument: await definitionPaths("from graphql_desk import TypedDocument", "TypedDocument"),
+        carrierSubmodule: await definitionPaths("from graphql_desk.typed_document import TypedDocument as CarrierDocument", "CarrierDocument"),
+        carrierBase: await definitionPaths("from graphql_desk.fragment_refs import FixtureDocument as CarrierBase", "CarrierBase"),
+        execute: await definitionPaths("def execute", "execute"),
+      });
       const ready = await until(async () => {
+        observed.basicDocument = await hover("basic_doc");
+        observed.basicResult = await hover("basic_result");
+        observed.basicResultType = inferredType("basic_result", observed.basicResult);
+        observed.basicCallErrors = lineDiagnostics("basic_result");
+        observed.basicBadVariableErrors = lineDiagnostics("basic_wrong");
+        observed.basicCarrierErrors = lineDiagnostics("fragment_doc_carrier");
+        observed.validConstructorErrors = lineDiagnostics("constructed_document");
+        observed.frozenConstructorErrors = lineDiagnostics("constructed_document.ast");
+        observed.invalidConstructorAstErrors = lineDiagnostics("bad_document_ast");
+        observed.keywordOnlyConstructorErrors = lineDiagnostics("bad_document_keyword_position");
         observed.visibleName = await hover("visible_name");
+        observed.fragmentDocument = await hover("fragment_doc");
+        observed.fragmentResult = await hover("fragment_result");
+        observed.noVariableResult = await hover("other_result");
+        observed.typedDocument = await hover("TypedDocument");
+        observed.carrierSubmodule = await hover("CarrierDocument");
+        observed.carrierBase = await hover("CarrierBase");
+        observed.execute = await hover("execute");
+        observed.fragmentCallErrors = lineDiagnostics("fragment_result");
+        observed.fragmentCarrierErrors = lineDiagnostics("fragment_doc_carrier");
+        observed.noVariableErrors = lineDiagnostics("other_result");
+        observed.badVariableErrors = lineDiagnostics("bad_fragment_result");
         observed.visibleNameType = inferredType("visible_name", observed.visibleName);
+        observed.fragmentResultType = inferredType("fragment_result", observed.fragmentResult);
+        observed.noVariableResultType = inferredType("other_result", observed.noVariableResult);
         observed.hiddenNameErrors = lineDiagnostics("hidden_name");
         observed.hiddenNameRejected = observed.hiddenNameErrors.some(message => /"name" is not a defined key/.test(message));
         observed.positiveErrors = lineDiagnostics("fragment_name_ok");
@@ -130,7 +168,18 @@ exports.run = async () => {
         observed.partialIdErrors = lineDiagnostics("partial_id_ok");
         observed.completeNameErrors = lineDiagnostics("complete_name_ok");
         observed.partialNameRejected = observed.partialNameErrors.some(message => /"name" is not a defined key/.test(message));
-        return observed.visibleNameType === "String" && observed.hiddenNameRejected &&
+        observed.resolution = await resolution();
+        return observed.basicResultType && !/\b(?:Any|Unknown)\b/.test(observed.basicResultType) &&
+          observed.basicCallErrors.length === 0 && observed.basicBadVariableErrors.length > 0 &&
+          observed.validConstructorErrors.length === 0 && observed.invalidConstructorAstErrors.length > 0 &&
+          observed.keywordOnlyConstructorErrors.length > 0 && observed.frozenConstructorErrors.length > 0 &&
+          observed.visibleNameType === "String" && observed.fragmentResultType &&
+          !/\b(?:Any|Unknown)\b/.test(observed.fragmentResultType) &&
+          observed.fragmentCallErrors.length === 0 && observed.badVariableErrors.length > 0 &&
+          observed.fragmentCarrierErrors.length === 0 &&
+          observed.noVariableResultType && !/\b(?:Any|Unknown)\b/.test(observed.noVariableResultType) &&
+          observed.noVariableErrors.length === 0 &&
+          observed.resolution.carrierSubmodule.length > 0 && observed.resolution.carrierBase.length > 0 && observed.hiddenNameRejected &&
           observed.positiveErrors.length === 0 && observed.partialNameRejected &&
           observed.partialIdErrors.length === 0 && observed.completeNameErrors.length === 0;
       }, "Pylance applies exact tuple read_result typing and keeps omitted nested fragment fields masked", 60000);
@@ -139,6 +188,10 @@ exports.run = async () => {
       const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
       results.lifecycle.configuredStubPath = settings["python.analysis.stubPath"];
       results.lifecycle.activeStubRoot = path.resolve(workspace, results.lifecycle.configuredStubPath);
+      const stubPackage = path.join(results.lifecycle.activeStubRoot, "graphql_desk-stubs");
+      results.lifecycle.managedPackageFiles = await fs.readdir(stubPackage);
+      assert.ok(results.lifecycle.managedPackageFiles.includes("typed_document.pyi"));
+      assert.ok(results.lifecycle.managedPackageFiles.includes("fragment_refs.pyi"));
       const helperStub = path.join(results.lifecycle.activeStubRoot, "graphql_desk-stubs", "testing.pyi");
       const helperText = await fs.readFile(helperStub, "utf8");
       assert.match(helperText, /def read_result\(/, "the managed Pylance root publishes the helper overload");

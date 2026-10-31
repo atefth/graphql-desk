@@ -868,6 +868,36 @@ class EditorWorker:
                 + "def read_result(document: object, data: object, "
                 "fragments: _graphql_desk_Sequence[object]) -> object: ...\n"
             )
+            fragment_refs_stub = (
+                "from collections.abc import Callable as _Callable, "
+                "Mapping as _Mapping\n"
+                "from typing import Generic as _Generic, TypeVar as _TypeVar\n"
+                "from typing_extensions import ReadOnly as _ReadOnly, "
+                "TypedDict as _TypedDict\n"
+                "from .typed_document import TypedDocument\n"
+                "from graphql_desk.fragments import DefinitionFact, IndexedDocument\n"
+                "_Key = _TypeVar('_Key')\n"
+                "_Identity = _TypeVar('_Identity')\n"
+                "_Identity_contra = _TypeVar('_Identity_contra', "
+                "contravariant=True)\n"
+                "_Result = _TypeVar('_Result')\n"
+                "_Variables = _TypeVar('_Variables')\n"
+                "_ReadInput = _TypeVar('_ReadInput', "
+                "bound=_Mapping[str, object])\n"
+                "class FragmentIdentity(_Generic[_Key]): ...\n"
+                "class FragmentRef(_TypedDict, _Generic[_Identity_contra]):\n"
+                "    _graphql_desk_φ: _ReadOnly[_Callable[["
+                "_Identity_contra], None]]\n"
+                "class FragmentDocument(TypedDocument[_Result, _Variables], "
+                "_Generic[_Identity, _Result, _Variables]): ...\n"
+                "class ReadableFragmentDocument(FragmentDocument["
+                "_Identity, _Result, _Variables], _Generic[_Identity, "
+                "_Result, _Variables, _ReadInput]): ...\n"
+                "class FixtureDocument(TypedDocument[_Result, _Variables], "
+                "_Generic[_Result, _Variables, _ReadInput]): ...\n"
+                "def fragment_identity_key(owner: IndexedDocument, "
+                "definition: DefinitionFact) -> str: ...\n"
+            )
             mask_stub = (
                 overload_imports
                 + "".join(masking_overloads)
@@ -882,6 +912,31 @@ class EditorWorker:
                 "saved_source_fingerprint": _saved_source_fingerprint(self._snapshot),
                 "projects": projects,
                 "parser_overlay": [
+                    {
+                        "relative_path": "graphql_desk-stubs/typed_document.pyi",
+                        "text": (
+                            "from dataclasses import dataclass as _dataclass\n"
+                            "from typing import Generic as _Generic, "
+                            "TypeVar as _TypeVar\n"
+                            "from graphql import DocumentNode as _DocumentNode\n"
+                            "_Result = _TypeVar('_Result')\n"
+                            "_Variables = _TypeVar('_Variables')\n"
+                            "@_dataclass(frozen=True)\n"
+                            "class TypedDocument(_Generic[_Result, _Variables]):\n"
+                            "    def __init__(self, ast: _DocumentNode, "
+                            "operation_name: str | None = None, *, "
+                            "schema_name: str | None = None, "
+                            "persisted_id: str | None = None) -> None: ...\n"
+                            "    ast: _DocumentNode\n"
+                            "    operation_name: str | None\n"
+                            "    schema_name: str | None\n"
+                            "    persisted_id: str | None\n"
+                        ),
+                    },
+                    {
+                        "relative_path": "graphql_desk-stubs/fragment_refs.pyi",
+                        "text": fragment_refs_stub,
+                    },
                     {
                         "relative_path": "graphql_desk-stubs/__init__.pyi",
                         "text": overlay.stub + "\n" + mask_stub,

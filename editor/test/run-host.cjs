@@ -152,7 +152,7 @@ async function main() {
   const suite = process.argv[3] || "features";
   assert.ok(["features", "renameProtocol", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
   const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
-  const temporaryRoot = path.resolve(__dirname, "../../../");
+  const temporaryRoot = path.resolve(__dirname, "../../../../.tmp/host");
   const cachePath = path.resolve(__dirname, "../.cache/vscode-test");
   await fs.mkdir(cachePath, { recursive: true });
   await fs.mkdir(temporaryRoot, { recursive: true });
@@ -212,7 +212,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     const source = [
       "from graphql_desk import TypedDocument",
       "from graphql_desk_generated.default import graphql",
-      ...(suite === "fragmentTyping" ? ["from fragments import card, inner, outer", "from graphql_desk.testing import read_result"] : []),
+      ...(suite === "fragmentTyping" ? ["from fragments import card, inner, outer", "from graphql_desk.testing import read_result", "from graphql_desk.typed_document import TypedDocument as CarrierDocument", "from graphql_desk.fragment_refs import FixtureDocument as CarrierBase", "from graphql import parse as graphql_parse", "from graphql_desk_generated.sources.consumer import FragmentDocResult, FragmentDocVariables"] : []),
       "from typing import TypeVar",
       ...(suite === "externalMappings" ? [
         "from graphql_desk_generated.beta import graphql as beta",
@@ -284,8 +284,17 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
         "nullable_items_bad: list[str] = nullable_items_value",
       ] : []),
       ...(suite === "fragmentTyping" ? [
-        "fragment_doc = graphql('query FragmentRead { user { id ...Card } }', (card,))",
-        "fragment_result = execute(fragment_doc, {})",
+        "constructed_document: TypedDocument[FragmentDocResult, FragmentDocVariables] = TypedDocument(graphql_parse('query FragmentRead($limit: Int!) { count(limit: $limit) }'), 'FragmentRead', schema_name='default', persisted_id='doc-1')",
+        "constructed_document.ast = graphql_parse('query { user { id } }')",
+        "bad_document_ast = TypedDocument('not a DocumentNode')",
+        "bad_document_keyword_position = TypedDocument(graphql_parse('query { user { id } }'), 'Query', 'default')",
+        "basic_doc = graphql('query Basic($limit: Int!) { count(limit: $limit) }')",
+        "basic_result = execute(basic_doc, {'limit': 1})",
+        "basic_wrong = execute(basic_doc, {'limit': 'bad'})",
+        "fragment_doc = graphql('query FragmentRead($limit: Int!) { count(limit: $limit) user { id ...Card } }', (card,))",
+        "fragment_doc_carrier: TypedDocument[FragmentDocResult, FragmentDocVariables] = fragment_doc",
+        "fragment_result = execute(fragment_doc, {'limit': 1})",
+        "bad_fragment_result = execute(fragment_doc, {'limit': 'wrong'})",
         "hidden_name = fragment_result['user']['name']",
         "from graphql_desk_generated.sources.fragments import read_card",
         "visible_name = read_card(fragment_result['user'])['name']",
@@ -369,6 +378,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["parserOverlay", "externalMappings", "mixedLists", "fragmentTyping"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
     extensionTestsEnv: {
       GRAPHQL_DESK_TEST_WORKSPACE: workspace,
+      GRAPHQL_DESK_TEST_PROFILE: profile,
       GRAPHQL_DESK_RESULT_PATH: result,
       GRAPHQL_DESK_PYTHON: python,
       GRAPHQL_DESK_ALTERNATE_PYTHON: process.env.GRAPHQL_DESK_ALTERNATE_PYTHON || "",
@@ -396,6 +406,20 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
       try {
         const observed = JSON.parse(await fs.readFile(result, "utf8"));
         const debug = observed.lifecycle?.debug;
+        const pylanceLogLines = [];
+        async function readPylanceLogs(directory) {
+          for (const entry of await fs.readdir(directory, { withFileTypes: true }).catch(() => [])) {
+            const file = path.join(directory, entry.name);
+            if (entry.isDirectory()) await readPylanceLogs(file);
+            else if (entry.isFile() && /\.log$/i.test(entry.name)) {
+              const text = await fs.readFile(file, "utf8").catch(() => "");
+              for (const line of text.split(/\r?\n/)) if (/stub.?path|graphql_desk|pyrightconfig|pyproject\.toml/i.test(line)) {
+                pylanceLogLines.push(`${entry.name}: ${line}`);
+              }
+            }
+          }
+        }
+        await readPylanceLogs(path.join(profile, "logs"));
         console.error(`Host test evidence: ${JSON.stringify({
           outcome: observed.outcome,
           error: observed.error,
@@ -403,6 +427,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
           probes: Object.fromEntries(Object.entries(observed.lifecycle || {}).filter(([key]) => /probe/i.test(key))),
           trace: observed.lifecycle?.coldTrace?.slice(-60),
           skipTraces: observed.lifecycle?.skipTraces?.slice(-30),
+          pylanceLogLines: pylanceLogLines.slice(-120),
           pylanceFailure: observed.pylance?.failureEvidence,
           debug: debug && {
             sourceChanges: debug.sourceChanges,

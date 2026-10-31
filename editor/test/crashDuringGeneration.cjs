@@ -28,7 +28,8 @@ const vscode = {
     getWorkspaceFolder: () => ({ uri: { fsPath: workspace } }),
   },
 };
-const managed = { ownsSetting: true, selectedSetting: ".graphql-desk/typings", ownsGeneration: () => false };
+const managed = { ownsSetting: true, selectedSetting: ".graphql-desk/typings", ownsGeneration: () => false,
+  async recordStaging() { return true; } };
 const publisher = createAnalysisGenerations(vscode, workspace, root);
 publisher.publish([[
   "graphql_desk_generated",
