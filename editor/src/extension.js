@@ -4,6 +4,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { createHash } = require("node:crypto");
 const { fileURLToPath } = require("node:url");
+require("./minimatchCompatibility");
 const { createAnalysisController } = require("./analysisController");
 const { registerLanguageFeatures } = require("./languageFeatures");
 const { createRenameLanguageClient } = require("./renameLanguageClient");
