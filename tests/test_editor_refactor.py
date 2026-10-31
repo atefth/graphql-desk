@@ -354,6 +354,40 @@ class EditorRefactorTests(unittest.TestCase):
             {"        ", "                "},
         )
 
+    def test_module_class_method_suites_are_extractable_but_class_scopes_are_not(
+        self,
+    ) -> None:
+        source = (
+            "from graphql_desk import gql\n"
+            "class Service:\n"
+            "    def read(self):\n"
+            "        query = gql('query Read { user { id } }')\n"
+            "    async def read_async(self):\n"
+            "        query = gql('query AsyncRead { user { id } }')\n"
+        )
+        contexts = extraction_contexts(source)
+        self.assertEqual(len(contexts), 2)
+        self.assertEqual({item["scope"] for item in contexts.values()}, {"function"})
+        self.assertEqual({item["indent"] for item in contexts.values()}, {"        "})
+        self.assertEqual(
+            extraction_contexts(
+                "from graphql_desk import gql\n"
+                "class Service:\n"
+                "    query = gql('query ClassBody { user { id } }')\n"
+            ),
+            {},
+        )
+        self.assertEqual(
+            extraction_contexts(
+                "from graphql_desk import gql\n"
+                "def outer():\n"
+                "    class Nested:\n"
+                "        def read(self):\n"
+                "            query = gql('query Nested { user { id } }')\n"
+            ),
+            {},
+        )
+
     def test_function_local_loop_exception_with_and_match_suites_are_extractable(
         self,
     ) -> None:

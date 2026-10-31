@@ -405,9 +405,21 @@ def extraction_contexts(
         return result
 
     for definition in tree.body:
-        if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            candidates = [definition, *nested_functions(definition.body)]
+        elif isinstance(definition, ast.ClassDef):
+            methods = [
+                statement
+                for statement in definition.body
+                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            candidates = [
+                candidate
+                for method in methods
+                for candidate in (method, *nested_functions(method.body))
+            ]
+        else:
             continue
-        candidates = [definition, *nested_functions(definition.body)]
         for candidate in candidates:
             scope: list[ast.AST] = list(candidate.body)
             safe = True

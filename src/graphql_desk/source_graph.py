@@ -2010,6 +2010,7 @@ class _CallScopes(ast.NodeVisitor):
         self.module = module
         self.scoped = False
         self.function_body = False
+        self.class_method: bool = False
         self.shadowed: set[str] = set()
 
     def check_scope(self, node: ast.Call) -> None:
@@ -2027,8 +2028,11 @@ class _CallScopes(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         nested = self.scoped and self.function_body
+        class_method = self.class_method and self.scoped and not self.function_body
         if (
-            not nested and (self.scoped or node not in self.module.tree.body)
+            not nested
+            and not class_method
+            and (self.scoped or node not in self.module.tree.body)
         ) or getattr(node, "type_params", False):
             self.visit_unsupported_scope(node)
             return
@@ -2064,6 +2068,31 @@ class _CallScopes(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        previous = self.scoped, self.function_body, self.class_method, self.shadowed
+        allow_methods = not self.scoped and node in self.module.tree.body
+        self.scoped = True
+        self.function_body = False
+        self.class_method = False
+        for expression in (*node.decorator_list, *node.bases):
+            self.visit(expression)
+        for class_keyword in node.keywords:
+            self.visit(class_keyword.value)
+        for statement in node.body:
+            self.class_method = allow_methods and isinstance(
+                statement, (ast.FunctionDef, ast.AsyncFunctionDef)
+            )
+            self.shadowed = previous[3]
+            if not self.class_method:
+                self.shadowed = self.shadowed | {
+                    item.id
+                    for item in ast.walk(statement)
+                    if isinstance(item, ast.Name)
+                    and isinstance(item.ctx, (ast.Store, ast.Del))
+                }
+            self.visit(statement)
+        self.scoped, self.function_body, self.class_method, self.shadowed = previous
+
     def visit_unsupported_scope(self, node: ast.AST) -> None:
         previous = self.scoped, self.function_body, self.shadowed
         self.scoped = True
@@ -2081,7 +2110,6 @@ class _CallScopes(ast.NodeVisitor):
         self.generic_visit(node)
         self.scoped, self.function_body, self.shadowed = previous
 
-    visit_ClassDef = visit_unsupported_scope
     visit_Lambda = visit_unsupported_scope
     visit_ListComp = visit_unsupported_scope
     visit_SetComp = visit_unsupported_scope

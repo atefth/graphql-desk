@@ -2865,6 +2865,52 @@ alias('{ id }')
             self.assertEqual(rejected.calls, ())
             self.assertTrue(rejected.diagnostics)
 
+    def test_top_level_class_methods_resolve_only_module_globals_and_literals(
+        self,
+    ) -> None:
+        source = (
+            "from graphql_desk import gql\n"
+            "TEXT='{ id }'\n"
+            "class Service:\n"
+            "    def read(self):\n"
+            "        query = gql(TEXT)\n"
+            "        return query\n"
+            "    async def async_read(self):\n"
+            "        query = gql('{ name }')\n"
+            "        return query\n"
+        )
+        result = resolve_project((module("main", source),))
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual([item.source for item in result.calls], ["{ id }", "{ name }"])
+        rejected = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def outer():\n"
+                    "    class Inner:\n"
+                    "        def read(self):\n"
+                    "            return gql('{ id }')\n",
+                ),
+            )
+        )
+        self.assertEqual(rejected.calls, ())
+        self.assertTrue(rejected.diagnostics)
+        guarded = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "if TYPE_CHECKING:\n"
+                    "    class Guarded:\n"
+                    "        def read(self):\n"
+                    "            return gql('{ id }')\n",
+                ),
+            )
+        )
+        self.assertEqual(guarded.calls, ())
+        self.assertTrue(guarded.diagnostics)
+
     def test_function_inputs_never_substitute_module_globals_for_local_names(
         self,
     ) -> None:

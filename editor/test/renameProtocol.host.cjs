@@ -142,6 +142,7 @@ async function run() {
   const observed = { outcome: "fragment-rename-lsp-unverified", step: "setup", twoFileSuccess: false,
     closedTargetOpened: false, staleTargetRejectedWithoutPartialEdit: false, cancellation: false,
     extractRoundtripUndo: false, extractFunctionRoundtripUndo: false,
+    extractClassMethodRoundtripUndo: false,
     extractQualifiedRoundtripUndo: false, extractStaleRejected: false,
     extractCancellation: false, shutdown: false };
   const clients = [];
@@ -314,6 +315,21 @@ async function run() {
     assert.equal(nestedExtraction.document.getText(), nestedSource);
     observed.extractNestedFunctionRoundtripUndo = true;
     await nestedClient.stop();
+
+    observed.step = "extract-class-method-roundtrip-undo";
+    const classMethodSource = "# 😀\r\nfrom graphql_desk import gql\r\nclass Service:\r\n    def read(self):\r\n        # method query\r\n        query = gql('query Read { user { id name } }')\r\n";
+    const classMethodExtraction = await pythonExtractionDocument("extract-class-method", classMethodSource);
+    const classMethodClient = createRenameLanguageClient(vscode, classMethodExtraction.language, { isTrusted: () => true });
+    clients.push(classMethodClient);
+    await classMethodClient.start();
+    await vscode.window.showTextDocument(classMethodExtraction.document);
+    assert.equal(await requestExtract(classMethodClient.client, classMethodExtraction.document), true);
+    assert.match(classMethodExtraction.document.getText(), /fragments=\[gql\(source="fragment UserFields on User/);
+    assert.match(classMethodExtraction.document.getText(), /\r\n        # method query\r\n        query = gql\(.*fragments=\[gql\(source=/);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(classMethodExtraction.document.getText(), classMethodSource);
+    observed.extractClassMethodRoundtripUndo = true;
+    await classMethodClient.stop();
 
     observed.step = "extract-module-qualified-roundtrip-undo";
     const qualifiedSource = "# 😀\r\nimport graphql_desk as desk\r\nquery = desk.gql('query Read { user { id name } }')\r\n";
