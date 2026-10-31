@@ -94,6 +94,8 @@ async function run() {
   if (branchDoc.languageId !== "python") branchDoc = await vscode.languages.setTextDocumentLanguage(branchDoc, "python");
   documents.set("extract-branch.py", branchDoc);
   await vscode.window.showTextDocument(branchDoc);
+  await until(() => documentSymbols(branchDoc), values => values.some(item => item.name === "ExtractBranch"),
+    "Indexed nested-suite operation outline symbol");
   const branchStart = branchDoc.getText().indexOf("id name");
   const branchRange = new vscode.Range(branchDoc.positionAt(branchStart), branchDoc.positionAt(branchStart + 7));
   const branchActions = await until(
