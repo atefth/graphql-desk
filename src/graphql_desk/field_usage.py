@@ -58,11 +58,12 @@ class FieldUsageOptions:
 
 
 class _Writes(ast.NodeVisitor):
-    """Bindings in this scope, excluding nested scopes and comprehensions."""
+    """Bindings here, excluding nested scopes and comprehension iteration targets."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, include_annotations: bool = False) -> None:
         self.names: dict[str, int] = {}
         self.star = False
+        self.include_annotations = include_annotations
 
     def add(self, name: str) -> None:
         self.names[name] = self.names.get(name, 0) + 1
@@ -91,17 +92,46 @@ class _Writes(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         self.add(node.name)
+        for expression in (
+            *node.decorator_list,
+            *node.args.defaults,
+            *(item for item in node.args.kw_defaults if item is not None),
+        ):
+            self.visit(expression)
+        if self.include_annotations:
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            ):
+                if argument.annotation is not None:
+                    self.visit(argument.annotation)
+            if node.args.vararg and node.args.vararg.annotation is not None:
+                self.visit(node.args.vararg.annotation)
+            if node.args.kwarg and node.args.kwarg.annotation is not None:
+                self.visit(node.args.kwarg.annotation)
+            if node.returns is not None:
+                self.visit(node.returns)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.add(node.name)
+        for expression in (*node.decorator_list, *node.bases):
+            self.visit(expression)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        pass
+        for expression in (
+            *node.args.defaults,
+            *(item for item in node.args.kw_defaults if item is not None),
+        ):
+            self.visit(expression)
 
     def visit_ListComp(self, node: ast.AST) -> None:
-        pass
+        for name in _ComprehensionWalrusWrites().collect(node):
+            self.add(name)
 
     visit_SetComp = visit_ListComp
     visit_DictComp = visit_ListComp
@@ -127,6 +157,34 @@ class _Writes(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+class _ComprehensionWalrusWrites(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def collect(self, node: ast.AST) -> set[str]:
+        self.visit(node)
+        return self.names
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.names.add(node.target.id)
+        self.visit(node.value)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        pass
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        pass
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for expression in (
+            *node.args.defaults,
+            *(item for item in node.args.kw_defaults if item is not None),
+        ):
+            self.visit(expression)
+
+
 class _OuterWrites(ast.NodeVisitor):
     def __init__(self) -> None:
         self.names: set[str] = set()
@@ -144,6 +202,45 @@ class _OuterWrites(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
+class _NonlocalCaptures(ast.NodeVisitor):
+    def __init__(self, function: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.scopes = [self._locals(function)]
+        self.names: set[str] = set()
+
+    @staticmethod
+    def _locals(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+        names = _local_names(function)
+        declarations = _OuterWrites()
+        for statement in function.body:
+            declarations.visit(statement)
+        return names - declarations.names
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        for name in node.names:
+            for depth in range(len(self.scopes) - 1, -1, -1):
+                if name in self.scopes[depth]:
+                    if depth == 0:
+                        self.names.add(name)
+                    break
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.scopes.append(self._locals(node))
+        try:
+            for statement in node.body:
+                self.visit(statement)
+        finally:
+            self.scopes.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        for statement in node.body:
+            self.visit(statement)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         return
@@ -756,6 +853,9 @@ class _Flow:
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.class_functions: set[int] = set()
         self.unsafe_local_class_functions: set[int] = set()
+        self.function_captures: dict[int, dict[str, _Value]] = {}
+        self.class_capture_scope: dict[str, _Value] | None = None
+        self.current_function: ast.FunctionDef | ast.AsyncFunctionDef | None = None
         self.in_function = False
         self.class_depth = 0
         self.captured: set[str] = set()
@@ -1153,15 +1253,38 @@ class _Flow:
                 ):
                     if default is not None:
                         _consume(self.expression(default, env))
+                annotation_writes = _Writes()
+                for argument in (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                ):
+                    if argument.annotation is not None:
+                        annotation_writes.visit(argument.annotation)
+                if node.args.vararg and node.args.vararg.annotation is not None:
+                    annotation_writes.visit(node.args.vararg.annotation)
+                if node.args.kwarg and node.args.kwarg.annotation is not None:
+                    annotation_writes.visit(node.args.kwarg.annotation)
+                if node.returns is not None:
+                    annotation_writes.visit(node.returns)
+                for name in annotation_writes.names:
+                    _consume(env.get(name))
+                    env[name] = None
                 if not self.in_function or self.class_depth:
                     self.functions.append(node)
                     if self.class_depth:
                         self.class_functions.add(id(node))
-                        if (
-                            self.in_function
-                            and _captures([node]) & self.current_function_locals
-                        ):
-                            self.unsafe_local_class_functions.add(id(node))
+                        captures = _captures([node]) & self.current_function_locals
+                        if captures:
+                            if self.class_capture_scope is None or not captures <= set(
+                                self.class_capture_scope
+                            ):
+                                self.unsafe_local_class_functions.add(id(node))
+                            else:
+                                self.function_captures[id(node)] = {
+                                    name: self.class_capture_scope[name]
+                                    for name in captures
+                                }
             elif isinstance(node, ast.ClassDef):
                 for expression in (*node.decorator_list, *node.bases):
                     _consume(self.expression(expression, env))
@@ -1171,11 +1294,43 @@ class _Flow:
                 annotations = _ClassAnnotations(self, class_env)
                 for statement in node.body:
                     annotations.visit(statement)
+                previous_capture_scope = self.class_capture_scope
+                self.class_capture_scope = None
+                if (
+                    self.in_function
+                    and self.class_depth == 0
+                    and self.current_function is not None
+                    and node in self.current_function.body
+                ):
+                    capture_names = _captures(node.body) & self.current_function_locals
+                    later_writes = _Writes(include_annotations=True)
+                    for statement in statements[position + 1 :]:
+                        later_writes.visit(statement)
+                    invalid_captures = capture_names & set(later_writes.names)
+                    nonlocal_captures = _NonlocalCaptures(self.current_function)
+                    for statement in self.current_function.body:
+                        nonlocal_captures.visit(statement)
+                    invalid_captures.update(capture_names & nonlocal_captures.names)
+                    for child in ast.walk(node):
+                        if isinstance(child, ast.Call) and (
+                            isinstance(child.func, ast.Name)
+                            and child.func.id in {"exec", "eval", "locals", "vars"}
+                            or isinstance(child.func, ast.Attribute)
+                            and child.func.attr in {"exec", "eval", "locals", "vars"}
+                        ):
+                            invalid_captures.update(capture_names)
+                    safe_captures = {
+                        name: env[name]
+                        for name in capture_names - invalid_captures
+                        if isinstance(env.get(name), (_Document, _Callable))
+                    }
+                    self.class_capture_scope = safe_captures
                 self.class_depth += 1
                 try:
                     self.block(node.body, class_env)
                 finally:
                     self.class_depth -= 1
+                    self.class_capture_scope = previous_capture_scope
                 writes = _Writes()
                 outer_writes = _OuterWrites()
                 for statement in node.body:
@@ -1248,16 +1403,19 @@ class _Flow:
             self.captured = _captures(function.body)
             for name in names:
                 local[name] = None
+            local.update(self.function_captures.get(id(function), {}))
             if id(function) in self.class_functions:
                 local["__class__"] = None
-            if any(
-                isinstance(item, (ast.Global, ast.Nonlocal))
-                for item in ast.walk(function)
-            ):
+            declarations = _OuterWrites()
+            for statement in function.body:
+                declarations.visit(statement)
+            if declarations.names:
                 for value in local.values():
                     _consume(value)
                 continue
+            self.current_function = function
             self.block(function.body, local)
+            self.current_function = None
             functions.extend(self.functions)
             self.functions.clear()
 

@@ -204,7 +204,22 @@ class FieldUsageTests(unittest.TestCase):
         self.assertEqual([field for field, _ in found], ["user"])
         self.assertIn("user.email", found[0][1])
 
-    def test_function_local_class_methods_do_not_guess_captured_documents(self) -> None:
+    def test_function_local_class_methods_use_stable_captured_documents(self) -> None:
+        source = (
+            PREFIX
+            + "def build_screen():\n"
+            + "    typed_execute = execute\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = typed_execute(local_query, {})\n"
+            + '            print(result["user"]["name"])'
+        )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
+
+    def test_comprehension_walrus_makes_method_name_local_not_captured(self) -> None:
         source = (
             PREFIX
             + "def build_screen():\n"
@@ -212,9 +227,140 @@ class FieldUsageTests(unittest.TestCase):
             + "    class Screen:\n"
             + "        def show(self):\n"
             + "            result = execute(local_query, {})\n"
-            + '            print(result["user"]["name"])'
+            + '            print(result["user"]["name"])\n'
+            + "            [(local_query := unrelated) for _ in range(1)]\n"
         )
         self.assertEqual(warnings(source), [])
+
+    def test_nested_function_walrus_does_not_invalidate_outer_capture(self) -> None:
+        source = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])\n'
+            + "    def update():\n"
+            + "        [(local_query := unrelated) for _ in range(1)]\n"
+        )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
+
+    def test_nested_global_does_not_invalidate_function_local_capture(self) -> None:
+        source = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])\n'
+            + "    def update():\n"
+            + "        global local_query\n"
+            + "        local_query = unrelated\n"
+        )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
+
+    def test_direct_global_declaration_stays_conservative(self) -> None:
+        source = (
+            PREFIX
+            + "class Screen:\n"
+            + "    def show(self):\n"
+            + "        global query\n"
+            + "        result = execute(query, {})\n"
+            + '        print(result["user"]["name"])'
+        )
+        self.assertEqual(warnings(source), [])
+
+    def test_function_local_class_methods_skip_unsupported_captures(self) -> None:
+        result_capture = (
+            PREFIX
+            + "def build_screen():\n    result = execute(query, {})\n"
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + '            print(result["user"]["name"])'
+        )
+        rebind_after_class = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])\n'
+            + "    local_query = unrelated\n"
+        )
+        nonlocal_rebind = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])\n'
+            + "    def replace_query():\n"
+            + "        nonlocal local_query\n"
+            + "        local_query = unrelated\n"
+            + "    replace_query()\n"
+        )
+        comprehension_rebind = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])\n'
+            + "    [(local_query := unrelated) for _ in range(1)]\n"
+        )
+        annotation_rebind = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])\n'
+            + "    def update(arg: (local_query := unrelated)): pass\n"
+        )
+        annotation_rebind_before_class = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    def update(arg: (local_query := unrelated)): pass\n"
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])\n'
+        )
+        intermediate_nonlocal_rebind = (
+            PREFIX
+            + "def build_screen():\n"
+            + '    local_query = gql("{ user { id name email } }")\n'
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + "            result = execute(local_query, {})\n"
+            + '            print(result["user"]["name"])\n'
+            + "    def update():\n"
+            + "        local_query = unrelated\n"
+            + "        def replace():\n"
+            + "            nonlocal local_query\n"
+            + "            local_query = another\n"
+            + "        replace()\n"
+        )
+        self.assertEqual(warnings(result_capture), [])
+        self.assertEqual(warnings(rebind_after_class), [])
+        self.assertEqual(warnings(nonlocal_rebind), [])
+        self.assertEqual(warnings(comprehension_rebind), [])
+        self.assertEqual(warnings(annotation_rebind), [])
+        self.assertEqual(warnings(annotation_rebind_before_class), [])
+        found = warnings(intermediate_nonlocal_rebind)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
 
     def test_class_methods_do_not_resolve_implicit_class_cell_as_a_global(self) -> None:
         source = (
