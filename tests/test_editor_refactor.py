@@ -377,16 +377,38 @@ class EditorRefactorTests(unittest.TestCase):
             ),
             {},
         )
-        self.assertEqual(
-            extraction_contexts(
-                "from graphql_desk import gql\n"
-                "def outer():\n"
-                "    class Nested:\n"
-                "        def read(self):\n"
-                "            query = gql('query Nested { user { id } }')\n"
-            ),
-            {},
+
+    def test_local_class_methods_are_extractable_and_dynamic_scopes_are_not(
+        self,
+    ) -> None:
+        source = (
+            "from graphql_desk import gql\n"
+            "def build_service():\n"
+            "    class LocalService:\n"
+            "        def read(self):\n"
+            "            query = gql('query Read { user { id name } }')\n"
+            "        async def read_async(self):\n"
+            "            query = gql('query AsyncRead { user { id } }')\n"
+            "class Service:\n"
+            "    class Nested:\n"
+            "        def read(self):\n"
+            "            query = gql('query Nested { user { name } }')\n"
         )
+        contexts = extraction_contexts(source)
+        self.assertEqual(len(contexts), 3)
+        self.assertEqual({item["scope"] for item in contexts.values()}, {"function"})
+        self.assertEqual(
+            {item["indent"] for item in contexts.values()}, {"            "}
+        )
+        unsafe = (
+            "from graphql_desk import gql\n"
+            "def build_service():\n"
+            "    class LocalService:\n"
+            "        def read(self):\n"
+            "            locals()\n"
+            "            query = gql('query Read { user { id } }')\n"
+        )
+        self.assertEqual(extraction_contexts(unsafe), {})
 
     def test_function_local_loop_exception_with_and_match_suites_are_extractable(
         self,
@@ -461,6 +483,13 @@ class EditorRefactorTests(unittest.TestCase):
             "    if flag:\n"
             "        class Nested:\n"
             "            q=gql('x')\n",
+            "from graphql_desk import gql\n"
+            "def outer():\n"
+            "    value = 1\n"
+            "    class Nested:\n"
+            "        def read(self):\n"
+            "            nonlocal value\n"
+            "            q=gql('x')\n",
         ):
             with self.subTest(source=source):
                 self.assertEqual(extraction_contexts(source), {}, source)
@@ -474,8 +503,11 @@ class EditorRefactorTests(unittest.TestCase):
             "def outer():\n    def nested():\n"
             "        value=locals()\n        q=gql('x')\n",
             "from graphql_desk import gql\n"
-            "def outer():\n    class Nested:\n"
-            "        def read(self):\n            q=gql('x')\n",
+            "def outer():\n    value = 1\n"
+            "    class Nested:\n"
+            "        def read(self):\n"
+            "            nonlocal value\n"
+            "            q=gql('x')\n",
         ):
             with self.subTest(source=source):
                 self.assertEqual(extraction_contexts(source), {}, source)

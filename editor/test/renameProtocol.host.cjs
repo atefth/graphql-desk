@@ -331,6 +331,21 @@ async function run() {
     observed.extractClassMethodRoundtripUndo = true;
     await classMethodClient.stop();
 
+    observed.step = "extract-local-class-method-roundtrip-undo";
+    const localClassMethodSource = "# 😀\r\nfrom graphql_desk import gql\r\ndef build_service():\r\n    class LocalService:\r\n        async def read(self):\r\n            # local class method query\r\n            query = gql('query Read { user { id name } }')\r\n";
+    const localClassMethodExtraction = await pythonExtractionDocument("extract-local-class-method", localClassMethodSource);
+    const localClassMethodClient = createRenameLanguageClient(vscode, localClassMethodExtraction.language, { isTrusted: () => true });
+    clients.push(localClassMethodClient);
+    await localClassMethodClient.start();
+    await vscode.window.showTextDocument(localClassMethodExtraction.document);
+    assert.equal(await requestExtract(localClassMethodClient.client, localClassMethodExtraction.document), true);
+    assert.match(localClassMethodExtraction.document.getText(), /fragments=\[gql\(source="fragment UserFields on User/);
+    assert.match(localClassMethodExtraction.document.getText(), /\r\n            # local class method query\r\n            query = gql\(.*fragments=\[gql\(source=/);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(localClassMethodExtraction.document.getText(), localClassMethodSource);
+    observed.extractLocalClassMethodRoundtripUndo = true;
+    await localClassMethodClient.stop();
+
     observed.step = "extract-module-qualified-roundtrip-undo";
     const qualifiedSource = "# 😀\r\nimport graphql_desk as desk\r\nquery = desk.gql('query Read { user { id name } }')\r\n";
     const qualifiedExtraction = await pythonExtractionDocument("extract-module-qualified", qualifiedSource);

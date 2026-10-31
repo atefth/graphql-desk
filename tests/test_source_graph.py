@@ -2852,8 +2852,9 @@ alias('{ id }')
             "    def inner():\n        return gql(TEXT)\n",
             "def outer():\n    def inner():\n"
             "        nonlocal TEXT\n        return gql(TEXT)\n",
-            "def outer():\n    class Inner:\n"
-            "        def read(self):\n            return gql('{ id }')\n",
+            "def outer():\n    TEXT='{ local }'\n"
+            "    class Inner:\n"
+            "        def read(self):\n            return gql(TEXT)\n",
         ):
             rejected = resolve_project(
                 (
@@ -2888,9 +2889,10 @@ alias('{ id }')
                     "main",
                     "from graphql_desk import gql\n"
                     "def outer():\n"
+                    "    TEXT='{ local }'\n"
                     "    class Inner:\n"
                     "        def read(self):\n"
-                    "            return gql('{ id }')\n",
+                    "            return gql(TEXT)\n",
                 ),
             )
         )
@@ -2910,6 +2912,60 @@ alias('{ id }')
         )
         self.assertEqual(guarded.calls, ())
         self.assertTrue(guarded.diagnostics)
+
+    def test_nested_class_methods_resolve_only_static_module_inputs(self) -> None:
+        source = (
+            "from graphql_desk import gql, parse\n"
+            "TEXT='{ id }'\n"
+            "class Service:\n"
+            "    class Nested:\n"
+            "        def read(self):\n"
+            "            return gql(TEXT)\n"
+            "def build_service():\n"
+            "    class Local:\n"
+            "        async def read(self):\n"
+            "            return parse('{ name }')\n"
+        )
+        result = resolve_project((module("main", source),))
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual([item.source for item in result.calls], ["{ id }"])
+        self.assertEqual(
+            [
+                item.source
+                for item in resolve_parse_sources((module("main", source),)).calls
+            ],
+            ["{ name }"],
+        )
+
+        captured = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def build_service():\n"
+                    "    TEXT='{ local }'\n"
+                    "    class Local:\n"
+                    "        def read(self):\n"
+                    "            return gql(TEXT)\n",
+                ),
+            )
+        )
+        self.assertEqual(captured.calls, ())
+        self.assertTrue(captured.diagnostics)
+
+        class_scope = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "class Service:\n"
+                    "    gql = custom\n"
+                    "    def read(self):\n"
+                    "        return gql('{ id }')\n",
+                ),
+            )
+        )
+        self.assertEqual([item.source for item in class_scope.calls], ["{ id }"])
 
     def test_function_inputs_never_substitute_module_globals_for_local_names(
         self,
