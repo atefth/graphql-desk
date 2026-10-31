@@ -2291,7 +2291,7 @@ def resolve_module_imports(
                     snapshot.project,
                     base,
                     module.identity,
-                    include_self=node.level == 0 and base == snapshot.module,
+                    include_self=node.module is not None and base == snapshot.module,
                 )
                 for alias in node.names:
                     if alias.name != "*":

@@ -272,6 +272,22 @@ class ScanGraphTests(unittest.TestCase):
         )
         main = next(item for item in under_source_root.modules if item.name == "main")
         self.assertTrue(main.entrypoint)
+        with_root_and_nested_roots = build_scan_graph(
+            sources,
+            empty_index,
+            modules,
+            paths={key: Path("src") / path for key, path in paths.items()},
+            roots={"app": root},
+            source_roots={"app": (Path("."), Path("src"))},
+            entrypoints={"app": ("main.py",)},
+        )
+        self.assertTrue(
+            next(
+                item
+                for item in with_root_and_nested_roots.modules
+                if item.name == "main"
+            ).entrypoint
+        )
         with self.assertRaisesRegex(ValueError, "unknown or excluded"):
             build_scan_graph(
                 sources,
@@ -281,6 +297,23 @@ class ScanGraphTests(unittest.TestCase):
                 roots={"app": root},
                 source_roots={"app": (Path("src"),)},
                 entrypoints={"app": ("src/main.py",)},
+            )
+        ambiguous_modules = (
+            ModuleSnapshot("app", "main", "file:///main.py", 1, "pass\n"),
+            ModuleSnapshot("app", "src.main", "file:///src/main.py", 1, "pass\n"),
+        )
+        with self.assertRaisesRegex(ValueError, "unknown or excluded"):
+            build_scan_graph(
+                sources,
+                empty_index,
+                ambiguous_modules,
+                paths={
+                    ("app", "main"): Path("main.py"),
+                    ("app", "src.main"): Path("src/main.py"),
+                },
+                roots={"app": root},
+                source_roots={"app": (Path("."), Path("src"))},
+                entrypoints={"app": ("main.py",)},
             )
         with self.assertRaisesRegex(ValueError, "escapes"):
             build_scan_graph(

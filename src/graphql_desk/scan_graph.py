@@ -247,7 +247,7 @@ def _module_facts(
             )
             continue
         project_root = roots[project].resolve()
-        by_path: dict[str, tuple[str, str]] = {}
+        by_path: dict[str, set[tuple[str, str]]] = defaultdict(set)
         for key, relative_path in relative_paths.items():
             if key[0] != project:
                 continue
@@ -259,13 +259,13 @@ def _module_facts(
                     else configured_root
                 )
                 if source_path.is_relative_to(source_root):
-                    by_path[source_path.relative_to(source_root).as_posix()] = key
-                    break
+                    by_path[source_path.relative_to(source_root).as_posix()].add(key)
         for entrypoint in configured:
             normalized = Path(entrypoint).as_posix()
-            entry_key = by_path.get(normalized)
-            if entry_key is None:
+            matches = by_path.get(normalized, set())
+            if len(matches) != 1:
                 raise ValueError("Configured entrypoint is unknown or excluded")
+            entry_key = next(iter(matches))
             if entry_key in entries:
                 raise ValueError("Configured entrypoints must be unique")
             entries.add(entry_key)
