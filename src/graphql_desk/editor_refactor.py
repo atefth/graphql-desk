@@ -341,6 +341,16 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
 
     extractable: list[ast.stmt] = list(tree.body)
     function_assignments: set[int] = set()
+
+    def conditional_suite(statements: list[ast.stmt]) -> list[ast.stmt]:
+        result: list[ast.stmt] = []
+        for statement in statements:
+            result.append(statement)
+            if isinstance(statement, ast.If):
+                result.extend(conditional_suite(statement.body))
+                result.extend(conditional_suite(statement.orelse))
+        return result
+
     for definition in tree.body:
         if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -361,8 +371,9 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 break
             scope.extend(ast.iter_child_nodes(node))
         if safe:
-            extractable.extend(definition.body)
-            function_assignments.update(id(item) for item in definition.body)
+            assignments = conditional_suite(definition.body)
+            extractable.extend(assignments)
+            function_assignments.update(id(item) for item in assignments)
 
     result: dict[tuple[int, int], dict[str, object]] = {}
     for statement in extractable:

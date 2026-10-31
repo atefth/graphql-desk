@@ -249,13 +249,32 @@ class EditorRefactorTests(unittest.TestCase):
         module = extraction_contexts("from graphql_desk import gql\nq=gql('x')\n")
         self.assertEqual(next(iter(module.values()))["scope"], "module")
 
+    def test_function_local_conditional_suites_are_extractable(self) -> None:
+        source = (
+            "# 😀\r\n"
+            "from graphql_desk import gql\r\n"
+            "def read(enabled):\r\n"
+            "    if enabled:\r\n"
+            "        # primary branch\r\n"
+            "        query = gql('query Read { user { id name } }')\r\n"
+            "    elif not enabled:\r\n"
+            "        query = gql('query Other { user { id } }')\r\n"
+            "    else:\r\n"
+            "        query = gql('query Fallback { user { name } }')\r\n"
+        )
+        contexts = extraction_contexts(source)
+        self.assertEqual(len(contexts), 3)
+        self.assertEqual({item["scope"] for item in contexts.values()}, {"function"})
+        self.assertEqual({item["indent"] for item in contexts.values()}, {"        "})
+        self.assertEqual({item["newline"] for item in contexts.values()}, {"\r\n"})
+
     def test_function_local_extraction_rejects_scope_ambiguity(self) -> None:
         for source in (
             "from graphql_desk import gql\ndef read(gql):\n    q=gql('x')\n",
             "from graphql_desk import gql\n"
             "def read():\n    q=gql('x')\n    gql=custom\n",
             "from graphql_desk import gql\n"
-            "def read():\n    if flag:\n        q=gql('x')\n",
+            "def read():\n    for flag in values:\n        q=gql('x')\n",
             "from graphql_desk import gql\n"
             "def read():\n    def nested():\n        q=gql('x')\n",
             "from graphql_desk import gql\n"

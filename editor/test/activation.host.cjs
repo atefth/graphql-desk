@@ -24,6 +24,7 @@ async function replace(document, text) {
 async function run() {
   const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
   const resultPath = process.env.GRAPHQL_DESK_RESULT_PATH;
+  const branchFixture = ["# 😀", "from graphql_desk import gql", "def read(enabled):", "    if enabled:", "        # query note", "        query = gql('query ExtractBranch { user { id name } }')", ""].join("\r\n");
   const fixtures = {
     "schema.graphql": schema,
     "pyproject.toml": '[tool.graphql-desk]\nschema="schema.graphql"\nclient_directives=["local"]\nschema_output="graphql_desk_generated/default.pyi"\n',
@@ -34,10 +35,13 @@ async function run() {
     "partial.py": 'from graphql_desk import gql\nq=gql("{ user { na")\n',
     "selected.py": 'outside: int = 1\nfrom graphql_desk import gql\nfrom fragments import card\nq=gql("{ user { name @local ...Card } }",[card])\n',
     "fragments.py": 'from graphql_desk import gql\ncard=gql("fragment Card on User { id }")\n',
+    "extract_branch.py": branchFixture,
   };
   for (const [name, text] of Object.entries(fixtures)) await fs.writeFile(path.join(workspace, name), text, { encoding: "utf8", flag: "wx" });
   const documents = new Map();
   for (const name of Object.keys(fixtures)) {
+    // Index it on disk before activation, but open it only after the outline checks.
+    if (name === "extract_branch.py") continue;
     let document = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(workspace, name)));
     if (name.endsWith(".py") && document.languageId !== "python") document = await vscode.languages.setTextDocumentLanguage(document, "python");
     documents.set(name, document);
@@ -85,6 +89,26 @@ async function run() {
   assert.match(extractDoc.getText(), /\.\.\.UserFields/);
   await vscode.commands.executeCommand("undo");
   assert.equal(extractDoc.getText(), fixtures["extract.py"]);
+  const branchPath = path.join(workspace, "extract_branch.py");
+  let branchDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(branchPath));
+  if (branchDoc.languageId !== "python") branchDoc = await vscode.languages.setTextDocumentLanguage(branchDoc, "python");
+  documents.set("extract_branch.py", branchDoc);
+  await vscode.window.showTextDocument(branchDoc);
+  await until(() => documentSymbols(branchDoc), values => values.some(item => item.name === "ExtractBranch"),
+    "Indexed nested-suite operation outline symbol");
+  const branchStart = branchDoc.getText().indexOf("id name");
+  const branchRange = new vscode.Range(branchDoc.positionAt(branchStart), branchDoc.positionAt(branchStart + 7));
+  const branchActions = await until(
+    () => vscode.commands.executeCommand("vscode.executeCodeActionProvider", branchDoc.uri, branchRange),
+    values => Array.isArray(values) && values.some(item => item.title === "Extract GraphQL fragment"),
+    "Activated nested-suite extraction code action",
+  );
+  const branchAction = branchActions.find(item => item.title === "Extract GraphQL fragment");
+  assert.equal(await vscode.commands.executeCommand(branchAction.command.command, ...branchAction.command.arguments), true);
+  assert.match(branchDoc.getText(), /if enabled:\r\n        # query note\r\n        query = gql\(.*fragments=\[gql\(source=/);
+  await vscode.commands.executeCommand("undo");
+  assert.equal(branchDoc.getText(), branchFixture);
+  assert.equal(await fs.readFile(branchPath, "utf8"), branchFixture);
   const diagnostics = document => vscode.languages.getDiagnostics(document.uri).filter(item => item.source === "GraphQL Desk");
   const main = documents.get("main.py");
   await vscode.window.showTextDocument(main);
