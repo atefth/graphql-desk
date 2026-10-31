@@ -536,6 +536,135 @@ class ScanGraphTests(unittest.TestCase):
         self.assertEqual(result.definitions[0].module, "queries")
         self.assertEqual(result.definitions[0].locations[0].module, "documents")
 
+    def test_duplicate_imported_definition_ids_follow_call_source_order(self) -> None:
+        graph = "query Same { user { ...Shared } }"
+        origin, origin_call, origin_index = indexed_source(
+            "app", "documents", f"doc = {graph!r}\n", graph, "shop"
+        )
+        first_fragment = indexed_source(
+            "app",
+            "first_fragment",
+            'doc = "fragment Shared on User { id }"\n',
+            "fragment Shared on User { id }",
+            "shop",
+        )
+        second_fragment = indexed_source(
+            "app",
+            "second_fragment",
+            'doc = "fragment Shared on User { name }"\n',
+            "fragment Shared on User { name }",
+            "shop",
+        )
+        consumer_source = (
+            "from documents import doc\nfirst = gql(doc)\nsecond = gql(doc)\n"
+        )
+        consumer = ModuleSnapshot(
+            "app", "queries", "file:///fixture/app/queries.py", 1, consumer_source
+        )
+        consumer_dependency = ModuleDependency(
+            consumer.project, consumer.module, consumer.uri, consumer.version
+        )
+        origin_dependency = origin_call.module
+        assert origin_call.contributions
+        call_spans = tuple(
+            Span(
+                consumer_source.index(f"{name} = gql(doc)"),
+                consumer_source.index(f"{name} = gql(doc)") + len(f"{name} = gql(doc)"),
+            )
+            for name in ("first", "second")
+        )
+        base_calls = tuple(
+            replace(
+                origin_call,
+                module=consumer_dependency,
+                range=span,
+                dependencies=(
+                    consumer_dependency,
+                    origin_dependency,
+                    (first_fragment if name == "first" else second_fragment)[1].module,
+                ),
+                contributions=(
+                    StringContribution(
+                        origin_dependency,
+                        origin_call.contributions[0].range,
+                        graph,
+                    ),
+                ),
+                fragments=(
+                    FragmentReference(
+                        DocumentIdentity(
+                            (first_fragment if name == "first" else second_fragment)[
+                                1
+                            ].module,
+                            (first_fragment if name == "first" else second_fragment)[
+                                1
+                            ].range,
+                        ),
+                        consumer_dependency,
+                        Span(0, 1),
+                    ),
+                ),
+            )
+            for name, span in zip(("first", "second"), call_spans)
+        )
+        indexed_documents: list[IndexedDocument] = []
+        for name, call in zip(("first", "second"), base_calls):
+            fragment_document = first_fragment if name == "first" else second_fragment
+            identity = DocumentIdentity(call.module, call.range)
+            definitions = (
+                *tuple(
+                    replace(fact, document=identity)
+                    for fact in origin_index.definitions
+                ),
+                *fragment_document[2].definitions,
+            )
+            indexed_documents.append(
+                replace(
+                    origin_index,
+                    call=call,
+                    selected_operation=next(
+                        fact for fact in definitions if fact.kind != "fragment"
+                    ),
+                    definitions=definitions,
+                )
+            )
+        calls = (*base_calls, first_fragment[1], second_fragment[1])
+        indexed_documents.extend((first_fragment[2], second_fragment[2]))
+        modules = (consumer, origin, first_fragment[0], second_fragment[0])
+        paths = {
+            ("app", "queries"): Path("queries.py"),
+            ("app", "documents"): Path("documents.py"),
+            ("app", "first_fragment"): Path("first_fragment.py"),
+            ("app", "second_fragment"): Path("second_fragment.py"),
+        }
+        roots = {"app": Path.cwd() / "scan-root"}
+        result = build_scan_graph(
+            ProjectSources(calls, ()),
+            FragmentIndex(tuple(indexed_documents), ()),
+            modules,
+            paths=paths,
+            roots=roots,
+        )
+        reordered = build_scan_graph(
+            ProjectSources(tuple(reversed(calls)), ()),
+            FragmentIndex(tuple(reversed(indexed_documents)), ()),
+            modules,
+            paths=paths,
+            roots=roots,
+        )
+        self.assertEqual(result, reordered)
+        self.assertEqual(
+            [item.id for item in result.definitions if item.kind == "query"],
+            ["app:shop:query:Same", "app:shop:query:Same~2"],
+        )
+        self.assertEqual(
+            [(edge.source_id, edge.target_id) for edge in result.fragment_edges],
+            [
+                ("app:shop:query:Same", "app:shop:fragment:Shared"),
+                ("app:shop:query:Same~2", "app:shop:fragment:Shared~2"),
+            ],
+        )
+
     def test_diagnostics_shared_with_fragment_index_are_emitted_once(self) -> None:
         graph = "query Get { hello }"
         snapshot, call, _ = indexed_source(
