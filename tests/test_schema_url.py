@@ -2,6 +2,7 @@
 
 import json
 import re
+import ssl
 import threading
 import time
 import traceback
@@ -9,6 +10,7 @@ import unittest
 from collections.abc import Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import ClassVar, cast
 from unittest.mock import patch
 
@@ -20,7 +22,9 @@ from graphql import (
 )
 
 from graphql_desk.config import SchemaOrigin
-from graphql_desk.schema_url import load_from_url
+from graphql_desk.schema_url import get_url_config, load_from_url
+
+TLS_FIXTURES = Path(__file__).parent / "fixtures" / "tls"
 
 
 class Endpoint(BaseHTTPRequestHandler):
@@ -49,8 +53,11 @@ class Endpoint(BaseHTTPRequestHandler):
             self.send_header("Location", "/schema")
             self.end_headers()
             return
-        if self.mode == "auth":
-            self.send_response(401, "secret response")
+        if self.mode in {"auth", "forbidden", "http-error"}:
+            self.send_response(
+                {"auth": 401, "forbidden": 403, "http-error": 500}[self.mode],
+                "secret response",
+            )
             self.end_headers()
             return
         schema = build_schema("""
@@ -63,10 +70,19 @@ class Endpoint(BaseHTTPRequestHandler):
             "IntrospectSupportQuery" in query
         ):
             data: object = {"errors": [{"message": "secret"}]}
-        elif self.mode == "graphql-auth":
+        elif self.mode in {"graphql-auth", "graphql-forbidden"}:
             data = {
                 "errors": [
-                    {"message": "secret", "extensions": {"code": "UNAUTHENTICATED"}}
+                    {
+                        "message": "secret response",
+                        "extensions": {
+                            "code": (
+                                "UNAUTHENTICATED"
+                                if self.mode == "graphql-auth"
+                                else "FORBIDDEN"
+                            )
+                        },
+                    }
                 ]
             }
         elif self.mode == "missing-data":
@@ -77,6 +93,15 @@ class Endpoint(BaseHTTPRequestHandler):
             data = {"errors": [{"message": "secret"}]}
         else:
             data = graphql_sync(schema, query or "{ __typename }").formatted
+        if "IntrospectionQuery" in query:
+            if self.mode == "partial":
+                cast(dict[str, object], data)["errors"] = [
+                    {"message": "secret response"}
+                ]
+            elif self.mode == "incomplete":
+                data = {
+                    "data": {"__schema": {"queryType": {"name": "secret response"}}}
+                }
         if self.mode in {"legacy", "mixed", "mixed-field"}:
             # Emulate older servers without mutating core's global introspection types.
             payload = cast(dict[str, object], data)
@@ -204,13 +229,22 @@ class Endpoint(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def endpoint(mode: str = "modern") -> Generator[tuple[str, type[Endpoint]], None, None]:
+def endpoint(
+    mode: str = "modern", *, certificate: str | None = None
+) -> Generator[tuple[str, type[Endpoint]], None, None]:
     handler = type("Handler", (Endpoint,), {"records": [], "mode": mode})
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    if certificate is not None:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(
+            TLS_FIXTURES / f"{certificate}.pem", TLS_FIXTURES / "server-key.pem"
+        )
+        server.socket = context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}", handler
+        scheme = "https" if certificate is not None else "http"
+        yield f"{scheme}://127.0.0.1:{server.server_port}", handler
     finally:
         server.shutdown()
         server.server_close()
@@ -218,6 +252,90 @@ def endpoint(mode: str = "modern") -> Generator[tuple[str, type[Endpoint]], None
 
 
 class SchemaURLTests(unittest.TestCase):
+    def test_url_config_is_pure_and_preserves_unresolved_headers(self) -> None:
+        origin = SchemaOrigin(
+            url="https://example.com/graphql?token=private",
+            headers=(("Authorization", "Bearer ${env:TOKEN}"),),
+        )
+        with patch("graphql_desk.schema_url.build_opener") as opener:
+            self.assertIs(get_url_config(origin), origin)
+            self.assertEqual(origin.headers[0][1], "Bearer ${env:TOKEN}")
+            self.assertNotIn("private", repr(origin))
+            self.assertNotIn("TOKEN", repr(origin))
+            for invalid in (
+                None,
+                SchemaOrigin(local_path=Path("schema.graphql")),
+                SchemaOrigin(url="https://example.com", local_path=Path("schema.gql")),
+                SchemaOrigin(url="ftp://example.com"),
+                SchemaOrigin(url="http://user:private@example.com"),
+                SchemaOrigin(url="https://example.com:0"),
+                SchemaOrigin(url="https://example.com/#private"),
+            ):
+                self.assertIsNone(get_url_config(invalid))
+            opener.assert_not_called()
+
+    def test_verified_tls_authentication_and_certificate_failures(self) -> None:
+        trusted = ssl.create_default_context(cafile=str(TLS_FIXTURES / "ca.pem"))
+        with (
+            endpoint(certificate="localhost") as (url, handler),
+            patch("ssl._create_default_https_context", return_value=trusted),
+        ):
+            schema = load_from_url(
+                SchemaOrigin(url=url, headers=(("Authorization", "Bearer private"),)),
+                environment={},
+            )
+            self.assertIn("Query", schema.type_map)
+            self.assertEqual(len(handler.records), 2)
+            self.assertTrue(
+                all(
+                    item[1]["Authorization"] == "Bearer private"
+                    for item in handler.records
+                )
+            )
+        for certificate, context in (
+            ("localhost", ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)),
+            ("expired", trusted),
+            ("wrong-host", trusted),
+        ):
+            with (
+                self.subTest(certificate=certificate),
+                endpoint(certificate=certificate) as (url, handler),
+                patch("ssl._create_default_https_context", return_value=context),
+            ):
+                try:
+                    load_from_url(
+                        SchemaOrigin(
+                            url=url + "/private-url-token",
+                            headers=(("Authorization", "Bearer private-header-token"),),
+                        ),
+                        environment={},
+                    )
+                except ValueError as error:
+                    self.assertEqual(str(error), "Schema transport failed.")
+                    self.assertNotIn("private-url-token", traceback.format_exc())
+                    self.assertNotIn("private-header-token", traceback.format_exc())
+                else:
+                    self.fail("Certificate verification must reject the connection")
+                self.assertEqual(handler.records, [])
+
+    def test_https_redirect_cannot_downgrade_or_send_credentials(self) -> None:
+        trusted = ssl.create_default_context(cafile=str(TLS_FIXTURES / "ca.pem"))
+        with (
+            endpoint() as (http_url, insecure),
+            endpoint(certificate="localhost") as (url, secure),
+            patch("ssl._create_default_https_context", return_value=trusted),
+        ):
+            secure.target = http_url
+            with self.assertRaisesRegex(ValueError, "Schema redirect failed"):
+                load_from_url(
+                    SchemaOrigin(
+                        url=url + "/redirect", headers=(("X-Key", "private"),)
+                    ),
+                    environment={},
+                )
+            self.assertEqual(len(secure.records), 1)
+            self.assertEqual(insecure.records, [])
+
     def test_current_features_headers_and_no_cache(self) -> None:
         with endpoint() as (url, handler):
             origin = SchemaOrigin(url=url, headers=(("X-Key", "${env:TOKEN}"),))
@@ -318,7 +436,10 @@ class SchemaURLTests(unittest.TestCase):
     def test_failures_are_bounded_and_redacted(self) -> None:
         for mode in (
             "auth",
+            "forbidden",
+            "http-error",
             "graphql-auth",
+            "graphql-forbidden",
             "malformed",
             "utf16",
             "utf32",
@@ -329,6 +450,8 @@ class SchemaURLTests(unittest.TestCase):
             "missing-data",
             "invalid-errors",
             "query-error",
+            "partial",
+            "incomplete",
         ):
             with self.subTest(mode=mode), endpoint(mode) as (url, handler):
                 token = "private" + "-credential"
@@ -344,10 +467,12 @@ class SchemaURLTests(unittest.TestCase):
                     )
                 except ValueError:
                     self.assertNotIn(token, traceback.format_exc())
+                    self.assertNotIn("secret response", traceback.format_exc())
                 else:
                     self.fail("Expected a bounded failure")
                 self.assertEqual(
-                    len(handler.records), 2 if mode == "query-error" else 1
+                    len(handler.records),
+                    2 if mode in {"query-error", "partial", "incomplete"} else 1,
                 )
 
     def test_chunked_response_and_redirect_failures(self) -> None:

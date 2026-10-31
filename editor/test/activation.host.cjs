@@ -170,14 +170,26 @@ async function run() {
   await replace(schemaDoc, schema.replace("name: String", "renamed: String"));
   await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition), value => !/Display name/.test(hoverText(value)), "Dirty schema invalidates old semantic hover");
   let remoteRequests = 0;
-  const payload = JSON.stringify({ data: introspectionFromSchema(buildSchema(schema)) });
+  const credentialName = "GRAPHQL_DESK_ACTIVATION_TOKEN";
+  const previousCredential = process.env[credentialName];
+  let credential = "TEST_ONLY_PRIVATE_INITIAL";
+  process.env[credentialName] = credential;
+  let denyRemote = false;
+  let description = "Display name";
+  const receivedCredentials = [];
   const remote = http.createServer((request, response) => {
     remoteRequests += 1; request.resume();
+    receivedCredentials.push(request.headers.authorization);
+    if (denyRemote || request.headers.authorization !== `Bearer ${credential}`) {
+      response.writeHead(401); response.end(`PRIVATE_RESPONSE_${credential}`); return;
+    }
+    const payload = JSON.stringify({ data: introspectionFromSchema(buildSchema(schema.replace("Display name", description))) });
     response.setHeader("Content-Type", "application/json"); response.end(payload);
   });
   await new Promise(resolve => remote.listen(0, "127.0.0.1", resolve));
   try {
-    await replace(configDoc, `[tool.graphql-desk]\nschema="http://127.0.0.1:${remote.address().port}/graphql"\nschema_output="graphql_desk_generated/default.pyi"\n`);
+    const remoteConfig = `[tool.graphql-desk]\nschema={url="http://127.0.0.1:${remote.address().port}/graphql",headers={Authorization="Bearer \${env:${credentialName}}"}}\nschema_output="graphql_desk_generated/default.pyi"\n`;
+    await replace(configDoc, remoteConfig);
     await vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition);
     assert.equal(remoteRequests, 0, "Typing/config capture must never fetch automatically");
     await vscode.commands.executeCommand("graphqlDesk.refreshSchema");
@@ -187,7 +199,33 @@ async function run() {
     await replace(unsaved, unsaved.getText() + "# another unsaved edit\n");
     await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition), value => /Display name/.test(hoverText(value)), "Fetched remote context survives source typing");
     assert.equal(remoteRequests, fetched, "Source edits retain schema without automatic HTTP");
-  } finally { await new Promise(resolve => remote.close(resolve)); }
+    assert.ok(receivedCredentials.every(value => value === `Bearer ${credential}`), "Captured environment headers reach authenticated introspection");
+    denyRemote = true;
+    await vscode.commands.executeCommand("graphqlDesk.refreshSchema");
+    await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition), value => !/Display name/.test(hoverText(value)), "Authentication failure must retire the last-good remote schema from analysis");
+    assert.doesNotMatch(JSON.stringify(diagnostics(configDoc).concat(diagnostics(unsaved))), /TEST_ONLY_PRIVATE|PRIVATE_RESPONSE/);
+    denyRemote = false; description = "Recovered remote name";
+    await vscode.commands.executeCommand("graphqlDesk.refreshSchema");
+    await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition), value => /Recovered remote name/.test(hoverText(value)), "Explicit retry recovers the newly fetched authenticated schema");
+    const beforeRotation = remoteRequests;
+    credential = "TEST_ONLY_PRIVATE_ROTATED"; process.env[credentialName] = credential;
+    await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition), value => !/Recovered remote name/.test(hoverText(value)), "Credential rotation invalidates the old authenticated context before any fetch");
+    assert.equal(remoteRequests, beforeRotation, "Credential changes do not enable implicit HTTP");
+    description = "Rotated remote name";
+    await vscode.commands.executeCommand("graphqlDesk.refreshSchema");
+    await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition), value => /Rotated remote name/.test(hoverText(value)), "Explicit refresh uses the current credential revision");
+    assert.equal(receivedCredentials.at(-1), `Bearer ${credential}`);
+    description = "Polled remote name";
+    await replace(configDoc, remoteConfig + "schema_refresh_interval=1\n");
+    await until(() => vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition), value => /Polled remote name/.test(hoverText(value)), "Trusted opt-in polling fetches the authenticated remote schema");
+    await replace(configDoc, remoteConfig);
+    await vscode.commands.executeCommand("vscode.executeHoverProvider", unsaved.uri, unsavedPosition);
+  } finally {
+    if (previousCredential === undefined) delete process.env[credentialName];
+    else process.env[credentialName] = previousCredential;
+    remote.closeAllConnections();
+    await new Promise(resolve => remote.close(resolve));
+  }
   assert.equal(main.isDirty, true); assert.equal(schemaDoc.isDirty, true); assert.equal(unsaved.isDirty, true);
   assert.equal(recovery.isDirty, true, "The edit-cycle fixture must remain unsaved in its original editor buffer");
   for (const [name, text] of Object.entries(fixtures)) assert.equal(await fs.readFile(path.join(workspace, name), "utf8"), text);
@@ -195,6 +233,6 @@ async function run() {
   await assert.rejects(fs.stat(path.join(workspace, "graphql_desk_generated")), { code: "ENOENT" });
   await require("../src/extension").deactivate();
   assert.ok(!(await vscode.commands.getCommands(true)).includes("graphqlDesk.extractFragment"));
-  await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-activation-observed", vscode: vscode.version, actualActivation: true, actualWorker: true, officialSelectedEnvironment: true, blankInterpreterOverride: true, diagnostics: true, configurationDiagnostics: true, completion: true, hover: true, definitions: true, configuredDirectives: true, dirtyConfiguration: true, dirtyFragment: true, sourceRepair: true, incompleteGraphqlRecovery: true, recoveryDirtyBufferPreserved: true, dirtySchema: true, associatedUntitled: true, explicitRemoteRefresh: true, remoteTypingRetention: true, noAutomaticHttp: true, nativePylanceCoexistence: true, diskUnchanged: true, dirtyBuffersPreserved: true }, null, 2));
+  await fs.writeFile(resultPath, JSON.stringify({ outcome: "read-only-activation-observed", vscode: vscode.version, actualActivation: true, actualWorker: true, officialSelectedEnvironment: true, blankInterpreterOverride: true, diagnostics: true, configurationDiagnostics: true, completion: true, hover: true, definitions: true, configuredDirectives: true, dirtyConfiguration: true, dirtyFragment: true, sourceRepair: true, incompleteGraphqlRecovery: true, recoveryDirtyBufferPreserved: true, dirtySchema: true, associatedUntitled: true, explicitRemoteRefresh: true, authenticatedRemoteRecovery: true, credentialRotation: true, authenticatedPolling: true, remoteTypingRetention: true, noAutomaticHttp: true, nativePylanceCoexistence: true, diskUnchanged: true, dirtyBuffersPreserved: true }, null, 2));
 }
 module.exports = { run };
