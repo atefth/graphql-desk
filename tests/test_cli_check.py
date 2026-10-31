@@ -1,13 +1,15 @@
 """Project checking reuses static source and schema analysis without imports."""
 
 import io
+import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from graphql_desk.cli import check, main
+from graphql_desk.cli import CheckDiagnostic, check, main
 
 
 class CheckCLITests(unittest.TestCase):
@@ -24,11 +26,18 @@ class CheckCLITests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def invoke(self, argv: list[str]) -> tuple[int, str, str]:
+    def invoke(
+        self, argv: list[str], *, github_actions: bool = False
+    ) -> tuple[int, str, str]:
         stdout, stderr = io.StringIO(), io.StringIO()
-        with patch.object(Path, "cwd", return_value=self.root):
-            with redirect_stdout(stdout), redirect_stderr(stderr):
-                code = main(argv)
+        with patch.dict(os.environ, {"GITHUB_WORKSPACE": str(self.root)}):
+            if github_actions:
+                os.environ["GITHUB_ACTIONS"] = "true"
+            else:
+                os.environ.pop("GITHUB_ACTIONS", None)
+            with patch.object(Path, "cwd", return_value=self.root):
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    code = main(argv)
         return code, stdout.getvalue(), stderr.getvalue()
 
     def test_valid_document_and_import_inert_project(self) -> None:
@@ -189,11 +198,163 @@ class CheckCLITests(unittest.TestCase):
         diagnostics = check(config=self.config)
         self.assertEqual([item.code for item in diagnostics], ["schema-unavailable"])
         self.assertEqual([item.severity for item in diagnostics], ["error"])
-        code, stdout, stderr = self.invoke(["check"])
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            code, stdout, stderr = self.invoke(["check"], github_actions=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            stdout, "::error::Schema contents or access could not be checked.\n"
+        )
+        self.assertNotIn("PRIVATE_SCHEMA_MARKER", stderr + stdout)
+        self.assertIn("schema default: error [schema-unavailable]", stderr)
+
+    def test_github_annotation_escaping_and_severity(self) -> None:
+        diagnostics = (
+            CheckDiagnostic(
+                "warn",
+                "52005",
+                "100% done\r\nnext: value,other",
+                file="nested/a:b,c%.py",
+                line=2,
+                column=3,
+                end_line=4,
+                end_column=5,
+            ),
+            CheckDiagnostic("info", "notice", "ready"),
+        )
+        with patch("graphql_desk.cli.check", return_value=diagnostics):
+            with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+                code, stdout, _ = self.invoke(
+                    ["check", "--level", "info"], github_actions=True
+                )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            stdout,
+            "::warning file=nested/a%3Ab%2Cc%25.py,line=2,col=3,endLine=4,"
+            "endColumn=5::100%25 done%0D%0Anext: value,other\n"
+            "::notice::ready\n",
+        )
+
+    def test_human_github_check_emits_annotations_on_stdout(self) -> None:
+        (self.root / "operation.py").write_text(
+            'from graphql_desk import graphql\nquery = graphql("query { absent }")\n',
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            code, stdout, stderr = self.invoke(["check"], github_actions=True)
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "::error file=operation.py,line=2,col=26,endLine=2,endColumn=31::",
+            stdout,
+        )
+        self.assertIn("error [graphql-validation]", stderr)
+        self.assertNotIn(str(self.root), stdout)
+
+    def test_external_source_root_diagnostic_is_not_misannotated(self) -> None:
+        external = tempfile.TemporaryDirectory(dir=self.root.parent)
+        self.addCleanup(external.cleanup)
+        source_root = Path(external.name).resolve()
+        (source_root / "operation.py").write_text(
+            'from graphql_desk import graphql\nquery = graphql("query { absent }")\n',
+            encoding="utf-8",
+        )
+        source_root_setting = os.path.relpath(source_root, self.root).replace("\\", "/")
+        self.config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n'
+            f'source_roots=["{source_root_setting}"]\n',
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            code, stdout, stderr = self.invoke(
+                ["check", "--config", str(self.config)], github_actions=True
+            )
+
         self.assertEqual(code, 1)
         self.assertEqual(stdout, "")
-        self.assertNotIn("PRIVATE_SCHEMA_MARKER", stderr)
-        self.assertIn("schema default: error [schema-unavailable]", stderr)
+        self.assertIn("error [graphql-validation]", stderr)
+        self.assertNotIn(str(source_root), stdout + stderr)
+
+    def test_nested_config_annotations_use_workspace_relative_paths(self) -> None:
+        project = self.root / "packages" / "api"
+        project.mkdir(parents=True)
+        (project / "schema.graphql").write_text(
+            "type Query { title: String }", encoding="utf-8"
+        )
+        config = project / "pyproject.toml"
+        config.write_text(
+            '[tool.graphql-desk]\nschema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/default.pyi"\n',
+            encoding="utf-8",
+        )
+        (project / "operation.py").write_text(
+            'from graphql_desk import graphql\nquery = graphql("query { absent }")\n',
+            encoding="utf-8",
+        )
+
+        with patch.dict(
+            os.environ,
+            {"GITHUB_ACTIONS": "true", "GITHUB_WORKSPACE": str(self.root)},
+        ):
+            code, stdout, stderr = self.invoke(
+                ["check", "--config", str(config)], github_actions=True
+            )
+
+        self.assertEqual(code, 1)
+        self.assertIn("::error file=packages/api/operation.py,line=2,col=26,", stdout)
+        self.assertIn("error [graphql-validation]", stderr)
+        self.assertNotIn(str(self.root), stdout)
+
+    def test_json_mode_keeps_annotations_separate_and_callable_is_silent(self) -> None:
+        (self.root / "operation.py").write_text(
+            'from graphql_desk import graphql\nquery = graphql("query { absent }")\n',
+            encoding="utf-8",
+        )
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            with patch("builtins.print") as output:
+                diagnostics = check(config=self.config)
+            output.assert_not_called()
+            code, stdout, stderr = self.invoke(
+                [
+                    "check",
+                    "--format",
+                    "json",
+                    "--annotations-output",
+                    "annotations.txt",
+                ],
+                github_actions=True,
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        self.assertNotIn("::error", stdout)
+        record = json.loads(stdout)[0]
+        self.assertEqual(record["file"], "operation.py")
+        self.assertEqual(record["line"], 2)
+        self.assertEqual(record["column"], 26)
+        self.assertEqual(record["end_line"], record["line"])
+        self.assertEqual(record["end_column"], 31)
+        annotations = (self.root / "annotations.txt").read_text(encoding="utf-8")
+        self.assertIn("::error file=operation.py,", annotations)
+        self.assertEqual(len(diagnostics), 1)
+        self.assertNotIn(str(self.root), stdout + annotations)
+
+    def test_github_annotations_follow_display_level_but_not_failure_policy(
+        self,
+    ) -> None:
+        diagnostics = (
+            CheckDiagnostic("warn", "warning", "hidden warning"),
+            CheckDiagnostic("error", "error", "visible error"),
+        )
+        with patch("graphql_desk.cli.check", return_value=diagnostics):
+            with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+                code, stdout, stderr = self.invoke(
+                    ["check", "--level", "error", "--fail-on-warn"],
+                    github_actions=True,
+                )
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "::error::visible error\n")
+        self.assertNotIn("hidden warning", stderr + stdout)
+        self.assertIn("visible error", stderr)
 
 
 if __name__ == "__main__":
