@@ -60,9 +60,10 @@ class FieldUsageOptions:
 class _Writes(ast.NodeVisitor):
     """Bindings here, excluding nested scopes and comprehension iteration targets."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, include_annotations: bool = False) -> None:
         self.names: dict[str, int] = {}
         self.star = False
+        self.include_annotations = include_annotations
 
     def add(self, name: str) -> None:
         self.names[name] = self.names.get(name, 0) + 1
@@ -91,14 +92,42 @@ class _Writes(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         self.add(node.name)
+        for expression in (
+            *node.decorator_list,
+            *node.args.defaults,
+            *(item for item in node.args.kw_defaults if item is not None),
+        ):
+            self.visit(expression)
+        if self.include_annotations:
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            ):
+                if argument.annotation is not None:
+                    self.visit(argument.annotation)
+            if node.args.vararg and node.args.vararg.annotation is not None:
+                self.visit(node.args.vararg.annotation)
+            if node.args.kwarg and node.args.kwarg.annotation is not None:
+                self.visit(node.args.kwarg.annotation)
+            if node.returns is not None:
+                self.visit(node.returns)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.add(node.name)
+        for expression in (*node.decorator_list, *node.bases):
+            self.visit(expression)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        pass
+        for expression in (
+            *node.args.defaults,
+            *(item for item in node.args.kw_defaults if item is not None),
+        ):
+            self.visit(expression)
 
     def visit_ListComp(self, node: ast.AST) -> None:
         for name in _ComprehensionWalrusWrites().collect(node):
@@ -149,7 +178,11 @@ class _ComprehensionWalrusWrites(ast.NodeVisitor):
         pass
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        pass
+        for expression in (
+            *node.args.defaults,
+            *(item for item in node.args.kw_defaults if item is not None),
+        ):
+            self.visit(expression)
 
 
 class _OuterWrites(ast.NodeVisitor):
@@ -1181,6 +1214,23 @@ class _Flow:
                 ):
                     if default is not None:
                         _consume(self.expression(default, env))
+                annotation_writes = _Writes()
+                for argument in (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                ):
+                    if argument.annotation is not None:
+                        annotation_writes.visit(argument.annotation)
+                if node.args.vararg and node.args.vararg.annotation is not None:
+                    annotation_writes.visit(node.args.vararg.annotation)
+                if node.args.kwarg and node.args.kwarg.annotation is not None:
+                    annotation_writes.visit(node.args.kwarg.annotation)
+                if node.returns is not None:
+                    annotation_writes.visit(node.returns)
+                for name in annotation_writes.names:
+                    _consume(env.get(name))
+                    env[name] = None
                 if not self.in_function or self.class_depth:
                     self.functions.append(node)
                     if self.class_depth:
@@ -1214,17 +1264,10 @@ class _Flow:
                     and node in self.current_function.body
                 ):
                     capture_names = _captures(node.body) & self.current_function_locals
-                    later_writes = _Writes()
+                    later_writes = _Writes(include_annotations=True)
                     for statement in statements[position + 1 :]:
                         later_writes.visit(statement)
                     invalid_captures = capture_names & set(later_writes.names)
-                    invalid_captures.update(
-                        child.target.id
-                        for statement in statements[position + 1 :]
-                        for child in ast.walk(statement)
-                        if isinstance(child, ast.NamedExpr)
-                        and child.target.id in capture_names
-                    )
                     for child in ast.walk(self.current_function):
                         if isinstance(child, (ast.Global, ast.Nonlocal)):
                             invalid_captures.update(capture_names & set(child.names))
