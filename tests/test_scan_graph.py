@@ -3,13 +3,26 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from graphql import FragmentDefinitionNode, OperationDefinitionNode, parse, print_ast
+from graphql import (
+    FragmentDefinitionNode,
+    OperationDefinitionNode,
+    build_schema,
+    parse,
+    print_ast,
+)
 
-from graphql_desk.fragments import DefinitionFact, FragmentIndex, IndexedDocument
+from graphql_desk.fragments import (
+    DefinitionFact,
+    FragmentIndex,
+    IndexedDocument,
+    SchemaContext,
+    index_fragments,
+)
 from graphql_desk.scan_graph import build_scan_graph
 from graphql_desk.source import Span
 from graphql_desk.source_graph import (
     DocumentIdentity,
+    GraphDiagnostic,
     ModuleDependency,
     ModuleSnapshot,
     ProjectSources,
@@ -182,6 +195,13 @@ class ScanGraphTests(unittest.TestCase):
             ),
             ModuleSnapshot("app", "leaf", "file:///leaf.py", 1, "item = 1\n"),
             ModuleSnapshot("app", "isolated", "file:///isolated.py", 1, "pass\n"),
+            ModuleSnapshot(
+                "app",
+                "self_import",
+                "file:///self_import.py",
+                1,
+                "import self_import\n",
+            ),
         )
         root = Path.cwd() / "scan-root"
         paths = {
@@ -209,6 +229,8 @@ class ScanGraphTests(unittest.TestCase):
         self.assertEqual(by_name["leaf"].imported_by, ("left", "right"))
         self.assertIsNone(by_name["cycle.a"].distance)
         self.assertEqual(by_name["isolated"].distance, 0)
+        self.assertFalse(by_name["self_import"].entrypoint)
+        self.assertIsNone(by_name["self_import"].distance)
         self.assertEqual(
             by_name["pkg.b"].reverse_reachable,
             ("main", "pkg.a", "pkg.b"),
@@ -238,6 +260,27 @@ class ScanGraphTests(unittest.TestCase):
                 paths=paths,
                 roots={"app": root},
                 entrypoints={"app": ("missing.py",)},
+            )
+        under_source_root = build_scan_graph(
+            sources,
+            empty_index,
+            modules,
+            paths={key: Path("src") / path for key, path in paths.items()},
+            roots={"app": root},
+            source_roots={"app": (Path("src"),)},
+            entrypoints={"app": ("main.py",)},
+        )
+        main = next(item for item in under_source_root.modules if item.name == "main")
+        self.assertTrue(main.entrypoint)
+        with self.assertRaisesRegex(ValueError, "unknown or excluded"):
+            build_scan_graph(
+                sources,
+                empty_index,
+                modules,
+                paths={key: Path("src") / path for key, path in paths.items()},
+                roots={"app": root},
+                source_roots={"app": (Path("src"),)},
+                entrypoints={"app": ("src/main.py",)},
             )
         with self.assertRaisesRegex(ValueError, "escapes"):
             build_scan_graph(
@@ -315,6 +358,68 @@ class ScanGraphTests(unittest.TestCase):
             roots={"app": Path.cwd() / "scan-root"},
         )
         self.assertEqual(result.definitions[0].locations[0].line, 2)
+
+    def test_definition_module_is_call_owner_when_literal_is_imported(self) -> None:
+        graph = "query Get { hello }"
+        origin, _, indexed = indexed_source(
+            "app", "documents", f"doc = graphql({graph!r})\n", graph, "shop"
+        )
+        owner_source = "from documents import doc\n"
+        owner = ModuleSnapshot(
+            "app", "queries", "file:///fixture/app/queries.py", 1, owner_source
+        )
+        owner_dependency = ModuleDependency("app", "queries", owner.uri, 1)
+        origin_dependency = ModuleDependency(
+            "app", "documents", origin.uri, origin.version
+        )
+        call = replace(
+            indexed.call,
+            module=owner_dependency,
+            range=Span(0, len(owner_source)),
+            dependencies=(owner_dependency, origin_dependency),
+        )
+        indexed = replace(indexed, call=call)
+        result = build_scan_graph(
+            ProjectSources((call,), ()),
+            FragmentIndex((indexed,), ()),
+            (owner, origin),
+            paths={
+                ("app", "queries"): Path("queries.py"),
+                ("app", "documents"): Path("documents.py"),
+            },
+            roots={"app": Path.cwd() / "scan-root"},
+        )
+        self.assertEqual(result.definitions[0].module, "queries")
+        self.assertEqual(result.definitions[0].locations[0].module, "documents")
+
+    def test_diagnostics_shared_with_fragment_index_are_emitted_once(self) -> None:
+        graph = "query Get { hello }"
+        snapshot, call, _ = indexed_source(
+            "app", "queries", f"doc = graphql({graph!r})\n", graph, "shop"
+        )
+        shared = GraphDiagnostic(
+            call.module,
+            "source-note",
+            "shared diagnostic",
+            Span(0, 1),
+        )
+        sources = ProjectSources((call,), (shared,))
+        index = index_fragments(
+            sources,
+            schemas={
+                ("app", "shop"): SchemaContext(
+                    "shop", build_schema("type Query { hello: String }"), "token"
+                )
+            },
+        )
+        result = build_scan_graph(
+            sources,
+            index,
+            (snapshot,),
+            paths={("app", "queries"): Path("queries.py")},
+            roots={"app": Path.cwd() / "scan-root"},
+        )
+        self.assertEqual(result.diagnostics.count(shared), 1)
 
     def test_module_import_resolver_ignores_external_modules(self) -> None:
         module = ModuleSnapshot(

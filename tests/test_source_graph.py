@@ -53,6 +53,18 @@ class SourceGraphTests(unittest.TestCase):
         )
         self.assertEqual(edges, resolve_module_imports(tuple(reversed(snapshots))))
 
+    def test_self_import_is_explicit_but_package_prefix_is_not_self_edge(self) -> None:
+        snapshots = (
+            module("selfmod", "import selfmod\n"),
+            module("pkg", "import pkg.child\n", package=True),
+            module("pkg.child", "pass\n"),
+        )
+        edges = resolve_module_imports(snapshots)
+        self.assertEqual(
+            {(edge.importer.module, edge.imported.module) for edge in edges},
+            {("selfmod", "selfmod"), ("pkg", "pkg.child")},
+        )
+
     @unittest.skipUnless(sys.version_info >= (3, 12), "PEP 695 requires Python3.12")
     def test_captured_non_generic_pep695_type_aliases(self) -> None:
         models = module(

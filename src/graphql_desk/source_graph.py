@@ -2253,14 +2253,20 @@ def resolve_module_imports(
     }
     edges: set[ModuleImport] = set()
 
-    def add_chain(project: str, name: str, importer: ModuleDependency) -> None:
+    def add_chain(
+        project: str,
+        name: str,
+        importer: ModuleDependency,
+        *,
+        include_self: bool = False,
+    ) -> None:
         parts = name.split(".")
         for index in range(1, len(parts) + 1):
             target = ".".join(parts[:index])
             snapshot = snapshots.get((project, target))
             if snapshot is not None and (index == len(parts) or snapshot.is_package):
                 imported = dependencies[(project, target)]
-                if imported != importer:
+                if imported != importer or (include_self and target == name):
                     edges.add(ModuleImport(importer, imported))
 
     for snapshot in modules:
@@ -2271,18 +2277,29 @@ def resolve_module_imports(
         for node in ast.walk(module.tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    add_chain(snapshot.project, alias.name, module.identity)
+                    add_chain(
+                        snapshot.project,
+                        alias.name,
+                        module.identity,
+                        include_self=alias.name == snapshot.module,
+                    )
             elif isinstance(node, ast.ImportFrom):
                 base = module.import_module(node)
                 if not base:
                     continue
-                add_chain(snapshot.project, base, module.identity)
+                add_chain(
+                    snapshot.project,
+                    base,
+                    module.identity,
+                    include_self=node.level == 0 and base == snapshot.module,
+                )
                 for alias in node.names:
                     if alias.name != "*":
                         add_chain(
                             snapshot.project,
                             f"{base}.{alias.name}",
                             module.identity,
+                            include_self=f"{base}.{alias.name}" == snapshot.module,
                         )
     return tuple(
         sorted(

@@ -195,6 +195,7 @@ def _module_facts(
     modules: tuple[ModuleSnapshot, ...],
     paths: Mapping[tuple[str, str], Path],
     roots: Mapping[str, Path],
+    source_roots: Mapping[str, tuple[Path, ...]],
     entrypoints: Mapping[str, tuple[str, ...] | None],
 ) -> tuple[ScanModule, ...]:
     identities = {(item.project, item.module): item for item in modules}
@@ -245,11 +246,21 @@ def _module_facts(
                 key for key in identities if key[0] == project and not incoming[key]
             )
             continue
-        by_path = {
-            relative_path: key
-            for key, relative_path in relative_paths.items()
-            if key[0] == project
-        }
+        project_root = roots[project].resolve()
+        by_path: dict[str, tuple[str, str]] = {}
+        for key, relative_path in relative_paths.items():
+            if key[0] != project:
+                continue
+            source_path = Path(relative_path)
+            for configured_root in source_roots.get(project, (Path("."),)):
+                source_root = (
+                    configured_root.resolve().relative_to(project_root)
+                    if configured_root.is_absolute()
+                    else configured_root
+                )
+                if source_path.is_relative_to(source_root):
+                    by_path[source_path.relative_to(source_root).as_posix()] = key
+                    break
         for entrypoint in configured:
             normalized = Path(entrypoint).as_posix()
             entry_key = by_path.get(normalized)
@@ -311,6 +322,7 @@ def build_scan_graph(
     *,
     paths: Mapping[tuple[str, str], Path],
     roots: Mapping[str, Path],
+    source_roots: Mapping[str, tuple[Path, ...]] | None = None,
     entrypoints: Mapping[str, tuple[str, ...] | None] | None = None,
 ) -> ScanGraph:
     """Build schema-qualified definition and Python import graph facts."""
@@ -366,7 +378,6 @@ def build_scan_graph(
             definition_span = Span(node.loc.start, node.loc.end)
             locations = _source_locations(source_map, definition_span, snapshots)
             host_ranges = source_map.to_host(definition_span)
-            source_module = locations[0].module if locations else call.module.module
             definitions.append(
                 ScanDefinition(
                     id="",
@@ -374,7 +385,7 @@ def build_scan_graph(
                     name=name,
                     project=call.module.project,
                     schema_name=indexed_document.schema_identity[1],
-                    module=source_module,
+                    module=call.module.module,
                     locations=locations,
                     variables=_variables(node)
                     if isinstance(node, OperationDefinitionNode)
@@ -423,7 +434,7 @@ def build_scan_graph(
                 )
     ordered_diagnostics = tuple(
         sorted(
-            diagnostics,
+            dict.fromkeys(diagnostics),
             key=lambda item: (
                 item.module.project,
                 item.module.module,
@@ -439,6 +450,7 @@ def build_scan_graph(
             modules,
             paths,
             roots,
+            {} if source_roots is None else source_roots,
             {} if entrypoints is None else entrypoints,
         ),
         ordered_diagnostics,
