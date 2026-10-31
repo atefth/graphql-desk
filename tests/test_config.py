@@ -22,6 +22,18 @@ schema_output = "graphql_desk_generated/default.pyi"
 
 
 class ConfigTests(unittest.TestCase):
+    def test_reserved_field_keys_are_validated_graphql_names(self) -> None:
+        config = parse_project_config(
+            _BASE + 'reserved_keys=["key", "createdAt"]\n', config_path=self.path
+        )
+        assert config is not None
+        self.assertEqual(config.reserved_keys, ("key", "createdAt"))
+        for value in ('"key"', '["user.name"]', '["@id"]', "[12]"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_project_config(
+                    _BASE + f"reserved_keys={value}\n", config_path=self.path
+                )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -95,6 +107,7 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(config.cache_enabled)
         self.assertFalse(config.disable_preprocessing)
         self.assertTrue(config.track_field_usage)
+        self.assertEqual(config.reserved_keys, ())
         self.assertTrue(config.check_colocated_fragments)
         self.assertEqual(config.client_directives, ())
         self.assertEqual(config.schema_refresh_interval, 0)

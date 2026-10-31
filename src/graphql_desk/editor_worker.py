@@ -34,6 +34,7 @@ from .factory_generation import (
     GeneratedFile,
     generate_project_factory_artifacts,
 )
+from .field_usage import FieldUsageOptions
 from .fragments import FragmentIndex
 from .parse_generation import (
     render_captured_parse_companions,
@@ -144,6 +145,7 @@ def _analysis_input_fingerprint(snapshot: EditorSnapshot) -> str:
                     ),
                     "template": config.template,
                     "track_field_usage": config.track_field_usage,
+                    "reserved_keys": config.reserved_keys,
                     "check_colocated_fragments": config.check_colocated_fragments,
                     "client_directives": config.client_directives,
                     "schema_refresh_interval": config.schema_refresh_interval,
@@ -972,6 +974,19 @@ class EditorWorker:
             external_mapping_modules=snapshot.external_mapping_modules,
             colocated_fragment_checks={
                 config.path.as_uri(): config.check_colocated_fragments
+                for config in snapshot.project_configs
+            },
+            field_usage_options={
+                config.path.as_uri(): FieldUsageOptions(
+                    enabled=config.track_field_usage,
+                    reserved_keys=config.reserved_keys,
+                    unmasked_schemas=tuple(
+                        schema.name
+                        for schema in config.schemas
+                        if schema.disable_masking
+                    ),
+                    client_directives=config.client_directives,
+                )
                 for config in snapshot.project_configs
             },
         )

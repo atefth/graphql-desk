@@ -11,6 +11,7 @@ from graphql import build_schema, introspection_from_schema
 
 from graphql_desk import source_graph
 from graphql_desk.editor_analysis import analyze_editor_json, analyze_editor_snapshot
+from graphql_desk.field_usage import FieldUsageOptions
 from graphql_desk.persisted import editor_sha256_id
 from graphql_desk.source_graph import IncrementalResolver, ModuleSnapshot
 
@@ -68,6 +69,35 @@ def array(value: object) -> list[object]:
 
 
 class EditorAnalysisTests(unittest.TestCase):
+    def test_field_warnings_map_original_source_and_obey_project_options(self) -> None:
+        source = (
+            "# 😀\r\nfrom graphql_desk import gql\r\n"
+            "from graphql_desk.testing import read_result\r\n"
+            "q=gql('{ user { id name } }')\r\n"
+            "result=read_result(q, {})\r\nprint(result['user']['id'])"
+        )
+        payload = request(source)
+        diagnostics = array(analyze_editor_snapshot(payload)["diagnostics"])
+        self.assertEqual([object_(item)["code"] for item in diagnostics], ["52005"])
+        location = object_(object_(diagnostics[0])["range"])
+        original = object_(location["codepoint"])
+        self.assertEqual(
+            source[cast(int, original["start"]) : cast(int, original["end"])], "user"
+        )
+        self.assertEqual(
+            object_(location["utf16"])["start"], cast(int, original["start"]) + 1
+        )
+        for options in (
+            FieldUsageOptions(enabled=False),
+            FieldUsageOptions(reserved_keys=("name",)),
+        ):
+            self.assertEqual(
+                analyze_editor_snapshot(payload, field_usage_options={"p": options})[
+                    "diagnostics"
+                ],
+                [],
+            )
+
     def test_colocated_fragment_warning_defaults_on_and_can_be_disabled(self) -> None:
         payload = request(
             "from fragments import card as ui_card\n"

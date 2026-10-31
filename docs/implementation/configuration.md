@@ -4,6 +4,10 @@
 
 The parser validates documented single/named-schema keys, types and defaults, schema origins, mapping symbol syntax, generated-package layout, and output collisions using canonical paths. Named schema bindings follow the runtime factory's ASCII GraphQL-name syntax. Source-root/authoring-root containment and exact entrypoint/glob syntax are checked without scanning files. Existing symlinks are resolved for identity; companion and package initializer paths cannot escape their owning generated directories. This is a planning check, not a race-safe writer or permission grant.
 
+`track_field_usage` defaults to `true`; `reserved_keys` accepts additional GraphQL
+field names for the [same-file consumption heuristic](field-usage.md). The worker
+passes these captured facts into analysis and includes them in its fingerprint.
+
 HTTP(S) schema origins and headers are retained as facts only. Configuration facts retain unresolved header environment references; unknown substitutions fail. `resolve_schema_headers(origin, environment=...)` resolves explicit references once using only the supplied environment mapping and returns a new redacted origin. It rejects missing variables and CR/LF/NUL expansions without printing values, never reads process environment implicitly, and does not fetch schemas. Header values and URLs are hidden from object representations, and configuration diagnostics avoid echoing supplied values. Scalar/enum/template qualified symbols are validated syntactically without importing them. Requesting the optional persistent cache currently raises an explicit unsupported error.
 
 Python 3.10 uses pinned MIT-licensed `tomli==2.5.0`; Python 3.11+ uses standard-library `tomllib`. The runtime license inventory follows that version marker.

@@ -23,6 +23,32 @@ from tests.test_schema_url import endpoint
 
 
 class EditorWorkerTests(unittest.TestCase):
+    def test_field_usage_uses_captured_project_configuration(self) -> None:
+        self.schema.write_text(
+            "type Query { name: String email: String }", encoding="utf8"
+        )
+        self.source.write_text(
+            "from graphql_desk import gql\n"
+            "from graphql_desk.testing import read_result\n"
+            "query=gql('{ name email }')\n"
+            "result=read_result(query, {})\nprint(result['name'])\n",
+            encoding="utf8",
+        )
+        base = self.config.read_text(encoding="utf8")
+        for setting, expected in (
+            ("", ["52005"]),
+            ("track_field_usage=false\n", []),
+            ('reserved_keys=["email"]\n', []),
+        ):
+            with self.subTest(setting=setting):
+                self.config.write_text(base + setting, encoding="utf8")
+                capture = self.capture()
+                result = self.analyze(capture, self.prepare(capture))
+                self.assertTrue(result["ok"], result)
+                response = cast(dict[str, object], result["response"])
+                diagnostics = cast(list[dict[str, object]], response["diagnostics"])
+                self.assertEqual([item["code"] for item in diagnostics], expected)
+
     def test_quarantine_round_trip_preserves_unrelated_project(self) -> None:
         def owner(project: str, offset: int) -> dict[str, object]:
             return {

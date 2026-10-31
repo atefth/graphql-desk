@@ -35,6 +35,26 @@ test("unused imported fragments are reported as warnings", async () => {
   assert.equal(source.slice(diagnostic.range.start, diagnostic.range.end), "from fragments import card as Card");
 });
 
+test("bounded field usage is a warning at the selected parent, without a deletion action", async () => {
+  const source = [
+    "from graphql_desk import gql",
+    "from graphql_desk.testing import read_result",
+    "query = gql('{ user { id name } }')",
+    "result = read_result(query, {})",
+    "print(result['user']['id'])",
+  ].join("\n");
+  const value = bundle(source);
+  const snapshot = document(value);
+  const service = createLanguageFeatures(options(value));
+  const diagnostics = await service.diagnostics(snapshot);
+  const warning = diagnostics.find(item => item.code === "graphql-desk.52005");
+  assert.ok(warning);
+  assert.equal(warning.severity, 2);
+  assert.equal(source.slice(warning.range.start, warning.range.end), "user");
+  assert.match(warning.message, /user\.name/);
+  assert.deepEqual(await service.codeActions(snapshot, [warning]), []);
+});
+
 test("stale persisted hashes produce an exact fix only for direct ID literals", async () => {
   const source = [
     "from graphql_desk import gql",
