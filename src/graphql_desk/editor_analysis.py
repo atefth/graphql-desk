@@ -500,7 +500,9 @@ def analyze_editor_snapshot_details(
         (call, build_source_map(call, tuple(modules))) for call in sources.calls
     ]
     refactor_contexts = {
-        module: extraction_contexts(snapshots[module])
+        module: extraction_contexts(
+            snapshots[module], projects[module.project].factories
+        )
         for module in {call.module for call, _ in mappings}
     }
     points: dict[ModuleDependency, set[int]] = {item: set() for item in snapshots}

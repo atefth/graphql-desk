@@ -69,6 +69,36 @@ def array(value: object) -> list[object]:
 
 
 class EditorAnalysisTests(unittest.TestCase):
+    def test_configured_factories_reach_fragment_extraction(self) -> None:
+        for source, factory, expected in (
+            (
+                "from custom_templates import make_document as custom\n"
+                "query = custom('{ user { id } }')",
+                {
+                    "module": "custom_templates",
+                    "export": "make_document",
+                    "schema_name": "default",
+                },
+                "custom",
+            ),
+            (
+                "from graphql_desk_generated.default import graphql as typed\n"
+                "query = typed('{ user { id } }')",
+                {
+                    "module": "graphql_desk_generated.default",
+                    "export": "graphql",
+                    "schema_name": "default",
+                },
+                "typed",
+            ),
+        ):
+            with self.subTest(factory=factory):
+                payload = request(source)
+                object_(array(payload["bindings"])[0])["factories"] = [factory]
+                call = object_(array(analyze_editor_snapshot(payload)["calls"])[0])
+                extract = object_(call["extract"])
+                self.assertEqual(extract["factory"], expected)
+
     def test_field_warnings_map_original_source_and_obey_project_options(self) -> None:
         source = (
             "# 😀\r\nfrom graphql_desk import gql\r\n"

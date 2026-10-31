@@ -6,10 +6,13 @@ import re
 import tokenize
 from typing import cast
 
+from .source_graph import FactoryBinding
 from .source_maps import convert_offset
 
 
-def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]:
+def extraction_contexts(
+    source: str, factory_bindings: tuple[FactoryBinding, ...] = ()
+) -> dict[tuple[int, int], dict[str, object]]:
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError, UnicodeError, RecursionError):
@@ -24,6 +27,9 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
     initializers: set[str] = set()
     module_aliases: set[str] = set()
     module_imports: set[str] = set()
+    configured_factories = {
+        (factory.module, factory.export) for factory in factory_bindings
+    }
     sys_aliases: set[str] = set()
     sys_modules_aliases: set[str] = set()
     importlib_aliases: set[str] = set()
@@ -263,22 +269,31 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
             escaped_modules.add(node.id)
 
     for statement in tree.body:
-        if (
-            isinstance(statement, ast.ImportFrom)
-            and statement.level == 0
-            and statement.module == "graphql_desk"
-        ):
+        if isinstance(statement, ast.ImportFrom) and statement.level == 0:
             for alias in statement.names:
-                if alias.name in {"gql", "graphql"}:
+                name = alias.asname or alias.name
+                if (
+                    statement.module == "graphql_desk"
+                    and alias.name in {"gql", "graphql"}
+                    and bindings.get(name) == 1
+                ):
+                    documents.add(name)
+                    binding_lines[name] = statement.lineno
+                elif (
+                    statement.module is not None
+                    and (statement.module, alias.name) in configured_factories
+                    and bindings.get(name) == 1
+                ):
+                    documents.add(name)
+                    binding_lines[name] = statement.lineno
+                elif (
+                    statement.module == "graphql_desk"
+                    and alias.name == "init_graphql"
+                    and bindings.get(name) == 1
+                ):
                     name = alias.asname or alias.name
-                    if bindings.get(name) == 1:
-                        documents.add(name)
-                        binding_lines[name] = statement.lineno
-                elif alias.name == "init_graphql":
-                    name = alias.asname or alias.name
-                    if bindings.get(name) == 1:
-                        initializers.add(name)
-                        binding_lines[name] = statement.lineno
+                    initializers.add(name)
+                    binding_lines[name] = statement.lineno
         elif isinstance(statement, ast.Import):
             for alias in statement.names:
                 name = alias.asname or alias.name.split(".")[0]

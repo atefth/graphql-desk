@@ -2,6 +2,7 @@ import sys
 import unittest
 
 from graphql_desk.editor_refactor import extraction_contexts
+from graphql_desk.source_graph import FactoryBinding
 from graphql_desk.source_maps import convert_offset
 
 
@@ -57,6 +58,62 @@ class EditorRefactorTests(unittest.TestCase):
         contexts = extraction_contexts(source)
         self.assertEqual(len(contexts), 1)
         self.assertEqual(next(iter(contexts.values()))["factory"], "factory")
+
+    def test_configured_factory_imports_are_supported_only_when_configured(
+        self,
+    ) -> None:
+        factories = (
+            FactoryBinding("custom_templates", "make_document", "default"),
+            FactoryBinding("graphql_desk_generated.default", "graphql", "default"),
+        )
+        for source, expected in (
+            (
+                "from custom_templates import make_document as custom\n"
+                "query = custom('{ user { id } }')\n",
+                "custom",
+            ),
+            (
+                "from graphql_desk_generated.default import graphql as typed\n"
+                "query = typed('{ user { id } }')\n",
+                "typed",
+            ),
+        ):
+            with self.subTest(source=source):
+                contexts = extraction_contexts(source, factories)
+                self.assertEqual(len(contexts), 1)
+                self.assertEqual(next(iter(contexts.values()))["factory"], expected)
+
+        self.assertEqual(
+            extraction_contexts(
+                "from custom_templates import make_document as custom\n"
+                "query = custom('{ user { id } }')\n"
+            ),
+            {},
+        )
+        self.assertEqual(
+            extraction_contexts(
+                "from custom_templates import make_document as custom\n"
+                "custom = replacement\nquery = custom('{ user { id } }')\n",
+                factories,
+            ),
+            {},
+        )
+        self.assertEqual(
+            extraction_contexts(
+                "from other_templates import make_document as custom\n"
+                "query = custom('{ user { id } }')\n",
+                factories,
+            ),
+            {},
+        )
+        self.assertEqual(
+            extraction_contexts(
+                "from .custom_templates import make_document as custom\n"
+                "query = custom('{ user { id } }')\n",
+                factories,
+            ),
+            {},
+        )
 
     def test_module_qualified_graphql_desk_factories_are_supported(self) -> None:
         for source, expected in (
