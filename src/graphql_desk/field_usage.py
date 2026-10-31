@@ -974,20 +974,24 @@ class _Flow:
                 )
 
             def visit_If(self, node: ast.If) -> None:
-                self._visit_conditional(node)
+                self.visit(node.test)
+                self._visit_conditional(*node.body, *node.orelse)
 
-            def _visit_conditional(self, node: ast.AST) -> None:
+            def _visit_conditional(self, *nodes: ast.AST) -> None:
                 self.conditional_depth += 1
-                self.generic_visit(node)
+                for node in nodes:
+                    self.visit(node)
                 self.conditional_depth -= 1
 
             def visit_For(self, node: ast.For) -> None:
+                self.visit(node.iter)
                 self._record_loop_aliases(node.target, node.iter)
-                self._visit_conditional(node)
+                self._visit_conditional(node.target, *node.body, *node.orelse)
 
             def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+                self.visit(node.iter)
                 self._record_loop_aliases(node.target, node.iter)
-                self._visit_conditional(node)
+                self._visit_conditional(node.target, *node.body, *node.orelse)
 
             def _record_loop_aliases(
                 self, target: ast.expr, iterable: ast.expr
@@ -1026,7 +1030,8 @@ class _Flow:
                             add(name.id, None)
 
             def visit_While(self, node: ast.While) -> None:
-                self._visit_conditional(node)
+                self.visit(node.test)
+                self._visit_conditional(*node.body, *node.orelse)
 
             def visit_Try(self, node: ast.Try) -> None:
                 self._visit_conditional(node)
@@ -1035,13 +1040,47 @@ class _Flow:
                 self._visit_conditional(node)
 
             def visit_With(self, node: ast.With) -> None:
-                self._visit_conditional(node)
+                for item in node.items:
+                    self.visit(item.context_expr)
+                    if item.optional_vars is not None:
+                        self._record_unknown_target(item.optional_vars)
+                self._visit_conditional(*node.body)
 
             def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
-                self._visit_conditional(node)
+                for item in node.items:
+                    self.visit(item.context_expr)
+                    if item.optional_vars is not None:
+                        self._record_unknown_target(item.optional_vars)
+                self._visit_conditional(*node.body)
 
             def visit_Match(self, node: ast.Match) -> None:
-                self._visit_conditional(node)
+                self.visit(node.subject)
+                for case in node.cases:
+                    self._record_pattern_targets(case.pattern)
+                    self._visit_conditional(
+                        *((case.guard,) if case.guard is not None else ()),
+                        *case.body,
+                    )
+
+            def _record_unknown_target(self, target: ast.expr) -> None:
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store):
+                        self.assignments.append((name.id, None, True))
+                        self.module_assignments.append((name.id, None, True))
+
+            def _record_pattern_targets(self, pattern: ast.pattern) -> None:
+                if isinstance(pattern, ast.MatchAs) and pattern.name is not None:
+                    self.assignments.append((pattern.name, None, True))
+                    self.module_assignments.append((pattern.name, None, True))
+                elif isinstance(pattern, ast.MatchStar) and pattern.name is not None:
+                    self.assignments.append((pattern.name, None, True))
+                    self.module_assignments.append((pattern.name, None, True))
+                elif isinstance(pattern, ast.MatchMapping) and pattern.rest is not None:
+                    self.assignments.append((pattern.rest, None, True))
+                    self.module_assignments.append((pattern.rest, None, True))
+                for child in ast.iter_child_nodes(pattern):
+                    if isinstance(child, ast.pattern):
+                        self._record_pattern_targets(child)
 
             def visit_Call(self, node: ast.Call) -> None:
                 self.calls.append(node)

@@ -710,6 +710,37 @@ class FieldUsageTests(unittest.TestCase):
         )
         self.assertEqual(warnings(source), [])
 
+    def test_control_flow_tests_apply_alias_writes_before_the_suite(self) -> None:
+        control_flow_tests = (
+            "if (patch := harmless_patch):\n                pass\n",
+            "while (patch := harmless_patch):\n                break\n",
+            "for _ in (patch := harmless_patch,):\n                pass\n",
+            "with (patch := harmless_manager):\n                pass\n",
+            "match (patch := harmless_patch):\n"
+            "                case _:\n"
+            "                    pass\n",
+        )
+        for control_flow_test in control_flow_tests:
+            with self.subTest(control_flow_test=control_flow_test):
+                source = (
+                    PREFIX
+                    + "class BaseView:\n"
+                    + "    def render_data(self, result):\n"
+                    + '        print(result["user"]["name"])\n'
+                    + "class Screen(BaseView):\n"
+                    + "    def render(self):\n"
+                    + "        def remove(patch=delattr):\n"
+                    + "            "
+                    + control_flow_test
+                    + '            patch(BaseView, "render_data", replacement)\n'
+                    + "        remove()\n"
+                    + "        result = execute(query, {})\n"
+                    + "        super().render_data(result)\n"
+                )
+                found = warnings(source)
+                self.assertEqual([field for field, _ in found], ["user"])
+                self.assertIn("user.email", found[0][1])
+
     def test_nested_function_walrus_does_not_invalidate_outer_capture(self) -> None:
         source = (
             PREFIX
