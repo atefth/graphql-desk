@@ -8,6 +8,14 @@ The parser validates documented single/named-schema keys, types and defaults, sc
 field names for the [same-file consumption heuristic](field-usage.md). The worker
 passes these captured facts into analysis and includes them in its fingerprint.
 
+`template_fragment_composition` defaults to `false`. Set it to `true` only when
+the configured `template` callable accepts GraphQL Desk's `source=` and
+`fragments=` keyword API, preserves document identity, and composes the supplied
+fragments. It is rejected without `template`. Generated per-schema
+`graphql_desk_generated.<schema>.graphql` factories are known to satisfy this
+contract and are marked automatically; this option only opts a custom template
+into fragment-extraction edits.
+
 HTTP(S) schema origins and headers are retained as facts only. Configuration facts retain unresolved header environment references; unknown substitutions fail. `resolve_schema_headers(origin, environment=...)` resolves explicit references once using only the supplied environment mapping and returns a new redacted origin. It rejects missing variables and CR/LF/NUL expansions without printing values, never reads process environment implicitly, and does not fetch schemas. Header values and URLs are hidden from object representations, and configuration diagnostics avoid echoing supplied values. Scalar/enum/template qualified symbols are validated syntactically without importing them. Requesting the optional persistent cache currently raises an explicit unsupported error.
 
 Python 3.10 uses pinned MIT-licensed `tomli==2.5.0`; Python 3.11+ uses standard-library `tomllib`. The runtime license inventory follows that version marker.
@@ -28,7 +36,7 @@ captures this map and owns the file checks and later freshness comparison.
 
 `select_schema(project, binding=None)` accepts a resolved schema name; only a single `default` schema permits omission. It does not infer bindings from filenames or source text. `validate_project_ownership(projects)` checks supplied project facts for shared generated trees, explicit/implicit output paths and input clobbering, including canonical symlink identities. Equal aliases deduplicate; conflicting snapshots fail. No registry, writes or source enumeration is introduced, and callers must supply every relevant project and recheck before writes.
 
-`project_bindings(config, project_id=...)` describes exact configured generated `graphql` factory identities and an optional template to the source resolver, without importing or creating those modules. `schema_for_call(config, call, project_id=...)` routes actual `ResolvedCall.schema_name` metadata to a configured schema. Both use the same explicit caller-owned project identity as module snapshots; Python assignment names never select a schema. Routing preserves call URI/version/dependency/contribution facts. Generated `gql` exports are not invented, and no source-file eligibility or freshness proof is implied.
+`project_bindings(config, project_id=...)` describes exact configured generated `graphql` factory identities and an optional template to the source resolver, without importing or creating those modules. Each `FactoryBinding` carries a separate fragment-composition capability: generated factories are enabled by definition, custom templates only when `template_fragment_composition = true`. This declaration is a user assertion, not runtime signature inspection. `schema_for_call(config, call, project_id=...)` routes actual `ResolvedCall.schema_name` metadata to a configured schema. Both use the same explicit caller-owned project identity as module snapshots; Python assignment names never select a schema. Routing preserves call URI/version/dependency/contribution facts. Generated `gql` exports are not invented, and no source-file eligibility or freshness proof is implied.
 
 The installed `graphql-desk doctor` command (also `python -m graphql_desk doctor`)
 selects the nearest configured project, or an explicit `--config PATH`. Optional

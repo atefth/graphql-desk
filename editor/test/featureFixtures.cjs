@@ -19,7 +19,7 @@ function bundle(source, extra = {}) {
     request_id: "features-1",
     modules: [{ project: "p", module: "main", uri: extra.uri ?? "file:///workspace/main.py", version: extra.version ?? 1, source, is_package: false }, ...(extra.modules ?? [])],
     bindings: [{ project: "p", schemas: extra.schemaNames ?? ["default"], default_schema: extra.defaultSchema === undefined ? "default" : extra.defaultSchema,
-      factories: extra.factories ?? [], type_mappings: [] }],
+      factories: (extra.factories ?? []).map(factory => ({ fragment_composition: false, ...factory })), type_mappings: [] }],
     schemas: [...(extra.includeDefaultSchema === false ? [] : [{ project: "p", schema_name: "default", uri: extra.schemaUri ?? "file:///workspace/schema.graphql", version: extra.schemaVersion ?? 2,
       token: extra.schemaToken ?? "schema-2", format: extra.schemaFormat ?? "sdl", text: extra.schema ?? schema }]), ...(extra.schemas ?? [])],
   };

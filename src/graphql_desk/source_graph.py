@@ -76,6 +76,7 @@ class FactoryBinding:
     module: str
     export: str
     schema_name: str | None = None
+    fragment_composition: bool = False
 
 
 @dataclass(frozen=True)

@@ -69,7 +69,7 @@ def array(value: object) -> list[object]:
 
 
 class EditorAnalysisTests(unittest.TestCase):
-    def test_configured_factories_reach_fragment_extraction(self) -> None:
+    def test_fragment_extraction_uses_only_composition_capable_factories(self) -> None:
         for source, factory, expected in (
             (
                 "from custom_templates import make_document as custom\n"
@@ -78,6 +78,7 @@ class EditorAnalysisTests(unittest.TestCase):
                     "module": "custom_templates",
                     "export": "make_document",
                     "schema_name": "default",
+                    "fragment_composition": True,
                 },
                 "custom",
             ),
@@ -88,6 +89,7 @@ class EditorAnalysisTests(unittest.TestCase):
                     "module": "graphql_desk_generated.default",
                     "export": "graphql",
                     "schema_name": "default",
+                    "fragment_composition": True,
                 },
                 "typed",
             ),
@@ -98,6 +100,21 @@ class EditorAnalysisTests(unittest.TestCase):
                 call = object_(array(analyze_editor_snapshot(payload)["calls"])[0])
                 extract = object_(call["extract"])
                 self.assertEqual(extract["factory"], expected)
+
+        payload = request(
+            "from custom_templates import make_document as custom\n"
+            "query = custom('{ user { id } }')"
+        )
+        object_(array(payload["bindings"])[0])["factories"] = [
+            {
+                "module": "custom_templates",
+                "export": "make_document",
+                "schema_name": "default",
+                "fragment_composition": False,
+            }
+        ]
+        call = object_(array(analyze_editor_snapshot(payload)["calls"])[0])
+        self.assertIsNone(call["extract"])
 
     def test_field_warnings_map_original_source_and_obey_project_options(self) -> None:
         source = (
@@ -704,6 +721,7 @@ class EditorAnalysisTests(unittest.TestCase):
                 "module": "generated.default",
                 "export": "graphql",
                 "schema_name": "default",
+                "fragment_composition": False,
             }
         ]
         response = analyze_editor_snapshot(payload)

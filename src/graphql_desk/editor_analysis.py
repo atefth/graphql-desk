@@ -205,12 +205,20 @@ def analyze_editor_snapshot_details(
         )
         factories: list[FactoryBinding] = []
         for factory in _array(item["factories"], "factories"):
-            record = _object(factory, {"module", "export", "schema_name"}, "factory")
+            record = _object(
+                factory,
+                {"module", "export", "schema_name", "fragment_composition"},
+                "factory",
+            )
+            fragment_composition = record["fragment_composition"]
+            if not isinstance(fragment_composition, bool):
+                raise ValueError("Factory fragment_composition must be a boolean")
             factories.append(
                 FactoryBinding(
                     _string(record["module"], "Factory module"),
                     _string(record["export"], "Factory export"),
                     _optional_string(record["schema_name"], "Factory schema"),
+                    fragment_composition,
                 )
             )
         mapping_facts: list[dict[str, object]] = []

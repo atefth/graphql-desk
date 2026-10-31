@@ -63,8 +63,10 @@ class EditorRefactorTests(unittest.TestCase):
         self,
     ) -> None:
         factories = (
-            FactoryBinding("custom_templates", "make_document", "default"),
-            FactoryBinding("graphql_desk_generated.default", "graphql", "default"),
+            FactoryBinding("custom_templates", "make_document", "default", True),
+            FactoryBinding(
+                "graphql_desk_generated.default", "graphql", "default", True
+            ),
         )
         for source, expected in (
             (
@@ -87,6 +89,14 @@ class EditorRefactorTests(unittest.TestCase):
             extraction_contexts(
                 "from custom_templates import make_document as custom\n"
                 "query = custom('{ user { id } }')\n"
+            ),
+            {},
+        )
+        self.assertEqual(
+            extraction_contexts(
+                "from custom_templates import make_document as custom\n"
+                "query = custom('{ user { id } }')\n",
+                (FactoryBinding("custom_templates", "make_document", "default"),),
             ),
             {},
         )

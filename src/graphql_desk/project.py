@@ -184,7 +184,7 @@ def project_bindings(config: ProjectConfig, *, project_id: str) -> ProjectBindin
     schemas = tuple(schema.name for schema in config.schemas)
     default = "default" if schemas == ("default",) else None
     factories = [
-        FactoryBinding(f"{config.generated_package}.{schema}", "graphql", schema)
+        FactoryBinding(f"{config.generated_package}.{schema}", "graphql", schema, True)
         for schema in schemas
     ]
     if config.template is not None:
@@ -194,7 +194,13 @@ def project_bindings(config: ProjectConfig, *, project_id: str) -> ProjectBindin
         if not any(
             (item.module, item.export) == (module, export) for item in factories
         ):
-            factories.append(FactoryBinding(module, export))
+            factories.append(
+                FactoryBinding(
+                    module,
+                    export,
+                    fragment_composition=config.template_fragment_composition,
+                )
+            )
     return ProjectBindings(project_id, schemas, default, tuple(factories))
 
 

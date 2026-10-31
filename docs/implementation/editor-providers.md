@@ -4,6 +4,13 @@
 
 `isCurrent(bundle, snapshot, cancellationToken)` is mandatory. The caller must compare all contributing source/config versions, fragment dependencies and schema identities/tokens with current state. Providers also check the local document snapshot and response schema facts, and recheck trust, cancellation and freshness before returning. A failed, stale, cancelled or ambiguous analysis returns no precise result. Failures do not replace the native Python service. The injected callback is an internal trusted analysis boundary; this module does not independently validate arbitrary malformed response JSON.
 
+Extract-fragment edits use the analysis `extract` context only for known GraphQL
+Desk factories or custom templates that explicitly set
+`template_fragment_composition = true`. That opt-in asserts the callable accepts
+`source=` and `fragments=`, preserves document identity, and composes fragments.
+Unknown or default-off configured factories remain analyzable but cannot produce
+fragment extraction edits. Edits continue to reuse the exact imported alias.
+
 The pinned lower-level `graphql-language-service==5.7.0` and `graphql==16.12.0` supply online completion/hover and validation primitives. Validation uses separately parsed raw source ASTs with their original locations, rather than concatenating printed fragments or compensating for guessed range endpoints. Diagnostics retain separate syntax, validation, deprecation and source/index codes, with identical results deduplicated. Configured client directive names may be supplied through `clientDirectives(bundle, call)`; undeclared pinned client names are suppressed without bypassing validation of schema-declared directives.
 
 Incomplete GraphQL inside valid Python still has real maps and can complete. Completion inserts a plain GraphQL name/value label where one linear current-file map span supplies an unambiguous replacement, or inserts at a uniquely mapped zero-width boundary with no matching linear occurrence. The latter preserves escaped whitespace and physical CRLF bytes while allowing the existing language-service suggestions. Atomic escape interiors, ranges crossing literal gaps and repeated/shared origins remain rejected, including repeated empty constants whose identical origins deduplicate. It does not rewrite Python escaping, insert snippets, plan refactors or claim project-wide edit safety. Native hover signatures/descriptions/deprecation are retained; input-member qualification is corrected from actual input type metadata, and actual argument/input defaults are shown. Hover Markdown is untrusted and HTML-disabled.

@@ -28,7 +28,9 @@ def extraction_contexts(
     module_aliases: set[str] = set()
     module_imports: set[str] = set()
     configured_factories = {
-        (factory.module, factory.export) for factory in factory_bindings
+        (factory.module, factory.export)
+        for factory in factory_bindings
+        if factory.fragment_composition
     }
     sys_aliases: set[str] = set()
     sys_modules_aliases: set[str] = set()
