@@ -578,6 +578,7 @@ def check(
                     fragment_index=index,
                     modules=modules,
                     client_directives=project_config.client_directives,
+                    include_deprecations=True,
                 )
             )
     except (GraphQLError, OSError, RuntimeError, TypeError, ValueError):

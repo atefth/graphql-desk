@@ -23,6 +23,7 @@ def validate_indexed_document(
     fragment_index: FragmentIndex,
     modules: tuple[ModuleSnapshot, ...],
     client_directives: tuple[str, ...] = (),
+    include_deprecations: bool = False,
 ) -> tuple[GraphDiagnostic, ...]:
     """Use original locations, including imported and split literal origins.
 
@@ -105,8 +106,12 @@ def validate_indexed_document(
         )
     )
     warnings = (
-        (error, "graphql-deprecation")
-        for error in validate_deprecations(context.schema, validated)
+        (
+            (error, "graphql-deprecation")
+            for error in validate_deprecations(context.schema, validated)
+        )
+        if include_deprecations
+        else ()
     )
     for error, code in (*errors, *warnings):
         located = False

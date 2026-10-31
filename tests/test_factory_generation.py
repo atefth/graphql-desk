@@ -546,6 +546,49 @@ def dynamic(name:str)->None:
                 },
             )
 
+    def test_deprecated_operation_still_generates_artifacts(self) -> None:
+        context = SchemaContext(
+            "main",
+            build_schema(
+                'type Query { old: String @deprecated(reason: "Use current") '
+                "current: String }"
+            ),
+            "v1",
+        )
+        modules = (
+            ModuleSnapshot(
+                "p",
+                "main",
+                "file:///main.py",
+                1,
+                'from generated.main import graphql\nq=graphql("{ old }")\n',
+            ),
+        )
+        sources = resolve_project(
+            modules,
+            bindings=(
+                ProjectBindings(
+                    "p",
+                    ("main",),
+                    factories=(
+                        FactoryBinding("generated.main", "graphql", "main"),
+                    ),
+                ),
+            ),
+        )
+        index = index_fragments(sources, schemas={("p", "main"): context})
+
+        artifacts = generate_factory_artifacts(
+            context,
+            index,
+            modules=modules,
+            project_id="p",
+            generated_package="generated",
+        )
+
+        self.assertTrue(artifacts.files)
+        self.assertFalse(artifacts.diagnostics)
+
     def test_semantic_failures_keep_independent_calls_and_importable_error_aliases(
         self,
     ) -> None:
