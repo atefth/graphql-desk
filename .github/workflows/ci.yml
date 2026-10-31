@@ -107,7 +107,7 @@ jobs:
           - os: windows-2025
             python: "3.14"
             arch: x64
-          - os: macos-14
+          - os: macos-15
             python: "3.14"
             arch: arm64
     steps:
