@@ -347,6 +347,77 @@ class FieldUsageTests(unittest.TestCase):
             + "        result = execute(query, {})\n"
             + "        super().render_data(result)\n"
         )
+        aliased_nested_deletion = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + "            delete = delattr\n"
+            + '            delete(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        imported_mutator_alias = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def replace():\n"
+            + "            from builtins import setattr as patch\n"
+            + '            patch(BaseView, "render_data", replacement)\n'
+            + "        replace()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        attribute_mutator_alias = (
+            PREFIX
+            + "import builtins\n"
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def replace():\n"
+            + "            patch = builtins.setattr\n"
+            + '            patch(BaseView, "render_data", replacement)\n'
+            + "        replace()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        annotated_attribute_mutator_alias = (
+            PREFIX
+            + "import builtins as bi\n"
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove():\n"
+            + "            patch: object = bi.delattr\n"
+            + '            patch(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
+        default_mutator_alias = (
+            PREFIX
+            + "class BaseView:\n"
+            + "    def render_data(self, result):\n"
+            + '        print(result["user"]["name"])\n'
+            + "class Screen(BaseView):\n"
+            + "    def render(self):\n"
+            + "        def remove(delete=delattr):\n"
+            + '            delete(BaseView, "render_data")\n'
+            + "        remove()\n"
+            + "        result = execute(query, {})\n"
+            + "        super().render_data(result)\n"
+        )
         self.assertEqual(warnings(multiple_inheritance), [])
         self.assertEqual(warnings(dynamic_instance_dispatch), [])
         self.assertEqual(warnings(shadowed_super), [])
@@ -355,6 +426,11 @@ class FieldUsageTests(unittest.TestCase):
         self.assertEqual(warnings(local_base_shadow), [])
         self.assertEqual(warnings(destructured_method_override), [])
         self.assertEqual(warnings(nested_method_deletion), [])
+        self.assertEqual(warnings(aliased_nested_deletion), [])
+        self.assertEqual(warnings(imported_mutator_alias), [])
+        self.assertEqual(warnings(attribute_mutator_alias), [])
+        self.assertEqual(warnings(annotated_attribute_mutator_alias), [])
+        self.assertEqual(warnings(default_mutator_alias), [])
 
     def test_comprehension_walrus_makes_method_name_local_not_captured(self) -> None:
         source = (

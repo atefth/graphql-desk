@@ -885,6 +885,55 @@ class _Flow:
                 if target is not None:
                     self.mutated_classes.add(id(target))
 
+        mutator_names = {"setattr", "delattr"}
+        mutator_aliases = set(mutator_names)
+        builtin_modules = {"builtins"}
+
+        def mutator_expression(node: ast.expr) -> str | None:
+            if isinstance(node, ast.Name) and node.id in mutator_aliases:
+                return node.id
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in builtin_modules
+                and node.attr in mutator_names
+            ):
+                return node.attr
+            return None
+
+        for child in ast.walk(owner.tree):
+            if isinstance(child, ast.ImportFrom) and child.module == "builtins":
+                mutator_aliases.update(
+                    item.asname or item.name
+                    for item in child.names
+                    if item.name in {"setattr", "delattr"}
+                )
+            elif isinstance(child, ast.Import):
+                builtin_modules.update(
+                    item.asname or item.name.split(".")[0]
+                    for item in child.names
+                    if item.name == "builtins"
+                )
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                positional = (*child.args.posonlyargs, *child.args.args)
+                default_parameters = positional[
+                    len(positional) - len(child.args.defaults) :
+                ]
+                mutator_aliases.update(
+                    argument.arg
+                    for argument, default in zip(
+                        default_parameters, child.args.defaults, strict=True
+                    )
+                    if mutator_expression(default)
+                )
+                mutator_aliases.update(
+                    argument.arg
+                    for argument, default in zip(
+                        child.args.kwonlyargs, child.args.kw_defaults, strict=True
+                    )
+                    if default is not None and mutator_expression(default)
+                )
+
         for child in ast.walk(owner.tree):
             if isinstance(child, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                 targets = (
@@ -893,13 +942,35 @@ class _Flow:
                 for target in targets:
                     if isinstance(target, ast.Attribute):
                         mark_mutated_class(target.value)
-            elif (
-                isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Name)
-                and child.func.id in {"setattr", "delattr"}
-                and child.args
-            ):
-                mark_mutated_class(child.args[0])
+                if isinstance(child, ast.Assign) and mutator_expression(child.value):
+                    mutator_aliases.update(
+                        target.id
+                        for target in child.targets
+                        if isinstance(target, ast.Name)
+                    )
+                elif (
+                    isinstance(child, ast.AnnAssign)
+                    and isinstance(child.target, ast.Name)
+                    and child.value is not None
+                    and mutator_expression(child.value)
+                ):
+                    mutator_aliases.add(child.target.id)
+            elif isinstance(child, ast.Call):
+                mutator = None
+                if (
+                    isinstance(child.func, ast.Name)
+                    and child.func.id in mutator_aliases
+                ):
+                    mutator = child.func.id
+                elif (
+                    isinstance(child.func, ast.Attribute)
+                    and isinstance(child.func.value, ast.Name)
+                    and child.func.value.id in builtin_modules
+                    and child.func.attr in {"setattr", "delattr"}
+                ):
+                    mutator = child.func.attr
+                if mutator and child.args:
+                    mark_mutated_class(child.args[0])
         self.in_function = False
         self.class_depth = 0
         self.captured: set[str] = set()
