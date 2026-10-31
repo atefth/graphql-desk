@@ -49,7 +49,11 @@ Class-suite assignments are treated as escapes because a metaclass may retain
 assigned values. Signature imports nested under a recognized
 `typing.TYPE_CHECKING` or `typing_extensions.TYPE_CHECKING` guard are available
 to the same-file signature resolver; the guard body is not treated as runtime
-code.
+code. A no-argument `super().method(...)` call can pass tracked results through
+an inherited method when the single-inheritance chain and undecorated method are
+defined unambiguously in the same module. Ordinary `self.method(...)` dispatch,
+multiple or dynamic bases, decorated/async methods, and class mutations remain
+escapes because runtime method resolution is not proven.
 Container method escapes consume their contained results, and comprehension
 assignment expressions invalidate enclosing bindings conservatively.
 Python list literals consume contained results and do not retain callable or

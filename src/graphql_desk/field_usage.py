@@ -852,10 +852,398 @@ class _Flow:
         self.states = states
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.class_functions: set[int] = set()
+        self.function_classes: dict[int, ast.ClassDef] = {}
+        self.class_stack: list[ast.ClassDef] = []
         self.unsafe_local_class_functions: set[int] = set()
         self.function_captures: dict[int, dict[str, _Value]] = {}
         self.class_capture_scope: dict[str, _Value] | None = None
         self.current_function: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+        self.current_class: ast.ClassDef | None = None
+        self.module_env: dict[str, _Value] = {}
+        self.class_definitions = {
+            name: target
+            for name, target in owner.exports.items()
+            if isinstance(target, ast.ClassDef) and name not in owner.blocked
+        }
+        self.mutated_classes: set[int] = set()
+
+        def resolve_class(
+            name: str, seen: frozenset[str] = frozenset()
+        ) -> ast.ClassDef | None:
+            if name in seen:
+                return None
+            target = owner.exports.get(name)
+            if isinstance(target, ast.ClassDef):
+                return target
+            if isinstance(target, ast.Name):
+                return resolve_class(target.id, seen | {name})
+            return None
+
+        def mark_mutated_class(node: ast.expr) -> None:
+            if isinstance(node, ast.Name):
+                target = resolve_class(node.id)
+                if target is not None:
+                    self.mutated_classes.add(id(target))
+
+        mutator_names = {"setattr", "delattr"}
+
+        class _MutationBindings(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.assignments: list[tuple[str, ast.expr | None, bool]] = []
+                self.module_assignments: list[tuple[str, ast.expr | None, bool]] = []
+                self.conditional_depth = 0
+                self.attribute_writes: list[ast.expr] = []
+                self.calls: list[ast.Call] = []
+                self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+                self.classes: list[ast.ClassDef] = []
+
+            def visit_Assign(self, node: ast.Assign) -> None:
+                def collect(target: ast.expr, value: ast.expr) -> None:
+                    if isinstance(target, ast.Name):
+                        conditional = bool(self.conditional_depth)
+                        self.assignments.append((target.id, value, conditional))
+                        self.module_assignments.append((target.id, value, conditional))
+                    elif (
+                        isinstance(target, (ast.Tuple, ast.List))
+                        and isinstance(value, (ast.Tuple, ast.List))
+                        and len(target.elts) == len(value.elts)
+                    ):
+                        for target_item, value_item in zip(
+                            target.elts, value.elts, strict=True
+                        ):
+                            collect(target_item, value_item)
+
+                for target in node.targets:
+                    if isinstance(target, ast.Attribute):
+                        self.attribute_writes.append(target.value)
+                    else:
+                        collect(target, node.value)
+                self.generic_visit(node)
+
+            def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+                if isinstance(node.target, ast.Name) and node.value is not None:
+                    conditional = bool(self.conditional_depth)
+                    self.assignments.append((node.target.id, node.value, conditional))
+                    self.module_assignments.append(
+                        (node.target.id, node.value, conditional)
+                    )
+                elif isinstance(node.target, ast.Attribute):
+                    self.attribute_writes.append(node.target.value)
+                self.generic_visit(node)
+
+            def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+                conditional = bool(self.conditional_depth)
+                self.assignments.append((node.target.id, node.value, conditional))
+                self.module_assignments.append(
+                    (node.target.id, node.value, conditional)
+                )
+                self.generic_visit(node)
+
+            def visit_AugAssign(self, node: ast.AugAssign) -> None:
+                if isinstance(node.target, ast.Attribute):
+                    self.attribute_writes.append(node.target.value)
+                self.generic_visit(node)
+
+            def visit_Delete(self, node: ast.Delete) -> None:
+                self.attribute_writes.extend(
+                    target.value
+                    for target in node.targets
+                    if isinstance(target, ast.Attribute)
+                )
+                self.generic_visit(node)
+
+            def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+                if node.module == "builtins":
+                    imported = {
+                        item.asname or item.name
+                        for item in node.names
+                        if item.name in mutator_names
+                    }
+                    self.assignments.extend(
+                        (name, None, bool(self.conditional_depth)) for name in imported
+                    )
+
+            def visit_Import(self, node: ast.Import) -> None:
+                imported = {
+                    item.asname or item.name.split(".")[0]
+                    for item in node.names
+                    if item.name == "builtins"
+                }
+                self.module_assignments.extend(
+                    (name, None, bool(self.conditional_depth)) for name in imported
+                )
+
+            def visit_If(self, node: ast.If) -> None:
+                self.visit(node.test)
+                self._visit_conditional(*node.body, *node.orelse)
+
+            def _visit_conditional(self, *nodes: ast.AST) -> None:
+                self.conditional_depth += 1
+                for node in nodes:
+                    self.visit(node)
+                self.conditional_depth -= 1
+
+            def visit_For(self, node: ast.For) -> None:
+                self.visit(node.iter)
+                self._record_loop_aliases(node.target, node.iter)
+                self._visit_conditional(node.target, *node.body, *node.orelse)
+
+            def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+                self.visit(node.iter)
+                self._record_loop_aliases(node.target, node.iter)
+                self._visit_conditional(node.target, *node.body, *node.orelse)
+
+            def _record_loop_aliases(
+                self, target: ast.expr, iterable: ast.expr
+            ) -> None:
+                def add(name: str, value: ast.expr | None) -> None:
+                    self.assignments.append((name, value, True))
+                    self.module_assignments.append((name, value, True))
+
+                def collect(target_node: ast.expr, value: ast.expr) -> None:
+                    if isinstance(target_node, ast.Name):
+                        add(target_node.id, value)
+                    elif (
+                        isinstance(target_node, (ast.Tuple, ast.List))
+                        and isinstance(value, (ast.Tuple, ast.List))
+                        and len(target_node.elts) == len(value.elts)
+                    ):
+                        for target_item, value_item in zip(
+                            target_node.elts, value.elts, strict=True
+                        ):
+                            collect(target_item, value_item)
+                    else:
+                        for name in ast.walk(target_node):
+                            if isinstance(name, ast.Name) and isinstance(
+                                name.ctx, ast.Store
+                            ):
+                                add(name.id, None)
+
+                if isinstance(iterable, (ast.Tuple, ast.List)):
+                    for value in iterable.elts:
+                        collect(target, value)
+                else:
+                    for name in ast.walk(target):
+                        if isinstance(name, ast.Name) and isinstance(
+                            name.ctx, ast.Store
+                        ):
+                            add(name.id, None)
+
+            def visit_While(self, node: ast.While) -> None:
+                self.visit(node.test)
+                self._visit_conditional(*node.body, *node.orelse)
+
+            def visit_Try(self, node: ast.Try) -> None:
+                self._visit_conditional(node)
+
+            def visit_TryStar(self, node: ast.AST) -> None:
+                self._visit_conditional(node)
+
+            def visit_With(self, node: ast.With) -> None:
+                for item in node.items:
+                    self.visit(item.context_expr)
+                    if item.optional_vars is not None:
+                        self._record_unknown_target(item.optional_vars)
+                self._visit_conditional(*node.body)
+
+            def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+                for item in node.items:
+                    self.visit(item.context_expr)
+                    if item.optional_vars is not None:
+                        self._record_unknown_target(item.optional_vars)
+                self._visit_conditional(*node.body)
+
+            def visit_Match(self, node: ast.Match) -> None:
+                self.visit(node.subject)
+                for case in node.cases:
+                    self._record_pattern_targets(case.pattern)
+                    self._visit_conditional(
+                        *((case.guard,) if case.guard is not None else ()),
+                        *case.body,
+                    )
+
+            def _record_unknown_target(self, target: ast.expr) -> None:
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store):
+                        self.assignments.append((name.id, None, True))
+                        self.module_assignments.append((name.id, None, True))
+
+            def _record_pattern_targets(self, pattern: ast.pattern) -> None:
+                if isinstance(pattern, ast.MatchAs) and pattern.name is not None:
+                    self.assignments.append((pattern.name, None, True))
+                    self.module_assignments.append((pattern.name, None, True))
+                elif isinstance(pattern, ast.MatchStar) and pattern.name is not None:
+                    self.assignments.append((pattern.name, None, True))
+                    self.module_assignments.append((pattern.name, None, True))
+                elif isinstance(pattern, ast.MatchMapping) and pattern.rest is not None:
+                    self.assignments.append((pattern.rest, None, True))
+                    self.module_assignments.append((pattern.rest, None, True))
+                for child in ast.iter_child_nodes(pattern):
+                    if isinstance(child, ast.pattern):
+                        self._record_pattern_targets(child)
+
+            def visit_Call(self, node: ast.Call) -> None:
+                self.calls.append(node)
+                self.generic_visit(node)
+
+            def visit_FunctionDef(
+                self, node: ast.FunctionDef | ast.AsyncFunctionDef
+            ) -> None:
+                self.functions.append(node)
+                for expression in (
+                    *node.decorator_list,
+                    *node.args.defaults,
+                    *(item for item in node.args.kw_defaults if item is not None),
+                    *(
+                        argument.annotation
+                        for argument in (
+                            *node.args.posonlyargs,
+                            *node.args.args,
+                            *node.args.kwonlyargs,
+                            *(
+                                (node.args.vararg,)
+                                if node.args.vararg is not None
+                                else ()
+                            ),
+                            *(
+                                (node.args.kwarg,)
+                                if node.args.kwarg is not None
+                                else ()
+                            ),
+                        )
+                        if argument.annotation is not None
+                    ),
+                    *((node.returns,) if node.returns is not None else ()),
+                ):
+                    self.visit(expression)
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                self.classes.append(node)
+                for expression in (*node.decorator_list, *node.bases):
+                    self.visit(expression)
+                for keyword in node.keywords:
+                    self.visit(keyword.value)
+
+        def scope_bindings(statements: list[ast.stmt]) -> _MutationBindings:
+            bindings = _MutationBindings()
+            for statement in statements:
+                bindings.visit(statement)
+            return bindings
+
+        def direct_mutator_expression(
+            node: ast.expr, aliases: set[str], modules: set[str]
+        ) -> bool:
+            return (
+                isinstance(node, ast.Name)
+                and node.id in aliases
+                or isinstance(node, ast.NamedExpr)
+                and direct_mutator_expression(node.value, aliases, modules)
+                or isinstance(node, ast.IfExp)
+                and (
+                    direct_mutator_expression(node.body, aliases, modules)
+                    or direct_mutator_expression(node.orelse, aliases, modules)
+                )
+                or isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in modules
+                and node.attr in mutator_names
+            )
+
+        def scan_scope(
+            node: ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
+            inherited_aliases: set[str],
+            inherited_modules: set[str],
+            *,
+            method_aliases: set[str] | None = None,
+            method_modules: set[str] | None = None,
+        ) -> None:
+            statements = node.body
+            bindings = scope_bindings(statements)
+            writes = _Writes()
+            for statement in statements:
+                writes.visit(statement)
+            bound = set(writes.names)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                bound.update(_local_names(node))
+            aliases = inherited_aliases - bound
+            modules = inherited_modules - bound
+            for target in bindings.attribute_writes:
+                mark_mutated_class(target)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                positional = (*node.args.posonlyargs, *node.args.args)
+                defaults = positional[len(positional) - len(node.args.defaults) :]
+                aliases.update(
+                    argument.arg
+                    for argument, default in zip(
+                        defaults, node.args.defaults, strict=True
+                    )
+                    if direct_mutator_expression(
+                        default, inherited_aliases, inherited_modules
+                    )
+                )
+                aliases.update(
+                    argument.arg
+                    for argument, default in zip(
+                        node.args.kwonlyargs, node.args.kw_defaults, strict=True
+                    )
+                    if default is not None
+                    and direct_mutator_expression(
+                        default, inherited_aliases, inherited_modules
+                    )
+                )
+            if isinstance(node, ast.Module):
+                aliases.update(mutator_names - bound)
+                if "builtins" not in bound:
+                    modules.add("builtins")
+            for name, expression, conditional in bindings.module_assignments:
+                is_module = expression is None or (
+                    isinstance(expression, ast.Name) and expression.id in modules
+                )
+                if is_module or conditional:
+                    if is_module:
+                        modules.add(name)
+                else:
+                    modules.discard(name)
+            for name, expression, conditional in bindings.assignments:
+                is_mutator = expression is None or direct_mutator_expression(
+                    expression, aliases, modules
+                )
+                if is_mutator or conditional:
+                    if is_mutator:
+                        aliases.add(name)
+                else:
+                    aliases.discard(name)
+            for call in bindings.calls:
+                called_function = call.func
+                is_mutator = direct_mutator_expression(
+                    called_function, aliases, modules
+                )
+                if is_mutator and call.args:
+                    mark_mutated_class(call.args[0])
+            if isinstance(node, ast.ClassDef):
+                child_function_aliases = method_aliases or inherited_aliases
+                child_function_modules = method_modules or inherited_modules
+            else:
+                child_function_aliases = aliases
+                child_function_modules = modules
+            for nested_function in bindings.functions:
+                scan_scope(
+                    nested_function,
+                    child_function_aliases,
+                    child_function_modules,
+                )
+            for class_node in bindings.classes:
+                scan_scope(
+                    class_node,
+                    aliases,
+                    modules,
+                    method_aliases=aliases,
+                    method_modules=modules,
+                )
+
+        scan_scope(owner.tree, set(), set())
         self.in_function = False
         self.class_depth = 0
         self.captured: set[str] = set()
@@ -914,6 +1302,154 @@ class _Flow:
         if shape.items is not None:
             return tuple(self.shape(state, item) for item in shape.items)
         return _Reference((_Path(state, state.root, 0, shape.wrappers),))
+
+    def _super_method(
+        self, name: str
+    ) -> tuple[ast.ClassDef, ast.FunctionDef | ast.AsyncFunctionDef] | None:
+        if (
+            self.current_class is None
+            or self.current_function is None
+            or id(self.current_class)
+            not in {id(item) for item in self.class_definitions.values()}
+            or self.current_function.decorator_list
+            or isinstance(self.current_function, ast.AsyncFunctionDef)
+            or not (
+                self.current_function.args.posonlyargs
+                or self.current_function.args.args
+            )
+        ):
+            return None
+        current = self.current_class
+        visited: set[int] = {id(current)}
+        while True:
+            if (
+                current.decorator_list
+                or current.keywords
+                or len(current.bases) != 1
+                or not isinstance(current.bases[0], ast.Name)
+            ):
+                return None
+            base = self.class_definitions.get(current.bases[0].id)
+            if (
+                base is None
+                or id(base) in visited
+                or id(current) in self.mutated_classes
+                or id(base) in self.mutated_classes
+            ):
+                return None
+            visited.add(id(base))
+            if any(
+                not isinstance(
+                    item,
+                    (
+                        ast.FunctionDef,
+                        ast.AsyncFunctionDef,
+                        ast.Assign,
+                        ast.AnnAssign,
+                        ast.Import,
+                        ast.ImportFrom,
+                        ast.Pass,
+                    ),
+                )
+                for item in base.body
+            ):
+                return None
+            members = [
+                item
+                for item in base.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name == name
+            ]
+            conflicting_bindings = False
+            for item in base.body:
+                if members and item is members[0]:
+                    continue
+                writes = _Writes()
+                writes.visit(item)
+                if name in writes.names:
+                    conflicting_bindings = True
+                    break
+            if members:
+                if (
+                    len(members) != 1
+                    or conflicting_bindings
+                    or members[0].decorator_list
+                    or isinstance(members[0], ast.AsyncFunctionDef)
+                    or members[0].args.vararg is not None
+                    or members[0].args.kwarg is not None
+                ):
+                    return None
+                return base, members[0]
+            current = base
+
+    def _call_super_method(
+        self, node: ast.Call, env: dict[str, _Value]
+    ) -> tuple[bool, _Value]:
+        function = node.func
+        if not (
+            isinstance(function, ast.Attribute)
+            and isinstance(function.value, ast.Call)
+            and isinstance(function.value.func, ast.Name)
+            and function.value.func.id == "super"
+            and "super" not in env
+            and not function.value.args
+            and not function.value.keywords
+            and not any(isinstance(item, ast.Starred) for item in node.args)
+            and all(item.arg is not None for item in node.keywords)
+        ):
+            return False, None
+        target = self._super_method(function.attr)
+        if target is None:
+            return False, None
+        class_node, method = target
+        parameters = (*method.args.posonlyargs, *method.args.args)
+        if not parameters or parameters[0].arg in {item.arg for item in node.keywords}:
+            return False, None
+        values = [self.expression(item, env) for item in node.args]
+        keywords = {
+            item.arg: self.expression(item.value, env) for item in node.keywords
+        }
+        bound = _bind_call(method, [None, *values], keywords)
+        if bound is None:
+            for value in (*values, *keywords.values()):
+                _consume(value)
+            return True, None
+        declarations = _OuterWrites()
+        for statement in method.body:
+            declarations.visit(statement)
+        if declarations.names:
+            for value in bound.values():
+                _consume(value)
+            return True, None
+        local = dict(self.module_env)
+        for name in _local_names(method):
+            local[name] = None
+        local.update(bound)
+        local[parameters[0].arg] = None
+        local["__class__"] = None
+        previous = (
+            self.current_function,
+            self.current_class,
+            self.current_function_locals,
+            self.captured,
+            self.in_function,
+        )
+        self.current_function = method
+        self.current_class = class_node
+        self.current_function_locals = _local_names(method)
+        self.captured = _captures(method.body)
+        self.in_function = True
+        try:
+            self.block(method.body, local)
+        finally:
+            (
+                self.current_function,
+                self.current_class,
+                self.current_function_locals,
+                self.captured,
+                self.in_function,
+            ) = previous
+        return True, None
 
     def element(self, value: _Value) -> _Value:
         if isinstance(value, _Reference) and all(
@@ -977,6 +1513,9 @@ class _Flow:
                 _consume(self.expression(list_element, env))
             return None
         if isinstance(node, ast.Call):
+            handled, value = self._call_super_method(node, env)
+            if handled:
+                return value
             document = self.documents.get(
                 DocumentIdentity(self.owner.identity, self.owner.span(node))
             )
@@ -1274,6 +1813,8 @@ class _Flow:
                     self.functions.append(node)
                     if self.class_depth:
                         self.class_functions.add(id(node))
+                        if self.class_stack:
+                            self.function_classes[id(node)] = self.class_stack[-1]
                         captures = _captures([node]) & self.current_function_locals
                         if captures:
                             if self.class_capture_scope is None or not captures <= set(
@@ -1326,9 +1867,11 @@ class _Flow:
                     }
                     self.class_capture_scope = safe_captures
                 self.class_depth += 1
+                self.class_stack.append(node)
                 try:
                     self.block(node.body, class_env)
                 finally:
+                    self.class_stack.pop()
                     self.class_depth -= 1
                     self.class_capture_scope = previous_capture_scope
                 writes = _Writes()
@@ -1389,6 +1932,7 @@ class _Flow:
         env: dict[str, _Value] = {}
         self.captured = _captures(self.owner.tree.body)
         self.block(self.owner.tree.body, env)
+        self.module_env = dict(env)
         functions, self.functions = self.functions, []
         self.in_function = True
         position = 0
@@ -1414,8 +1958,10 @@ class _Flow:
                     _consume(value)
                 continue
             self.current_function = function
+            self.current_class = self.function_classes.get(id(function))
             self.block(function.body, local)
             self.current_function = None
+            self.current_class = None
             functions.extend(self.functions)
             self.functions.clear()
 
