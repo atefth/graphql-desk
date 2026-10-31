@@ -116,7 +116,7 @@ def extraction_contexts(source: str) -> dict[tuple[int, int], dict[str, object]]
                 continue
             source_name = assignment_value.id
             reflection_kinds = builtin_reflection_aliases.get(source_name, set())
-            if source_name in {"getattr", "vars"}:
+            if source_name in {"getattr", "vars", "globals", "locals"}:
                 reflection_kinds = reflection_kinds | {source_name}
             if source_name == "__import__":
                 # The built-in import function is itself a guarded binding.
