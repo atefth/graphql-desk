@@ -756,12 +756,19 @@ test("extraction binds inline fragment dependencies once and reuses their identi
   const extracted = refreshed.response.calls.find(call => call.index?.primary_fragment?.name === "UserFields");
   assert.equal(extracted?.fragments.length, 1);
 
-  const ambiguous = "from graphql_desk import gql\nq = gql('query Read { user { friend { ...Card ...Name } } }', [gql('fragment Card on User { id }'), gql('fragment Name on User { name }')])\n";
-  const ambiguousValue = bundle(ambiguous, { schema: schema.replace("id: ID!", "id: ID! friend: User") });
-  const ambiguousStart = ambiguous.indexOf("friend { ...Card ...Name }");
-  assert.equal(await createLanguageFeatures(options(ambiguousValue)).extractFragment(document(ambiguousValue), {
-    start: ambiguousStart, end: ambiguousStart + "friend { ...Card ...Name }".length,
-  }), null);
+  const multiple = "from graphql_desk import gql\nq = gql('query Read { user { friend { ...Card ...Name } } }', [gql('fragment Card on User { id }'), gql('fragment Name on User { name }')])\n";
+  const multipleValue = bundle(multiple, { schema: schema.replace("id: ID!", "id: ID! friend: User") });
+  const multipleStart = multiple.indexOf("friend { ...Card ...Name }");
+  const multiplePlan = await createLanguageFeatures(options(multipleValue)).extractFragment(document(multipleValue), {
+    start: multipleStart, end: multipleStart + "friend { ...Card ...Name }".length,
+  });
+  assert.equal(multiplePlan.length, 4);
+  const multipleUpdated = [...multiplePlan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), multiple);
+  assert.match(multipleUpdated, /fragment_card = gql\('fragment Card on User \{ id \}'\)\nfragment_name = gql\('fragment Name on User \{ name \}'\)/);
+  assert.match(multipleUpdated, /fragments=\[fragment_card, fragment_name\]/);
+  assert.match(multipleUpdated, /\[user_fields, fragment_card, fragment_name\]/);
+  assert.deepEqual(bundle(multipleUpdated, { schema: multipleValue.request.schemas[0].text }).response.diagnostics, []);
 });
 
 test("extraction preserves aliases, CRLF, keyword arguments and variables", async () => {
