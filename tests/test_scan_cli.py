@@ -87,6 +87,66 @@ class ScanCLITests(unittest.TestCase):
             json.loads(self.invoke(["scan", "--graph"])[1]),
         )
 
+    def test_project_scan_resolves_imported_fragment_through_the_full_pipeline(
+        self,
+    ) -> None:
+        users = self.root / "features" / "users"
+        shared = self.root / "features" / "shared"
+        users.mkdir(parents=True)
+        shared.mkdir(parents=True)
+        (self.root / "features" / "__init__.py").write_text("", encoding="utf-8")
+        (users / "__init__.py").write_text("", encoding="utf-8")
+        (shared / "__init__.py").write_text("", encoding="utf-8")
+        fragment_source = shared / "fragments.py"
+        fragment_source.write_text(
+            "from graphql_desk_generated.default import graphql\n"
+            'card = graphql("fragment UserName on User { name }")\n',
+            encoding="utf-8",
+        )
+        self.source.write_text("", encoding="utf-8")
+        (users / "queries.py").write_text(
+            "from graphql_desk_generated.default import graphql\n"
+            "from features.shared.fragments import card\n"
+            'document = graphql("query Users { users { ...UserName } }", [card])\n',
+            encoding="utf-8",
+        )
+
+        with patch.object(Path, "cwd", return_value=self.root):
+            report = scan_project()
+
+        operation = report.operations[0]
+        fragment = report.fragments[0]
+        self.assertEqual(operation["module"], "features.users.queries")
+        self.assertEqual(operation["loc"]["file"], "features/users/queries.py")
+        self.assertEqual(fragment["module"], "features.shared.fragments")
+        self.assertEqual(fragment["loc"]["file"], "features/shared/fragments.py")
+        edges = {
+            (item["from"], item["to"], item["kind"])
+            for item in report.graph["edges"]
+        }
+        self.assertIn(
+            (
+                "module:features.users.queries",
+                "module:features.shared.fragments",
+                "imports",
+            ),
+            edges,
+        )
+        self.assertIn(
+            (f"operation:{operation['id']}", f"fragment:{fragment['id']}", "spreads"),
+            edges,
+        )
+        cross_feature = report.rules["cross-feature-fragments"]
+        self.assertEqual(len(cross_feature), 1)
+        self.assertEqual(
+            cross_feature[0]["data"],
+            {
+                "definingArea": "features/shared",
+                "consumerAreas": ("features/users",),
+                "spreadCount": 1,
+            },
+        )
+
     def test_output_file_leaves_stdout_free_and_cannot_replace_source(self) -> None:
         output_path = self.root / "scan.json"
         code, output, error = self.invoke(
@@ -239,8 +299,11 @@ class ScanCLITests(unittest.TestCase):
         )
 
     def test_explicit_external_source_root_uses_nonabsolute_report_paths(self) -> None:
-        external = self.root.parent / f"{self.root.name}-external"
-        external.mkdir()
+        external_temp = tempfile.TemporaryDirectory(
+            prefix="graphql-desk-external-", dir=self.root.parent
+        )
+        self.addCleanup(external_temp.cleanup)
+        external = Path(external_temp.name)
         (external / "outside.py").write_text(
             "from graphql_desk_generated.default import graphql\n"
             "document = graphql('query Outside { users { name } }')\n",
@@ -249,7 +312,7 @@ class ScanCLITests(unittest.TestCase):
         (self.root / "pyproject.toml").write_text(
             '[tool.graphql-desk]\nschema="schema.graphql"\n'
             'schema_output="graphql_desk_generated/default.pyi"\n'
-            f'source_roots=["../{self.root.name}-external"]\n',
+            f'source_roots=["../{external.name}"]\n',
             encoding="utf-8",
         )
         with patch.object(Path, "cwd", return_value=self.root):
