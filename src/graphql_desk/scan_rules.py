@@ -133,7 +133,7 @@ def field_usage_rule(
     }
     parsed: dict[
         _SourceKey,
-        tuple[OperationDefinitionNode | FragmentDefinitionNode, ...],
+        dict[tuple[int, int], OperationDefinitionNode | FragmentDefinitionNode],
     ] = {}
     direct: dict[str, dict[_Coordinate, tuple[str, str | None]]] = {}
     definitions_by_id = {definition.id: definition for definition in graph.definitions}
@@ -150,22 +150,14 @@ def field_usage_rule(
             raise ValueError("Scan definitions must have their schema context")
         nodes = parsed.get(source_key)
         if nodes is None:
-            nodes = tuple(
-                node
+            nodes = {
+                (node.loc.start, node.loc.end): node
                 for node in parse(document.call.source).definitions
                 if isinstance(node, (OperationDefinitionNode, FragmentDefinitionNode))
-            )
+                and node.loc is not None
+            }
             parsed[source_key] = nodes
-        node = next(
-            (
-                item
-                for item in nodes
-                if item.loc is not None
-                and item.loc.start == span.start
-                and item.loc.end == span.end
-            ),
-            None,
-        )
+        node = nodes.get((span.start, span.end))
         if node is None:
             raise ValueError("Scan definition range does not match its document")
         direct[definition.id] = _fields(
