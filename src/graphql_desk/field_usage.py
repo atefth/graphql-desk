@@ -309,6 +309,85 @@ def _captures(statements: list[ast.stmt]) -> set[str]:
     return captures.names
 
 
+@dataclass(frozen=True)
+class _CaptureFacts:
+    positions: tuple[tuple[int, int], ...]
+    later_writes: tuple[frozenset[str], ...]
+    nonlocal_names: frozenset[str]
+
+    def writes_after(self, statement: ast.stmt) -> frozenset[str]:
+        return self.later_writes[
+            bisect_right(self.positions, (statement.lineno, statement.col_offset))
+        ]
+
+
+def _capture_facts(function: ast.FunctionDef | ast.AsyncFunctionDef) -> _CaptureFacts:
+    class ScopeStatements(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.statements: list[ast.stmt] = []
+
+        def generic_visit(self, node: ast.AST) -> None:
+            if isinstance(node, ast.stmt):
+                self.statements.append(node)
+            super().generic_visit(node)
+
+        def visit_FunctionDef(
+            self, node: ast.FunctionDef | ast.AsyncFunctionDef
+        ) -> None:
+            self.statements.append(node)
+            for expression in (
+                *node.decorator_list,
+                *node.args.defaults,
+                *(item for item in node.args.kw_defaults if item is not None),
+            ):
+                self.visit(expression)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self.statements.append(node)
+            for expression in (*node.decorator_list, *node.bases):
+                self.visit(expression)
+            for keyword in node.keywords:
+                self.visit(keyword.value)
+
+    scope = ScopeStatements()
+    for statement in function.body:
+        scope.visit(statement)
+    writes_by_position: dict[tuple[int, int], set[str]] = {}
+    for statement in scope.statements:
+        writes = _Writes(include_annotations=True)
+        writes.visit(statement)
+        if writes.names:
+            position = statement.lineno, statement.col_offset
+            writes_by_position.setdefault(position, set()).update(writes.names)
+    positions = tuple(sorted(writes_by_position))
+    later_writes: list[frozenset[str]] = [frozenset()] * (len(positions) + 1)
+    accumulated: set[str] = set()
+    for index in range(len(positions) - 1, -1, -1):
+        accumulated.update(writes_by_position[positions[index]])
+        later_writes[index] = frozenset(accumulated)
+    nonlocal_captures = _NonlocalCaptures(function)
+    for statement in function.body:
+        nonlocal_captures.visit(statement)
+    return _CaptureFacts(
+        tuple(positions), tuple(later_writes), frozenset(nonlocal_captures.names)
+    )
+
+
+def _uses_dynamic_scope(node: ast.AST) -> bool:
+    return any(
+        isinstance(child, ast.Call)
+        and (
+            isinstance(child.func, ast.Name)
+            and child.func.id in {"exec", "eval", "locals", "vars"}
+            or isinstance(child.func, ast.Attribute)
+            and child.func.attr in {"exec", "eval", "locals", "vars"}
+        )
+        for child in ast.walk(node)
+    )
+
+
 class _Module:
     def __init__(self, snapshot: ModuleSnapshot, tree: ast.Module) -> None:
         self.snapshot = snapshot
@@ -856,9 +935,12 @@ class _Flow:
         self.class_stack: list[ast.ClassDef] = []
         self.unsafe_local_class_functions: set[int] = set()
         self.function_captures: dict[int, dict[str, _Value]] = {}
+        self.capture_facts: dict[int, _CaptureFacts] = {}
         self.class_capture_scope: dict[str, _Value] | None = None
         self.current_function: ast.FunctionDef | ast.AsyncFunctionDef | None = None
         self.current_class: ast.ClassDef | None = None
+        self.current_function_captures: set[str] = set()
+        self.unsafe_captures: set[str] = set()
         self.module_env: dict[str, _Value] = {}
         self.class_definitions = {
             name: target
@@ -1249,6 +1331,15 @@ class _Flow:
         self.captured: set[str] = set()
         self.current_function_locals: set[str] = set()
 
+    def _capture_facts_for(
+        self, function: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> _CaptureFacts:
+        facts = self.capture_facts.get(id(function))
+        if facts is None:
+            facts = _capture_facts(function)
+            self.capture_facts[id(function)] = facts
+        return facts
+
     def target_value(self, target: _Target) -> _Value:
         if isinstance(target, tuple) and isinstance(target[1], ast.Call):
             owner, node = target
@@ -1431,12 +1522,16 @@ class _Flow:
             self.current_function,
             self.current_class,
             self.current_function_locals,
+            self.current_function_captures,
+            self.unsafe_captures,
             self.captured,
             self.in_function,
         )
         self.current_function = method
         self.current_class = class_node
         self.current_function_locals = _local_names(method)
+        self.current_function_captures = set()
+        self.unsafe_captures = set()
         self.captured = _captures(method.body)
         self.in_function = True
         try:
@@ -1446,6 +1541,8 @@ class _Flow:
                 self.current_function,
                 self.current_class,
                 self.current_function_locals,
+                self.current_function_captures,
+                self.unsafe_captures,
                 self.captured,
                 self.in_function,
             ) = previous
@@ -1716,7 +1813,9 @@ class _Flow:
             if self.class_depth:
                 _consume(value)
             env[node.id] = value
-            if node.id in self.captured:
+            if node.id in self.captured and (
+                not self.in_function or node.id in self.unsafe_captures
+            ):
                 _consume(value)
         elif isinstance(node, (ast.Tuple, ast.List)) and not any(
             isinstance(item, ast.Starred) for item in node.elts
@@ -1826,6 +1925,24 @@ class _Flow:
                                     name: self.class_capture_scope[name]
                                     for name in captures
                                 }
+                elif self.current_function is not None:
+                    self.functions.append(node)
+                    captures = _captures([node]) & (
+                        self.current_function_locals | self.current_function_captures
+                    )
+                    facts = self._capture_facts_for(self.current_function)
+                    invalid = captures & (
+                        facts.writes_after(node) | facts.nonlocal_names
+                    )
+                    if node.decorator_list or _uses_dynamic_scope(node):
+                        invalid.update(captures)
+                    self.function_captures[id(node)] = {
+                        name: None if name in invalid else env.get(name)
+                        for name in captures
+                    }
+                    for name in invalid:
+                        _consume(env.get(name))
+                        self.unsafe_captures.add(name)
             elif isinstance(node, ast.ClassDef):
                 for expression in (*node.decorator_list, *node.bases):
                     _consume(self.expression(expression, env))
@@ -1848,23 +1965,18 @@ class _Flow:
                     for statement in statements[position + 1 :]:
                         later_writes.visit(statement)
                     invalid_captures = capture_names & set(later_writes.names)
-                    nonlocal_captures = _NonlocalCaptures(self.current_function)
-                    for statement in self.current_function.body:
-                        nonlocal_captures.visit(statement)
-                    invalid_captures.update(capture_names & nonlocal_captures.names)
-                    for child in ast.walk(node):
-                        if isinstance(child, ast.Call) and (
-                            isinstance(child.func, ast.Name)
-                            and child.func.id in {"exec", "eval", "locals", "vars"}
-                            or isinstance(child.func, ast.Attribute)
-                            and child.func.attr in {"exec", "eval", "locals", "vars"}
-                        ):
-                            invalid_captures.update(capture_names)
+                    facts = self._capture_facts_for(self.current_function)
+                    invalid_captures.update(capture_names & facts.nonlocal_names)
+                    if _uses_dynamic_scope(node):
+                        invalid_captures.update(capture_names)
                     safe_captures = {
                         name: env[name]
                         for name in capture_names - invalid_captures
-                        if isinstance(env.get(name), (_Document, _Callable))
+                        if isinstance(env.get(name), (_Document, _Callable, _Reference))
                     }
+                    for name in capture_names - set(safe_captures):
+                        _consume(env.get(name))
+                        self.unsafe_captures.add(name)
                     self.class_capture_scope = safe_captures
                 self.class_depth += 1
                 self.class_stack.append(node)
@@ -1959,6 +2071,9 @@ class _Flow:
                 continue
             self.current_function = function
             self.current_class = self.function_classes.get(id(function))
+            captures = self.function_captures.get(id(function), {})
+            self.current_function_captures = set(captures)
+            self.unsafe_captures = set()
             self.block(function.body, local)
             self.current_function = None
             self.current_class = None

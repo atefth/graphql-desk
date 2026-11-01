@@ -757,6 +757,36 @@ class FieldUsageTests(unittest.TestCase):
         self.assertEqual([field for field, _ in found], ["user"])
         self.assertIn("user.email", found[0][1])
 
+    def test_nested_function_reads_captured_result_fields(self) -> None:
+        source = (
+            PREFIX
+            + "def render():\n"
+            + "    result = execute(query, {})\n"
+            + "    def consume():\n"
+            + '        print(result["user"]["name"])\n'
+            + "    def helper():\n"
+            + "        result = 1\n"
+            + "    consume()\n"
+        )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
+        self.assertNotIn("user.name", found[0][1])
+
+    def test_nested_function_does_not_use_a_result_rebound_after_definition(
+        self,
+    ) -> None:
+        source = (
+            PREFIX
+            + "def render():\n"
+            + "    result = execute(query, {})\n"
+            + "    def consume():\n"
+            + '        print(result["user"]["name"])\n'
+            + "    result = unrelated\n"
+            + "    consume()\n"
+        )
+        self.assertEqual(warnings(source), [])
+
     def test_nested_global_does_not_invalidate_function_local_capture(self) -> None:
         source = (
             PREFIX
@@ -861,7 +891,19 @@ class FieldUsageTests(unittest.TestCase):
             + "            local_query = another\n"
             + "        replace()\n"
         )
-        self.assertEqual(warnings(result_capture), [])
+        found = warnings(result_capture)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
+        result_capture_rebound = (
+            PREFIX
+            + "def build_screen():\n"
+            + "    result = execute(query, {})\n"
+            + "    class Screen:\n"
+            + "        def show(self):\n"
+            + '            print(result["user"]["name"])\n'
+            + "    result = unrelated\n"
+        )
+        self.assertEqual(warnings(result_capture_rebound), [])
         self.assertEqual(warnings(rebind_after_class), [])
         self.assertEqual(warnings(nonlocal_rebind), [])
         self.assertEqual(warnings(comprehension_rebind), [])
