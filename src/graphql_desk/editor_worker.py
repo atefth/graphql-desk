@@ -7,11 +7,13 @@ import os
 import re
 import sys
 import traceback
+from collections.abc import MutableMapping, MutableSequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import BinaryIO, cast
 from uuid import uuid4
 
+import tomlkit
 from graphql import introspection_from_schema
 
 from .editor_analysis import (
@@ -51,6 +53,7 @@ from .source_graph import (
 from .testing_helpers import render_testing_helper_artifacts
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
+MAX_PYRIGHT_CONFIG_BYTES = 1024 * 1024
 _CAPTURE_KEYS = {"workspace", "candidates", "buffers", "documents", "editor_fallback"}
 
 
@@ -85,6 +88,163 @@ def _boolean(value: object) -> bool:
     if not isinstance(value, bool):
         raise ValueError("Invalid boolean")
     return value
+
+
+def _pyright_config_request(value: dict[str, object]) -> dict[str, object]:
+    if set(value) != {"op", "workspace", "text", "action", "managed_path", "ownership"}:
+        raise ValueError("Invalid Pyright config request")
+    workspace = _path(value["workspace"])
+    text = value["text"]
+    action = value["action"]
+    managed_path = value["managed_path"]
+    ownership_value = value["ownership"]
+    if not isinstance(ownership_value, dict):
+        raise ValueError("Invalid Pyright config request")
+    ownership_record = cast(dict[str, object], ownership_value)
+    if (
+        not workspace.is_dir()
+        or not isinstance(text, str)
+        or len(text.encode("utf-8")) > MAX_PYRIGHT_CONFIG_BYTES
+        or action not in {"inspect", "add", "remove"}
+        or not isinstance(managed_path, str)
+        or not managed_path
+        or "\x00" in managed_path
+        or action != "inspect"
+        and Path(managed_path).is_absolute()
+        or set(ownership_record) != {"top_level", "execution_environment_roots"}
+        or not isinstance(ownership_record.get("top_level"), bool)
+        or not isinstance(ownership_record.get("execution_environment_roots"), list)
+        or any(
+            not isinstance(item, str) or not item
+            for item in cast(
+                list[object], ownership_record.get("execution_environment_roots")
+            )
+        )
+    ):
+        raise ValueError("Invalid Pyright config request")
+    ownership = ownership_record
+    owned_environment_roots = cast(list[str], ownership["execution_environment_roots"])
+    document = cast(MutableMapping[str, object], tomlkit.parse(text))
+    tool_value = document.get("tool")
+    if tool_value is None:
+        return {
+            "ok": True,
+            "found": False,
+            "text": text,
+            "stub_path": None,
+            "extra_paths": [],
+            "has_execution_environments": False,
+            "execution_environments": [],
+            "ownership": {"top_level": True, "execution_environment_roots": []},
+        }
+    if not isinstance(tool_value, MutableMapping):
+        raise ValueError("Invalid TOML tool table")
+    tool = cast(MutableMapping[str, object], tool_value)
+    if "pyright" not in tool:
+        return {
+            "ok": True,
+            "found": False,
+            "text": text,
+            "stub_path": None,
+            "extra_paths": [],
+            "has_execution_environments": False,
+            "execution_environments": [],
+            "ownership": {"top_level": True, "execution_environment_roots": []},
+        }
+    pyright_value = tool["pyright"]
+    if not isinstance(pyright_value, MutableMapping):
+        raise ValueError("Invalid Pyright table")
+    pyright = cast(MutableMapping[str, object], pyright_value)
+    extra_paths_value = pyright.get("extraPaths", [])
+    if not isinstance(extra_paths_value, MutableSequence):
+        raise ValueError("Invalid Pyright extraPaths")
+    extra_paths = cast(MutableSequence[object], extra_paths_value)
+    if any(not isinstance(item, str) for item in extra_paths):
+        raise ValueError("Invalid Pyright extraPaths")
+    stub_path = pyright.get("stubPath")
+    if stub_path is not None and not isinstance(stub_path, str):
+        raise ValueError("Invalid Pyright stubPath")
+    execution_environments_value = pyright.get("executionEnvironments", [])
+    if not isinstance(execution_environments_value, MutableSequence):
+        raise ValueError("Invalid Pyright executionEnvironments")
+    execution_environments = cast(MutableSequence[object], execution_environments_value)
+    environment_roots: set[str] = set()
+    environments: list[MutableMapping[str, object]] = []
+    for environment_value in execution_environments:
+        if not isinstance(environment_value, MutableMapping):
+            raise ValueError("Invalid Pyright execution environment root")
+        environment = cast(MutableMapping[str, object], environment_value)
+        if not isinstance(environment.get("root"), str) or not environment["root"]:
+            raise ValueError("Invalid Pyright execution environment root")
+        root = cast(str, environment["root"])
+        if root in environment_roots:
+            raise ValueError("Duplicate Pyright execution environment root")
+        environment_roots.add(root)
+        paths_value = environment.get("extraPaths", [])
+        if not isinstance(paths_value, MutableSequence):
+            raise ValueError("Invalid execution environment extraPaths")
+        paths = cast(MutableSequence[object], paths_value)
+        if any(not isinstance(item, str) for item in paths):
+            raise ValueError("Invalid execution environment extraPaths")
+        environments.append(environment)
+    matches = [index for index, item in enumerate(extra_paths) if item == managed_path]
+    had_top_level_extra_paths = "extraPaths" in pyright
+    if len(matches) > 1:
+        raise ValueError("Duplicate GraphQL Desk extraPath")
+    if action == "add" and not matches:
+        extra_paths.append(managed_path)
+        pyright["extraPaths"] = extra_paths
+    elif action == "remove" and matches:
+        del extra_paths[matches[0]]
+        if extra_paths or not ownership["top_level"]:
+            pyright["extraPaths"] = extra_paths
+        else:
+            pyright.pop("extraPaths", None)
+    created_environment_roots: list[str] = []
+    for environment in environments:
+        paths = cast(MutableSequence[object], environment.get("extraPaths", []))
+        environment_matches = [
+            index for index, item in enumerate(paths) if item == managed_path
+        ]
+        if len(environment_matches) > 1:
+            raise ValueError("Duplicate GraphQL Desk execution environment path")
+        if action == "add" and not environment_matches:
+            if "extraPaths" not in environment:
+                created_environment_roots.append(cast(str, environment["root"]))
+            paths.append(managed_path)
+            environment["extraPaths"] = paths
+        elif action == "remove" and environment_matches:
+            del paths[environment_matches[0]]
+            if paths:
+                environment["extraPaths"] = paths
+            elif cast(str, environment["root"]) in owned_environment_roots:
+                environment.pop("extraPaths", None)
+            else:
+                environment["extraPaths"] = paths
+    return {
+        "ok": True,
+        "found": True,
+        "text": text if action == "inspect" else tomlkit.dumps(document),
+        "stub_path": stub_path,
+        "extra_paths": list(
+            cast(MutableSequence[object], pyright.get("extraPaths", []))
+        ),
+        "has_execution_environments": bool(execution_environments),
+        "execution_environments": [
+            {
+                "root": cast(str, item["root"]),
+                "extra_paths": list(
+                    cast(MutableSequence[object], item.get("extraPaths", []))
+                ),
+                "has_extra_paths": "extraPaths" in item,
+            }
+            for item in environments
+        ],
+        "ownership": {
+            "top_level": not had_top_level_extra_paths,
+            "execution_environment_roots": created_environment_roots,
+        },
+    }
 
 
 def _path(value: object) -> Path:
@@ -540,6 +700,8 @@ class EditorWorker:
         operation = raw.get("op")
         if operation == "quarantine":
             return _quarantine_request(raw)
+        if operation == "pyright_config":
+            return _pyright_config_request(raw)
         if not isinstance(operation, str) or operation not in {
             "prepare",
             "analyze",
