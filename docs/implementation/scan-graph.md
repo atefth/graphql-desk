@@ -96,7 +96,10 @@ The terminal/JSON/graph and CLI paths have focused fixtures for output
 equivalence, exact 2-of-3 coverage, schema isolation, graph edges, destination
 safety, and warning policy. A project-level acceptance fixture now follows an
 imported fragment through source resolution, schema indexing, graph edges, and
-the user-facing report; lower-level graph fixtures remain for malformed and
+the user-facing report. A second configured-project fixture repeats the same
+operation source with two explicitly composed same-name fragments, then reruns
+project resolution with reversed module snapshot order; operation/fragment IDs
+and composition-bound spread edges remain identical. Lower-level graph fixtures remain for malformed and
 synthetic collision cases. Pinned upstream output conformance, the full
 source/import corpus, broader CLI acceptance, and product-scale performance
 remain open. SCAN-01 and overall gql.tada parity remain open.
