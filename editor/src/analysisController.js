@@ -578,6 +578,16 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       return null;
     }
   }
+  async function editPyrightConfig(folder, text, action, managedPath = ".graphql-desk/live-typings", ownership = {}) {
+    if (!folder?.uri || folder.uri.scheme !== "file" || !trusted()) throw new Error("Trusted file workspace required");
+    const state = await stateFor({ uri: folder.uri.toString() });
+    if (!state || !trusted()) throw new Error("Python environment unavailable for Pyright config update");
+    const reply = await state.worker.request({ op: "pyright_config", workspace: state.root, text, action, managed_path: managedPath,
+      ownership: { topLevel: ownership.topLevel === true,
+        executionEnvironmentRoots: Array.isArray(ownership.executionEnvironmentRoots) ? ownership.executionEnvironmentRoots : [] } });
+    if (reply.ok !== true) throw new Error("Pyproject Pyright config could not be edited safely");
+    return reply;
+  }
   async function quarantine({ workspace, projects, invalidated_owners, preserve_current = false } = {}) {
     if (!trusted() || typeof workspace !== "string" || !path.isAbsolute(workspace) ||
         !Array.isArray(projects) || !Array.isArray(invalidated_owners)) return null;
@@ -778,7 +788,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }));
   }
   reconcileFolderWatches();
-  return { analyze, isCurrent, artifacts, quarantine, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
+  return { analyze, isCurrent, artifacts, quarantine, editPyrightConfig, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
     dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); folderWatchRoots.clear(); ownedAnalysisPaths.clear(); ownedAnalysisDirectories.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
 module.exports = { createAnalysisController };

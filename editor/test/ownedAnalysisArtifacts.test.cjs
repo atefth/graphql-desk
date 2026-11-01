@@ -102,6 +102,73 @@ test("publishes a multi-file stub generation, removes only obsolete owned files,
   assert.equal(fs.readFileSync(path.join(f.root, "preexisting.txt"), "utf8"), "keep");
 });
 
+test("recovers marked artifacts after an interrupted session and updates a clean managed document", async t => {
+  const f = fixture(t);
+  const first = f.make(original);
+  const documents = new Map();
+  const openDocument = file => {
+    const document = { uri: f.vscode.Uri.file(file), text: fs.readFileSync(file, "utf8"), version: 1, isDirty: false,
+      getText() { return this.text; }, positionAt(offset) { return { offset }; }, async save() {
+        fs.writeFileSync(file, this.text); this.isDirty = false; return true;
+      } };
+    documents.set(file, document); f.vscode.workspace.textDocuments.push(document); return document;
+  };
+  const file = path.join(f.root, "graphql_desk_generated", "default.pyi");
+  const document = openDocument(file);
+  f.vscode.WorkspaceEdit = class { replace(_uri, _range, text) { this.text = text; } };
+  f.vscode.Position = class { constructor(line, character) { this.offset = line + character; } };
+  f.vscode.Range = class { constructor(start, end) { this.start = start; this.end = end; } };
+  f.vscode.workspace.openTextDocument = async uri => documents.get(uri.fsPath) ?? openDocument(uri.fsPath);
+  f.vscode.workspace.applyEdit = async edit => {
+    document.text = edit.text; document.version += 1; document.isDirty = true; return true;
+  };
+  // Leave the first manager active to model an interrupted extension process.
+  const recovered = createOwnedAnalysisArtifacts(f.vscode, f.workspace, f.root, "graphql_desk_generated", original,
+    null, { inMemoryManagedUpdates: true });
+  const next = original.map(item => ({ ...item, text: item.text.replace("str", "str | None") }));
+  assert.equal(await recovered.publish(next, () => true), true);
+  assert.equal(document.isDirty, false);
+  assert.match(document.getText(), /str \| None/);
+  assert.match(fs.readFileSync(file, "utf8"), /str \| None/);
+  await recovered.cleanup();
+  void first;
+});
+
+test("refuses unowned crash leftovers and preserves an edit racing a managed update", async t => {
+  const f = fixture(t);
+  const first = f.make(original);
+  const file = path.join(f.root, "graphql_desk_generated", "default.pyi");
+  fs.writeFileSync(path.join(f.root, "graphql_desk_generated", "manual.pyi"), "user file\n");
+  assert.throws(() => createOwnedAnalysisArtifacts(f.vscode, f.workspace, f.root, "graphql_desk_generated", original), /Unowned analysis/);
+  fs.unlinkSync(path.join(f.root, "graphql_desk_generated", "manual.pyi"));
+  const document = { uri: f.vscode.Uri.file(file), text: fs.readFileSync(file, "utf8"), version: 1, isDirty: false,
+    getText() { return this.text; }, positionAt(offset) { return { offset }; }, async save() {
+      fs.writeFileSync(file, this.text); this.isDirty = false; return true;
+    } };
+  f.vscode.workspace.textDocuments.push(document);
+  f.vscode.WorkspaceEdit = class { replace(_uri, _range, text) { this.text = text; } };
+  f.vscode.Position = class { constructor(line, character) { this.offset = line + character; } };
+  f.vscode.Range = class { constructor(start, end) { this.start = start; this.end = end; } };
+  f.vscode.workspace.openTextDocument = async uri => {
+    if (uri.fsPath === file) return document;
+    const extra = { uri, text: fs.readFileSync(uri.fsPath, "utf8"), version: 1, isDirty: false,
+      getText() { return this.text; }, positionAt(offset) { return { offset }; }, async save() {
+        fs.writeFileSync(uri.fsPath, this.text); this.isDirty = false; return true;
+      } };
+    f.vscode.workspace.textDocuments.push(extra); return extra;
+  };
+  f.vscode.workspace.applyEdit = async edit => {
+    document.text = `${edit.text}# user edit\n`; document.version += 2; document.isDirty = true; return true;
+  };
+  const handle = createOwnedAnalysisArtifacts(f.vscode, f.workspace, f.root, "graphql_desk_generated", original,
+    null, { inMemoryManagedUpdates: true });
+  await assert.rejects(handle.publish(original.map(item => ({ ...item, text: "changed\n" })), () => true), /buffer changed|user edits/);
+  assert.match(document.getText(), /# user edit/);
+  assert.equal(document.isDirty, true);
+  assert.doesNotMatch(fs.readFileSync(file, "utf8"), /# user edit/);
+  void first;
+});
+
 test("analysis artifact fingerprints are deterministic and content-sensitive", async t => {
   const first = fixture(t);
   first.make(original);
@@ -137,7 +204,7 @@ test("refuses existing packages and rolls back an interrupted multi-file update"
   const f = fixture(t);
   fs.mkdirSync(path.join(f.root, "graphql_desk_generated"));
   fs.writeFileSync(path.join(f.root, "graphql_desk_generated", "default.pyi"), "foreign");
-  assert.throws(() => f.make(original), /EEXIST/);
+  assert.throws(() => f.make(original), /Unowned analysis/);
   fs.rmSync(path.join(f.root, "graphql_desk_generated"), { recursive: true });
   const handle = f.make(original);
   const base = path.join(f.root, "graphql_desk_generated");

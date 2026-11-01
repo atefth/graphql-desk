@@ -12,6 +12,7 @@ const { registerHighlighting } = require("./highlighting");
 const { createManagedStubPath } = require("./managedStubPath");
 const { createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
 const { createAnalysisGenerations } = require("./analysisGenerations");
+const { createManagedProjectConfig } = require("./projectPyrightConfig");
 
 function operationDependencyImpact(previous, current) {
   if (!Array.isArray(previous) || !Array.isArray(current)) return null;
@@ -210,14 +211,22 @@ function activate(context) {
     lastSkipReason = reason;
     output.appendLine(`Live typing skipped: ${reason}`);
   }
-  function managedRoot(folder, folderRoot) {
+  function createManagedRoot(folder) {
+    return (async () => await createManagedProjectConfig(vscode, folder, context.workspaceState,
+      (target, text, action, managedPath, ownership) => controller.editPyrightConfig(target, text, action, managedPath, ownership)) ??
+      await createManagedStubPath(vscode, folder, context.workspaceState))();
+  }
+  function managedRoot(folder, folderRoot, generatedPackages = []) {
     let promise = roots.get(folderRoot);
     if (!promise) {
-      promise = createManagedStubPath(vscode, folder, context.workspaceState);
+      promise = createManagedRoot(folder);
       roots.set(folderRoot, promise);
       promise.catch(() => { if (roots.get(folderRoot) === promise) roots.delete(folderRoot); });
     }
-    return promise;
+    return promise.then(async managed => {
+      await managed.validateGeneratedPackages?.(generatedPackages);
+      return managed;
+    });
   }
   async function retireRoot(folderRoot, managed) {
     latestArtifacts.delete(folderRoot);
@@ -226,11 +235,12 @@ function activate(context) {
       await handle.cleanup();
       outputs.delete(key);
     }
+    await managed.release?.();
     managed.cleanup();
   }
   async function reconfigureRoots() {
     await reconfigureWorkspaceRoots({ roots, folders: vscode.workspace.workspaceFolders ?? [],
-      create: folder => createManagedStubPath(vscode, folder, context.workspaceState), retire: retireRoot });
+      create: createManagedRoot, retire: retireRoot });
   }
   async function managedStubPathsAreCurrent() {
     if (!roots.size) return false;
@@ -279,10 +289,10 @@ function activate(context) {
     const folder = vscode.workspace.getWorkspaceFolder(parsed);
     if (!folder) return;
     const folderRoot = path.resolve(folder.uri.fsPath);
+    const previous = previousOverride ?? latestArtifacts.get(folderRoot);
     let managed;
-    try { managed = await managedRoot(folder, folderRoot); } catch { return; }
+    try { managed = await managedRoot(folder, folderRoot, previous?.operationManifest?.map(item => item.generated_package) ?? []); } catch { return; }
     if (disposed || ticket !== generation || !controller.isTrusted()) return;
-    let previous = previousOverride ?? latestArtifacts.get(folderRoot);
     const key = `${folderRoot}\0${managed.root}`;
     let publisher = generations.get(key);
     if (!publisher && managed.ownsSetting) {
@@ -433,7 +443,7 @@ function activate(context) {
           const handle = outputs.get(key);
           if (handle) await handle.publish(files, isCurrent);
         }
-        schedulePylanceRestart();
+        if (!managed.projectConfig) schedulePylanceRestart();
       }
       if (isCurrent()) {
         latestArtifacts.set(folderRoot, { ...previous, selectedSetting: managed.selectedSetting,
@@ -476,7 +486,7 @@ function activate(context) {
     }
     let managed;
     try {
-      const managedPromise = managedRoot(folder, folderRoot);
+      const managedPromise = managedRoot(folder, folderRoot, result.projects.map(project => project.generated_package));
       managed = await managedPromise;
     } catch {
       traceSkip("managed-stub-root-unavailable");
@@ -520,13 +530,17 @@ function activate(context) {
           const key = `${folderRoot}\0${managed.root}\0${packageName}`;
           let handle = outputs.get(key);
           if (!handle && files.length) {
-            handle = createOwnedAnalysisArtifacts(vscode, folderRoot, managed.root, packageName, files);
+            handle = createOwnedAnalysisArtifacts(vscode, folderRoot, managed.root, packageName, files, null,
+              { inMemoryManagedUpdates: managed.projectConfig });
             outputs.set(key, handle);
             changedArtifacts = true;
           } else if (handle) changedArtifacts = (await handle.publish(files, result.isCurrent)) || changedArtifacts;
         }
       }
-      if (changedArtifacts && !managed.ownsSetting && typingChanged) schedulePylanceRestart();
+      if (changedArtifacts && managed.projectConfig && managed.needsInitialRestart) {
+        schedulePylanceRestart();
+        managed.needsInitialRestart = false;
+      } else if (changedArtifacts && !managed.ownsSetting && !managed.projectConfig && typingChanged) schedulePylanceRestart();
       latestArtifacts.set(folderRoot, { managedRoot: managed.root, selectedSetting: managed.selectedSetting,
         operationManifest, projects: result.projects.map(({ project, generated_package, provenance, files }) =>
           ({ project, generated_package, provenance, files })),
@@ -634,11 +648,16 @@ function activate(context) {
     await renameStarted;
     await renameClient.stop();
     disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
-    configChanged.dispose(); language.dispose(); highlighting.dispose(); controller.dispose(); output.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
+    configChanged.dispose(); language.dispose(); highlighting.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
     outputs.clear();
     const managedRoots = await Promise.all([...roots.values()].map(promise => promise.catch(() => null)));
-    for (const managed of managedRoots) managed?.cleanup();
+    for (const managed of managedRoots) {
+      try { await managed?.release?.(); } catch (error) { output.appendLine(`Pyright config cleanup failed: ${String(error)}`); }
+      managed?.cleanup();
+    }
+    controller.dispose();
+    output.dispose();
     roots.clear();
     latestArtifacts.clear();
     try { await vscode.commands.executeCommand("python.analysis.restartLanguageServer"); } catch { /* Pylance may already be deactivating. */ }

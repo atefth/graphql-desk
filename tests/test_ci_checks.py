@@ -35,6 +35,19 @@ class RuntimeLicenseTests(unittest.TestCase):
                     SimpleNamespace(requires=[], version="3.3.0", metadata=metadata)
                 )
 
+    def test_tomlkit_mit_license_is_approved(self) -> None:
+        packages = {
+            "graphql-desk": SimpleNamespace(requires=["tomlkit==0.15.2"]),
+            "tomlkit": SimpleNamespace(
+                requires=[], version="0.15.2", metadata={"License-Expression": "MIT"}
+            ),
+        }
+        with patch("scripts.check_runtime_licenses.distribution", packages.__getitem__):
+            self.assertEqual(
+                runtime_inventory("graphql-desk"),
+                [{"name": "tomlkit", "version": "0.15.2", "license": "MIT"}],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

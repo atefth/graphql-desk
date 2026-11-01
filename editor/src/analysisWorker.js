@@ -41,6 +41,17 @@ function parseFrame(buffer) {
 
 function validReply(reply, request) {
   if (!object(reply) || reply.ok !== true) return false;
+  if (request.op === "pyright_config") return keys(reply, ["ok", "found", "text", "stub_path", "extra_paths", "has_execution_environments", "execution_environments", "ownership"]) &&
+    typeof reply.found === "boolean" && typeof reply.text === "string" &&
+    (reply.stub_path === null || typeof reply.stub_path === "string") &&
+    Array.isArray(reply.extra_paths) && reply.extra_paths.length <= 1024 && reply.extra_paths.every(value => typeof value === "string") &&
+    typeof reply.has_execution_environments === "boolean" &&
+    Array.isArray(reply.execution_environments) && reply.execution_environments.length <= 1024 && reply.execution_environments.every(item =>
+      keys(item, ["root", "extra_paths", "has_extra_paths"]) && string(item.root) && Array.isArray(item.extra_paths) &&
+      item.extra_paths.length <= 1024 && item.extra_paths.every(string) && typeof item.has_extra_paths === "boolean") &&
+    keys(reply.ownership, ["top_level", "execution_environment_roots"]) && typeof reply.ownership.top_level === "boolean" &&
+    Array.isArray(reply.ownership.execution_environment_roots) && reply.ownership.execution_environment_roots.every(string) &&
+    (reply.found || reply.text === request.text && reply.stub_path === null && reply.extra_paths.length === 0 && !reply.has_execution_environments);
   if (request.op === "prepare") {
     const extended = Object.hasOwn(request, "remote_revisions");
     const expected = ["ok", "id", "local_schemas", "remote_schemas", "required_buffers", "configuration_diagnostics"];
@@ -319,9 +330,15 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
       if (disposed || !trusted() || signal?.aborted) { stop(); throw failure(); }
       let encoded;
       try {
-        if (!object(message) || !["prepare", "analyze", "current", "refresh", "artifacts", "quarantine"].includes(message.op) ||
+        if (!object(message) || !["prepare", "analyze", "current", "refresh", "artifacts", "quarantine", "pyright_config"].includes(message.op) ||
             message.workspace !== workspace) throw failure();
-        if (message.op === "quarantine") {
+        if (message.op === "pyright_config") {
+          if (!keys(message, ["op", "workspace", "text", "action", "managed_path", "ownership"]) || typeof message.text !== "string" ||
+              Buffer.byteLength(message.text, "utf8") > 1024 * 1024 || !["inspect", "add", "remove"].includes(message.action) ||
+              message.managed_path !== ".graphql-desk/live-typings" || !keys(message.ownership, ["topLevel", "executionEnvironmentRoots"]) ||
+              typeof message.ownership.topLevel !== "boolean" || !Array.isArray(message.ownership.executionEnvironmentRoots) ||
+              !message.ownership.executionEnvironmentRoots.every(string)) throw failure();
+        } else if (message.op === "quarantine") {
           const projects = message.projects;
           const operations = Array.isArray(projects) ? projects.map(project => ({
             project: project?.project, generated_package: project?.generated_package, operations: project?.provenance,
@@ -344,7 +361,11 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
             }
           }
         }
-        encoded = Buffer.from(JSON.stringify(message) + "\n", "utf8");
+        const wireMessage = message.op === "pyright_config" ? { ...message, ownership: {
+          top_level: message.ownership.topLevel,
+          execution_environment_roots: message.ownership.executionEnvironmentRoots,
+        } } : message;
+        encoded = Buffer.from(JSON.stringify(wireMessage) + "\n", "utf8");
         if (encoded.length > MAX_FRAME_BYTES) throw failure();
       } catch { stop(); throw failure(); }
       let process;

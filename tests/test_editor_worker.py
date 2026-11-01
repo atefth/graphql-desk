@@ -23,6 +23,119 @@ from tests.test_schema_url import endpoint
 
 
 class EditorWorkerTests(unittest.TestCase):
+    def test_pyright_config_edit_preserves_toml_comments_and_existing_paths(
+        self,
+    ) -> None:
+        text = (
+            "# top comment\n[tool.pyright]\n"
+            'stubPath = "custom-stubs" # keep this\n'
+            'extraPaths = ["vendor",] # keep this too\n'
+            "\n[tool.other]\nvalue = 1\n"
+        )
+        request: dict[str, object] = {
+            "op": "pyright_config",
+            "workspace": str(Path.cwd().resolve()),
+            "text": text,
+            "action": "add",
+            "managed_path": ".graphql-desk/live-typings",
+            "ownership": {"top_level": False, "execution_environment_roots": []},
+        }
+        added = EditorWorker().handle(request)
+        self.assertTrue(added["ok"], added)
+        self.assertTrue(added["found"])
+        self.assertEqual(added["stub_path"], "custom-stubs")
+        self.assertEqual(added["extra_paths"], ["vendor", ".graphql-desk/live-typings"])
+        added_text = cast(str, added["text"])
+        self.assertIn("# top comment", added_text)
+        self.assertIn("# keep this", added_text)
+        self.assertIn("# keep this too", added_text)
+        self.assertIn("[tool.other]\nvalue = 1", added_text)
+        removed = EditorWorker().handle(
+            {
+                **request,
+                "text": added_text,
+                "action": "remove",
+                "ownership": added["ownership"],
+            }
+        )
+        self.assertTrue(removed["ok"], removed)
+        self.assertEqual(removed["extra_paths"], ["vendor"])
+        self.assertNotIn(".graphql-desk/live-typings", cast(str, removed["text"]))
+        self.assertIn("custom-stubs", cast(str, removed["text"]))
+
+    def test_pyright_config_reports_execution_environments_and_rejects_bad_values(
+        self,
+    ) -> None:
+        request: dict[str, object] = {
+            "op": "pyright_config",
+            "workspace": str(Path.cwd().resolve()),
+            "text": '[tool.pyright]\nexecutionEnvironments = [{ root = "src" }]\n',
+            "action": "inspect",
+            "managed_path": ".graphql-desk/live-typings",
+            "ownership": {"top_level": False, "execution_environment_roots": []},
+        }
+        result = EditorWorker().handle(request)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["has_execution_environments"])
+        result_environments = cast(
+            list[dict[str, object]], result["execution_environments"]
+        )
+        self.assertEqual(result_environments[0]["root"], "src")
+        invalid = EditorWorker().handle(
+            {**request, "text": '[tool.pyright]\nextraPaths = "wrong"\n'}
+        )
+        self.assertFalse(invalid["ok"])
+
+    def test_pyproject_execution_environment_paths_are_added_and_restored(self) -> None:
+        request: dict[str, object] = {
+            "op": "pyright_config",
+            "workspace": str(Path.cwd().resolve()),
+            "text": (
+                '[tool.pyright]\nextraPaths = ["vendor"]\n'
+                '[[tool.pyright.executionEnvironments]]\nroot = "."\n'
+                'extraPaths = ["env-vendor"]\n'
+                '[[tool.pyright.executionEnvironments]]\nroot = "src"\n'
+                'pythonVersion = "3.12"\n'
+            ),
+            "action": "add",
+            "managed_path": ".graphql-desk/live-typings",
+            "ownership": {"top_level": False, "execution_environment_roots": []},
+        }
+        added = EditorWorker().handle(request)
+        self.assertTrue(added["ok"], added)
+        self.assertEqual(added["extra_paths"], ["vendor", ".graphql-desk/live-typings"])
+        self.assertEqual(
+            added["ownership"],
+            {"top_level": False, "execution_environment_roots": ["src"]},
+        )
+        added_environments = cast(
+            list[dict[str, object]], added["execution_environments"]
+        )
+        self.assertEqual(
+            [item["extra_paths"] for item in added_environments],
+            [
+                ["env-vendor", ".graphql-desk/live-typings"],
+                [".graphql-desk/live-typings"],
+            ],
+        )
+        removed = EditorWorker().handle(
+            {
+                **request,
+                "text": added["text"],
+                "action": "remove",
+                "ownership": added["ownership"],
+            }
+        )
+        self.assertTrue(removed["ok"], removed)
+        self.assertEqual(removed["extra_paths"], ["vendor"])
+        removed_environments = cast(
+            list[dict[str, object]], removed["execution_environments"]
+        )
+        self.assertEqual(
+            [item["extra_paths"] for item in removed_environments], [["env-vendor"], []]
+        )
+        self.assertFalse(removed_environments[1]["has_extra_paths"])
+
     def test_field_usage_uses_captured_project_configuration(self) -> None:
         self.schema.write_text(
             "type Query { name: String email: String }", encoding="utf8"

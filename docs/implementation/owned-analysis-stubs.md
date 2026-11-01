@@ -11,6 +11,18 @@ Pylance's `./typings` default; a workspace-local custom root is reused, includin
 changes made while the extension is running. External roots are refused.
 Existing settings and files outside GraphQL Desk's owned package are preserved.
 
+When a project has `pyrightconfig.json`, GraphQL Desk uses it ahead of
+`[tool.pyright]` in `pyproject.toml`, matching Pyright's configuration
+precedence. It leaves the project's `stubPath` unchanged and adds the stable
+workspace path `.graphql-desk/live-typings` to top-level `extraPaths` and each
+execution environment's own `extraPaths`, so environment overrides still see
+the generated package. JSONC comments and unrelated settings are retained;
+TOML is edited with `tomlkit`. GraphQL Desk records which path entries and
+`extraPaths` keys it created, then removes only those on workspace shutdown.
+Malformed, dirty, symbolic-link, ambiguous or concurrently changed configs are
+left untouched and live typing fails closed. Generated `.pyi` updates use a
+clean VS Code document edit and save; a dirty or racing document is preserved.
+
 The output manager accepts only safe `.pyi` paths beneath the worker's configured
 generated package. It creates only new package files and directories, rejects
 foreign collisions, symbolic links and dirty aliases, and verifies ownership,

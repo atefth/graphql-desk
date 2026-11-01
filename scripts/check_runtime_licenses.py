@@ -12,7 +12,12 @@ def runtime_inventory(root: str) -> list[dict[str, str]]:
     pending = [root]
     seen: set[str] = set()
     inventory: list[dict[str, str]] = []
-    approved = {"graphql-core": "MIT", "tomli": "MIT", "typing-extensions": "PSF-2.0"}
+    approved = {
+        "graphql-core": "MIT",
+        "tomli": "MIT",
+        "tomlkit": "MIT",
+        "typing-extensions": "PSF-2.0",
+    }
     while pending:
         name = canonicalize_name(pending.pop())
         if name in seen:
@@ -47,6 +52,7 @@ if __name__ == "__main__":
     result = runtime_inventory("graphql-desk")
     expected = [
         {"name": "graphql-core", "version": "3.3.1", "license": "MIT"},
+        {"name": "tomlkit", "version": "0.15.2", "license": "MIT"},
         {"name": "typing-extensions", "version": "4.16.0", "license": "PSF-2.0"},
     ]
     if sys.version_info < (3, 11):
