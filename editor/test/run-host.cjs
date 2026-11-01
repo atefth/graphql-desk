@@ -152,7 +152,8 @@ async function main() {
   const suite = process.argv[3] || "features";
   assert.ok(["features", "renameProtocol", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
   const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
-  const temporaryRoot = path.resolve(__dirname, "../../.tmp/host");
+  // Keep host fixtures inside Pyright's configured test roots, in the repository.
+  const temporaryRoot = path.resolve(__dirname, "../../tests/host-temp/host");
   const cachePath = path.resolve(__dirname, "../.cache/vscode-test");
   await fs.mkdir(cachePath, { recursive: true });
   await fs.mkdir(temporaryRoot, { recursive: true });
@@ -162,6 +163,10 @@ async function main() {
   } finally {
     await fs.rm(temporary, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
     await assert.rejects(fs.access(temporary), { code: "ENOENT" }, "Host-test temporary data must be removed");
+    for (const directory of [temporaryRoot, path.dirname(temporaryRoot)]) {
+      try { await fs.rmdir(directory); }
+      catch (error) { if (!["ENOENT", "ENOTEMPTY"].includes(error.code)) throw error; }
+    }
   }
 }
 

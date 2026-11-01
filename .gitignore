@@ -14,3 +14,4 @@ editor/node_modules/
 editor/.vscode-test/
 editor/.cache/
 editor/.tmp/
+tests/host-temp/
