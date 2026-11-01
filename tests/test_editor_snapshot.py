@@ -1008,6 +1008,166 @@ class EditorSnapshotTests(unittest.TestCase):
         self.assertEqual(graph_inputs(fourth)[0][0].version, 4)
         self.assertFalse(is_editor_snapshot_current(third, candidates=(source,)))
 
+    def test_owned_pyright_stub_rotation_is_snapshot_neutral_but_user_edits_are_not(
+        self,
+    ) -> None:
+        first_path = (
+            ".graphql-desk/live-typings/generations/"
+            "g-1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )
+        next_path = (
+            ".graphql-desk/live-typings/generations/"
+            "g-2-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )
+        project_text = (
+            _BASE
+            + '[tool.pyright]\nstubPath = "'
+            + first_path
+            + '"\nextraPaths = ["vendor", "custom-stubs"]\n'
+        )
+        self.project(text=project_text)
+        source = self.write("q.py", _QUERY)
+        snapshot = acquire_editor_snapshot(
+            workspace=self.root,
+            candidates=(source,),
+            generation=1,
+            managed_pyright_config_path="pyproject.toml",
+            managed_pyright_stub_path=first_path,
+        )
+        rotated = project_text.replace(first_path, next_path)
+        self.write("pyproject.toml", rotated)
+        self.assertTrue(
+            is_editor_snapshot_current(
+                snapshot,
+                candidates=(source,),
+                managed_pyright_config_path="pyproject.toml",
+                managed_pyright_stub_path=next_path,
+            ),
+            "Only the exact owner-supplied generation path is ignored",
+        )
+        self.write("pyproject.toml", rotated + 'typeCheckingMode = "strict"\n')
+        self.assertFalse(
+            is_editor_snapshot_current(
+                snapshot,
+                candidates=(source,),
+                managed_pyright_config_path="pyproject.toml",
+                managed_pyright_stub_path=next_path,
+            ),
+            "Changes outside the exact managed stubPath remain freshness-relevant",
+        )
+        user_replacement = rotated.replace(next_path, "custom-stubs")
+        self.write("pyproject.toml", user_replacement)
+        self.assertFalse(
+            is_editor_snapshot_current(
+                snapshot,
+                candidates=(source,),
+                managed_pyright_config_path="pyproject.toml",
+                managed_pyright_stub_path=next_path,
+            ),
+            "A user replacement of the active stubPath remains freshness-relevant",
+        )
+
+    def test_owned_project_stub_path_takeover_preserves_config_freshness(self) -> None:
+        original_path = "custom-stubs"
+        managed_path = ".graphql-desk/live-typings"
+        project_text = (
+            _BASE
+            + '[tool.pyright]\nstubPath = "'
+            + original_path
+            + '"\nextraPaths = ["vendor", "custom-stubs"]\n'
+        )
+        self.project(text=project_text)
+        source = self.write("q.py", _QUERY)
+        snapshot = acquire_editor_snapshot(
+            workspace=self.root,
+            candidates=(source,),
+            generation=1,
+            managed_pyright_config_path="pyproject.toml",
+        )
+        self.write(
+            "pyproject.toml",
+            project_text.replace(
+                f'stubPath = "{original_path}"', f'stubPath = "{managed_path}"'
+            ),
+        )
+        self.assertTrue(
+            is_editor_snapshot_current(
+                snapshot,
+                candidates=(source,),
+                managed_pyright_config_path="pyproject.toml",
+                managed_pyright_stub_path=managed_path,
+                managed_pyright_previous_stub_path=original_path,
+                managed_pyright_previous_stub_path_present=True,
+                managed_pyright_previous_stub_path_known=True,
+            ),
+            "Exact owner takeover is neutral while the other TOML bytes match",
+        )
+        self.write(
+            "pyproject.toml",
+            project_text.replace(
+                f'stubPath = "{original_path}"', f'stubPath = "{managed_path}"'
+            )
+            + 'typeCheckingMode = "strict"\n',
+        )
+        self.assertFalse(
+            is_editor_snapshot_current(
+                snapshot,
+                candidates=(source,),
+                managed_pyright_config_path="pyproject.toml",
+                managed_pyright_stub_path=managed_path,
+                managed_pyright_previous_stub_path=original_path,
+                managed_pyright_previous_stub_path_present=True,
+                managed_pyright_previous_stub_path_known=True,
+            ),
+            "Unrelated TOML changes remain stale during takeover",
+        )
+
+    def test_owned_project_stub_path_takeover_from_unset_preserves_config_freshness(
+        self,
+    ) -> None:
+        project_text = _BASE
+        managed_path = ".graphql-desk/live-typings"
+        self.project(text=project_text)
+        source = self.write("q.py", _QUERY)
+        snapshot = acquire_editor_snapshot(
+            workspace=self.root,
+            candidates=(source,),
+            generation=1,
+            managed_pyright_config_path="pyproject.toml",
+        )
+        self.write(
+            "pyproject.toml",
+            project_text + f'\n[tool.pyright]\nstubPath = "{managed_path}"\n',
+        )
+        self.assertTrue(
+            is_editor_snapshot_current(
+                snapshot,
+                candidates=(source,),
+                managed_pyright_config_path="pyproject.toml",
+                managed_pyright_stub_path=managed_path,
+                managed_pyright_previous_stub_path_present=False,
+                managed_pyright_previous_stub_path_known=True,
+            ),
+            "The exact owner-verified takeover from an absent setting is neutral",
+        )
+        self.write(
+            "pyproject.toml",
+            project_text
+            + f'\n[tool.pyright]\nstubPath = "{managed_path}"\n'
+            + 'typeCheckingMode = "strict"\n',
+        )
+        self.assertFalse(
+            is_editor_snapshot_current(
+                snapshot,
+                candidates=(source,),
+                managed_pyright_config_path="pyproject.toml",
+                managed_pyright_stub_path=managed_path,
+                managed_pyright_previous_stub_path_present=False,
+                managed_pyright_previous_stub_path_known=True,
+            ),
+            "Unrelated TOML changes remain stale when taking over an absent setting",
+        )
+
     def test_previous_snapshot_baseline_validation_and_no_baseline_behavior(
         self,
     ) -> None:

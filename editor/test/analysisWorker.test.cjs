@@ -63,6 +63,36 @@ test("prepare accepts only bounded file configuration diagnostics with UTF-16 po
   await assert.rejects(fixture.worker.request(message(fixture.workspace)), generic);
 });
 
+test("Pyright TOML worker permits only a GraphQL Desk immutable generation rotation", async t => {
+  const workspace = path.join(os.tmpdir(), "graphql-desk-transport-fixture");
+  const generation = ".graphql-desk/live-typings/generations/g-7-01234567-89ab-cdef-0123-456789abcdef";
+  const source = '[tool.pyright]\nstubPath = ".graphql-desk/live-typings"\n';
+  const fake = fakeSpawn((child, chunk) => {
+    const request = JSON.parse(chunk.toString("utf8"));
+    assert.equal(request.managed_path, generation);
+    assert.equal(request.ownership.expected_stub_path, ".graphql-desk/live-typings");
+    child.stdout.write(JSON.stringify({ ok: true, found: true,
+      text: source.replace('".graphql-desk/live-typings"', JSON.stringify(generation)),
+      stub_path: generation, has_stub_path: true, extra_paths: [], has_execution_environments: false,
+      execution_environments: [], ownership: { top_level: false, execution_environment_roots: [] } }) + "\n");
+  });
+  const { worker } = setup(t, fake);
+  const accepted = await worker.request({ op: "pyright_config", workspace, text: source, action: "set_stub_path",
+    managed_path: generation, ownership: { topLevel: false, executionEnvironmentRoots: [],
+      expected_stub_path_present: true, expected_stub_path: ".graphql-desk/live-typings" } });
+  assert.equal(accepted.stub_path, generation);
+
+  for (const managedPath of ["../vendor/stubs", ".graphql-desk/live-typings/generations/../../vendor/stubs",
+    ".graphql-desk/other/generations/g-7-01234567-89ab-cdef-0123-456789abcdef"]) {
+    const invalid = fakeSpawn();
+    const fixture = setup(t, invalid);
+    await assert.rejects(fixture.worker.request({ op: "pyright_config", workspace, text: source, action: "set_stub_path",
+      managed_path: managedPath, ownership: { topLevel: false, executionEnvironmentRoots: [],
+        expected_stub_path_present: true, expected_stub_path: ".graphql-desk/live-typings" } }), generic);
+    assert.equal(invalid.calls.length, 0, "invalid generation paths must be rejected before launching the worker");
+  }
+});
+
 function fakeSpawn(onWrite = () => {}) {
   const children = [];
   const calls = [];

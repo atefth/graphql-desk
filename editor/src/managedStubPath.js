@@ -10,12 +10,13 @@ const inside = (root, value) => {
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 };
 
-function isManagedGeneration(workspace, setting) {
+function isManagedGeneration(workspace, setting, baseSetting = ".graphql-desk/typings") {
   const relative = setting.replaceAll("\\", "/");
-  const match = /^\.graphql-desk\/typings\/generations\/(g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/.exec(relative);
+  const prefix = baseSetting.replaceAll("\\", "/").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`^${prefix}/generations/(g-\\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$`).exec(relative);
   if (!match) return false;
   const directory = path.resolve(workspace, ...relative.split("/"));
-  if (!inside(path.join(workspace, ".graphql-desk", "typings", "generations"), directory)) return false;
+  if (!inside(path.join(workspace, ...baseSetting.split("/").concat("generations")), directory)) return false;
   let current = workspace;
   try {
     for (const part of path.relative(workspace, directory).split(path.sep)) {
@@ -34,28 +35,30 @@ function isManagedGeneration(workspace, setting) {
   } catch { return false; }
 }
 
-async function createManagedStubPath(vscode, folder, workspaceState) {
+async function createManagedStubPath(vscode, folder, workspaceState, options = {}) {
   if (!folder || folder.uri.scheme !== "file" || !path.isAbsolute(folder.uri.fsPath) || !vscode.workspace.isTrusted) throw new Error("Trusted file workspace required");
   const workspace = path.resolve(folder.uri.fsPath);
-  const config = vscode.workspace.getConfiguration("python", folder.uri);
+  const config = options.config ?? vscode.workspace.getConfiguration("python", folder.uri);
+  const managedBase = options.baseSetting ?? ".graphql-desk/typings";
+  const suffix = options.stateSuffix ?? "";
   const inspection = config.inspect?.("analysis.stubPath");
   const explicitlyConfigured = inspection && [inspection.globalValue, inspection.workspaceValue, inspection.workspaceFolderValue].some(value => value !== undefined);
   const configured = explicitlyConfigured
     ? config.get("analysis.stubPath", "") : "";
   let setting = typeof configured === "string" ? configured.trim() : "";
-  const stateKey = `managed-analysis-stub:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
-  const generationStateKey = `managed-analysis-generations:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
-  const stagingStateKey = `managed-analysis-staging:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
+  const keys = managedStateKeys(workspace, suffix);
+  const { stateKey, generationStateKey, stagingStateKey } = keys;
   const previousOwner = workspaceState?.get?.(stateKey);
   const inspectedSettings = [inspection?.globalValue, inspection?.workspaceValue, inspection?.workspaceFolderValue]
     .filter(value => value !== undefined);
   const selectedWorkspaceSetting = (inspection?.workspaceValue === setting || inspection?.workspaceFolderValue === setting) &&
     inspectedSettings.every(value => value === setting);
-  const owned = Boolean(previousOwner?.base === ".graphql-desk/typings" &&
+  const owned = Boolean(previousOwner?.base === managedBase &&
     (previousOwner.current === setting || (previousOwner.pending === true && previousOwner.previous === setting)) ||
-    !previousOwner && selectedWorkspaceSetting && isManagedGeneration(workspace, setting));
-  let ownsSetting = owned;
-  let baseSetting = owned ? previousOwner?.base ?? ".graphql-desk/typings" : setting;
+    !previousOwner && selectedWorkspaceSetting && isManagedGeneration(workspace, setting, managedBase));
+  if (options.forceOwned === true && previousOwner && !owned) throw new Error("Pyright stubPath ownership changed; preserved");
+  let ownsSetting = options.forceOwned === true || owned;
+  let baseSetting = owned ? previousOwner?.base ?? managedBase : ownsSetting ? managedBase : setting;
   const ownsCurrentValue = expected => {
     const current = config.inspect?.("analysis.stubPath");
     if (current) {
@@ -70,9 +73,9 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
   };
   const ownershipError = () => `Pylance stubPath ownership changed; preserved (expected ${JSON.stringify(setting)}, actual ${JSON.stringify(config.inspect?.("analysis.stubPath"))})`;
   let generationStateQueue = Promise.resolve();
-  if (!setting && explicitlyConfigured) {
+  if (!setting && explicitlyConfigured && options.forceOwned !== true) {
     setting = "typings";
-  } else if (!setting) {
+  } else if (!setting && options.forceOwned !== true) {
     const target = path.join(workspace, ".vscode", "settings.json");
     const workspaceFile = vscode.workspace.workspaceFile?.scheme === "file" ? vscode.workspace.workspaceFile.fsPath : null;
     const dirty = vscode.workspace.textDocuments?.some(document => document.isDirty &&
@@ -82,6 +85,11 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
     setting = "";
     ownsSetting = true;
     baseSetting = ".graphql-desk/typings";
+    await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
+  }
+  if (options.forceOwned === true && !previousOwner) {
+    const dirty = options.isDirty?.();
+    if (dirty) throw new Error("Dirty Pyright config buffer; preserved");
     await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
   }
   if (ownsSetting && !inside(workspace, path.resolve(workspace, baseSetting))) throw new Error("Owned Pylance stubPath is outside the workspace; preserved");
@@ -220,7 +228,8 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
           const settingsPath = path.join(workspace, ".vscode", "settings.json");
           const workspaceFile = vscode.workspace.workspaceFile?.scheme === "file" ? vscode.workspace.workspaceFile.fsPath : null;
           const dirty = vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === "file" && document.uri.fsPath &&
-            (normalized(document.uri.fsPath) === normalized(settingsPath) || (workspaceFile && normalized(document.uri.fsPath) === normalized(workspaceFile))));
+            (normalized(document.uri.fsPath) === normalized(settingsPath) || (workspaceFile && normalized(document.uri.fsPath) === normalized(workspaceFile)))) ||
+            options.isDirty?.();
           if (dirty) throw new Error("Dirty workspace settings; preserved");
           const oldSetting = setting;
           try {
@@ -269,6 +278,16 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
           } catch { /* Preserve paths that are no longer verified as ours. */ }
         }
       },
+      async release() {
+        if (options.restoreOnRelease !== true || !ownsSetting) return;
+        if (!ownsCurrentValue(setting)) throw new Error(ownershipError());
+        const restored = options.restoreSetting;
+        await config.update("analysis.stubPath", restored || undefined, vscode.ConfigurationTarget.WorkspaceFolder);
+        if (!ownsCurrentValue(restored ?? "")) throw new Error("Original Pyright stubPath restoration could not be verified; preserved");
+        setting = restored ?? "";
+        ownsSetting = false;
+        await workspaceState?.update?.(stateKey, undefined);
+      },
     };
   } catch (error) {
     for (const [directory, stat] of created.reverse()) {
@@ -281,4 +300,13 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
   }
 }
 
-module.exports = { createManagedStubPath };
+function managedStateKeys(workspace, suffix = "") {
+  const digest = createHash("sha256").update(normalized(workspace)).digest("hex");
+  return {
+    stateKey: `managed-analysis-stub:${digest}${suffix}`,
+    generationStateKey: `managed-analysis-generations:${digest}${suffix}`,
+    stagingStateKey: `managed-analysis-staging:${digest}${suffix}`,
+  };
+}
+
+module.exports = { createManagedStubPath, managedStateKeys, isManagedGeneration };

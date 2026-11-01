@@ -150,10 +150,10 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "renameProtocol", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite), "Choose a known isolated suite");
-  const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle"].includes(suite);
+  assert.ok(["features", "renameProtocol", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle", "projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite), "Choose a known isolated suite");
+  const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle", "projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite);
   // Keep host fixtures under the project directory instead of the system temp folder.
-  const temporaryRoot = path.resolve(__dirname, "../../../.tmp/host");
+  const temporaryRoot = path.resolve(__dirname, "../../.tmp/host");
   const cachePath = path.resolve(__dirname, "../.cache/vscode-test");
   await fs.mkdir(cachePath, { recursive: true });
   await fs.mkdir(temporaryRoot, { recursive: true });
@@ -196,9 +196,14 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     "python.experiments.enabled": false,
     "python.analysis.aiHoverSummaries": false,
     ...(suite === "ownedAnalysis" ? { "python.analysis.typeCheckingMode": "strict", "python.analysis.stubPath": stubRoot } : {}),
+    ...(["projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite) ? { "python.analysis.stubPath": "python-custom-stubs" } : {}),
     ...(factorySuite ? { "python.analysis.typeCheckingMode": "strict" } : {}),
     ...(suite === "workspaceRemoval" ? { "python.analysis.stubPath": ".graphql-desk/typings" } : {}),
   }));
+  if (suite === "projectConfig" || suite === "projectConfigEnvironment") await fs.writeFile(path.join(workspace, "pyrightconfig.json"), JSON.stringify({
+    stubPath: "custom-stubs", extraPaths: ["vendor"], typeCheckingMode: "strict",
+    ...(suite === "projectConfigEnvironment" ? { executionEnvironments: [{ root: ".", extraPaths: ["environment-vendor"] }] } : {}),
+  }, null, 2));
   if (suite === "ownedAnalysis") {
     await fs.mkdir(stubRoot);
     const files = {
@@ -320,7 +325,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     await Promise.all([
       fs.writeFile(path.join(workspace, "pyproject.toml"), suite === "externalMappings"
         ? `[tool.graphql-desk]\ngenerated_package = "graphql_desk_generated"\n[[tool.graphql-desk.schemas]]\nname = "default"\nschema = "schema.graphql"\nschema_output = "graphql_desk_generated/default.pyi"\nscalars = { ExternalDate = { input = "${mappingFixture.packageName}.alpha.AlphaDateInput", output = "${mappingFixture.packageName}.alpha.AlphaDateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.alpha.AlphaColor" }\n[[tool.graphql-desk.schemas]]\nname = "beta"\nschema = "beta.graphql"\nschema_output = "graphql_desk_generated/beta.pyi"\nscalars = { ExternalDate = { input = "${mappingFixture.packageName}.beta.BetaDateInput", output = "${mappingFixture.packageName}.beta.BetaDateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.beta.BetaColor" }\n`
-        : '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n'),
+        : `[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n${["projectConfig", "projectConfigEnvironment"].includes(suite) ? '[tool.pyright]\nstubPath = "toml-ignored"\n' : ""}${suite === "projectConfigToml" ? '[tool.pyright]\nstubPath = "custom-stubs"\nextraPaths = ["vendor"]\n[[tool.pyright.executionEnvironments]]\nroot = "."\nextraPaths = ["environment-vendor"]\n' : ""}`),
       fs.writeFile(path.join(workspace, "schema.graphql"), `${suite === "externalMappings" ? "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" : ""}type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${suite === "externalMappings" ? " externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor!" : ""}${shapeFields} }\n`),
       ...(suite === "externalMappings" ? [fs.writeFile(path.join(workspace, "beta.graphql"),
         "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" +
@@ -380,7 +385,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     version,
     cachePath,
     extensionDevelopmentPath: path.resolve(__dirname, ".."),
-    extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["parserOverlay", "externalMappings", "mixedLists", "fragmentTyping"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
+    extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["projectConfigToml", "projectConfigEnvironment"].includes(suite) ? "projectConfig" : ["parserOverlay", "externalMappings", "mixedLists", "fragmentTyping"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
     extensionTestsEnv: {
       GRAPHQL_DESK_TEST_WORKSPACE: workspace,
       GRAPHQL_DESK_TEST_PROFILE: profile,
@@ -395,7 +400,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     },
     launchArgs: [launchTarget, ...isolation, "--disable-updates", "--disable-telemetry", "--skip-welcome", "--skip-release-notes", "--disable-workspace-trust"],
   };
-  const sessions = suite === "restartRecovery" ? ["before-restart", "after-restart"]
+  const sessions = suite === "restartRecovery" || ["projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite) ? ["before-restart", "after-restart"]
     : suite === "restartRecoveryChangedInputs" ? ["before-restart", "after-input-change"] : [null];
   let beforeRestart;
   let interruptedGenerationFile;
@@ -456,6 +461,12 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     }
     if (phase === "before-restart") {
       beforeRestart = JSON.parse(await fs.readFile(result, "utf8"));
+      if (["projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite)) {
+        assert.equal(beforeRestart.outcome, "project-config-live-typing-observed");
+        assert.ok(beforeRestart.managedConfigGeneration.includes("generations"));
+        await fs.access(path.join(workspace, beforeRestart.managedConfigGeneration, "complete.json"));
+        continue;
+      }
       assert.equal(beforeRestart.outcome, "owned-output-restart-observed");
       const oldStubPath = beforeRestart.lifecycle.stubPath;
       assert.ok(oldStubPath.includes("generations"), "The first host must select a complete owned generation");
@@ -535,6 +546,27 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
     observed.lifecycle.userFilePreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
+  } else if (["projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite)) {
+    assert.equal(observed.outcome, "project-config-live-typing-observed");
+    const toml = await fs.readFile(path.join(workspace, "pyproject.toml"), "utf8");
+    const project = suite !== "projectConfigToml" ? JSON.parse(await fs.readFile(path.join(workspace, "pyrightconfig.json"), "utf8")) : null;
+    if (suite !== "projectConfigToml") {
+      console.log(`Project config lifecycle: ${JSON.stringify({ project, lifecycle: observed.lifecycle })}`);
+      assert.equal(project.stubPath, "custom-stubs", "Deactivation restores the original project stubPath");
+      assert.deepEqual(project.extraPaths, ["vendor"], "Deactivation preserves the user extraPaths");
+      if (suite === "projectConfigEnvironment") assert.deepEqual(project.executionEnvironments[0].extraPaths, ["environment-vendor"]);
+      assert.match(toml, /stubPath = "toml-ignored"/, "The lower-precedence TOML setting stays untouched");
+    } else {
+      assert.match(toml, /stubPath = "custom-stubs"/);
+      assert.match(toml, /extraPaths = \["vendor"\]/);
+      assert.match(toml, /extraPaths = \["environment-vendor"\]/);
+    }
+    const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+    assert.equal(settings["python.analysis.stubPath"], "python-custom-stubs", "Deactivation restores Pylance's original workspace stubPath");
+    observed.lifecycle = { restoredProjectStubPath: project?.stubPath ?? "custom-stubs", preservedExtraPaths: project?.extraPaths ?? ["vendor"],
+      lowerPrecedenceTomlUntouched: suite !== "projectConfigToml", managedConfigGeneration: observed.managedConfigGeneration,
+      initialPylanceType: observed.initialPylanceType, refreshedPylanceType: observed.refreshedPylanceType };
+    await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (factorySuite) {
     if (["typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "malformedRecovery"].includes(suite)) {
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "complete.json"));
@@ -596,7 +628,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     observed.lifecycle.userConfigurationPreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   }
-  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "mixedLists" ? "mixed-list-nullability-observed" : suite === "fragmentTyping" ? "fragment-masking-live-typing-observed" : suite === "externalMappings" ? "external-mappings-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : suite === "renameProtocol" ? "fragment-rename-lsp-observed" : `read-only-${suite}-observed`);
+  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "mixedLists" ? "mixed-list-nullability-observed" : suite === "fragmentTyping" ? "fragment-masking-live-typing-observed" : suite === "externalMappings" ? "external-mappings-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : ["projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite) ? "project-config-live-typing-observed" : suite === "renameProtocol" ? "fragment-rename-lsp-observed" : `read-only-${suite}-observed`);
   console.log(`${suite} evidence: ${result}`);
 }
 

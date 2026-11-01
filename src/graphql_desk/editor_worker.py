@@ -54,7 +54,14 @@ from .testing_helpers import render_testing_helper_artifacts
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
 MAX_PYRIGHT_CONFIG_BYTES = 1024 * 1024
+LIVE_STUB_ROOT = ".graphql-desk/live-typings"
+LIVE_GENERATION_STUB_PATH = re.compile(
+    r"\.graphql-desk/live-typings/generations/g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z"
+)
 _CAPTURE_KEYS = {"workspace", "candidates", "buffers", "documents", "editor_fallback"}
+_MANAGED_PYRIGHT_STUB_PATH = re.compile(
+    r"\.graphql-desk/live-typings(?:/generations/g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})?\Z"
+)
 
 
 def _object(value: object, keys: set[str]) -> dict[str, object]:
@@ -105,13 +112,90 @@ def _pyright_config_request(value: dict[str, object]) -> dict[str, object]:
         not workspace.is_dir()
         or not isinstance(text, str)
         or len(text.encode("utf-8")) > MAX_PYRIGHT_CONFIG_BYTES
-        or action not in {"inspect", "add", "remove"}
+        or action
+        not in {
+            "inspect",
+            "add",
+            "remove",
+            "set_stub_path",
+            "restore_stub_path",
+            "prepare_stub_path",
+            "release_stub_path",
+        }
         or not isinstance(managed_path, str)
         or not managed_path
         or "\x00" in managed_path
         or action != "inspect"
         and Path(managed_path).is_absolute()
-        or set(ownership_record) != {"top_level", "execution_environment_roots"}
+        or action == "set_stub_path"
+        and LIVE_GENERATION_STUB_PATH.fullmatch(managed_path) is None
+        or action != "set_stub_path"
+        and managed_path != LIVE_STUB_ROOT
+        or not {"top_level", "execution_environment_roots"}.issubset(ownership_record)
+        or set(ownership_record)
+        - {
+            "top_level",
+            "execution_environment_roots",
+            "expected_stub_path_present",
+            "expected_stub_path",
+            "restore_stub_path_present",
+            "restore_stub_path",
+            "custom_stub_path",
+            "custom_stub_path_added",
+            "remove_extra_paths_key",
+            "original_stub_path_present",
+            "original_stub_path",
+            "remove_managed_paths",
+            "legacy_top_level",
+            "legacy_execution_environment_roots",
+        }
+        or action in {"inspect", "add", "remove"}
+        and set(ownership_record) != {"top_level", "execution_environment_roots"}
+        or action == "set_stub_path"
+        and set(ownership_record)
+        != {
+            "top_level",
+            "execution_environment_roots",
+            "expected_stub_path_present",
+            "expected_stub_path",
+        }
+        or action == "restore_stub_path"
+        and set(ownership_record)
+        != {
+            "top_level",
+            "execution_environment_roots",
+            "expected_stub_path_present",
+            "expected_stub_path",
+            "restore_stub_path_present",
+            "restore_stub_path",
+        }
+        or action == "prepare_stub_path"
+        and set(ownership_record)
+        != {
+            "top_level",
+            "execution_environment_roots",
+            "expected_stub_path_present",
+            "expected_stub_path",
+            "custom_stub_path",
+            "custom_stub_path_added",
+            "remove_extra_paths_key",
+            "remove_managed_paths",
+            "legacy_top_level",
+            "legacy_execution_environment_roots",
+        }
+        or action == "release_stub_path"
+        and set(ownership_record)
+        != {
+            "top_level",
+            "execution_environment_roots",
+            "expected_stub_path_present",
+            "expected_stub_path",
+            "custom_stub_path",
+            "custom_stub_path_added",
+            "remove_extra_paths_key",
+            "original_stub_path_present",
+            "original_stub_path",
+        }
         or not isinstance(ownership_record.get("top_level"), bool)
         or not isinstance(ownership_record.get("execution_environment_roots"), list)
         or any(
@@ -132,6 +216,7 @@ def _pyright_config_request(value: dict[str, object]) -> dict[str, object]:
             "found": False,
             "text": text,
             "stub_path": None,
+            "has_stub_path": False,
             "extra_paths": [],
             "has_execution_environments": False,
             "execution_environments": [],
@@ -146,6 +231,7 @@ def _pyright_config_request(value: dict[str, object]) -> dict[str, object]:
             "found": False,
             "text": text,
             "stub_path": None,
+            "has_stub_path": False,
             "extra_paths": [],
             "has_execution_environments": False,
             "execution_environments": [],
@@ -162,8 +248,49 @@ def _pyright_config_request(value: dict[str, object]) -> dict[str, object]:
     if any(not isinstance(item, str) for item in extra_paths):
         raise ValueError("Invalid Pyright extraPaths")
     stub_path = pyright.get("stubPath")
+    has_stub_path = "stubPath" in pyright
     if stub_path is not None and not isinstance(stub_path, str):
         raise ValueError("Invalid Pyright stubPath")
+    if action in {
+        "set_stub_path",
+        "restore_stub_path",
+        "prepare_stub_path",
+        "release_stub_path",
+    }:
+        expected_present = ownership_record.get("expected_stub_path_present")
+        expected_path = ownership_record.get("expected_stub_path")
+        if (
+            not isinstance(expected_present, bool)
+            or expected_present
+            and not isinstance(expected_path, str)
+            or has_stub_path != expected_present
+            or expected_present
+            and stub_path != expected_path
+        ):
+            raise ValueError(
+                "Pyright stubPath changed before GraphQL Desk could update it; "
+                "preserved"
+            )
+        if action == "set_stub_path":
+            stub_path = managed_path
+            pyright["stubPath"] = managed_path
+            has_stub_path = True
+        elif action == "restore_stub_path":
+            restore_present = ownership_record.get("restore_stub_path_present")
+            restore_path = ownership_record.get("restore_stub_path")
+            if (
+                not isinstance(restore_present, bool)
+                or restore_present
+                and not isinstance(restore_path, str)
+            ):
+                raise ValueError("Invalid original Pyright stubPath; preserved")
+            if restore_present:
+                stub_path = restore_path
+                pyright["stubPath"] = restore_path
+            else:
+                stub_path = None
+                pyright.pop("stubPath", None)
+            has_stub_path = restore_present
     execution_environments_value = pyright.get("executionEnvironments", [])
     if not isinstance(execution_environments_value, MutableSequence):
         raise ValueError("Invalid Pyright executionEnvironments")
@@ -187,6 +314,98 @@ def _pyright_config_request(value: dict[str, object]) -> dict[str, object]:
         if any(not isinstance(item, str) for item in paths):
             raise ValueError("Invalid execution environment extraPaths")
         environments.append(environment)
+    if action == "prepare_stub_path":
+        custom_path = ownership_record.get("custom_stub_path")
+        custom_added = ownership_record.get("custom_stub_path_added")
+        remove_managed = ownership_record.get("remove_managed_paths")
+        legacy_top_level = ownership_record.get("legacy_top_level")
+        legacy_roots = ownership_record.get("legacy_execution_environment_roots")
+        if (
+            not isinstance(custom_path, str)
+            or not isinstance(custom_added, bool)
+            or not isinstance(remove_managed, bool)
+            or not isinstance(legacy_top_level, bool)
+            or not isinstance(legacy_roots, list)
+            or any(
+                not isinstance(item, str) or not item
+                for item in cast(list[object], legacy_roots)
+            )
+        ):
+            raise ValueError("Invalid managed Pyright stubPath ownership; preserved")
+        if remove_managed:
+            matches = [
+                index for index, item in enumerate(extra_paths) if item == managed_path
+            ]
+            if len(matches) > 1:
+                raise ValueError("Duplicate GraphQL Desk extraPath; preserved")
+            if matches:
+                del extra_paths[matches[0]]
+                if extra_paths or not legacy_top_level:
+                    pyright["extraPaths"] = extra_paths
+                else:
+                    pyright.pop("extraPaths", None)
+            for environment in environments:
+                paths = cast(MutableSequence[object], environment.get("extraPaths", []))
+                env_matches = [
+                    index for index, item in enumerate(paths) if item == managed_path
+                ]
+                if len(env_matches) > 1:
+                    raise ValueError(
+                        "Duplicate GraphQL Desk execution environment path; preserved"
+                    )
+                if env_matches:
+                    del paths[env_matches[0]]
+                    if paths or cast(str, environment["root"]) not in cast(
+                        list[str], legacy_roots
+                    ):
+                        environment["extraPaths"] = paths
+                    else:
+                        environment.pop("extraPaths", None)
+        if custom_added:
+            if custom_path in extra_paths:
+                raise ValueError(
+                    "GraphQL Desk custom stub root appeared during setup; preserved"
+                )
+            extra_paths.append(custom_path)
+            pyright["extraPaths"] = extra_paths
+        stub_path = managed_path
+        has_stub_path = True
+        pyright["stubPath"] = managed_path
+    elif action == "release_stub_path":
+        custom_path = ownership_record.get("custom_stub_path")
+        custom_added = ownership_record.get("custom_stub_path_added")
+        remove_extra_key = ownership_record.get("remove_extra_paths_key")
+        original_present = ownership_record.get("original_stub_path_present")
+        original_path = ownership_record.get("original_stub_path")
+        if (
+            not isinstance(custom_path, str)
+            or not isinstance(custom_added, bool)
+            or not isinstance(remove_extra_key, bool)
+            or not isinstance(original_present, bool)
+            or original_present
+            and not isinstance(original_path, str)
+        ):
+            raise ValueError("Invalid managed Pyright stubPath release; preserved")
+        if custom_added:
+            matches = [
+                index for index, item in enumerate(extra_paths) if item == custom_path
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    "GraphQL Desk custom stub root ownership changed; preserved"
+                )
+            del extra_paths[matches[0]]
+            if remove_extra_key and not extra_paths:
+                pyright.pop("extraPaths", None)
+            else:
+                pyright["extraPaths"] = extra_paths
+        if original_present:
+            pyright["stubPath"] = original_path
+            stub_path = original_path
+        else:
+            pyright.pop("stubPath", None)
+            stub_path = None
+        has_stub_path = original_present
     matches = [index for index, item in enumerate(extra_paths) if item == managed_path]
     had_top_level_extra_paths = "extraPaths" in pyright
     if len(matches) > 1:
@@ -226,6 +445,7 @@ def _pyright_config_request(value: dict[str, object]) -> dict[str, object]:
         "found": True,
         "text": text if action == "inspect" else tomlkit.dumps(document),
         "stub_path": stub_path,
+        "has_stub_path": has_stub_path,
         "extra_paths": list(
             cast(MutableSequence[object], pyright.get("extraPaths", []))
         ),
@@ -465,6 +685,11 @@ class _Capture:
     buffers: tuple[OpenBuffer, ...]
     documents: tuple[_Document, ...]
     fallback_json: str = field(repr=False)
+    managed_pyright_config_path: str | None = None
+    managed_pyright_stub_path: str | None = None
+    managed_pyright_previous_stub_path: str | None = None
+    managed_pyright_previous_stub_path_present: bool = False
+    managed_pyright_previous_stub_path_known: bool = False
 
     @property
     def fallback(self) -> dict[str, object] | None:
@@ -529,12 +754,47 @@ def _capture(item: dict[str, object]) -> _Capture:
     fallback = item["editor_fallback"]
     if fallback is not None and not isinstance(fallback, dict):
         raise ValueError("Invalid fallback")
+    managed_stub_path = item.get("managed_pyright_stub_path")
+    managed_config_path = item.get("managed_pyright_config_path")
+    previous_stub_path = item.get("managed_pyright_previous_stub_path")
+    previous_stub_path_known = "managed_pyright_previous_stub_path_present" in item
+    previous_stub_path_present = item.get(
+        "managed_pyright_previous_stub_path_present", False
+    )
+    if managed_config_path is not None and (
+        not isinstance(managed_config_path, str)
+        or managed_config_path != "pyproject.toml"
+    ):
+        raise ValueError("Invalid GraphQL Desk-owned Pyright config path")
+    if (managed_config_path is None) != (managed_stub_path is None):
+        raise ValueError("Incomplete GraphQL Desk-owned Pyright config identity")
+    if managed_stub_path is not None and (
+        not isinstance(managed_stub_path, str)
+        or not _MANAGED_PYRIGHT_STUB_PATH.fullmatch(managed_stub_path)
+    ):
+        raise ValueError("Invalid GraphQL Desk-owned Pyright stubPath")
+    if not isinstance(previous_stub_path_present, bool):
+        raise ValueError("Invalid GraphQL Desk previous Pyright stubPath ownership")
+    if previous_stub_path_present and (
+        not isinstance(previous_stub_path, str)
+        or not previous_stub_path
+        or len(previous_stub_path) > 4096
+        or "\0" in previous_stub_path
+    ):
+        raise ValueError("Invalid GraphQL Desk previous Pyright stubPath")
+    if not previous_stub_path_present and previous_stub_path is not None:
+        raise ValueError("Unexpected GraphQL Desk previous Pyright stubPath")
     return _Capture(
         workspace,
         tuple(sorted(candidates, key=str)),
         tuple(sorted(buffers, key=lambda buffer: str(buffer.path))),
         tuple(sorted(documents, key=lambda doc: doc.identity)),
         json.dumps(fallback, sort_keys=True, allow_nan=False),
+        managed_config_path,
+        managed_stub_path,
+        cast(str | None, previous_stub_path),
+        previous_stub_path_present,
+        previous_stub_path_known,
     )
 
 
@@ -720,7 +980,15 @@ class EditorWorker:
             and "remote_revisions" in raw
         ):
             keys.add("remote_revisions")
-        item = _object(raw, keys)
+        allowed_keys = keys | {
+            "managed_pyright_config_path",
+            "managed_pyright_stub_path",
+            "managed_pyright_previous_stub_path",
+            "managed_pyright_previous_stub_path_present",
+        }
+        if not keys <= set(raw) or not set(raw) <= allowed_keys:
+            raise ValueError("Invalid object")
+        item = raw
         capture = _capture(item)
         workspace = _canonical(capture.workspace)
         if self._workspace is not None and workspace != self._workspace:
@@ -737,6 +1005,8 @@ class EditorWorker:
                 candidates=capture.candidates,
                 buffers=capture.buffers,
                 editor_fallback=capture.fallback,
+                managed_pyright_config_path=capture.managed_pyright_config_path,
+                managed_pyright_stub_path=capture.managed_pyright_stub_path,
             )
             self._capture = capture
             self._preparation = preparation
@@ -816,7 +1086,16 @@ class EditorWorker:
         if (
             _string(item["id"]) != self._identity
             or self._preparation is None
-            or capture != self._capture
+            or self._capture is None
+            or replace(
+                capture,
+                managed_pyright_config_path=self._capture.managed_pyright_config_path,
+                managed_pyright_stub_path=self._capture.managed_pyright_stub_path,
+                managed_pyright_previous_stub_path=self._capture.managed_pyright_previous_stub_path,
+                managed_pyright_previous_stub_path_present=self._capture.managed_pyright_previous_stub_path_present,
+                managed_pyright_previous_stub_path_known=self._capture.managed_pyright_previous_stub_path_known,
+            )
+            != self._capture
         ):
             raise ValueError("Stale job")
         schema_buffers = tuple(
@@ -847,6 +1126,11 @@ class EditorWorker:
                     buffers=buffers,
                     editor_fallback=capture.fallback,
                     remote_schemas=remote_schemas,
+                    managed_pyright_config_path=capture.managed_pyright_config_path,
+                    managed_pyright_stub_path=capture.managed_pyright_stub_path,
+                    managed_pyright_previous_stub_path=capture.managed_pyright_previous_stub_path,
+                    managed_pyright_previous_stub_path_present=capture.managed_pyright_previous_stub_path_present,
+                    managed_pyright_previous_stub_path_known=capture.managed_pyright_previous_stub_path_known,
                 )
             )
             if not current:
@@ -1128,6 +1412,8 @@ class EditorWorker:
             preparation=self._preparation,
             previous=self._previous,
             remote_schemas=remote_schemas,
+            managed_pyright_config_path=capture.managed_pyright_config_path,
+            managed_pyright_stub_path=capture.managed_pyright_stub_path,
         )
         request = snapshot.request
         analysis = analyze_editor_snapshot_details(
@@ -1224,6 +1510,8 @@ class EditorWorker:
                     candidates=capture.candidates,
                     buffers=capture.buffers,
                     editor_fallback=capture.fallback,
+                    managed_pyright_config_path=capture.managed_pyright_config_path,
+                    managed_pyright_stub_path=capture.managed_pyright_stub_path,
                 )
                 != self._preparation
             ):

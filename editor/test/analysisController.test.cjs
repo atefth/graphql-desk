@@ -509,6 +509,220 @@ test("real configured factory capture highlights incomplete Python lexically and
   await assert.rejects(fs.stat(path.join(fixture.root, "changed")), { code: "ENOENT" });
 });
 
+test("opening a verified live generation artifact does not change the source snapshot", async t => {
+  const fixture = await setup(t);
+  const controller = createAnalysisController(fixture.vscode);
+  t.after(() => controller.dispose());
+  const snapshot = controller.snapshot(fixture.main);
+  const bundle = await controller.analyze(snapshot);
+  assert.ok(bundle);
+  const generation = `g-1-${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`;
+  const generationRoot = path.join(fixture.root, ".graphql-desk", "live-typings", "generations", generation);
+  const generated = path.join(generationRoot, "graphql_desk_generated", "default.pyi");
+  const bytes = renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "def graphql(query: str) -> object: ...\n");
+  await fs.mkdir(path.dirname(generated), { recursive: true });
+  await fs.writeFile(generated, bytes);
+  fixture.stubPath(path.relative(fixture.root, generationRoot));
+  const generatedDocument = fixture.document(path.relative(fixture.root, generated), bytes.toString("utf8"));
+  fixture.events.onDidOpenTextDocument.fire(generatedDocument);
+  assert.equal(await controller.isCurrent(bundle, snapshot), true,
+    "Pylance opening GraphQL Desk's own generated stub must not invalidate the analysis that produced it");
+  fixture.events.onDidCloseTextDocument.fire(generatedDocument);
+  assert.equal(await controller.isCurrent(bundle, snapshot), true,
+    "Closing the generated document does not change the captured source snapshot");
+  assert.equal(generatedDocument.isDirty, false);
+});
+
+test("only exact owned config replacement temp paths and hashes are ignored by the source watcher", async t => {
+  const fixture = await setup(t);
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+  t.after(() => controller.dispose());
+  assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
+  const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+  for (const [filename, originalText, ownedText, userText] of [
+    ["pyrightconfig.json", '{"stubPath":"typings"}\n', '{"stubPath":".graphql-desk/live-typings/generations/g-1-owned"}\n',
+      '{"stubPath":".graphql-desk/live-typings/generations/g-1-owned","typeCheckingMode":"strict"}\n'],
+    ["pyproject.toml", '[tool.pyright]\nstubPath = "typings"\n',
+      '[tool.pyright]\nstubPath = ".graphql-desk/live-typings/generations/g-1-owned"\n',
+      '[tool.pyright]\nstubPath = ".graphql-desk/live-typings/generations/g-1-owned"\ntypeCheckingMode = "strict"\n'],
+  ]) {
+    const file = path.join(fixture.root, filename);
+    const beforeOwnedWrite = invalidations;
+    await fs.writeFile(file, originalText);
+    const previousHash = createHash("sha256").update(originalText).digest("hex");
+    const nextHash = createHash("sha256").update(ownedText).digest("hex");
+    const temporaryPath = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+    assert.equal(controller.markOwnedProjectConfig(file, previousHash), true);
+    assert.equal(controller.trackOwnedProjectConfigWrite(file, nextHash,
+      { phase: "begin", previousHash, temporaryPath }), true);
+    await fs.writeFile(temporaryPath, ownedText);
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeOwnedWrite, `The exact owned ${filename} temp file and hash do not invalidate analysis`);
+    await fs.unlink(temporaryPath);
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeOwnedWrite, `The exact owned ${filename} temp rename event does not invalidate analysis`);
+    await fs.unlink(file);
+    watcher.fire(Uri.file(file));
+    assert.equal(invalidations, beforeOwnedWrite, `The delete event inside an owned ${filename} replacement must not invalidate analysis`);
+    await fs.writeFile(file, ownedText);
+    assert.equal(controller.trackOwnedProjectConfigWrite(file, nextHash, { phase: "commit" }), true);
+    watcher.fire(Uri.file(file));
+    assert.equal(invalidations, beforeOwnedWrite, `An exact owned ${filename} stubPath rotation must not restart source analysis`);
+    await fs.writeFile(file, userText);
+    watcher.fire(Uri.file(file));
+    assert.equal(invalidations, beforeOwnedWrite + 1,
+      `A later user edit to ${filename} is still observed`);
+    await fs.unlink(file);
+    watcher.fire(Uri.file(file));
+    assert.equal(invalidations, beforeOwnedWrite + 2,
+      `A later user deletion of ${filename} is still observed`);
+  }
+  const foreignTemporary = path.join(fixture.root, ".graphql-desk-11111111-2222-3333-4444-555555555555.tmp");
+  await fs.writeFile(foreignTemporary, "user temp content");
+  watcher.fire(Uri.file(foreignTemporary));
+  assert.equal(invalidations, 5, "An unregistered GraphQL Desk-shaped temp path remains a visible source change");
+});
+
+test("only the active workspace TOML stubPath ownership is forwarded to Python analysis", async t => {
+  const fixture = await setup(t);
+  const requests = [];
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, request(message) { requests.push(message); return worker.request(message); } };
+  } });
+  t.after(() => controller.dispose());
+  const generation = ".graphql-desk/live-typings/generations/g-1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const configPath = path.join(fixture.root, "pyproject.toml");
+  const originalConfig = await fs.readFile(configPath, "utf8");
+  await fs.writeFile(configPath, `${originalConfig}[tool.pyright]\nstubPath = "${generation}"\n`);
+  assert.equal(controller.setManagedProjectStubPath(fixture.root,
+    configPath, generation, "custom-stubs", true), true);
+  assert.equal(controller.setManagedProjectStubPath(fixture.root,
+    path.join(fixture.root, "pyrightconfig.json"), generation, "custom-stubs", true), false);
+  assert.equal(controller.setManagedProjectStubPath(fixture.root,
+    configPath, "../custom-stubs", "custom-stubs", true), false);
+  const bundle = await controller.analyze(controller.snapshot(fixture.main));
+  assert.ok(bundle);
+  const prepare = requests.find(message => message.op === "prepare");
+  assert.equal(prepare.managed_pyright_config_path, "pyproject.toml");
+  assert.equal(prepare.managed_pyright_stub_path, generation);
+  assert.equal(prepare.managed_pyright_previous_stub_path, "custom-stubs");
+  assert.equal(prepare.managed_pyright_previous_stub_path_present, true);
+});
+
+test("current analysis accepts only an exact owned TOML stubPath rotation", async t => {
+  const fixture = await setup(t);
+  const requests = [];
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, request(message) { requests.push(message); return worker.request(message); } };
+  } });
+  t.after(() => controller.dispose());
+  const first = ".graphql-desk/live-typings/generations/g-1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const next = ".graphql-desk/live-typings/generations/g-2-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  assert.equal(controller.setManagedProjectStubPath(fixture.root,
+    path.join(fixture.root, "pyproject.toml"), first), true);
+  const original = await fs.readFile(path.join(fixture.root, "pyproject.toml"), "utf8");
+  await fs.writeFile(path.join(fixture.root, "pyproject.toml"),
+    `${original}[tool.pyright]\nstubPath = "${first}"\n`);
+  const analysis = await controller.analyze(controller.snapshot(fixture.main));
+  assert.ok(analysis);
+
+  assert.equal(controller.setManagedProjectStubPath(fixture.root,
+    path.join(fixture.root, "pyproject.toml"), next), true);
+  await fs.writeFile(path.join(fixture.root, "pyproject.toml"),
+    `${original}[tool.pyright]\nstubPath = "${next}"\n`);
+  const generated = await controller.artifacts(controller.snapshot(fixture.main));
+  assert.ok(generated, "Artifact freshness tolerates an exact owner-verified root rotation");
+  assert.equal(requests.filter(message => message.op === "artifacts").at(-1).managed_pyright_stub_path, next,
+    "The artifact freshness check receives the exact newly owned project setting");
+  assert.equal(await controller.isCurrent(analysis, controller.snapshot(fixture.main)), true,
+    "An exact owner-verified generation rotation does not stale unchanged analysis inputs");
+  assert.equal(requests.filter(message => message.op === "current").at(-1).managed_pyright_stub_path, next,
+    "The current check receives the newly owned exact project setting");
+
+  const afterRotation = await controller.analyze(controller.snapshot(fixture.main));
+  assert.ok(afterRotation);
+  await fs.writeFile(path.join(fixture.root, "pyproject.toml"),
+    `${original}[tool.pyright]\nstubPath = "${next}"\ntypeCheckingMode = "strict"\n`);
+  assert.equal(await controller.isCurrent(afterRotation, controller.snapshot(fixture.main)), false,
+    "Unrelated project-config edits remain visible to freshness checks");
+});
+
+test("current analysis accepts the exact owner-verified initial TOML takeover", async t => {
+  const fixture = await setup(t);
+  const requests = [];
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, request(message) { requests.push(message); return worker.request(message); } };
+  } });
+  t.after(() => controller.dispose());
+  const configPath = path.join(fixture.root, "pyproject.toml");
+  const original = await fs.readFile(configPath, "utf8");
+  await fs.writeFile(configPath, `${original}[tool.pyright]\nstubPath = "custom-stubs"\nextraPaths = ["vendor"]\n`);
+  const analysis = await controller.analyze(controller.snapshot(fixture.main));
+  assert.ok(analysis);
+
+  const managed = ".graphql-desk/live-typings";
+  assert.equal(controller.setManagedProjectStubPath(fixture.root, configPath, managed, "custom-stubs", true), true);
+  await fs.writeFile(configPath,
+    `${original}[tool.pyright]\nstubPath = "${managed}"\nextraPaths = ["vendor"]\n`);
+  const generated = await controller.artifacts(controller.snapshot(fixture.main));
+  assert.ok(generated, "The first owned config takeover preserves unchanged analysis facts");
+  const current = requests.filter(message => message.op === "artifacts").at(-1);
+  assert.equal(current.managed_pyright_stub_path, managed);
+  assert.equal(current.managed_pyright_previous_stub_path, "custom-stubs");
+  assert.equal(current.managed_pyright_previous_stub_path_present, true);
+
+  await fs.writeFile(configPath,
+    `${original}[tool.pyright]\nstubPath = "${managed}"\nextraPaths = ["vendor"]\ntypeCheckingMode = "strict"\n`);
+  assert.equal(await controller.isCurrent(analysis, controller.snapshot(fixture.main)), false,
+    "Unrelated TOML edits remain stale even with the owner transition pair");
+});
+
+test("persisted TOML ownership is loaded before the first restart artifacts request", async t => {
+  const fixture = await setup(t);
+  const requests = [];
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, request(message) { requests.push(message); return worker.request(message); } };
+  } });
+  t.after(() => controller.dispose());
+  const configPath = path.join(fixture.root, "pyproject.toml");
+  const original = await fs.readFile(configPath, "utf8");
+  const managed = ".graphql-desk/live-typings";
+  await fs.writeFile(configPath, `${original}[tool.pyright]\nstubPath = "${managed}"\nextraPaths = ["vendor"]\n`);
+  assert.equal(controller.setManagedProjectStubPath(fixture.root, configPath, managed, undefined, false), true);
+  const artifacts = await controller.artifacts(controller.snapshot(fixture.main));
+  assert.ok(artifacts, "The first request after restoring persisted ownership can publish artifacts");
+  const request = requests.find(message => message.op === "artifacts");
+  assert.equal(request.managed_pyright_config_path, "pyproject.toml");
+  assert.equal(request.managed_pyright_stub_path, managed);
+  assert.equal(request.managed_pyright_previous_stub_path_present, false);
+  assert.equal(Object.hasOwn(request, "managed_pyright_previous_stub_path"), false);
+});
+
+test("duplicate watcher reports for identical schema bytes cause one refresh, changed bytes still refresh", async t => {
+  const fixture = await setup(t);
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+  t.after(() => controller.dispose());
+  assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
+  const workspaceWatcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+  const schemaWatcher = fixture.watchers.find(item => item.pattern.pattern === "schema.graphql");
+  assert.ok(workspaceWatcher);
+  assert.ok(schemaWatcher);
+  const schemaUri = Uri.file(path.join(fixture.root, "schema.graphql"));
+  workspaceWatcher.fire(schemaUri);
+  schemaWatcher.fire(schemaUri);
+  assert.equal(invalidations, 1, "The same disk bytes reported by both watchers share one refresh");
+  await fs.writeFile(path.join(fixture.root, "schema.graphql"), "type Query { title: String changed: Int }");
+  workspaceWatcher.fire(schemaUri);
+  schemaWatcher.fire(schemaUri);
+  assert.equal(invalidations, 2, "A different schema fingerprint remains a new refresh");
+});
+
 test("workspace folder watchers follow additions and removals and refresh closed source/config changes", async t => {
   const fixture = await setup(t);
   const added = await setup(t);
@@ -623,6 +837,33 @@ test("workspace folder watchers follow additions and removals and refresh closed
   addedWatch.fire(Uri.file(generationDir));
   addedWatch.fire(Uri.file(generationArtifact));
   assert.equal(invalidations, beforeGeneratedStub + 2, "Immutable generation creation and contents must not self-invalidate the source snapshot");
+  const liveGeneration = path.join(added.root, ".graphql-desk", "live-typings", "generations", `g-1-${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`);
+  fixture.stubPath(path.relative(added.root, liveGeneration));
+  const liveGenerationDir = path.join(liveGeneration, "graphql_desk_generated");
+  await fs.mkdir(liveGenerationDir, { recursive: true });
+  const liveGenerationStage = path.join(liveGenerationDir, ".graphql-desk-123e4567-e89b-12d3-a456-426614174000.tmp");
+  await fs.writeFile(liveGenerationStage, "");
+  addedWatch.fire(Uri.file(liveGenerationStage));
+  fixture.events.onDidOpenTextDocument.fire({ uri: Uri.file(liveGenerationStage) });
+  fixture.events.onDidChangeTextDocument.fire({ document: { uri: Uri.file(liveGenerationStage), isDirty: true }, contentChanges: [{ rangeOffset: 0, rangeLength: 0 }] });
+  assert.equal(invalidations, beforeGeneratedStub + 2, "Live project-config generation files do not invalidate their own analysis");
+  const liveGenerated = path.join(liveGenerationDir, "default.pyi");
+  const liveGeneratedBytes = renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "class Generated: ...\n");
+  await fs.writeFile(liveGenerated, liveGeneratedBytes);
+  await fs.writeFile(path.join(liveGeneration, "complete.json"), JSON.stringify({ owner: "graphql-desk-analysis-generation", format: 2,
+    files: [{ path: "graphql_desk_generated/default.pyi", sha256: createHash("sha256").update(liveGeneratedBytes).digest("hex") }] }));
+  addedWatch.fire(Uri.file(liveGeneration));
+  addedWatch.fire(Uri.file(liveGenerationDir));
+  addedWatch.fire(Uri.file(liveGenerated));
+  addedWatch.fire(Uri.file(path.join(liveGeneration, "complete.json")));
+  assert.equal(invalidations, beforeGeneratedStub + 2,
+    "Complete live-typings generations and generated files do not restart their own publication");
+  const projectOwnerRecord = path.join(added.root, ".graphql-desk", "live-typings", "project-config-owner.json");
+  await fs.writeFile(projectOwnerRecord, "{}\n");
+  addedWatch.fire(Uri.file(projectOwnerRecord));
+  fixture.events.onDidOpenTextDocument.fire({ uri: Uri.file(projectOwnerRecord) });
+  assert.equal(invalidations, beforeGeneratedStub + 2,
+    "The durable project-config owner record does not invalidate the analysis that writes it");
   const generationStage = path.join(nestedGenerationDir, ".graphql-desk-123e4567-e89b-12d3-a456-426614174000.tmp");
   await fs.writeFile(generationStage, "");
   addedWatch.fire(Uri.file(generationStage));
