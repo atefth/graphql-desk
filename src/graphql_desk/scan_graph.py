@@ -52,6 +52,8 @@ class ScanDefinition:
     variables: tuple[tuple[str, str, str | None], ...]
     fragment_spreads: tuple[str, ...]
     hash: str
+    source_key: tuple[str, str, int, int]
+    definition_range: Span
     type_condition: str | None = None
 
 
@@ -201,6 +203,8 @@ def _assign_ids(
                 variables=item.variables,
                 fragment_spreads=item.fragment_spreads,
                 hash=item.hash,
+                source_key=item.source_key,
+                definition_range=item.definition_range,
                 type_condition=item.type_condition,
             )
         )
@@ -456,6 +460,13 @@ def build_scan_graph(
                     if isinstance(node, FragmentDefinitionNode)
                     else None
                 ),
+                source_key=(
+                    call.module.project,
+                    call.module.module,
+                    call.range.start,
+                    call.range.end,
+                ),
+                definition_range=definition_span,
             )
             definitions.append(definition)
             definition_contexts[id(definition)] = indexed_document
