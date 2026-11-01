@@ -56,6 +56,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
   const owned = Boolean(previousOwner?.base === managedBase &&
     (previousOwner.current === setting || (previousOwner.pending === true && previousOwner.previous === setting)) ||
     !previousOwner && selectedWorkspaceSetting && isManagedGeneration(workspace, setting, managedBase));
+  let settingPresent = ownedSettingPresent(previousOwner, setting, explicitlyConfigured);
   if (options.forceOwned === true && previousOwner && !owned) throw new Error("Pyright stubPath ownership changed; preserved");
   let ownsSetting = options.forceOwned === true || owned;
   let baseSetting = owned ? previousOwner?.base ?? managedBase : ownsSetting ? managedBase : setting;
@@ -85,12 +86,13 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
     setting = "";
     ownsSetting = true;
     baseSetting = ".graphql-desk/typings";
-    await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
+    settingPresent = false;
+    await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: false });
   }
   if (options.forceOwned === true && !previousOwner) {
     const dirty = options.isDirty?.();
     if (dirty) throw new Error("Dirty Pyright config buffer; preserved");
-    await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
+    await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: settingPresent });
   }
   if (ownsSetting && !inside(workspace, path.resolve(workspace, baseSetting))) throw new Error("Owned Pylance stubPath is outside the workspace; preserved");
   const root = path.resolve(workspace, ownsSetting ? baseSetting : setting);
@@ -232,29 +234,35 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
             options.isDirty?.();
           if (dirty) throw new Error("Dirty workspace settings; preserved");
           const oldSetting = setting;
+          const oldSettingPresent = settingPresent;
           try {
             setting = targetSetting;
-            await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, previous: oldSetting, pending: true });
+            settingPresent = true;
+            await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting,
+              previous: oldSetting, previousPresent: oldSettingPresent, pending: true });
             verifyGeneration();
             if (!ownsCurrentValue(oldSetting)) throw new Error(ownershipError());
             verifyGeneration();
             await config.update("analysis.stubPath", targetSetting, vscode.ConfigurationTarget.WorkspaceFolder);
             verifyGeneration();
-            await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
+            await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: true });
+            settingPresent = true;
             if (isCurrent() !== true && ownsCurrentValue(targetSetting)) {
               setting = oldSetting;
-              await config.update("analysis.stubPath", oldSetting, vscode.ConfigurationTarget.WorkspaceFolder);
-              await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
+              await config.update("analysis.stubPath", oldSettingPresent ? oldSetting : undefined, vscode.ConfigurationTarget.WorkspaceFolder);
+              settingPresent = oldSettingPresent;
+              await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: settingPresent });
               return false;
             }
             return ownsCurrentValue(targetSetting);
           } catch (error) {
             if (ownsCurrentValue(targetSetting)) {
-              await config.update("analysis.stubPath", oldSetting, vscode.ConfigurationTarget.WorkspaceFolder);
+              await config.update("analysis.stubPath", oldSettingPresent ? oldSetting : undefined, vscode.ConfigurationTarget.WorkspaceFolder);
             }
             if (ownsCurrentValue(oldSetting)) {
               setting = oldSetting;
-              try { await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting }); }
+              settingPresent = oldSettingPresent;
+              try { await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: settingPresent }); }
               catch { /* A failed state write before the setting change leaves the prior record authoritative. */ }
             } else if (!ownsCurrentValue(targetSetting)) {
               // A third value belongs to the user; stop managing it and leave it intact.
@@ -298,6 +306,15 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
     }
     throw error;
   }
+}
+
+function ownedSettingPresent(previousOwner, setting, explicitlyConfigured) {
+  if (!previousOwner || (previousOwner.current !== setting &&
+      !(previousOwner.pending === true && previousOwner.previous === setting))) return explicitlyConfigured;
+  if (previousOwner.pending === true && previousOwner.previous === setting) {
+    return previousOwner.previousPresent ?? (setting !== "");
+  }
+  return previousOwner.currentPresent ?? (setting !== "");
 }
 
 function managedStateKeys(workspace, suffix = "") {
