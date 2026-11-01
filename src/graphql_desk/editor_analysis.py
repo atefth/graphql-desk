@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 from .config import ScalarMapping
 from .editor_refactor import extraction_contexts
-from .field_usage import FieldUsageOptions, field_usage_diagnostics
+from .field_usage import FieldUsageOptions, UnusedSelection, field_usage_diagnostics
 from .fragments import (
     DefinitionFact,
     FragmentIndex,
@@ -372,8 +372,13 @@ def analyze_editor_snapshot_details(
             }
         )
     index = index_fragments(sources, schemas=schemas)
+    unused_selections: list[UnusedSelection] = []
     field_diagnostics = field_usage_diagnostics(
-        tuple(modules), index, schemas, field_usage_options
+        tuple(modules),
+        index,
+        schemas,
+        field_usage_options,
+        unused_selections=unused_selections,
     )
     colocated_diagnostics = tuple(
         diagnostic
@@ -679,6 +684,21 @@ def analyze_editor_snapshot_details(
         "calls": calls,
         "persisted": persisted_facts,
         "persisted_id_insertions": persisted_id_insertions,
+        "unused_selections": [
+            {
+                "diagnostic": editor_diagnostic(item.diagnostic, snapshots),
+                "document": document_(item.document),
+                "range": {
+                    "start": convert_offset(
+                        indexed[item.document].call.source, item.range.start
+                    ),
+                    "end": convert_offset(
+                        indexed[item.document].call.source, item.range.end
+                    ),
+                },
+            }
+            for item in unused_selections
+        ],
         "diagnostics": [
             editor_diagnostic(item, snapshots) for item in index.diagnostics
         ]

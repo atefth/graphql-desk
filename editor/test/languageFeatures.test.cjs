@@ -35,7 +35,7 @@ test("unused imported fragments are reported as warnings", async () => {
   assert.equal(source.slice(diagnostic.range.start, diagnostic.range.end), "from fragments import card as Card");
 });
 
-test("bounded field usage is a warning at the selected parent, without a deletion action", async () => {
+test("bounded field usage removes only the proven unused leaf, retaining its consumed parent", async () => {
   const source = [
     "from graphql_desk import gql",
     "from graphql_desk.testing import read_result",
@@ -52,7 +52,72 @@ test("bounded field usage is a warning at the selected parent, without a deletio
   assert.equal(warning.severity, 2);
   assert.equal(source.slice(warning.range.start, warning.range.end), "user");
   assert.match(warning.message, /user\.name/);
-  assert.deepEqual(await service.codeActions(snapshot, [warning]), []);
+  const actions = await service.codeActions(snapshot, [warning]);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].title, "Remove unused selection 'name'");
+  assert.equal(source.slice(actions[0].range.start, actions[0].range.end), "name ");
+  assert.equal(actions[0].replacement, "");
+  assert.equal(source.slice(0, actions[0].range.start) + source.slice(actions[0].range.end), source.replace("id name", "id"));
+  assert.deepEqual(await service.codeActions(snapshot, [{ ...warning, range: { start: warning.range.start + 1, end: warning.range.end } }]), []);
+  assert.deepEqual(await createLanguageFeatures(options(value, { isCurrent: async () => false })).codeActions(snapshot, [warning]), []);
+  assert.deepEqual(await service.codeActions(snapshot, [warning], { isCancellationRequested: true }), []);
+});
+
+test("unused leaf actions retain multiline formatting and exact Unicode/CRLF Python ranges", async () => {
+  for (const newline of ["\n", "\r\n"]) {
+    const line = `  label: name${newline}`;
+    const source = "# 😀\r\nfrom graphql_desk import gql\r\nfrom graphql_desk.testing import read_result\r\n" +
+      `query = gql('''{ user(id: "😀") {${newline}  id${newline}${line}} }''')\r\nresult = read_result(query, {})\r\nprint(result['user']['id'])`;
+    const value = bundle(source);
+    const service = createLanguageFeatures(options(value));
+    const snapshot = document(value);
+    const warnings = (await service.diagnostics(snapshot)).filter(d => d.code === "graphql-desk.52005");
+    const actions = await service.codeActions(snapshot, warnings);
+    assert.equal(actions.length, 1);
+    assert.equal(source.slice(actions[0].range.start, actions[0].range.end), line);
+    const edited = source.slice(0, actions[0].range.start) + source.slice(actions[0].range.end);
+    assert.equal(edited, source.replace(line, ""));
+    const repaired = bundle(edited);
+    assert.deepEqual(await createLanguageFeatures(options(repaired)).diagnostics(document(repaired)), []);
+  }
+});
+
+test("unsafe or ambiguous field-use removals remain unavailable", async () => {
+  const prefix = "from graphql_desk import gql\nfrom graphql_desk.testing import read_result\n";
+  const suffix = "\nresult = read_result(query, {})\nprint(result['user']['id'])";
+  for (const [label, query, use] of [
+    ["only field", "query = gql('{ user { id } other: user { name } }')", ""],
+    ["fragment required", "query = gql('{ user { id name ...Card } } fragment Card on User { name }')", ""],
+    ["inline fragment", "query = gql('{ user { id ... on User { name } } }')", ""],
+    ["directive", "query = gql('{ user { id name @skip(if: false) } }')", ""],
+    ["multiple operations", "query = gql('query Q { user { id name } } query R { user { name } }', operation_name='Q')", ""],
+    ["shared source", "TEXT = '{ user { id name } }'\nquery = gql(TEXT)", ""],
+    ["split literal", "query = gql('{ user { id na' 'me } }')", ""],
+    ["escaped source", String.raw`query = gql('{ user { id n\u0061me } }')`, ""],
+    ["comment", "query = gql('''{ user { id name # keep\n} }''')", ""],
+    ["direct read", "query = gql('{ user { id name } }')", "\nprint(result['user']['name'])"],
+    ["other execution read", "query = gql('{ user { id name } }')", "\nsecond = read_result(query, {})\nprint(second['user']['name'])"],
+    ["dynamic key", "query = gql('{ user { id name } }')", "\nresult['user'][key]"],
+    ["result escape", "query = gql('{ user { id name } }')", "\nsend(result['user'])"],
+    ["document escape", "query = gql('{ user { id name } }')", "\nsend(query)"],
+    ["document store", "query = gql('{ user { id name } }')", "\nstored = {'document': query}"],
+    ["document return", "query = gql('{ user { id name } }')", "\ndef exported():\n    return query"],
+    ["no local consumption", "query = gql('{ user { id name } }')", "NO_READ"],
+  ]) {
+    const source = prefix + query + (use === "NO_READ" ? "" : suffix + use);
+    const value = bundle(source);
+    const service = createLanguageFeatures(options(value));
+    const snapshot = document(value);
+    const diagnostics = (await service.diagnostics(snapshot)).filter(d => d.code === "graphql-desk.52005");
+    assert.deepEqual(await service.codeActions(snapshot, diagnostics), [], label);
+  }
+  const value = bundle(prefix + `query = gql('{ user { id name(format: "x") } }')` + suffix,
+    { schema: schema.replace("name: String!", "name(format: String): String!") });
+  const service = createLanguageFeatures(options(value));
+  const snapshot = document(value);
+  const warnings = (await service.diagnostics(snapshot)).filter(d => d.code === "graphql-desk.52005");
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(await service.codeActions(snapshot, warnings), []);
 });
 
 test("stale persisted hashes produce an exact fix only for direct ID literals", async () => {
@@ -465,6 +530,7 @@ test("registered fragment rename exposes fresh plans for the LSP bridge", async 
   const noop = () => ({ dispose() {} });
   const vscode = {
     Uri: { parse(value) { return { toString: () => value }; } },
+    commands: { registerCommand() { return noop(); } },
     Range: class { constructor(start, end) { Object.assign(this, { start, end }); } },
     Location: class { constructor(uri, range) { Object.assign(this, { uri, range }); } },
     Diagnostic: class {},
@@ -1052,9 +1118,15 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   const publications = [];
   const providers = {};
   let disposed = 0;
+  const registeredCommands = new Map();
   const handle = () => ({ dispose() { disposed += 1; } });
   const vscode = {
     Uri: { parse(value) { return { toString: () => value }; } },
+    commands: {
+      registerCommand(name, callback) { registeredCommands.set(name, callback); return handle(); },
+    },
+    workspace: { textDocuments: [] },
+    window: { visibleTextEditors: [] },
     Range: class { constructor(start, end) { this.start = start; this.end = end; } },
     Location: class { constructor(uri, range) { Object.assign(this, { uri, range }); } },
     TextEdit: { replace(range, newText) { return { range, newText }; } },
@@ -1109,10 +1181,39 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   assert.equal(doc.getText().slice(validationActions[0].edit.changes[0][1].start.offset,
     validationActions[0].edit.changes[0][1].end.offset), "nam");
   assert.equal(validationActions[0].edit.changes[0][2], "name");
+  const guardedCommand = [...registeredCommands.values()][0];
+  let guardedText = "old text";
+  const guardedDocument = { uri: { toString: () => "file:///guarded.py" }, version: 4, isClosed: false,
+    getText: () => guardedText, positionAt: offset => ({ offset }) };
+  vscode.workspace.textDocuments = [guardedDocument];
+  let editBuilderCalled = false;
+  vscode.window.visibleTextEditors = [{ document: guardedDocument, async edit(build) {
+    guardedDocument.version += 1;
+    guardedText = "new text";
+    build({ replace() { editBuilderCalled = true; } });
+    return false;
+  } }];
+  assert.equal(await guardedCommand({ uri: "file:///guarded.py", version: 4,
+    range: { start: 0, end: 3 }, expected: "old", replacement: "" }), false);
+  assert.equal(editBuilderCalled, false);
+  assert.equal(guardedText, "new text");
+  guardedDocument.version = 5;
+  guardedText = "old text";
+  editBuilderCalled = false;
+  vscode.window.visibleTextEditors[0].edit = async build => {
+    build({ replace() { editBuilderCalled = true; } });
+    guardedDocument.version += 1;
+    guardedText = "user edit";
+    return false;
+  };
+  assert.equal(await guardedCommand({ uri: "file:///guarded.py", version: 5,
+    range: { start: 0, end: 3 }, expected: "old", replacement: "" }), false);
+  assert.equal(editBuilderCalled, true);
+  assert.equal(guardedText, "user edit");
   const documentSymbols = await providers.symbols.provideDocumentSymbols(doc);
   assert.deepEqual(documentSymbols.map(item => [item.name, item.detail, item.kind]), [["Check", "query", 11]]);
   registered.dispose();
-  assert.equal(disposed, 7);
+  assert.equal(disposed, 8);
   const extractValue = bundle("from graphql_desk import gql\nq=gql('query { user { id name } }')");
   const extractRegistered = registerLanguageFeatures(vscode, options(extractValue));
   const extractItem = extractValue.request.modules[0];

@@ -2,6 +2,7 @@
 
 const gql = require("graphql");
 const gls = require("graphql-language-service");
+let guardedEditCommandSequence = 0;
 
 const CLIENT_DIRECTIVES = new Set([
   "populate", "client", "unmask", "_unmask", "_optional", "_relayPagination",
@@ -245,6 +246,57 @@ function editableRange(bundle, call, span, snapshot) {
   if (span.start === span.end && matching.length === 0) return origin.range;
   if (matching.length !== 1 || call.source.slice(span.start, span.end) !== snapshot.text.slice(origin.range.start, origin.range.end)) return null;
   return origin.range;
+}
+
+function unusedSelectionActions(bundle, snapshot, diagnostics) {
+  const result = [];
+  for (const item of bundle.response.unused_selections ?? []) {
+    const diagnostic = item.diagnostic;
+    if (diagnostic.module.uri !== snapshot.uri || diagnostic.module.version !== snapshot.version ||
+        !diagnostics.some(d => d.code === "graphql-desk.52005" &&
+          d.range.start === diagnostic.range.utf16.start && d.range.end === diagnostic.range.utf16.end)) continue;
+    const call = bundle.response.calls.find(call => documentKey(call.identity) === documentKey(item.document));
+    if (!call || call.identity.module.uri !== snapshot.uri || call.identity.module.version !== snapshot.version) continue;
+    const ast = gql.parse(call.source);
+    // shortcut: only plain query leaves are removable; expand with fragment/directive safety proofs.
+    if (ast.definitions.length !== 1 || ast.definitions[0].kind !== gql.Kind.OPERATION_DEFINITION ||
+        ast.definitions[0].operation !== "query" || call.source.includes("#")) continue;
+    let unsafe = false;
+    let selected;
+    gql.visit(ast, {
+      Directive() { unsafe = true; },
+      FragmentSpread() { unsafe = true; },
+      InlineFragment() { unsafe = true; },
+      SelectionSet(node) {
+        const field = node.selections.find(field => field.loc.start === item.range.start && field.loc.end === item.range.end);
+        if (field?.kind === gql.Kind.FIELD && !field.selectionSet && !field.arguments.length && node.selections.length > 1) selected = field;
+      },
+    });
+    if (unsafe || !selected) continue;
+    let { start, end } = selected.loc;
+    const lineStart = call.source.lastIndexOf("\n", start - 1) + 1;
+    const nextLine = call.source.indexOf("\n", end);
+    if (/^[ \t]*$/.test(call.source.slice(lineStart, start)) && nextLine !== -1 &&
+        /^[ \t\r]*$/.test(call.source.slice(end, nextLine))) {
+      start = lineStart;
+      end = nextLine + 1;
+    } else {
+      const following = /^[ \t,]+/.exec(call.source.slice(end));
+      if (following) end += following[0].length;
+      else start -= /[ \t,]*$/.exec(call.source.slice(0, start))[0].length;
+    }
+    const parts = callMappedParts(call, { start, end }, call.identity.module);
+    if (!parts || parts.some(part => {
+      const decoded = call.source.slice(part.decoded.start, part.decoded.end);
+      const host = snapshot.text.slice(part.range.start, part.range.end);
+      return part.linear ? decoded !== host : decoded !== "\n" || host !== "\r\n";
+    })) continue;
+    const range = { start: parts[0].range.start, end: parts.at(-1).range.end };
+    const callRange = call.identity.call_range.utf16;
+    if (range.start < callRange.start || range.end > callRange.end) continue;
+    result.push({ title: `Remove unused selection '${selected.alias?.value ?? selected.name.value}'`, range, replacement: "", guardOnApply: true });
+  }
+  return unique(result);
 }
 
 function nodeLocation(bundle, node) {
@@ -820,7 +872,8 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
           }
           semantic = suggestionActions(bundle, snapshot, diagnostics, validated);
         }
-        return await finish(bundle, snapshot, token, [...stale, ...insertions, ...semantic], []);
+        const removals = unusedSelectionActions(bundle, snapshot, diagnostics);
+        return await finish(bundle, snapshot, token, [...stale, ...insertions, ...semantic, ...removals], []);
       } catch { return []; }
     },
     async diagnostics(snapshot, token) {
@@ -886,6 +939,7 @@ function registerLanguageFeatures(vscode, options) {
   const service = createLanguageFeatures({ ...options,
     isCurrent: async (...args) => !disposed && await options.isCurrent(...args) && !disposed,
   });
+  const guardedEditCommand = `graphqlDesk.applyGuardedEdit.${++guardedEditCommandSequence}`;
   const selector = [{ language: "python", scheme: "file" }, { language: "python", scheme: "untitled" }];
   const snapshot = options.snapshot ?? ((document) => ({ uri: document.uri.toString(), version: document.version, text: document.getText() }));
   const range = (document, span) => new vscode.Range(document.positionAt(span.start), document.positionAt(span.end));
@@ -897,6 +951,27 @@ function registerLanguageFeatures(vscode, options) {
     return content;
   };
   const handles = [collection,
+    vscode.commands.registerCommand(guardedEditCommand, async params => {
+      const { uri, version, range: span, expected, replacement } = params ?? {};
+      if (disposed || typeof uri !== "string" || !Number.isInteger(version) || !span ||
+          !Number.isInteger(span.start) || !Number.isInteger(span.end) || typeof expected !== "string" ||
+          typeof replacement !== "string") return false;
+      const document = vscode.workspace.textDocuments.find(item => item.uri.toString() === uri);
+      if (!document || document.isClosed || document.version !== version) return false;
+      const text = document.getText();
+      if (span.start < 0 || span.end < span.start || span.end > text.length ||
+          text.slice(span.start, span.end) !== expected) return false;
+      const editor = vscode.window.visibleTextEditors.find(item => item.document === document);
+      if (!editor) return false;
+      let accepted = false;
+      const applied = await editor.edit(edit => {
+        if (disposed || document.isClosed || document.version !== version ||
+            document.getText().slice(span.start, span.end) !== expected) return;
+        edit.replace(range(document, span), replacement);
+        accepted = true;
+      });
+      return accepted && applied;
+    }),
     vscode.languages.registerCompletionItemProvider(selector, {
       async provideCompletionItems(document, position, token) {
         return (await service.complete(snapshot(document), document.offsetAt(position), token)).map((item) => {
@@ -947,7 +1022,7 @@ function registerLanguageFeatures(vscode, options) {
         const current = () => !cancelled(token) && document.version === version && !document.isClosed;
         const diagnostics = context.diagnostics.filter((item) =>
           ["graphql-desk.persisted-hash-mismatch", "graphql-desk.persisted-id-missing",
-            "graphql.validation", "graphql.deprecation"].includes(item.code));
+            "graphql.validation", "graphql.deprecation", "graphql-desk.52005"].includes(item.code));
         const items = diagnostics.map((item) => ({
           code: item.code,
           message: item.message,
@@ -960,8 +1035,14 @@ function registerLanguageFeatures(vscode, options) {
           ? await service.codeActions(snapshot(document), items, token) : [];
         const actions = quickFixes.map((item) => {
           const action = new vscode.CodeAction(item.title, vscode.CodeActionKind.QuickFix);
-          action.edit = new vscode.WorkspaceEdit();
-          action.edit.replace(document.uri, range(document, item.range), item.replacement);
+          if (item.guardOnApply) {
+            action.command = { command: guardedEditCommand, title: item.title,
+              arguments: [{ uri: document.uri.toString(), version, range: item.range,
+                expected: document.getText().slice(item.range.start, item.range.end), replacement: item.replacement }] };
+          } else {
+            action.edit = new vscode.WorkspaceEdit();
+            action.edit.replace(document.uri, range(document, item.range), item.replacement);
+          }
           action.diagnostics = diagnostics;
           return action;
         });

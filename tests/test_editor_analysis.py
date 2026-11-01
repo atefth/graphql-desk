@@ -124,7 +124,8 @@ class EditorAnalysisTests(unittest.TestCase):
             "result=read_result(q, {})\r\nprint(result['user']['id'])"
         )
         payload = request(source)
-        diagnostics = array(analyze_editor_snapshot(payload)["diagnostics"])
+        response = analyze_editor_snapshot(payload)
+        diagnostics = array(response["diagnostics"])
         self.assertEqual([object_(item)["code"] for item in diagnostics], ["52005"])
         location = object_(object_(diagnostics[0])["range"])
         original = object_(location["codepoint"])
@@ -133,6 +134,17 @@ class EditorAnalysisTests(unittest.TestCase):
         )
         self.assertEqual(
             object_(location["utf16"])["start"], cast(int, original["start"]) + 1
+        )
+        selection = object_(array(response["unused_selections"])[0])
+        self.assertEqual(selection["diagnostic"], diagnostics[0])
+        call = object_(array(response["calls"])[0])
+        self.assertEqual(selection["document"], call["identity"])
+        span = object_(selection["range"])
+        self.assertEqual(
+            cast(str, call["source"])[
+                cast(int, span["start"]) : cast(int, span["end"])
+            ],
+            "name",
         )
         for options in (
             FieldUsageOptions(enabled=False),
@@ -144,6 +156,56 @@ class EditorAnalysisTests(unittest.TestCase):
                 ],
                 [],
             )
+            self.assertEqual(
+                analyze_editor_snapshot(payload, field_usage_options={"p": options})[
+                    "unused_selections"
+                ],
+                [],
+            )
+
+    def test_unused_selection_facts_require_unconsumed_result_paths(self) -> None:
+        prefix = (
+            "from graphql_desk import gql\n"
+            "from graphql_desk.testing import read_result\n"
+            "q=gql('{ user { id name } }')\n"
+            "result=read_result(q, {})\nprint(result['user']['id'])\n"
+        )
+        for use in (
+            "print(result['user']['name'])",
+            "result['user'][key]",
+            "send(result['user'])",
+            "send(q)",
+            "second=read_result(q, {})\nprint(second['user']['name'])",
+            "alias=q",
+            "stored={'document': q}",
+            "def exported():\n    return q",
+            "print(q.source)",
+        ):
+            with self.subTest(use=use):
+                self.assertEqual(
+                    analyze_editor_snapshot(request(prefix + use))["unused_selections"],
+                    [],
+                )
+
+    def test_unused_selections_support_direct_typed_execution_arguments(self) -> None:
+        source = (
+            "from typing import TypeVar\n"
+            "from graphql_desk import gql, TypedDocument\n"
+            "R=TypeVar('R')\nV=TypeVar('V')\n"
+            "def execute(document: TypedDocument[R, V], variables: V) -> R: ...\n"
+            "q=gql('{ user { id name } }')\n"
+            "result=execute(document=q, variables={})\nprint(result['user']['id'])"
+        )
+        self.assertEqual(
+            len(array(analyze_editor_snapshot(request(source))["unused_selections"])), 1
+        )
+        for imported in ("from main import q", "import main", "from main import *"):
+            with self.subTest(imported=imported):
+                payload = request(source)
+                array(payload["modules"]).append(module("consumer", imported))
+                response = analyze_editor_snapshot(payload)
+                self.assertEqual(response["unused_selections"], [])
+                self.assertTrue(array(response["diagnostics"]))
 
     def test_colocated_fragment_warning_defaults_on_and_can_be_disabled(self) -> None:
         payload = request(
