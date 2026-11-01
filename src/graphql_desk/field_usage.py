@@ -600,8 +600,21 @@ class _Awaited:
     value: _Value
 
 
+@dataclass
+class _Instance:
+    result_attribute: str
+    value: _Value = None
+    consumed: bool = False
+
+
 _Value: TypeAlias = (
-    _Reference | _Document | _Callable | _Awaited | tuple["_Value", ...] | None
+    _Reference
+    | _Document
+    | _Callable
+    | _Awaited
+    | _Instance
+    | tuple["_Value", ...]
+    | None
 )
 
 
@@ -910,11 +923,129 @@ def _consume(value: _Value) -> None:
         for path in value.paths:
             path.state.escaped.add(path.node.path)
             path.state.accesses += 1
+    elif isinstance(value, _Instance):
+        if not value.consumed:
+            value.consumed = True
+            _consume(value.value)
     elif isinstance(value, tuple):
         for item in value:
             _consume(item)
     elif isinstance(value, _Awaited):
         _consume(value.value)
+
+
+# shortcut: external aliases are untracked; widen only with project-wide
+# instance alias analysis.
+def _stored_result_attribute(class_node: ast.ClassDef) -> str | None:
+    if class_node.bases or class_node.keywords or class_node.decorator_list:
+        return None
+    methods = [
+        item
+        for item in class_node.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    if any(
+        not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Pass))
+        and not (
+            isinstance(item, ast.Expr)
+            and isinstance(item.value, ast.Constant)
+            and isinstance(item.value.value, str)
+        )
+        for item in class_node.body
+    ):
+        return None
+    constructors = [method for method in methods if method.name == "__init__"]
+    if len(constructors) != 1 or any(method.decorator_list for method in methods):
+        return None
+    if any(
+        method.name in {"__getattr__", "__getattribute__", "__setattr__", "__delattr__"}
+        for method in methods
+    ):
+        return None
+
+    constructor = constructors[0]
+    if isinstance(constructor, ast.AsyncFunctionDef):
+        return None
+    constructor_args = (*constructor.args.posonlyargs, *constructor.args.args)
+    if not constructor_args:
+        return None
+    self_name = constructor_args[0].arg
+    writes: list[str] = []
+    reads: list[tuple[ast.AST, str]] = []
+    for method in methods:
+        if _uses_dynamic_scope(method):
+            return None
+        method_args = (*method.args.posonlyargs, *method.args.args)
+        if not method_args:
+            continue
+        method_self = method_args[0].arg
+        for node in ast.walk(method):
+            if isinstance(node, ast.Call):
+                arguments = (*node.args, *(item.value for item in node.keywords))
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id
+                    in {
+                        "getattr",
+                        "setattr",
+                        "delattr",
+                    }
+                    or any(
+                        isinstance(argument, ast.Name) and argument.id == method_self
+                        for argument in arguments
+                    )
+                ):
+                    return None
+            elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                value = node.value
+                if value is not None and any(
+                    isinstance(child, ast.Name)
+                    and child.id == method_self
+                    and isinstance(child.ctx, ast.Load)
+                    for child in ast.walk(value)
+                ):
+                    return None
+            elif (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == method_self
+            ):
+                if node.attr in {
+                    "__dict__",
+                    "__getattribute__",
+                    "__setattr__",
+                    "__delattr__",
+                }:
+                    return None
+                if isinstance(node.ctx, ast.Load):
+                    reads.append((method, node.attr))
+                else:
+                    writes.append(node.attr)
+
+    direct_writes: list[str] = []
+    for statement in constructor.body:
+        targets: tuple[ast.expr, ...] = ()
+        if isinstance(statement, ast.Assign):
+            targets = tuple(statement.targets)
+        elif isinstance(statement, ast.AnnAssign):
+            targets = (statement.target,)
+        for target in targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == self_name
+            ):
+                direct_writes.append(target.attr)
+    candidates = [
+        attribute
+        for attribute in set(direct_writes)
+        if direct_writes.count(attribute) == 1
+        and writes.count(attribute) == 1
+        and any(
+            method is not constructor and name == attribute for method, name in reads
+        )
+    ]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 class _Flow:
@@ -932,6 +1063,7 @@ class _Flow:
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.class_functions: set[int] = set()
         self.function_classes: dict[int, ast.ClassDef] = {}
+        self.class_instances: dict[int, _Instance] = {}
         self.class_stack: list[ast.ClassDef] = []
         self.unsafe_local_class_functions: set[int] = set()
         self.function_captures: dict[int, dict[str, _Value]] = {}
@@ -1576,6 +1708,8 @@ class _Flow:
             return None
         if isinstance(node, ast.Attribute):
             base = self.expression(node.value, env)
+            if isinstance(base, _Instance):
+                return base.value if node.attr == base.result_attribute else None
             if isinstance(base, _Callable) and isinstance(base.target, str):
                 return self.target_value(
                     self.symbols.imported(
@@ -1832,6 +1966,23 @@ class _Flow:
                 _consume(value)
                 for target in node.elts:
                     self.bind(target, None, env)
+        elif isinstance(node, ast.Attribute):
+            instance = self.expression(node.value, env)
+            if isinstance(instance, _Instance):
+                if (
+                    node.attr == instance.result_attribute
+                    and instance.value is None
+                    and not instance.consumed
+                ):
+                    instance.value = value
+                else:
+                    _consume(value)
+                    if node.attr == instance.result_attribute:
+                        _consume(instance.value)
+                        instance.value = None
+            else:
+                _consume(value)
+                _consume(instance)
         else:
             _consume(value)
             if isinstance(node, (ast.Attribute, ast.Subscript)):
@@ -2046,6 +2197,25 @@ class _Flow:
         self.block(self.owner.tree.body, env)
         self.module_env = dict(env)
         functions, self.functions = self.functions, []
+        for class_node in self.function_classes.values():
+            if id(class_node) in self.mutated_classes:
+                continue
+            attribute = _stored_result_attribute(class_node)
+            if attribute is not None:
+                self.class_instances[id(class_node)] = _Instance(attribute)
+        functions = [
+            function
+            for _, function in sorted(
+                enumerate(functions),
+                key=lambda item: (
+                    0
+                    if id(item[1]) in self.class_functions
+                    and item[1].name == "__init__"
+                    else 1,
+                    item[0],
+                ),
+            )
+        ]
         self.in_function = True
         position = 0
         while position < len(functions):
@@ -2062,6 +2232,15 @@ class _Flow:
             local.update(self.function_captures.get(id(function), {}))
             if id(function) in self.class_functions:
                 local["__class__"] = None
+                function_class = self.function_classes.get(id(function))
+                instance = (
+                    self.class_instances.get(id(function_class))
+                    if function_class is not None
+                    else None
+                )
+                arguments = (*function.args.posonlyargs, *function.args.args)
+                if instance is not None and arguments:
+                    local[arguments[0].arg] = instance
             declarations = _OuterWrites()
             for statement in function.body:
                 declarations.visit(statement)
