@@ -934,6 +934,8 @@ def _consume(value: _Value) -> None:
         _consume(value.value)
 
 
+# shortcut: external aliases are untracked; widen only with project-wide
+# instance alias analysis.
 def _stored_result_attribute(class_node: ast.ClassDef) -> str | None:
     if class_node.bases or class_node.keywords or class_node.decorator_list:
         return None
