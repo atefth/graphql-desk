@@ -736,6 +736,34 @@ test("extraction preserves referenced fragments inside selected fields", async (
   assert.deepEqual(bundle(updated, { schema: value.request.schemas[0].text }).response.diagnostics, []);
 });
 
+test("extraction binds inline fragment dependencies once and reuses their identity", async () => {
+  const source = "from graphql_desk import gql\nq = gql('query Read { user { friend { ...Card } name } }', [gql('fragment Card on User { id }')])\n";
+  const value = bundle(source, { schema: schema.replace("id: ID!", "id: ID! friend: User") });
+  const selected = "friend { ...Card }", start = source.indexOf(selected);
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), {
+    start, end: start + selected.length,
+  });
+  assert.equal(plan.length, 3);
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+  assert.match(updated, /fragment_card = gql\('fragment Card on User \{ id \}'\)/);
+  assert.match(updated, /fragment UserFields on User .*fragments=\[fragment_card\]/);
+  assert.match(updated, /\[user_fields, fragment_card\]/);
+  assert.equal((updated.match(/fragment Card on User/g) ?? []).length, 1);
+  const refreshed = bundle(updated, { schema: value.request.schemas[0].text });
+  assert.deepEqual(refreshed.response.diagnostics, []);
+  assert.equal(refreshed.response.calls.length, 3);
+  const extracted = refreshed.response.calls.find(call => call.index?.primary_fragment?.name === "UserFields");
+  assert.equal(extracted?.fragments.length, 1);
+
+  const ambiguous = "from graphql_desk import gql\nq = gql('query Read { user { friend { ...Card ...Name } } }', [gql('fragment Card on User { id }'), gql('fragment Name on User { name }')])\n";
+  const ambiguousValue = bundle(ambiguous, { schema: schema.replace("id: ID!", "id: ID! friend: User") });
+  const ambiguousStart = ambiguous.indexOf("friend { ...Card ...Name }");
+  assert.equal(await createLanguageFeatures(options(ambiguousValue)).extractFragment(document(ambiguousValue), {
+    start: ambiguousStart, end: ambiguousStart + "friend { ...Card ...Name }".length,
+  }), null);
+});
+
 test("extraction preserves aliases, CRLF, keyword arguments and variables", async () => {
   const source = "# 😀\r\nfrom graphql_desk import gql as make\r\nq = make(source='query Read($id: ID) { user(id: $id) { name } }', fragments=())\r\n";
   const value = bundle(source);

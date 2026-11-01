@@ -477,7 +477,7 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
       for (const match of candidate.source.matchAll(/\bfragment(?:[\s,]|#[^\r\n]*(?:\r\n|\r|\n|$))+([_A-Za-z][_0-9A-Za-z]*)\b/g)) names.add(match[1]);
     }
     const base = `${parent.name}Fields`;
-    const pythonNames = snapshot.text.normalize("NFKC");
+    let pythonNames = snapshot.text.normalize("NFKC");
     let name = base, binding, suffix = 2;
     do {
       binding = name.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
@@ -487,6 +487,8 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
     } while (true);
     const calls = new Map(bundle.response.calls.map(item => [documentKey(item.identity), item]));
     const references = [];
+    const inlineReferenceEdits = [];
+    const inlineBindings = new Map();
     for (const spread of spreads) {
       const matches = call.fragments.filter(reference => {
         const target = calls.get(documentKey(reference.target));
@@ -494,11 +496,33 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
           reference.reference_module.uri === snapshot.uri && reference.reference_module.version === snapshot.version;
       });
       if (matches.length !== 1) { references.length = 0; break; }
-      const range = matches[0].range.utf16;
+      const reference = matches[0];
+      const range = reference.range.utf16;
+      const target = calls.get(documentKey(reference.target));
       const expression = snapshot.text.slice(range.start, range.end);
-      if (range.start < callRange.start || range.end > callRange.end ||
-          !/^[_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*$/.test(expression)) { references.length = 0; break; }
-      references.push(expression);
+      if (!target || range.start < callRange.start || range.end > callRange.end) { references.length = 0; break; }
+      if (/^[_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*$/.test(expression)) {
+        references.push(expression);
+        continue;
+      }
+      const targetRange = target.identity.call_range.utf16;
+      if (target.identity.module.uri !== snapshot.uri || target.identity.module.version !== snapshot.version ||
+          range.start !== targetRange.start || range.end !== targetRange.end || call.fragments.length !== 1) {
+        references.length = 0; break;
+      }
+      const key = `${range.start}:${range.end}`;
+      let inline = inlineBindings.get(key);
+      if (!inline) {
+        const baseBinding = `fragment_${spread.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+          .replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase()}`;
+        let inlineBinding = baseBinding, inlineSuffix = 2;
+        while (pythonNames.includes(inlineBinding)) inlineBinding = `${baseBinding}_${inlineSuffix++}`;
+        pythonNames += inlineBinding;
+        inline = { binding: inlineBinding, expression, range };
+        inlineBindings.set(key, inline);
+        inlineReferenceEdits.push({ range, replacement: inlineBinding });
+      }
+      references.push(inline.binding);
     }
     if (references.length !== spreads.size) continue;
     const fragment = `fragment ${name} on ${parent.name} {\n${call.source.slice(span.start, span.end)}\n}`;
@@ -521,12 +545,22 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
     };
     const composition = additions[context.fragment_mode];
     if (!composition || (context.fragment_insertion >= host.start && context.fragment_insertion <= host.end)) continue;
+    const firstInline = inlineReferenceEdits.find(item => item.range.start === context.fragment_insertion);
+    const compositionChange = firstInline
+      ? { range: { start: context.fragment_insertion, end: firstInline.range.end },
+        replacement: composition + firstInline.replacement }
+      : { range: { start: context.fragment_insertion, end: context.fragment_insertion }, replacement: composition };
     const changes = [
       { range: host, replacement: `...${name}` },
-      { range: { start: context.fragment_insertion, end: context.fragment_insertion }, replacement: composition },
+      compositionChange,
+      ...inlineReferenceEdits.filter(item => item !== firstInline),
     ];
-    if (context.scope === "module") changes.push({ range: { start: context.statement_start, end: context.statement_start },
-      replacement: `${context.indent}${binding} = ${fragmentCall}${context.newline}` });
+    const prefix = [...inlineBindings.values()].map(item =>
+      `${context.indent}${item.binding} = ${item.expression}${context.newline}`,
+    ).join("");
+    const statement = context.scope === "module" ? `${context.indent}${binding} = ${fragmentCall}${context.newline}` : "";
+    if (prefix || statement) changes.push({ range: { start: context.statement_start, end: context.statement_start },
+      replacement: prefix + statement });
     plans.push(changes.map(item => ({ ...item, module: call.identity.module, sourceText: snapshot.text,
       positionRange: { start: positionAt(snapshot.text, item.range.start), end: positionAt(snapshot.text, item.range.end) } })));
   }
