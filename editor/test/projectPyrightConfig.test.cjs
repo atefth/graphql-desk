@@ -12,7 +12,7 @@ function stateStore() {
   return { get: key => values.get(key), update: async (key, value) => value === undefined ? values.delete(key) : values.set(key, value) };
 }
 
-function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonStubPath } = {}) {
+function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonStubPath, inheritedPythonStubPath } = {}) {
   const localTemp = path.join(__dirname, "..", ".cache", "issue-329-unit");
   fs.mkdirSync(localTemp, { recursive: true });
   const root = fs.mkdtempSync(path.join(localTemp, "pyright-config-"));
@@ -24,8 +24,8 @@ function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonSt
   const configurationListeners = new Set();
   let onPythonSettingChange;
   const pythonConfiguration = {
-    get: (_name, fallback) => pythonStubPath ?? fallback,
-    inspect: () => ({ workspaceFolderValue: pythonStubPath }),
+    get: (_name, fallback) => pythonStubPath ?? inheritedPythonStubPath ?? fallback,
+    inspect: () => ({ workspaceFolderValue: pythonStubPath, workspaceValue: inheritedPythonStubPath }),
     update: async (_name, value) => {
       pythonStubPath = value;
       if (onPythonSettingChange) await onPythonSettingChange(value);
@@ -333,6 +333,15 @@ test("fresh JSON config release removes the extraPaths key created by GraphQL De
   assert.equal(restored.stubPath, "custom-stubs");
   assert.equal(restored.hasExtraPaths, false);
   assert.equal(state.get(stateKey(f.root)), undefined);
+});
+
+test("project config release restores an explicit empty folder stubPath over an inherited value", async t => {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs"}', pythonStubPath: "", inheritedPythonStubPath: "inherited-stubs" });
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker);
+  await managed.release();
+  assert.equal(f.pythonStubPath, "");
+  assert.equal(f.vscode.workspace.getConfiguration("python", f.folder.uri).get("analysis.stubPath", "fallback"), "");
+  managed.cleanup();
 });
 
 test("fresh TOML config release removes the extraPaths key created by GraphQL Desk", async t => {

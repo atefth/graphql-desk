@@ -40,7 +40,7 @@ function pythonStubSettings(vscode, folder, workspace) {
   const dirty = () => vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === "file" &&
     (normalized(document.uri.fsPath) === normalized(path.join(workspace, ".vscode", "settings.json")) ||
       workspaceFile && normalized(document.uri.fsPath) === normalized(workspaceFile))) === true;
-  const update = async value => configuration.update(setting, value || undefined, vscode.ConfigurationTarget.WorkspaceFolder);
+  const update = async value => configuration.update(setting, value === undefined || value === null ? undefined : value, vscode.ConfigurationTarget.WorkspaceFolder);
   const restore = async previous => {
     if (previous.folderPresent) await update(previous.folderValue);
     else if (previous.singleFolderDirectory && previous.workspacePresent) await update(previous.workspaceValue);

@@ -181,7 +181,8 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
   assert.deepEqual(await fs.readdir(extensions), [], "Every host run starts with an empty extensions directory");
   const result = path.join(temporary, "result.json");
   const artifacts = path.join(temporary, "artifacts.json");
-  const stubRoot = factorySuite ? path.join(workspace, ".graphql-desk", "typings") : path.join(workspace, "owned_analysis_stubs");
+  const managedBase = ["typingMatrix", "mixedLists"].includes(suite) ? "live-typings" : "typings";
+  const stubRoot = factorySuite ? path.join(workspace, ".graphql-desk", managedBase) : path.join(workspace, "owned_analysis_stubs");
   const python = process.env.GRAPHQL_DESK_PYTHON || path.resolve(__dirname, "..", "..", ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
   assert.ok(path.isAbsolute(python), "Choose an absolute trusted Python interpreter");
   const mappingFixture = suite === "externalMappings" ? await installMappingStub(python) : null;
@@ -344,6 +345,11 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
       ...(suite === "lifecycle" ? [fs.writeFile(path.join(workspace, "lifecycle_calls.py"), "from graphql_desk_generated.default import graphql\nextra = graphql('query Extra { user { id } }')\n")] : []),
       ...(suite === "lifecycle" ? [fs.writeFile(path.join(workspace, "preserved_user.py"), "value = 'saved'\n")] : []),
     ]);
+    if (["typingMatrix", "mixedLists"].includes(suite)) {
+      await fs.writeFile(path.join(workspace, "pyrightconfig.json"), JSON.stringify({
+        stubPath: "custom-stubs", extraPaths: ["vendor"], typeCheckingMode: "strict",
+      }));
+    }
     const runtimePackage = path.join(workspace, "graphql_desk_generated");
     await fs.mkdir(path.join(runtimePackage, "sources"), { recursive: true });
     await Promise.all([
@@ -545,6 +551,20 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     observed.lifecycle.abandonedGenerationIgnoredAndPreserved = true;
     assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
     observed.lifecycle.userFilePreserved = true;
+    await fs.writeFile(result, JSON.stringify(observed, null, 2));
+  } else if (["typingMatrix", "mixedLists"].includes(suite)) {
+    const project = JSON.parse(await fs.readFile(path.join(workspace, "pyrightconfig.json"), "utf8"));
+    assert.match(project.stubPath.replaceAll("\\", "/"), /^\.graphql-desk\/live-typings\/generations\/g-/,
+      "GraphQL Desk publishes through the effective project config");
+    assert.deepEqual(project.extraPaths, ["vendor", "custom-stubs"], "GraphQL Desk preserves custom project stub roots");
+    const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
+    assert.equal(settings["python.analysis.stubPath"], project.stubPath,
+      "Pylance uses the same complete generation as the project config");
+    const generations = await fs.readdir(path.join(stubRoot, "generations"));
+    assert.ok(generations.some(name => name.startsWith("g-") && fsSync.existsSync(path.join(stubRoot, "generations", name, "complete.json"))),
+      "A complete immutable generation is selected");
+    observed.lifecycle.managedProjectStubPath = project.stubPath;
+    observed.lifecycle.preservedProjectExtraPaths = project.extraPaths;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (["projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite)) {
     assert.equal(observed.outcome, "project-config-live-typing-observed");

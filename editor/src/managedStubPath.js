@@ -62,12 +62,12 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
   const ownsCurrentValue = expected => {
     const current = config.inspect?.("analysis.stubPath");
     if (current) {
-      const configuredValues = [current.globalValue, current.workspaceValue, current.workspaceFolderValue]
-        .filter(value => value !== undefined);
-      if (expected === "") return configuredValues.length === 0;
       // VS Code may serialize a WorkspaceFolder target as workspaceValue for a
-      // single-folder workspace. Ownership is the persisted value, not that layer.
-      return configuredValues.length > 0 && configuredValues.every(value => value === expected);
+      // single-folder workspace. Compare the effective explicit layer so an owned
+      // empty override remains distinct from an inherited nonempty setting.
+      const value = current.workspaceFolderValue !== undefined ? current.workspaceFolderValue :
+        current.workspaceValue !== undefined ? current.workspaceValue : current.globalValue ?? "";
+      return value === expected;
     }
     return config.get("analysis.stubPath", "") === expected;
   };
@@ -243,14 +243,14 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
             await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
             if (isCurrent() !== true && ownsCurrentValue(targetSetting)) {
               setting = oldSetting;
-              await config.update("analysis.stubPath", oldSetting || undefined, vscode.ConfigurationTarget.WorkspaceFolder);
+              await config.update("analysis.stubPath", oldSetting, vscode.ConfigurationTarget.WorkspaceFolder);
               await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
               return false;
             }
             return ownsCurrentValue(targetSetting);
           } catch (error) {
             if (ownsCurrentValue(targetSetting)) {
-              await config.update("analysis.stubPath", oldSetting || undefined, vscode.ConfigurationTarget.WorkspaceFolder);
+              await config.update("analysis.stubPath", oldSetting, vscode.ConfigurationTarget.WorkspaceFolder);
             }
             if (ownsCurrentValue(oldSetting)) {
               setting = oldSetting;
@@ -282,7 +282,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
         if (options.restoreOnRelease !== true || !ownsSetting) return;
         if (!ownsCurrentValue(setting)) throw new Error(ownershipError());
         const restored = options.restoreSetting;
-        await config.update("analysis.stubPath", restored || undefined, vscode.ConfigurationTarget.WorkspaceFolder);
+        await config.update("analysis.stubPath", restored, vscode.ConfigurationTarget.WorkspaceFolder);
         if (!ownsCurrentValue(restored ?? "")) throw new Error("Original Pyright stubPath restoration could not be verified; preserved");
         setting = restored ?? "";
         ownsSetting = false;
