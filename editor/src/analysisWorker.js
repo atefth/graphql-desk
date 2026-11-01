@@ -361,7 +361,11 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
             }
           }
         }
-        encoded = Buffer.from(JSON.stringify(message) + "\n", "utf8");
+        const wireMessage = message.op === "pyright_config" ? { ...message, ownership: {
+          top_level: message.ownership.topLevel,
+          execution_environment_roots: message.ownership.executionEnvironmentRoots,
+        } } : message;
+        encoded = Buffer.from(JSON.stringify(wireMessage) + "\n", "utf8");
         if (encoded.length > MAX_FRAME_BYTES) throw failure();
       } catch { stop(); throw failure(); }
       let process;

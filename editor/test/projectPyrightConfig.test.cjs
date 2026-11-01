@@ -76,6 +76,14 @@ test("JSONC edit adds and removes the managed path when extraPaths is absent", (
   assert.match(removed.text, /"typeCheckingMode": "strict"/);
 });
 
+test("duplicate JSONC keys are rejected before any config update", async t => {
+  const text = '{"extraPaths":["vendor"],"extraPaths":["shadow"]}';
+  assert.throws(() => modifyJsonConfig(text, "add"), /Duplicate JSONC config key/);
+  const f = fixture(t, { json: text });
+  await assert.rejects(updateProjectConfig(f.vscode, f.folder, "add", f.worker), /Duplicate JSONC config key/);
+  assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), text);
+});
+
 test("JSONC appends to every execution environment and removes only settings it created", () => {
   const original = `{
   "extraPaths": ["vendor"],
@@ -127,6 +135,76 @@ test("execution environments get managed paths and dirty config buffers fail clo
   const dirty = fixture(t, { json: '{"stubPath":"stubs"}', dirty: true });
   await assert.rejects(updateProjectConfig(dirty.vscode, dirty.folder, "add", dirty.worker), /Dirty Pyright config buffer/);
   assert.equal(fs.readFileSync(path.join(dirty.root, "pyrightconfig.json"), "utf8"), '{"stubPath":"stubs"}');
+});
+
+test("an in-place TOML edit during the async worker call is preserved", async t => {
+  const original = '[tool.pyright]\nstubPath = "stubs"\n';
+  const f = fixture(t, { toml: original });
+  const file = path.join(f.root, "pyproject.toml");
+  const before = fs.statSync(file);
+  const worker = async (...args) => {
+    const result = await f.worker(...args);
+    if (args[2] === "add") fs.writeFileSync(file, `${original}# concurrent user edit\n`);
+    return result;
+  };
+  await assert.rejects(updateProjectConfig(f.vscode, f.folder, "add", worker), /changed concurrently/);
+  const after = fs.statSync(file);
+  assert.equal(after.ino, before.ino, "the test mutates the same config inode");
+  assert.equal(fs.readFileSync(file, "utf8"), `${original}# concurrent user edit\n`);
+});
+
+test("pending ownership recovers before and after the atomic config edit", async t => {
+  for (const statePoint of ["before-edit", "after-edit"]) {
+    const original = '{"extraPaths":["vendor"],"executionEnvironments":[{"root":"src"}]}';
+    const f = fixture(t, { json: original });
+    const state = stateStore();
+    const file = path.join(f.root, "pyrightconfig.json");
+    const intent = modifyJsonConfig(original, "add");
+    await state.update(stateKey(f.root), { version: 2, file: "pyrightconfig.json", format: "jsonc", path: MANAGED_PATH,
+      ownership: intent.ownership, pending: true });
+    if (statePoint === "after-edit") fs.writeFileSync(file, intent.text);
+    const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    assert.equal(state.get(stateKey(f.root)).active, true);
+    await managed.release();
+    managed.cleanup();
+    const restored = parseJsonConfig(fs.readFileSync(file, "utf8"));
+    assert.deepEqual(restored.extraPaths, ["vendor"]);
+    assert.equal(restored.executionEnvironments[0].hasExtraPaths, false);
+  }
+});
+
+test("pending TOML recovery carries its saved ownership through the worker bridge", async t => {
+  const f = fixture(t, { toml: '[tool.pyright]\nextraPaths = ["vendor"]\n' });
+  const state = stateStore();
+  const ownership = { topLevel: false, executionEnvironmentRoots: [] };
+  await state.update(stateKey(f.root), { version: 2, file: "pyproject.toml", format: "toml", path: MANAGED_PATH,
+    ownership, pending: true });
+  let observed;
+  const worker = async (...args) => { observed = args[4]; return f.worker(...args); };
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, worker);
+  assert.deepEqual(observed, ownership);
+  assert.equal(state.get(stateKey(f.root)).active, true);
+  await managed.release();
+  managed.cleanup();
+});
+
+test("active ownership fails closed if the managed path was removed before restart", async t => {
+  const original = '{"extraPaths":["vendor"]}';
+  const f = fixture(t, { json: original });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const file = path.join(f.root, "pyrightconfig.json");
+  const current = fs.readFileSync(file, "utf8");
+  fs.writeFileSync(file, modifyJsonConfig(current, "remove", MANAGED_PATH, state.get(stateKey(f.root)).ownership).text);
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker), /Active GraphQL Desk Pyright path is missing/);
+  managed.cleanup();
+});
+
+test("globbed Pyright search paths fail closed before modifying the config", async t => {
+  const original = '{"extraPaths":["vendor/*"]}';
+  const f = fixture(t, { json: original });
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker), /globs cannot be checked/);
+  assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), original);
 });
 
 test("malformed Pyright configs are preserved", async t => {

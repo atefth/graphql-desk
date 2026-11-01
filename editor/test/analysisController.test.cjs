@@ -114,6 +114,20 @@ test("real worker captures unsaved source/config/schema, shares concurrent provi
   await assert.rejects(fs.stat(path.join(root, "new.py")), { code: "ENOENT" });
 });
 
+test("TOML Pyright ownership maps across the controller, worker protocol and Python worker", async t => {
+  const fixture = await setup(t);
+  pythonApi(fixture);
+  const controller = createAnalysisController(fixture.vscode);
+  t.after(() => controller.dispose());
+  const text = '[tool.pyright]\nextraPaths = ["vendor"]\n[[tool.pyright.executionEnvironments]]\nroot = "src"\n';
+  const reply = await controller.editPyrightConfig(fixture.vscode.workspace.workspaceFolders[0], text, "add",
+    ".graphql-desk/live-typings", { topLevel: false, executionEnvironmentRoots: ["src"] });
+  assert.equal(reply.ok, true);
+  assert.deepEqual(reply.extra_paths, ["vendor", ".graphql-desk/live-typings"]);
+  assert.deepEqual(reply.ownership, { top_level: false, execution_environment_roots: ["src"] });
+  assert.deepEqual(reply.execution_environments[0].extra_paths, [".graphql-desk/live-typings"]);
+});
+
 test("configuration diagnostics follow the current dirty pyproject and clear after repair", async t => {
   const fixture = await setup(t);
   const reports = [];

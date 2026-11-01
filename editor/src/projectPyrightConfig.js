@@ -3,7 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomUUID, createHash } = require("node:crypto");
-const { parse, modify, applyEdits } = require("jsonc-parser");
+const { parse, parseTree, modify, applyEdits } = require("jsonc-parser");
 
 const MANAGED_PATH = ".graphql-desk/live-typings";
 const MAX_CONFIG_BYTES = 1024 * 1024;
@@ -51,6 +51,20 @@ function parseJsonConfig(text) {
   const errors = [];
   const value = parse(text, errors, { allowTrailingComma: true, disallowComments: false });
   if (errors.length || !value || Object.getPrototypeOf(value) !== Object.prototype) throw new Error("Malformed pyrightconfig.json; preserved");
+  const tree = parseTree(text, errors, { allowTrailingComma: true, disallowComments: false });
+  if (errors.length || !tree) throw new Error("Malformed pyrightconfig.json; preserved");
+  const checkDuplicates = node => {
+    if (node.type === "object") {
+      const keys = new Set();
+      for (const property of node.children ?? []) {
+        const key = property.children?.[0]?.value;
+        if (typeof key !== "string" || keys.has(key)) throw new Error("Duplicate JSONC config key; preserved");
+        keys.add(key);
+        if (property.children?.[1]) checkDuplicates(property.children[1]);
+      }
+    } else for (const child of node.children ?? []) checkDuplicates(child);
+  };
+  checkDuplicates(tree);
   const extraPaths = value.extraPaths ?? [];
   if (!Array.isArray(extraPaths) || extraPaths.some(item => typeof item !== "string")) throw new Error("Invalid Pyright extraPaths; preserved");
   if (value.stubPath !== undefined && typeof value.stubPath !== "string") throw new Error("Invalid Pyright stubPath; preserved");
@@ -142,15 +156,19 @@ function readFileSafe(vscode, workspace, file) {
         const bytes = Buffer.alloc(opened.size);
         const count = fs.readSync(descriptor, bytes, 0, bytes.length, 0);
         if (count !== bytes.length || !same(opened, fs.lstatSync(current))) throw new Error("Pyright config changed while reading; preserved");
-        return { text: bytes.toString("utf8"), identity: opened, filename: current };
+        return { text: bytes.toString("utf8"), identity: opened,
+          hash: createHash("sha256").update(bytes).digest("hex"), filename: current };
       } finally { fs.closeSync(descriptor); }
     }
   }
 }
 
-function atomicReplace(vscode, workspace, file, text, expected) {
+function atomicReplace(vscode, workspace, file, text, expected, expectedHash) {
   const targetStat = safeIdentity(file);
-  if (!same(targetStat, expected) || targetStat.size > MAX_CONFIG_BYTES) throw new Error("Pyright config changed concurrently; preserved");
+  if (!same(targetStat, expected) || targetStat.size > MAX_CONFIG_BYTES ||
+      createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== expectedHash) {
+    throw new Error("Pyright config changed concurrently; preserved");
+  }
   if (vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.scheme === "file" &&
       normalized(document.uri.fsPath) === normalized(file))) throw new Error("Dirty Pyright config buffer; preserved");
   const temporary = path.join(path.dirname(file), `.graphql-desk-${randomUUID()}.tmp`);
@@ -160,7 +178,8 @@ function atomicReplace(vscode, workspace, file, text, expected) {
     try { created = fs.fstatSync(descriptor); fs.writeFileSync(descriptor, Buffer.from(text, "utf8")); fs.fsyncSync(descriptor); }
     finally { fs.closeSync(descriptor); }
     const current = safeIdentity(file);
-    if (!same(expected, current) || !same(created, fs.lstatSync(temporary))) throw new Error("Pyright config changed concurrently; preserved");
+    if (!same(expected, current) || createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== expectedHash ||
+        !same(created, fs.lstatSync(temporary))) throw new Error("Pyright config changed concurrently; preserved");
     const owner = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file));
     if (!owner || normalized(owner.uri.fsPath) !== normalized(workspace)) throw new Error("Pyright config workspace changed; preserved");
     fs.renameSync(temporary, file);
@@ -210,7 +229,7 @@ async function updateProjectConfig(vscode, folder, action, worker, ownership = {
   if (action === "inspect") return { ...inspected, file, format, identity: snapshot.identity, workspace };
     const update = format === "jsonc" ? modifyJsonConfig(snapshot.text, action, MANAGED_PATH, ownership) :
     await invokeToml(folder, snapshot.text, action, worker, ownership);
-  if (update.text !== snapshot.text) atomicReplace(vscode, workspace, file, update.text, snapshot.identity);
+  if (update.text !== snapshot.text) atomicReplace(vscode, workspace, file, update.text, snapshot.identity, snapshot.hash);
   return { ...update, file, format, workspace };
 }
 
@@ -221,26 +240,50 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   const key = stateKey(workspace);
   const saved = workspaceState?.get?.(key);
   const fileKey = path.relative(workspace, inspected.file).split(path.sep).join("/");
+  const configuredPaths = config => [config.stubPath ?? "typings", ...config.extraPaths,
+    ...config.executionEnvironments.flatMap(item => item.extraPaths)];
+  const hasGlob = value => value.includes("*") || value.includes("?") || /[\[\]{}]/.test(value);
+  if (configuredPaths(inspected).some(value => value !== MANAGED_PATH && hasGlob(value))) {
+    throw new Error("Pyright stubPath/extraPaths globs cannot be checked for generated-package collisions; preserved");
+  }
+  const validOwnership = value => value && typeof value.topLevel === "boolean" &&
+    Array.isArray(value.executionEnvironmentRoots) && value.executionEnvironmentRoots.every(root => typeof root === "string");
   if (saved && (saved.version !== 2 || saved.file !== fileKey || saved.path !== MANAGED_PATH || saved.format !== inspected.format ||
-      !saved.ownership || typeof saved.ownership.topLevel !== "boolean" || !Array.isArray(saved.ownership.executionEnvironmentRoots))) {
+      !validOwnership(saved.ownership) || Boolean(saved.pending) === Boolean(saved.active))) {
     throw new Error("GraphQL Desk Pyright config ownership changed; preserved");
   }
-  if ((inspected.extraPaths.includes(MANAGED_PATH) || inspected.executionEnvironments.some(item => item.extraPaths.includes(MANAGED_PATH))) && !saved?.active) {
+  const hasManagedPath = config => config.extraPaths.includes(MANAGED_PATH) &&
+    config.executionEnvironments.every(item => item.extraPaths.includes(MANAGED_PATH));
+  const hasAnyManagedPath = config => config.extraPaths.includes(MANAGED_PATH) ||
+    config.executionEnvironments.some(item => item.extraPaths.includes(MANAGED_PATH));
+  if (saved?.active && !hasManagedPath(inspected)) {
+    throw new Error("Active GraphQL Desk Pyright path is missing from project config; preserved");
+  }
+  if (saved?.pending && hasAnyManagedPath(inspected) && !hasManagedPath(inspected)) {
+    throw new Error("Incomplete pending GraphQL Desk Pyright config update; preserved");
+  }
+  if (hasAnyManagedPath(inspected) && !saved?.active && !saved?.pending) {
     throw new Error("Pyright extraPaths already contains the reserved GraphQL Desk path; preserved");
   }
-  const directory = ensureWorkspaceRoot(workspace, Boolean(saved?.active));
+  const directory = ensureWorkspaceRoot(workspace, Boolean(saved?.active || saved?.pending));
   let active = Boolean(saved?.active);
   let configChanged = false;
   let current = inspected;
   try {
     if (!active) {
-      await workspaceState?.update?.(key, { version: 2, file: fileKey, format: inspected.format, path: MANAGED_PATH, pending: true });
-      current = await updateProjectConfig(vscode, folder, "add", worker);
-      if (!current.extraPaths.includes(MANAGED_PATH)) throw new Error("GraphQL Desk Pyright extraPath was not persisted");
+      const ownership = saved?.pending ? saved.ownership : {
+        topLevel: !inspected.hasExtraPaths,
+        executionEnvironmentRoots: inspected.executionEnvironments.filter(item => !item.hasExtraPaths).map(item => item.root),
+      };
+      await workspaceState?.update?.(key, { version: 2, file: fileKey, format: inspected.format, path: MANAGED_PATH,
+        ownership, pending: true });
+      if (saved?.pending && hasManagedPath(inspected)) current = { ...inspected, ownership };
+      else current = await updateProjectConfig(vscode, folder, "add", worker, ownership);
+      if (!hasManagedPath(current)) throw new Error("GraphQL Desk Pyright extraPath was not persisted everywhere");
       active = true;
       configChanged = current.text !== inspected.text;
       await workspaceState?.update?.(key, { version: 2, file: fileKey, format: inspected.format, path: MANAGED_PATH,
-        ownership: current.ownership, active: true });
+        ownership: current.ownership ?? ownership, active: true });
     }
   } catch (error) {
     if (active) {
@@ -255,9 +298,10 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   const configRoots = () => {
     const base = path.dirname(inspected.file);
     const stubPath = current.stubPath ?? "typings";
-    return [path.resolve(base, stubPath), ...current.extraPaths,
-      ...current.executionEnvironments.flatMap(item => item.extraPaths)].filter(value => value !== MANAGED_PATH)
-      .map(value => path.resolve(base, value)).filter((value, index, values) => values.indexOf(value) === index);
+    const values = [stubPath, ...current.extraPaths, ...current.executionEnvironments.flatMap(item => item.extraPaths)]
+      .filter(value => value !== MANAGED_PATH);
+    if (values.some(hasGlob)) throw new Error("Pyright stubPath/extraPaths globs cannot be checked for generated-package collisions; preserved");
+    return values.map(value => path.resolve(base, value)).filter((value, index, values) => values.indexOf(value) === index);
   };
   const packageRootExists = (rootPath, topPackage) => {
     let currentPath = path.parse(rootPath).root;
