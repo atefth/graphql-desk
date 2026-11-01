@@ -75,6 +75,27 @@ class FragmentTests(unittest.TestCase):
         )
         return [fact.name for fact in document.definitions]
 
+    def test_function_local_fragment_reaches_indexed_operation(self) -> None:
+        sources = self.resolve(
+            module(
+                "query",
+                "def read():\n"
+                '    card = graphql("fragment Card on User { id name }")\n'
+                '    return graphql("query UserCard { user { ...Card } }", '
+                "fragments=[card])\n",
+            )
+        )
+        index = index_fragments(sources, schemas=self.schemas)
+        self.assertEqual(index.diagnostics, ())
+        self.assertEqual(len(index.documents), 2)
+        operation = next(
+            item for item in index.documents if item.call.source.startswith("query")
+        )
+        self.assertEqual(operation.definitions[0].name, "UserCard")
+        self.assertEqual(
+            [item.name for item in operation.definitions], ["UserCard", "Card"]
+        )
+
     def test_rejected_owners_preserve_transitive_causes_and_independent_success(
         self,
     ) -> None:

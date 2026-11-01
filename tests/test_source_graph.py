@@ -3120,6 +3120,97 @@ alias('{ id }')
                 (),
             )
 
+    def test_function_local_fragment_bindings_resolve_only_when_statically_safe(
+        self,
+    ) -> None:
+        positive = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def read():\n"
+                    "    card = gql('fragment Card on User { id }')\n"
+                    "    return gql('query UserCard { user { ...Card } }', "
+                    "fragments=[card])\n",
+                ),
+            )
+        )
+        self.assertEqual(positive.diagnostics, ())
+        self.assertEqual(len(positive.calls), 2)
+        operation = positive.calls[-1]
+        self.assertEqual(operation.source, "query UserCard { user { ...Card } }")
+        self.assertEqual(len(operation.fragments), 1)
+        self.assertEqual(
+            operation.fragments[0].target,
+            DocumentIdentity(positive.calls[0].module, positive.calls[0].range),
+        )
+        annotated_async = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql as document\n"
+                    "async def read():\n"
+                    "    card: object = document('fragment Card on User { id }')\n"
+                    "    return document('query UserCard { user { ...Card } }', "
+                    "fragments=(card,))\n",
+                ),
+            )
+        )
+        self.assertEqual(annotated_async.diagnostics, ())
+        self.assertEqual(len(annotated_async.calls), 2)
+        self.assertEqual(len(annotated_async.calls[-1].fragments), 1)
+
+        rejected = (
+            "def read(flag):\n"
+            "    if flag:\n"
+            "        card = gql('fragment Card on User { id }')\n"
+            "    return gql('query { user { ...Card } }', fragments=[card])\n",
+            "def read(flag):\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    if flag: card = gql('fragment Card on User { name }')\n"
+            "    return gql('query { user { ...Card } }', fragments=[card])\n",
+            "def read():\n"
+            "    card = make_fragment()\n"
+            "    return gql('query { user { ...Card } }', fragments=[card])\n",
+            "def read():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    card = gql('fragment Card on User { name }')\n"
+            "    return gql('query { user { ...Card } }', fragments=[card])\n",
+            "def read(card):\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    return gql('query { user { ...Card } }', fragments=[card])\n",
+            "def read():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    retain(lambda: card)\n"
+            "    return gql('query { user { ...Card } }', fragments=[card])\n",
+            "def read():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    retain(card)\n"
+            "    return gql('query { user { ...Card } }', fragments=[card])\n",
+            "def read():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    return gql('query { user { ...Card } }', fragments=make_list(card))\n",
+            "def read():\n"
+            "    card = gql('query Wrong { user { id } }')\n"
+            "    return gql('query { user { ...Wrong } }', fragments=[card])\n",
+            "def read(flag):\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    if flag:\n"
+            "        return gql('query { user { ...Card } }', fragments=[card])\n",
+        )
+        for body in rejected:
+            with self.subTest(body=body):
+                result = resolve_project(
+                    (module("main", "from graphql_desk import gql\n" + body),)
+                )
+                self.assertFalse(
+                    any(
+                        call.source == "query { user { ...Card } }"
+                        for call in result.calls
+                    )
+                )
+                self.assertTrue(result.diagnostics)
+
     def test_persisted_declarations_resolve_schema_document_and_exact_spans(
         self,
     ) -> None:
