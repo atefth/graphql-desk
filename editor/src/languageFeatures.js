@@ -961,9 +961,16 @@ function registerLanguageFeatures(vscode, options) {
       const text = document.getText();
       if (span.start < 0 || span.end < span.start || span.end > text.length ||
           text.slice(span.start, span.end) !== expected) return false;
-      const edit = new vscode.WorkspaceEdit();
-      edit.replace(document.uri, range(document, span), replacement);
-      return vscode.workspace.applyEdit(edit);
+      const editor = vscode.window.visibleTextEditors.find(item => item.document === document);
+      if (!editor) return false;
+      let accepted = false;
+      const applied = await editor.edit(edit => {
+        if (disposed || document.isClosed || document.version !== version ||
+            document.getText().slice(span.start, span.end) !== expected) return;
+        edit.replace(range(document, span), replacement);
+        accepted = true;
+      });
+      return accepted && applied;
     }),
     vscode.languages.registerCompletionItemProvider(selector, {
       async provideCompletionItems(document, position, token) {

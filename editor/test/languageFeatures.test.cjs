@@ -1118,11 +1118,15 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   const publications = [];
   const providers = {};
   let disposed = 0;
+  const registeredCommands = new Map();
   const handle = () => ({ dispose() { disposed += 1; } });
   const vscode = {
     Uri: { parse(value) { return { toString: () => value }; } },
-    commands: { registerCommand() { return handle(); } },
-    workspace: { textDocuments: [], async applyEdit() { return true; } },
+    commands: {
+      registerCommand(name, callback) { registeredCommands.set(name, callback); return handle(); },
+    },
+    workspace: { textDocuments: [] },
+    window: { visibleTextEditors: [] },
     Range: class { constructor(start, end) { this.start = start; this.end = end; } },
     Location: class { constructor(uri, range) { Object.assign(this, { uri, range }); } },
     TextEdit: { replace(range, newText) { return { range, newText }; } },
@@ -1177,6 +1181,35 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   assert.equal(doc.getText().slice(validationActions[0].edit.changes[0][1].start.offset,
     validationActions[0].edit.changes[0][1].end.offset), "nam");
   assert.equal(validationActions[0].edit.changes[0][2], "name");
+  const guardedCommand = [...registeredCommands.values()][0];
+  let guardedText = "old text";
+  const guardedDocument = { uri: { toString: () => "file:///guarded.py" }, version: 4, isClosed: false,
+    getText: () => guardedText, positionAt: offset => ({ offset }) };
+  vscode.workspace.textDocuments = [guardedDocument];
+  let editBuilderCalled = false;
+  vscode.window.visibleTextEditors = [{ document: guardedDocument, async edit(build) {
+    guardedDocument.version += 1;
+    guardedText = "new text";
+    build({ replace() { editBuilderCalled = true; } });
+    return false;
+  } }];
+  assert.equal(await guardedCommand({ uri: "file:///guarded.py", version: 4,
+    range: { start: 0, end: 3 }, expected: "old", replacement: "" }), false);
+  assert.equal(editBuilderCalled, false);
+  assert.equal(guardedText, "new text");
+  guardedDocument.version = 5;
+  guardedText = "old text";
+  editBuilderCalled = false;
+  vscode.window.visibleTextEditors[0].edit = async build => {
+    build({ replace() { editBuilderCalled = true; } });
+    guardedDocument.version += 1;
+    guardedText = "user edit";
+    return false;
+  };
+  assert.equal(await guardedCommand({ uri: "file:///guarded.py", version: 5,
+    range: { start: 0, end: 3 }, expected: "old", replacement: "" }), false);
+  assert.equal(editBuilderCalled, true);
+  assert.equal(guardedText, "user edit");
   const documentSymbols = await providers.symbols.provideDocumentSymbols(doc);
   assert.deepEqual(documentSymbols.map(item => [item.name, item.detail, item.kind]), [["Check", "query", 11]]);
   registered.dispose();
