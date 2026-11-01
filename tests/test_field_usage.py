@@ -192,6 +192,50 @@ class FieldUsageTests(unittest.TestCase):
         self.assertEqual([field for field, _ in found], ["user"])
         self.assertIn("user.email", found[0][1])
 
+    def test_instance_stored_result_is_consumed_by_another_method(self) -> None:
+        source = (
+            PREFIX
+            + "class Screen:\n"
+            + "    def __init__(self, client):\n"
+            + "        self.data = execute(query, {})\n"
+            + "        self.client = client\n"
+            + "    def show(self):\n"
+            + '        print(self.data["user"]["name"])'
+        )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
+
+    def test_unstable_instance_result_storage_stays_silent(self) -> None:
+        cases = (
+            "class Screen:\n"
+            "    def __init__(self):\n"
+            "        self.data = execute(query, {})\n"
+            "    def show(self):\n"
+            "        self.data = None\n"
+            '        print(self.data["user"]["name"])',
+            "class Screen:\n"
+            "    def __init__(self):\n"
+            "        self.data = execute(query, {})\n"
+            "    def show(self):\n"
+            '        print(getattr(self, "data")["user"]["name"])',
+            "class Screen:\n"
+            "    def __init__(self):\n"
+            "        if enabled:\n"
+            "            self.data = execute(query, {})\n"
+            "    def show(self):\n"
+            '        print(self.data["user"]["name"])',
+            "class Screen:\n"
+            "    def __init__(self):\n"
+            "        self.data = execute(query, {})\n"
+            "        self.data = execute(query, {})\n"
+            "    def show(self):\n"
+            '        print(self.data["user"]["name"])',
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertEqual(warnings(PREFIX + case), [])
+
     def test_function_local_class_methods_use_module_scope_documents(self) -> None:
         source = (
             PREFIX
