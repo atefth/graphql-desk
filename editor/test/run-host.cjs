@@ -199,10 +199,6 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     ...(factorySuite ? { "python.analysis.typeCheckingMode": "strict" } : {}),
     ...(suite === "workspaceRemoval" ? { "python.analysis.stubPath": ".graphql-desk/typings" } : {}),
   }));
-  if (factorySuite) {
-    // Prevent the repository's parent Pyright include list from excluding this nested host workspace.
-    await fs.writeFile(path.join(workspace, "pyrightconfig.json"), JSON.stringify({ include: ["**/*.py"] }));
-  }
   if (suite === "ownedAnalysis") {
     await fs.mkdir(stubRoot);
     const files = {
@@ -322,9 +318,9 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     const shapeFields = ["typingMatrix", "mixedLists"].includes(suite)
       ? ` nested: [[String!]!]! nullable: [String]${suite === "mixedLists" ? " nullableList: [String!] nullableItems: [String]!" : ""}` : "";
     await Promise.all([
-      fs.writeFile(path.join(workspace, "pyproject.toml"), suite === "externalMappings"
+      fs.writeFile(path.join(workspace, "pyproject.toml"), (suite === "externalMappings"
         ? `[tool.graphql-desk]\ngenerated_package = "graphql_desk_generated"\n[[tool.graphql-desk.schemas]]\nname = "default"\nschema = "schema.graphql"\nschema_output = "graphql_desk_generated/default.pyi"\nscalars = { ExternalDate = { input = "${mappingFixture.packageName}.alpha.AlphaDateInput", output = "${mappingFixture.packageName}.alpha.AlphaDateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.alpha.AlphaColor" }\n[[tool.graphql-desk.schemas]]\nname = "beta"\nschema = "beta.graphql"\nschema_output = "graphql_desk_generated/beta.pyi"\nscalars = { ExternalDate = { input = "${mappingFixture.packageName}.beta.BetaDateInput", output = "${mappingFixture.packageName}.beta.BetaDateOutput" } }\nenums = { ExternalColor = "${mappingFixture.packageName}.beta.BetaColor" }\n`
-        : '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n'),
+        : '[tool.graphql-desk]\nschema="schema.graphql"\nschema_output="graphql_desk_generated/default.pyi"\n') + '\n[tool.pyright]\ninclude = ["**/*.py"]\n'),
       fs.writeFile(path.join(workspace, "schema.graphql"), `${suite === "externalMappings" ? "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" : ""}type User { id: ID! name: String! }\ntype Query { selected: String! count(limit: Int!): Int! user: User!${suite === "externalMappings" ? " externalDate(value: ExternalDate!): ExternalDate! externalColor(value: ExternalColor!): ExternalColor!" : ""}${shapeFields} }\n`),
       ...(suite === "externalMappings" ? [fs.writeFile(path.join(workspace, "beta.graphql"),
         "scalar ExternalDate\nenum ExternalColor { RED BLUE }\n" +
