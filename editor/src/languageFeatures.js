@@ -486,43 +486,66 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
       name = `${base}${suffix++}`;
     } while (true);
     const calls = new Map(bundle.response.calls.map(item => [documentKey(item.identity), item]));
-    const references = [];
-    const inlineReferenceEdits = [];
-    const inlineBindings = new Map();
+    const selectedReferences = [];
+    let hasInlineDependency = false;
     for (const spread of spreads) {
       const matches = call.fragments.filter(reference => {
         const target = calls.get(documentKey(reference.target));
         return target?.index?.primary_fragment?.name === spread &&
           reference.reference_module.uri === snapshot.uri && reference.reference_module.version === snapshot.version;
       });
-      if (matches.length !== 1) { references.length = 0; break; }
+      if (matches.length !== 1) { selectedReferences.length = 0; break; }
       const reference = matches[0];
       const range = reference.range.utf16;
       const target = calls.get(documentKey(reference.target));
       const expression = snapshot.text.slice(range.start, range.end);
-      if (!target || range.start < callRange.start || range.end > callRange.end) { references.length = 0; break; }
-      if (/^[_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*$/.test(expression)) {
-        references.push(expression);
-        continue;
-      }
+      if (!target || range.start < callRange.start || range.end > callRange.end) { selectedReferences.length = 0; break; }
       const targetRange = target.identity.call_range.utf16;
-      if (target.identity.module.uri !== snapshot.uri || target.identity.module.version !== snapshot.version ||
-          range.start !== targetRange.start || range.end !== targetRange.end || call.fragments.length !== 1) {
-        references.length = 0; break;
+      const inline = target.identity.module.uri === snapshot.uri && target.identity.module.version === snapshot.version &&
+        range.start === targetRange.start && range.end === targetRange.end;
+      if (!inline && !/^[_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*$/.test(expression)) {
+        selectedReferences.length = 0; break;
       }
-      const key = `${range.start}:${range.end}`;
-      let inline = inlineBindings.get(key);
-      if (!inline) {
-        const baseBinding = `fragment_${spread.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+      hasInlineDependency ||= inline;
+      selectedReferences.push({ range, target, expression, inline });
+    }
+    if (selectedReferences.length !== spreads.size) continue;
+    const references = [];
+    const inlineReferenceEdits = [];
+    const inlineBindings = new Map();
+    if (hasInlineDependency) {
+      const dependencies = call.fragments.map(reference => {
+        const range = reference.range.utf16;
+        const target = calls.get(documentKey(reference.target));
+        const expression = snapshot.text.slice(range.start, range.end);
+        if (!target || range.start < callRange.start || range.end > callRange.end) return null;
+        const targetRange = target.identity.call_range.utf16;
+        const inline = target.identity.module.uri === snapshot.uri && target.identity.module.version === snapshot.version &&
+          range.start === targetRange.start && range.end === targetRange.end;
+        if (!inline && !/^[_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*$/.test(expression)) return null;
+        return { range, target, expression };
+      }).sort((a, b) => a.range.start - b.range.start);
+      if (dependencies.some(item => !item)) continue;
+      for (const dependency of dependencies) {
+        const key = `${dependency.range.start}:${dependency.range.end}`;
+        if (inlineBindings.has(key)) continue;
+        const fragmentName = dependency.target.index?.primary_fragment?.name ?? "Dependency";
+        const baseBinding = `fragment_${fragmentName.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
           .replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase()}`;
-        let inlineBinding = baseBinding, inlineSuffix = 2;
-        while (pythonNames.includes(inlineBinding)) inlineBinding = `${baseBinding}_${inlineSuffix++}`;
-        pythonNames += inlineBinding;
-        inline = { binding: inlineBinding, expression, range };
-        inlineBindings.set(key, inline);
-        inlineReferenceEdits.push({ range, replacement: inlineBinding });
+        let dependencyBinding = baseBinding, dependencySuffix = 2;
+        while (pythonNames.includes(dependencyBinding)) dependencyBinding = `${baseBinding}_${dependencySuffix++}`;
+        pythonNames += dependencyBinding;
+        inlineBindings.set(key, { binding: dependencyBinding, expression: dependency.expression, range: dependency.range });
+        inlineReferenceEdits.push({ range: dependency.range, replacement: dependencyBinding });
       }
-      references.push(inline.binding);
+      for (const selected of selectedReferences) {
+        const key = `${selected.range.start}:${selected.range.end}`;
+        const dependency = inlineBindings.get(key);
+        if (!dependency) { references.length = 0; break; }
+        references.push(dependency.binding);
+      }
+    } else {
+      references.push(...selectedReferences.map(item => item.expression));
     }
     if (references.length !== spreads.size) continue;
     const fragment = `fragment ${name} on ${parent.name} {\n${call.source.slice(span.start, span.end)}\n}`;
