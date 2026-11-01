@@ -199,6 +199,10 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     ...(factorySuite ? { "python.analysis.typeCheckingMode": "strict" } : {}),
     ...(suite === "workspaceRemoval" ? { "python.analysis.stubPath": ".graphql-desk/typings" } : {}),
   }));
+  if (factorySuite) {
+    // Prevent the repository's parent Pyright include list from excluding this nested host workspace.
+    await fs.writeFile(path.join(workspace, "pyrightconfig.json"), JSON.stringify({ include: ["**/*.py"] }));
+  }
   if (suite === "ownedAnalysis") {
     await fs.mkdir(stubRoot);
     const files = {
