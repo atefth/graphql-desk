@@ -146,6 +146,7 @@ async function run() {
     extractClassMethodRoundtripUndo: false,
     extractQualifiedRoundtripUndo: false, extractStaleRejected: false,
     extractMultipleInlineDependenciesRoundtripUndo: false,
+    extractNestedFragmentRoundtripUndo: false,
     extractCancellation: false, shutdown: false };
   const clients = [];
   try {
@@ -308,6 +309,30 @@ async function run() {
     assert.equal(multipleInline.document.getText(), multipleInlineSource);
     observed.extractMultipleInlineDependenciesRoundtripUndo = true;
     await multipleInlineClient.stop();
+
+    observed.step = "extract-nested-fragment-roundtrip-undo";
+    const nestedFragmentSource = "from graphql_desk import gql\nname = gql('fragment Name on User { name }')\nquery = gql('query Read { user { friend { ...Name } } }', fragments=[gql('fragment Card on User { ...Name }', fragments=[name])])\n";
+    const nestedFragmentSchema = "type User { id: ID! name: String! friend: User } type Query { user: User }";
+    const nestedFragment = await pythonExtractionDocument("extract-nested-fragment", nestedFragmentSource, {
+      schema: nestedFragmentSchema,
+    });
+    const nestedFragmentClient = createRenameLanguageClient(vscode, nestedFragment.language, { isTrusted: () => true });
+    clients.push(nestedFragmentClient);
+    await nestedFragmentClient.start();
+    await vscode.window.showTextDocument(nestedFragment.document);
+    assert.equal(await requestExtract(nestedFragmentClient.client, nestedFragment.document, undefined, "friend { ...Name }"), true);
+    assert.match(nestedFragment.document.getText(), /fragment UserFields on User .*fragments=\[fragment_card\]/);
+    assert.match(nestedFragment.document.getText(), /fragments=\[user_fields, fragment_card\]/);
+    const nestedFragmentUpdated = bundle(nestedFragment.document.getText(), {
+      uri: nestedFragment.document.uri.toString(), version: nestedFragment.document.version,
+      schema: nestedFragmentSchema,
+    });
+    assert.deepEqual(nestedFragmentUpdated.response.diagnostics, []);
+    assert.equal(nestedFragmentUpdated.response.calls.length, 4);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(nestedFragment.document.getText(), nestedFragmentSource);
+    observed.extractNestedFragmentRoundtripUndo = true;
+    await nestedFragmentClient.stop();
 
     observed.step = "extract-module-conditional-roundtrip-undo";
     const conditionalSource = "# 😀\r\nfrom graphql_desk import gql\r\nif ENABLED:\r\n    # conditional query\r\n    query = gql('query Read { user { id name } }')\r\n";
