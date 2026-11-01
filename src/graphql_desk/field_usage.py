@@ -982,14 +982,18 @@ def _stored_result_attribute(class_node: ast.ClassDef) -> str | None:
         for node in ast.walk(method):
             if isinstance(node, ast.Call):
                 arguments = (*node.args, *(item.value for item in node.keywords))
-                if isinstance(node.func, ast.Name) and node.func.id in {
-                    "getattr",
-                    "setattr",
-                    "delattr",
-                } or any(
-                    isinstance(argument, ast.Name)
-                    and argument.id == method_self
-                    for argument in arguments
+                if (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id
+                    in {
+                        "getattr",
+                        "setattr",
+                        "delattr",
+                    }
+                    or any(
+                        isinstance(argument, ast.Name) and argument.id == method_self
+                        for argument in arguments
+                    )
                 ):
                     return None
             elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
@@ -1001,9 +1005,11 @@ def _stored_result_attribute(class_node: ast.ClassDef) -> str | None:
                     for child in ast.walk(value)
                 ):
                     return None
-            elif isinstance(node, ast.Attribute) and isinstance(
-                node.value, ast.Name
-            ) and node.value.id == method_self:
+            elif (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == method_self
+            ):
                 if node.attr in {
                     "__dict__",
                     "__getattribute__",
@@ -1024,9 +1030,11 @@ def _stored_result_attribute(class_node: ast.ClassDef) -> str | None:
         elif isinstance(statement, ast.AnnAssign):
             targets = (statement.target,)
         for target in targets:
-            if isinstance(target, ast.Attribute) and isinstance(
-                target.value, ast.Name
-            ) and target.value.id == self_name:
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == self_name
+            ):
                 direct_writes.append(target.attr)
     candidates = [
         attribute
@@ -1034,8 +1042,7 @@ def _stored_result_attribute(class_node: ast.ClassDef) -> str | None:
         if direct_writes.count(attribute) == 1
         and writes.count(attribute) == 1
         and any(
-            method is not constructor and name == attribute
-            for method, name in reads
+            method is not constructor and name == attribute for method, name in reads
         )
     ]
     return candidates[0] if len(candidates) == 1 else None
