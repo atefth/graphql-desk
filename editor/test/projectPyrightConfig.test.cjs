@@ -27,7 +27,7 @@ function fixture(t, { json, toml, dirty = false } = {}) {
     },
     Uri: { file: fsPath => ({ scheme: "file", fsPath }) },
   };
-  const worker = async (_folder, text, action, managedPath) => {
+  const worker = async (_folder, text, action, managedPath, ownership = {}) => {
     const start = text.indexOf("[tool.pyright]");
     if (start < 0) return { ok: true, found: false, text, stub_path: null, extra_paths: [], has_execution_environments: false,
       execution_environments: [], ownership: { top_level: true, execution_environment_roots: [] } };
@@ -42,12 +42,17 @@ function fixture(t, { json, toml, dirty = false } = {}) {
       output = line
         ? text.replace(line, line.replace(/\]\s*$/, `${extra.length ? ", " : ""}\"${managedPath}\"]`))
         : `${text.trimEnd()}\nextraPaths = [\"${managedPath}\"]\n`;
-    } else if (action === "remove" && extra.includes(managedPath)) {
-      const line = pathLine[0].replace(new RegExp(`,?\\s*\\"${managedPath.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\"`), "");
-      output = text.replace(pathLine[0], line);
     }
     const nextExtra = action === "add" ? [...extra, ...(extra.includes(managedPath) ? [] : [managedPath])] :
       action === "remove" ? extra.filter(item => item !== managedPath) : extra;
+    if (action === "remove" && extra.includes(managedPath)) {
+      if (ownership.topLevel === true && nextExtra.length === 0) {
+        output = text.replace(/^[ \t]*extraPaths\s*=\s*\[[^\]]*\][ \t]*(?:\r?\n|$)/m, "");
+      } else {
+        const line = pathLine[0].replace(new RegExp(`,?\\s*\\"${managedPath.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\"`), "");
+        output = text.replace(pathLine[0], line);
+      }
+    }
     return { ok: true, found: true, text: output, stub_path: stub, extra_paths: nextExtra, has_execution_environments: hasEnvs,
       execution_environments: [], ownership: { top_level: !pathLine, execution_environment_roots: [] } };
   };
@@ -211,11 +216,37 @@ test("release removes remaining owned environment entries after the top-level pa
   await managed.release();
   managed.cleanup();
   assert.equal(state.get(stateKey(f.root)), undefined);
-  assert.deepEqual(parseJsonConfig(fs.readFileSync(file, "utf8")).executionEnvironments[0].extraPaths, []);
+  const released = parseJsonConfig(fs.readFileSync(file, "utf8")).executionEnvironments[0];
+  assert.deepEqual(released.extraPaths, []);
+  assert.equal(released.hasExtraPaths, false);
   const reopened = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
   assert.equal(state.get(stateKey(f.root)).active, true);
   await reopened.release();
   reopened.cleanup();
+});
+
+test("fresh JSON config release removes the extraPaths key created by GraphQL Desk", async t => {
+  const original = '{"stubPath":"custom-stubs"}';
+  const f = fixture(t, { json: original });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  await managed.release();
+  managed.cleanup();
+  const restored = parseJsonConfig(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"));
+  assert.equal(restored.stubPath, "custom-stubs");
+  assert.equal(restored.hasExtraPaths, false);
+  assert.equal(state.get(stateKey(f.root)), undefined);
+});
+
+test("fresh TOML config release removes the extraPaths key created by GraphQL Desk", async t => {
+  const original = '[tool.pyright]\nstubPath = "custom-stubs"\n';
+  const f = fixture(t, { toml: original });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  await managed.release();
+  managed.cleanup();
+  assert.equal(fs.readFileSync(path.join(f.root, "pyproject.toml"), "utf8"), original);
+  assert.equal(state.get(stateKey(f.root)), undefined);
 });
 
 test("an extraPaths alias of the reserved managed directory is rejected before config edits", async t => {
