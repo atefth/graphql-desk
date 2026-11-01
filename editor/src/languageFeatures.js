@@ -2,6 +2,7 @@
 
 const gql = require("graphql");
 const gls = require("graphql-language-service");
+let guardedEditCommandSequence = 0;
 
 const CLIENT_DIRECTIVES = new Set([
   "populate", "client", "unmask", "_unmask", "_optional", "_relayPagination",
@@ -293,7 +294,7 @@ function unusedSelectionActions(bundle, snapshot, diagnostics) {
     const range = { start: parts[0].range.start, end: parts.at(-1).range.end };
     const callRange = call.identity.call_range.utf16;
     if (range.start < callRange.start || range.end > callRange.end) continue;
-    result.push({ title: `Remove unused selection '${selected.alias?.value ?? selected.name.value}'`, range, replacement: "" });
+    result.push({ title: `Remove unused selection '${selected.alias?.value ?? selected.name.value}'`, range, replacement: "", guardOnApply: true });
   }
   return unique(result);
 }
@@ -938,6 +939,7 @@ function registerLanguageFeatures(vscode, options) {
   const service = createLanguageFeatures({ ...options,
     isCurrent: async (...args) => !disposed && await options.isCurrent(...args) && !disposed,
   });
+  const guardedEditCommand = `graphqlDesk.applyGuardedEdit.${++guardedEditCommandSequence}`;
   const selector = [{ language: "python", scheme: "file" }, { language: "python", scheme: "untitled" }];
   const snapshot = options.snapshot ?? ((document) => ({ uri: document.uri.toString(), version: document.version, text: document.getText() }));
   const range = (document, span) => new vscode.Range(document.positionAt(span.start), document.positionAt(span.end));
@@ -949,6 +951,20 @@ function registerLanguageFeatures(vscode, options) {
     return content;
   };
   const handles = [collection,
+    vscode.commands.registerCommand(guardedEditCommand, async params => {
+      const { uri, version, range: span, expected, replacement } = params ?? {};
+      if (disposed || typeof uri !== "string" || !Number.isInteger(version) || !span ||
+          !Number.isInteger(span.start) || !Number.isInteger(span.end) || typeof expected !== "string" ||
+          typeof replacement !== "string") return false;
+      const document = vscode.workspace.textDocuments.find(item => item.uri.toString() === uri);
+      if (!document || document.isClosed || document.version !== version) return false;
+      const text = document.getText();
+      if (span.start < 0 || span.end < span.start || span.end > text.length ||
+          text.slice(span.start, span.end) !== expected) return false;
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(document.uri, range(document, span), replacement);
+      return vscode.workspace.applyEdit(edit);
+    }),
     vscode.languages.registerCompletionItemProvider(selector, {
       async provideCompletionItems(document, position, token) {
         return (await service.complete(snapshot(document), document.offsetAt(position), token)).map((item) => {
@@ -1012,8 +1028,14 @@ function registerLanguageFeatures(vscode, options) {
           ? await service.codeActions(snapshot(document), items, token) : [];
         const actions = quickFixes.map((item) => {
           const action = new vscode.CodeAction(item.title, vscode.CodeActionKind.QuickFix);
-          action.edit = new vscode.WorkspaceEdit();
-          action.edit.replace(document.uri, range(document, item.range), item.replacement);
+          if (item.guardOnApply) {
+            action.command = { command: guardedEditCommand, title: item.title,
+              arguments: [{ uri: document.uri.toString(), version, range: item.range,
+                expected: document.getText().slice(item.range.start, item.range.end), replacement: item.replacement }] };
+          } else {
+            action.edit = new vscode.WorkspaceEdit();
+            action.edit.replace(document.uri, range(document, item.range), item.replacement);
+          }
           action.diagnostics = diagnostics;
           return action;
         });

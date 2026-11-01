@@ -203,23 +203,38 @@ async function run() {
     const unusedActions = await codeActionProvider.provideCodeActions(unused, unusedDiagnostic.range,
       { diagnostics: [unusedDiagnostic], only: vscode.CodeActionKind.QuickFix });
     assert.equal(unusedActions.length, 1);
-    const remove = unusedActions[0];
+    let remove = unusedActions[0];
     assert.equal(remove.title, "Remove unused selection 'label'");
-    const removeEdits = remove.edit.entries();
-    assert.equal(removeEdits.length, 1);
-    assert.equal(removeEdits[0][0].toString(), unused.uri.toString());
-    assert.equal(removeEdits[0][1].length, 1);
-    assert.equal(unused.getText(removeEdits[0][1][0].range), "  label: name\r\n");
-    assert.equal(removeEdits[0][1][0].newText, "");
-    assert.equal(await vscode.workspace.applyEdit(remove.edit), true);
-    assert.equal(unused.getText(), fixtures["unused.py"].replace("  label: name\r\n", ""));
+    assert.equal(remove.edit, undefined);
+    assert.match(remove.command.command, /^graphqlDesk\.applyGuardedEdit\.\d+$/);
+    const staleCommand = remove.command;
+    const appended = new vscode.WorkspaceEdit();
+    appended.insert(unused.uri, unused.positionAt(unused.getText().length), "# user change\r\n");
+    assert.equal(await vscode.workspace.applyEdit(appended), true);
+    assert.equal(await unused.save(), true);
+    assert.equal(await vscode.commands.executeCommand(staleCommand.command, ...staleCommand.arguments), false);
+    assert.equal(unused.getText(), `${fixtures["unused.py"]}# user change\r\n`);
+    assert.ok(unused.getText().includes("  label: name\r\n"));
+    await registration.refresh(unused);
+    const refreshedDiagnostic = vscode.languages.getDiagnostics(unused.uri).find(item => item.code === "graphql-desk.52005");
+    const refreshedActions = await codeActionProvider.provideCodeActions(unused, refreshedDiagnostic.range,
+      { diagnostics: [refreshedDiagnostic], only: vscode.CodeActionKind.QuickFix });
+    remove = refreshedActions[0];
+    assert.equal(await vscode.commands.executeCommand(remove.command.command, ...remove.command.arguments), true);
+    assert.equal(unused.getText(), `${fixtures["unused.py"].replace("  label: name\r\n", "")}# user change\r\n`);
     await registration.refresh(unused);
     assert.deepEqual(vscode.languages.getDiagnostics(unused.uri).filter(item => item.source === "GraphQL Desk"), []);
     await vscode.commands.executeCommand("undo");
-    assert.equal(unused.getText(), fixtures["unused.py"]);
+    assert.equal(unused.getText(), `${fixtures["unused.py"]}# user change\r\n`);
     assert.equal(unused.isDirty, false);
     await registration.refresh(unused);
     assert.ok(vscode.languages.getDiagnostics(unused.uri).some(item => item.code === "graphql-desk.52005"));
+    const restoreFixture = new vscode.WorkspaceEdit();
+    restoreFixture.delete(unused.uri, new vscode.Range(unused.positionAt(fixtures["unused.py"].length),
+      unused.positionAt(unused.getText().length)));
+    assert.equal(await vscode.workspace.applyEdit(restoreFixture), true);
+    assert.equal(await unused.save(), true);
+    assert.equal(unused.getText(), fixtures["unused.py"]);
     observations.unusedSelectionEditAndUndo = true;
     await recordProgress("unused-selection-edit-undo");
     const partial = documents.get("partial.py");

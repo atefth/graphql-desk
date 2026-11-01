@@ -530,6 +530,7 @@ test("registered fragment rename exposes fresh plans for the LSP bridge", async 
   const noop = () => ({ dispose() {} });
   const vscode = {
     Uri: { parse(value) { return { toString: () => value }; } },
+    commands: { registerCommand() { return noop(); } },
     Range: class { constructor(start, end) { Object.assign(this, { start, end }); } },
     Location: class { constructor(uri, range) { Object.assign(this, { uri, range }); } },
     Diagnostic: class {},
@@ -1120,6 +1121,8 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   const handle = () => ({ dispose() { disposed += 1; } });
   const vscode = {
     Uri: { parse(value) { return { toString: () => value }; } },
+    commands: { registerCommand() { return handle(); } },
+    workspace: { textDocuments: [], async applyEdit() { return true; } },
     Range: class { constructor(start, end) { this.start = start; this.end = end; } },
     Location: class { constructor(uri, range) { Object.assign(this, { uri, range }); } },
     TextEdit: { replace(range, newText) { return { range, newText }; } },
@@ -1177,7 +1180,7 @@ test("VS Code registration supplements Python services and ignores old diagnosti
   const documentSymbols = await providers.symbols.provideDocumentSymbols(doc);
   assert.deepEqual(documentSymbols.map(item => [item.name, item.detail, item.kind]), [["Check", "query", 11]]);
   registered.dispose();
-  assert.equal(disposed, 7);
+  assert.equal(disposed, 8);
   const extractValue = bundle("from graphql_desk import gql\nq=gql('query { user { id name } }')");
   const extractRegistered = registerLanguageFeatures(vscode, options(extractValue));
   const extractItem = extractValue.request.modules[0];
