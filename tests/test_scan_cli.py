@@ -121,8 +121,7 @@ class ScanCLITests(unittest.TestCase):
         self.assertEqual(fragment["module"], "features.shared.fragments")
         self.assertEqual(fragment["loc"]["file"], "features/shared/fragments.py")
         edges = {
-            (item["from"], item["to"], item["kind"])
-            for item in report.graph["edges"]
+            (item["from"], item["to"], item["kind"]) for item in report.graph["edges"]
         }
         self.assertIn(
             (
