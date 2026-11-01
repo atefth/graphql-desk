@@ -49,7 +49,25 @@ reach and reports deprecated coordinates with distinct reaching operation IDs,
 their deprecation reason when present, and a zero count for deprecated fields
 used only by orphan fragments.
 
-These rules are data-layer slices only; they are not wired to CLI output yet.
-The other five scan rules, terminal/JSON/graph renderers, CLI integration,
-upstream conformance corpus, and product-scale performance acceptance remain in
-their separate stories. SCAN-01 and overall gql.tada parity remain open.
+`graphql_desk.scan_fragment_rules.orphan_fragment_rule` reports fragments that
+are never the target of a resolved direct spread; a fragment used from another
+orphan fragment is not orphaned, and a spread cycle is not orphaned. Its paired
+`cross_feature_fragment_rule` counts direct spreads by consumer area, includes
+the defining area and `(root)` in consumer lists, emits only cross-area uses,
+and weights each row by distinct external areas.
+
+`graphql_desk.scan_complexity_rules.operation_complexity_rule` counts distinct
+reachable non-introspection coordinates and list fields, computes cycle-guarded
+fragment depth, and ranks with `fieldCount + depth² + 3 × listFields`. This is a
+static ranking signal, not a server execution-cost estimate.
+`graphql_desk.scan_depth_rules.fetch_depth_rule` emits query operations only,
+ranked by shortest import distance from inferred/configured entrypoints; closed
+unreachable module cycles have null depth and sort last.
+`graphql_desk.scan_directive_rules.directive_usage_rule` counts directive
+applications in original GraphQL source before client directive stripping and
+ranks by descending count, then directive name.
+
+All eight rule functions are data-layer slices only; none is wired to CLI output
+yet. Version 1 terminal/JSON/graph output, CLI integration, upstream
+conformance corpus, and product-scale performance acceptance remain in their
+separate stories. SCAN-01 and overall gql.tada parity remain open.
