@@ -350,6 +350,13 @@ def generated_output_paths(
     if package == root:
         raise ValueError("generated_package must lie below the project root")
     paths: list[Path] = []
+    paths.append(
+        _path(
+            str(package / ".graphql-desk-manifest.json"),
+            root,
+            "generated manifest",
+        )
+    )
     current = package
     while current != root:
         for suffix in (".py", ".pyi"):

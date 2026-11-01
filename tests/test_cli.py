@@ -1,6 +1,7 @@
 """Real CLI diagnostics without project imports, writes or false health claims."""
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -11,7 +12,13 @@ from importlib import metadata
 from pathlib import Path
 from unittest.mock import patch
 
-from graphql_desk.cli import PersistedGenerationError, generate_persisted, main
+from graphql_desk.cli import (
+    OutputGenerationError,
+    PersistedGenerationError,
+    generate_output,
+    generate_persisted,
+    main,
+)
 from tests.test_schema_url import endpoint
 
 
@@ -116,6 +123,190 @@ class CLITests(unittest.TestCase):
         self.assertEqual((code, out), (1, ""))
         self.assertIn("configuration: unavailable", err)
         self.assertNotIn("PRIVATE_MARKER", err)
+
+    def test_generate_output_writes_stable_owned_package_from_project_sources(
+        self,
+    ) -> None:
+        queries = self.root / "queries.py"
+        queries.write_text(
+            "from graphql_desk_generated.default import graphql\n"
+            'Users = graphql("query Users { title }")\n',
+            encoding="utf8",
+        )
+        package = self.root / "graphql_desk_generated"
+        generate_output(config=self.config)
+        generated = {
+            path.relative_to(package).as_posix(): path.read_bytes()
+            for path in package.rglob("*")
+            if path.is_file()
+        }
+        self.assertIn("default.py", generated)
+        self.assertIn("default.pyi", generated)
+        self.assertIn("sources/queries.pyi", generated)
+        self.assertIn(".graphql-desk-manifest.json", generated)
+        stub = generated["default.pyi"].decode("utf8")
+        self.assertIn("query Users { title }", stub)
+        manifest = json.loads(generated[".graphql-desk-manifest.json"])
+        self.assertEqual(manifest["owner"], "graphql-desk-generated-output")
+        self.assertEqual(manifest["mode"], "retained")
+
+        generate_output(config=self.config, disable_preprocessing=True)
+        repeated = {
+            path.relative_to(package).as_posix(): path.read_bytes()
+            for path in package.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(generated.keys(), repeated.keys())
+        self.assertEqual(
+            {
+                name: value
+                for name, value in generated.items()
+                if name != ".graphql-desk-manifest.json"
+            },
+            {
+                name: value
+                for name, value in repeated.items()
+                if name != ".graphql-desk-manifest.json"
+            },
+        )
+        self.assertTrue(
+            json.loads(repeated[".graphql-desk-manifest.json"])["disable_preprocessing"]
+        )
+
+    def test_generate_output_piped_stub_and_ts_only_flag(self) -> None:
+        code, out, err = self.invoke(["generate", "output", "--disable-preprocessing"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("graphql: __graphql_desk_Factory", out)
+        self.assertEqual(err, "")
+        self.assertFalse((self.root / "graphql_desk_generated").exists())
+
+        code, out, err = self.invoke(["generate-output", "--force-ts-format"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("Python stubs", err)
+
+    def test_generate_output_rejects_unowned_package_files(self) -> None:
+        generate_output(config=self.config)
+        foreign = self.root / "graphql_desk_generated" / "user.py"
+        foreign.write_text("value = 1\n", encoding="utf8")
+        with self.assertRaises(OutputGenerationError):
+            generate_output(config=self.config)
+        self.assertEqual(foreign.read_text(encoding="utf8"), "value = 1\n")
+
+    def test_generate_output_rechecks_package_before_replacement(self) -> None:
+        generate_output(config=self.config)
+        package = self.root / "graphql_desk_generated"
+        validate_patch = patch("graphql_desk.output_generation._validate_existing")
+        validate_mock = validate_patch.start()
+        self.addCleanup(validate_patch.stop)
+        validate_existing = validate_patch.get_original()[0]
+        calls = 0
+
+        def add_concurrent_file(root: Path, generated_package: str) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                (package / "concurrent.py").write_text("value = 2\n", encoding="utf8")
+            validate_existing(root, generated_package)
+
+        validate_mock.side_effect = add_concurrent_file
+        with self.assertRaises(OutputGenerationError):
+            generate_output(config=self.config)
+        self.assertEqual(
+            (package / "concurrent.py").read_text(encoding="utf8"), "value = 2\n"
+        )
+
+    def test_generate_output_preserves_destination_created_during_swap(self) -> None:
+        generate_output(config=self.config)
+        package = self.root / "graphql_desk_generated"
+        replace_path = Path.replace
+        injected = False
+
+        def create_concurrent_package(source: Path, destination: Path) -> Path:
+            nonlocal injected
+            if not injected and source.name == "package" and destination == package:
+                injected = True
+                package.mkdir()
+                (package / "concurrent.py").write_text("value = 3\n", encoding="utf8")
+                raise FileExistsError("injected concurrent destination")
+            return replace_path(source, destination)
+
+        with patch.object(Path, "replace", new=create_concurrent_package):
+            with self.assertRaises(OutputGenerationError) as caught:
+                generate_output(config=self.config)
+
+        self.assertTrue((package / "default.pyi").is_file())
+        self.assertIn("previous package was restored", caught.exception.diagnostics[0])
+        recovery_roots = tuple(self.root.glob(".graphql-desk-conflict-*/package"))
+        self.assertEqual(len(recovery_roots), 1)
+        self.assertEqual(
+            (recovery_roots[0] / "concurrent.py").read_text(encoding="utf8"),
+            "value = 3\n",
+        )
+
+    def test_generate_output_keeps_backup_if_conflict_recovery_move_fails(self) -> None:
+        generate_output(config=self.config)
+        package = self.root / "graphql_desk_generated"
+        replace_path = Path.replace
+        injected = False
+
+        def fail_recovery_move(source: Path, destination: Path) -> Path:
+            nonlocal injected
+            if not injected and source.name == "package" and destination == package:
+                injected = True
+                package.mkdir()
+                (package / "concurrent.py").write_text("value = 4\n", encoding="utf8")
+                raise FileExistsError("injected concurrent destination")
+            elif (
+                injected
+                and source == package
+                and destination.parent.name.startswith(".graphql-desk-conflict-")
+            ):
+                raise PermissionError("injected recovery move failure")
+            return replace_path(source, destination)
+
+        with patch.object(Path, "replace", new=fail_recovery_move):
+            with self.assertRaises(OutputGenerationError) as caught:
+                generate_output(config=self.config)
+
+        message = caught.exception.diagnostics[0]
+        self.assertIn("previous package is preserved at", message)
+        preserved = Path(message.split("preserved at ", 1)[1].rstrip("."))
+        self.assertTrue((preserved / "default.pyi").is_file())
+        self.assertEqual(
+            (package / "concurrent.py").read_text(encoding="utf8"), "value = 4\n"
+        )
+
+    def test_generate_output_requires_canonical_selected_schema_output(self) -> None:
+        code, out, err = self.invoke(
+            ["generate-output", "--output", "graphql_desk_generated/other.pyi"]
+        )
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("command failed", err)
+
+        self.config.write_text(
+            "[tool.graphql-desk]\n"
+            '[[tool.graphql-desk.schemas]]\nname="first"\n'
+            'schema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/first.pyi"\n'
+            '[[tool.graphql-desk.schemas]]\nname="second"\n'
+            'schema="schema.graphql"\n'
+            'schema_output="graphql_desk_generated/second.pyi"\n',
+            encoding="utf8",
+        )
+        code, out, err = self.invoke(["generate-output"])
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("command failed", err)
+        code, out, err = self.invoke(
+            [
+                "generate-output",
+                "--schema",
+                "first",
+                "--output",
+                "graphql_desk_generated/first.pyi",
+            ]
+        )
+        self.assertEqual((code, out), (0, ""), err)
 
     def test_invalid_inactive_missing_config_and_static_mapping_symbols(self) -> None:
         for text in ("[INVALID_PRIVATE_MARKER", "[project]\nname='inactive'\n"):
