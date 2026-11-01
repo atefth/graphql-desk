@@ -802,6 +802,52 @@ test("extraction preserves referenced fragments inside selected fields", async (
   assert.deepEqual(bundle(updated, { schema: value.request.schemas[0].text }).response.diagnostics, []);
 });
 
+test("extraction preserves nested local fragment dependencies and their identities", async () => {
+  const source = "from graphql_desk import gql\nname = gql('fragment Name on User { name }')\ncard = gql('fragment Card on User { ...Name }', fragments=[name])\nquery = gql('query Read { user { friend { ...Name } } }', fragments=[card])\n";
+  const value = bundle(source, { schema: schema.replace("id: ID!", "id: ID! friend: User") });
+  const selected = "friend { ...Name }", start = source.indexOf(selected);
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value), {
+    start, end: start + selected.length,
+  });
+  assert.equal(plan.length, 3);
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+  assert.match(updated, /fragment Card on User \{ \.\.\.Name \}.*fragments=\[name\]/s);
+  assert.match(updated, /fragment UserFields on User .*fragments=\[card\]/s);
+  assert.match(updated, /fragments=\[user_fields, card\]/);
+  const refreshed = bundle(updated, { schema: value.request.schemas[0].text });
+  assert.deepEqual(refreshed.response.diagnostics, []);
+  assert.equal(refreshed.response.calls.length, 4);
+  const extracted = refreshed.response.calls.find(call => call.index?.primary_fragment?.name === "UserFields");
+  assert.equal(extracted?.index?.primary_fragment?.type_condition, "User");
+  assert.deepEqual(extracted?.fragments[0]?.target, refreshed.response.calls.find(call =>
+    call.index?.primary_fragment?.name === "Card")?.identity);
+  assert.deepEqual(refreshed.response.calls.find(call => call.index?.primary_fragment?.name === "Card")?.fragments[0]?.target,
+    refreshed.response.calls.find(call => call.index?.primary_fragment?.name === "Name")?.identity);
+
+  const ambiguous = source.replace("fragments=[card])", "fragments=[card, name])");
+  const ambiguousValue = bundle(ambiguous, { schema: value.request.schemas[0].text });
+  const ambiguousStart = ambiguous.indexOf(selected);
+  assert.equal(await createLanguageFeatures(options(ambiguousValue)).extractFragment(document(ambiguousValue), {
+    start: ambiguousStart, end: ambiguousStart + selected.length,
+  }), null);
+
+  const inline = source.replace("card = gql('fragment Card on User { ...Name }', fragments=[name])\nquery = gql('query Read { user { friend { ...Name } } }', fragments=[card])",
+    "query = gql('query Read { user { friend { ...Name } } }', fragments=[gql('fragment Card on User { ...Name }', fragments=[name])])");
+  const inlineValue = bundle(inline, { schema: value.request.schemas[0].text });
+  const inlineStart = inline.indexOf(selected);
+  const inlinePlan = await createLanguageFeatures(options(inlineValue)).extractFragment(document(inlineValue), {
+    start: inlineStart, end: inlineStart + selected.length,
+  });
+  assert.equal(inlinePlan.length, 3);
+  const inlineUpdated = [...inlinePlan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), inline);
+  assert.match(inlineUpdated, /fragment_card = gql\('fragment Card on User \{ \.\.\.Name \}', fragments=\[name\]\)/);
+  assert.match(inlineUpdated, /fragment UserFields on User .*fragments=\[fragment_card\]/);
+  assert.match(inlineUpdated, /fragments=\[user_fields, fragment_card\]/);
+  assert.deepEqual(bundle(inlineUpdated, { schema: value.request.schemas[0].text }).response.diagnostics, []);
+});
+
 test("extraction binds inline fragment dependencies once and reuses their identity", async () => {
   const source = "from graphql_desk import gql\nq = gql('query Read { user { friend { ...Card } name } }', [gql('fragment Card on User { id }')])\n";
   const value = bundle(source, { schema: schema.replace("id: ID!", "id: ID! friend: User") });

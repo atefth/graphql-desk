@@ -538,14 +538,24 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
       name = `${base}${suffix++}`;
     } while (true);
     const calls = new Map(bundle.response.calls.map(item => [documentKey(item.identity), item]));
+    const exposesFragment = (reference, name) => {
+      const pending = [calls.get(documentKey(reference.target))];
+      const visited = new Set();
+      while (pending.length) {
+        const target = pending.pop();
+        if (!target || visited.has(documentKey(target.identity))) continue;
+        if (!target.index?.primary_fragment) return false;
+        visited.add(documentKey(target.identity));
+        if (target.index?.primary_fragment?.name === name) return true;
+        for (const nested of target.fragments ?? []) pending.push(calls.get(documentKey(nested.target)));
+      }
+      return false;
+    };
     const selectedReferences = [];
     let hasInlineDependency = false;
     for (const spread of spreads) {
-      const matches = call.fragments.filter(reference => {
-        const target = calls.get(documentKey(reference.target));
-        return target?.index?.primary_fragment?.name === spread &&
-          reference.reference_module.uri === snapshot.uri && reference.reference_module.version === snapshot.version;
-      });
+      const matches = call.fragments.filter(reference => exposesFragment(reference, spread) &&
+        reference.reference_module.uri === snapshot.uri && reference.reference_module.version === snapshot.version);
       if (matches.length !== 1) { selectedReferences.length = 0; break; }
       const reference = matches[0];
       const range = reference.range.utf16;
@@ -562,6 +572,7 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
       selectedReferences.push({ range, target, expression, inline });
     }
     if (selectedReferences.length !== spreads.size) continue;
+    const requiredReferences = [...new Map(selectedReferences.map(item => [`${item.range.start}:${item.range.end}`, item])).values()];
     const references = [];
     const inlineReferenceEdits = [];
     const inlineBindings = new Map();
@@ -590,7 +601,7 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
         inlineBindings.set(key, { binding: dependencyBinding, expression: dependency.expression, range: dependency.range });
         inlineReferenceEdits.push({ range: dependency.range, replacement: dependencyBinding });
       }
-      for (const selected of selectedReferences) {
+      for (const selected of requiredReferences) {
         const key = `${selected.range.start}:${selected.range.end}`;
         const dependency = inlineBindings.get(key);
         if (!dependency) { references.length = 0; break; }
@@ -599,7 +610,7 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
     } else {
       references.push(...selectedReferences.map(item => item.expression));
     }
-    if (references.length !== spreads.size) continue;
+    if (references.length !== requiredReferences.length) continue;
     const fragment = `fragment ${name} on ${parent.name} {\n${call.source.slice(span.start, span.end)}\n}`;
     const rewritten = `${call.source.slice(0, span.start)}...${name}${call.source.slice(span.end)}\n${fragment}`;
     const rewrittenAst = gql.parse(new gql.Source(rewritten, documentKey(call.identity)));
