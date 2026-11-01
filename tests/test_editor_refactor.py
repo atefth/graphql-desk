@@ -336,6 +336,19 @@ class EditorRefactorTests(unittest.TestCase):
         self.assertEqual({item["indent"] for item in contexts.values()}, {"        "})
         self.assertEqual({item["newline"] for item in contexts.values()}, {"\r\n"})
 
+    def test_module_level_control_flow_assignments_are_extractable(self) -> None:
+        source = (
+            "from graphql_desk import gql\n"
+            "if enabled:\n"
+            "    query = gql('query Read { user { id name } }')\n"
+            "for item in items:\n"
+            "    other = gql('query Other { user { id } }')\n"
+        )
+        contexts = extraction_contexts(source)
+        self.assertEqual(len(contexts), 2)
+        self.assertEqual({item["scope"] for item in contexts.values()}, {"function"})
+        self.assertEqual({item["indent"] for item in contexts.values()}, {"    "})
+
     def test_nested_function_suites_are_extractable(self) -> None:
         source = (
             "from graphql_desk import gql\n"
