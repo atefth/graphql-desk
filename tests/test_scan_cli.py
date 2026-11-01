@@ -11,6 +11,12 @@ from unittest.mock import patch
 from graphql_desk.cli import main
 from graphql_desk.scan import scan_project
 from graphql_desk.scan_reporting import json_report
+from graphql_desk.source_graph import (
+    ModuleSnapshot,
+    ProjectBindings,
+    ProjectSources,
+)
+from graphql_desk.source_graph import resolve_project as resolve_project_impl
 
 
 class _Terminal(io.StringIO):
@@ -143,6 +149,91 @@ class ScanCLITests(unittest.TestCase):
                 "definingArea": "features/shared",
                 "consumerAreas": ("features/users",),
                 "spreadCount": 1,
+            },
+        )
+
+    def test_repeated_configured_document_uses_keep_composition_edges_stable(
+        self,
+    ) -> None:
+        shared = self.root / "features" / "shared"
+        users = self.root / "features" / "users"
+        shared.mkdir(parents=True)
+        users.mkdir(parents=True)
+        (self.root / "features" / "__init__.py").write_text("", encoding="utf-8")
+        (shared / "__init__.py").write_text("", encoding="utf-8")
+        (users / "__init__.py").write_text("", encoding="utf-8")
+        (shared / "documents.py").write_text(
+            "from graphql_desk_generated.default import graphql\n"
+            'QUERY = "query Users { users { ...UserFields } }"\n'
+            'by_id = graphql("fragment UserFields on User { id }")\n'
+            'by_name = graphql("fragment UserFields on User { name }")\n',
+            encoding="utf-8",
+        )
+        self.source.write_text("", encoding="utf-8")
+        (users / "queries.py").write_text(
+            "from graphql_desk_generated.default import graphql\n"
+            "from features.shared.documents import QUERY, by_id, by_name\n"
+            "first = graphql(QUERY, fragments=[by_id])\n"
+            "second = graphql(QUERY, fragments=[by_name])\n",
+            encoding="utf-8",
+        )
+
+        with patch.object(Path, "cwd", return_value=self.root):
+            report = scan_project()
+
+        def resolve_reversed(
+            modules: tuple[ModuleSnapshot, ...],
+            *,
+            bindings: tuple[ProjectBindings, ...] = (),
+            collect_document_imports: bool = False,
+        ) -> ProjectSources:
+            return resolve_project_impl(
+                tuple(reversed(modules)),
+                bindings=bindings,
+                collect_document_imports=collect_document_imports,
+            )
+
+        with (
+            patch.object(Path, "cwd", return_value=self.root),
+            patch(
+                "graphql_desk.scan.resolve_project",
+                side_effect=resolve_reversed,
+            ),
+        ):
+            reordered = scan_project()
+
+        self.assertEqual(report.operations, reordered.operations)
+        self.assertEqual(report.fragments, reordered.fragments)
+        self.assertEqual(report.graph, reordered.graph)
+        operation_ids = [item["id"] for item in report.operations]
+        fragment_ids = [item["id"] for item in report.fragments]
+        self.assertEqual(
+            operation_ids,
+            ["project:default:query:Users", "project:default:query:Users~2"],
+        )
+        self.assertEqual(
+            fragment_ids,
+            [
+                "project:default:fragment:UserFields",
+                "project:default:fragment:UserFields~2",
+            ],
+        )
+        spread_edges = {
+            (item["from"], item["to"])
+            for item in report.graph["edges"]
+            if item["kind"] == "spreads"
+        }
+        self.assertEqual(
+            spread_edges,
+            {
+                (
+                    "operation:project:default:query:Users",
+                    "fragment:project:default:fragment:UserFields",
+                ),
+                (
+                    "operation:project:default:query:Users~2",
+                    "fragment:project:default:fragment:UserFields~2",
+                ),
             },
         )
 
