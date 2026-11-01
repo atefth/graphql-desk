@@ -26,8 +26,8 @@ or ambiguous targets produce no edge.
 The module graph includes every selected Python module, including isolated
 modules. Absolute and relative imports only create edges to selected project
 modules. Inferred entrypoints have no incoming import edges; configured
-entrypoint paths are relative to the selected source root, matching source
-selection, and replace that set while rejecting unknown paths. Breadth-first
+entrypoint paths are project-root-relative and replace that set while rejecting
+unknown paths. Breadth-first
 distances follow importer-to-imported edges. Closed import cycles remain
 unreachable unless an entrypoint reaches them. Areas are the module's
 project-relative parent directory, with `(root)` for the project root.
@@ -65,9 +65,35 @@ ranked by shortest import distance from inferred/configured entrypoints; closed
 unreachable module cycles have null depth and sort last.
 `graphql_desk.scan_directive_rules.directive_usage_rule` counts directive
 applications in original GraphQL source before client directive stripping and
-ranks by descending count, then directive name.
+ranks by descending count, then directive name. Input and directive findings
+retain their referenced definition IDs so terminal results can point back to
+the Python location containing each finding.
 
-All eight rule functions are data-layer slices only; none is wired to CLI output
-yet. Version 1 terminal/JSON/graph output, CLI integration, upstream
-conformance corpus, and product-scale performance acceptance remain in their
-separate stories. SCAN-01 and overall gql.tada parity remain open.
+`graphql_desk.scan.scan_project()` now builds one read-only report from the
+configured project and invokes all eight rules. The `graphql-desk scan` command
+offers an experimental ranked terminal report, two-space version-1 JSON, and
+pure graph JSON through `--graph`; graph output takes precedence over
+`--format`. Pipe and output-file use default to JSON; an interactive terminal
+defaults to the human report. An explicit `--format` overrides that default.
+Machine reports include schema-qualified coverage, operation and
+fragment records, rule data, and discovery/parse warnings. Coverage rounds
+integer percentages to nearest with half values rounded up, and an empty schema
+reports 100%. Named schema coordinates stay distinct.
+
+Configured entrypoints use project-root-relative Python paths, matching the
+configuration contract. For an explicitly selected external source root, report
+paths use a stable `external-source-root-N/` prefix so terminal and machine
+output do not reveal absolute local paths. A requested output file is staged
+atomically and cannot replace project inputs, configured schema/generated
+artifacts, or paths reached through symlinks. `--fail-on-warn` changes the exit
+code only for source discovery/parse warnings; findings alone do not fail.
+Python files honor their declared source encoding; undecodable input produces a
+sanitized command error instead of a traceback.
+Machine stdout contains only JSON, warnings are included in that JSON, and a
+specified output file leaves stdout free.
+
+The terminal/JSON/graph and CLI paths now have focused fixtures for output
+equivalence, exact 2-of-3 coverage, schema isolation, graph edges, destination
+safety, and warning policy. Pinned upstream output conformance, the full
+source/import corpus, broader CLI acceptance, and product-scale performance
+remain open. SCAN-01 and overall gql.tada parity remain open.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, cast
@@ -41,6 +41,7 @@ class InputUsageReference(TypedDict):
 class InputUsageData(TypedDict):
     kind: _InputKind
     count: int
+    definitionIds: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -57,11 +58,13 @@ class _InputUsageVisitor(Visitor):
         type_info: TypeInfo,
         definition: ScanDefinition,
         counts: Counter[tuple[_Coordinate, _InputKind]],
+        definition_ids: defaultdict[tuple[_Coordinate, _InputKind], set[str]],
     ) -> None:
         super().__init__()
         self.type_info = type_info
         self.definition = definition
         self.counts = counts
+        self.definition_ids = definition_ids
 
     def enter_object_field(self, node: ObjectFieldNode, *_args: object) -> None:
         parent = cast(Any, self.type_info).get_parent_input_type()
@@ -77,6 +80,7 @@ class _InputUsageVisitor(Visitor):
             node.name.value,
         )
         self.counts[(coordinate, "input-field")] += 1
+        self.definition_ids[(coordinate, "input-field")].add(self.definition.id)
 
     def enter_enum_value(self, node: EnumValueNode, *_args: object) -> None:
         type_info = cast(Any, self.type_info)
@@ -90,6 +94,7 @@ class _InputUsageVisitor(Visitor):
             node.value,
         )
         self.counts[(coordinate, "enum-value")] += 1
+        self.definition_ids[(coordinate, "enum-value")].add(self.definition.id)
 
 
 def input_usage_rule(
@@ -112,6 +117,9 @@ def input_usage_rule(
         dict[tuple[int, int], OperationDefinitionNode | FragmentDefinitionNode],
     ] = {}
     counts: Counter[tuple[_Coordinate, _InputKind]] = Counter()
+    definition_ids: defaultdict[tuple[_Coordinate, _InputKind], set[str]] = defaultdict(
+        set
+    )
 
     for definition in graph.definitions:
         document = documents.get(definition.source_key)
@@ -138,7 +146,7 @@ def input_usage_rule(
         if node is None:
             raise ValueError("Scan definition range does not match its document")
         type_info = TypeInfo(context.schema)
-        visitor = _InputUsageVisitor(type_info, definition, counts)
+        visitor = _InputUsageVisitor(type_info, definition, counts, definition_ids)
         visit(node, TypeInfoVisitor(type_info, visitor))
 
     points: list[InputUsagePoint] = []
@@ -153,7 +161,11 @@ def input_usage_rule(
                     "fieldName": field_name,
                 },
                 message=f"{type_name}.{field_name} appears {count} times",
-                data={"kind": kind, "count": count},
+                data={
+                    "kind": kind,
+                    "count": count,
+                    "definitionIds": tuple(sorted(definition_ids[(coordinate, kind)])),
+                },
                 weight=count,
             )
         )

@@ -294,7 +294,7 @@ class ScanGraphTests(unittest.TestCase):
             paths={key: Path("src") / path for key, path in paths.items()},
             roots={"app": root},
             source_roots={"app": (Path("src"),)},
-            entrypoints={"app": ("main.py",)},
+            entrypoints={"app": ("src/main.py",)},
         )
         main = next(item for item in under_source_root.modules if item.name == "main")
         self.assertTrue(main.entrypoint)
@@ -305,7 +305,7 @@ class ScanGraphTests(unittest.TestCase):
             paths={key: Path("src") / path for key, path in paths.items()},
             roots={"app": root},
             source_roots={"app": (Path("."), Path("src"))},
-            entrypoints={"app": ("main.py",)},
+            entrypoints={"app": ("src/main.py",)},
         )
         self.assertTrue(
             next(
@@ -322,25 +322,36 @@ class ScanGraphTests(unittest.TestCase):
                 paths={key: Path("src") / path for key, path in paths.items()},
                 roots={"app": root},
                 source_roots={"app": (Path("src"),)},
-                entrypoints={"app": ("src/main.py",)},
+                entrypoints={"app": ("main.py",)},
             )
         ambiguous_modules = (
             ModuleSnapshot("app", "main", "file:///main.py", 1, "pass\n"),
             ModuleSnapshot("app", "src.main", "file:///src/main.py", 1, "pass\n"),
         )
-        with self.assertRaisesRegex(ValueError, "unknown or excluded"):
-            build_scan_graph(
-                sources,
-                empty_index,
-                ambiguous_modules,
-                paths={
-                    ("app", "main"): Path("main.py"),
-                    ("app", "src.main"): Path("src/main.py"),
-                },
-                roots={"app": root},
-                source_roots={"app": (Path("."), Path("src"))},
-                entrypoints={"app": ("main.py",)},
-            )
+        explicit_relative_entry = build_scan_graph(
+            sources,
+            empty_index,
+            ambiguous_modules,
+            paths={
+                ("app", "main"): Path("main.py"),
+                ("app", "src.main"): Path("src/main.py"),
+            },
+            roots={"app": root},
+            source_roots={"app": (Path("."), Path("src"))},
+            entrypoints={"app": ("main.py",)},
+        )
+        self.assertTrue(
+            next(
+                item for item in explicit_relative_entry.modules if item.name == "main"
+            ).entrypoint
+        )
+        self.assertFalse(
+            next(
+                item
+                for item in explicit_relative_entry.modules
+                if item.name == "src.main"
+            ).entrypoint
+        )
         with self.assertRaisesRegex(ValueError, "escapes"):
             build_scan_graph(
                 sources,

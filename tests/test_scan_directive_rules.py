@@ -116,15 +116,19 @@ class DirectiveUsageRuleTests(unittest.TestCase):
 
         self.assertEqual(
             [
-                (point.ref["schemaName"], point.ref["directiveName"], point.data)
+                (
+                    point.ref["schemaName"],
+                    point.ref["directiveName"],
+                    point.data["count"],
+                )
                 for point in points
             ],
             [
-                ("shop", "custom", {"count": 6}),
-                ("shop", "defer", {"count": 2}),
-                ("shop", "_unmask", {"count": 1}),
-                ("shop", "include", {"count": 1}),
-                ("shop", "skip", {"count": 1}),
+                ("shop", "custom", 6),
+                ("shop", "defer", 2),
+                ("shop", "_unmask", 1),
+                ("shop", "include", 1),
+                ("shop", "skip", 1),
             ],
         )
         self.assertEqual([point.weight for point in points], [6, 2, 1, 1, 1])

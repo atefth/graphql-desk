@@ -4,6 +4,7 @@ import argparse
 import ast
 import json
 import os
+import shutil
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -44,6 +45,8 @@ from .release_artifacts import (
     validate_authoring_separation,
     validate_omitted_tree,
 )
+from .scan import scan_project
+from .scan_reporting import json_report, terminal_report
 from .schema_loading import load_local_schema
 from .schema_types import render_schema_types
 from .schema_url import load_from_url
@@ -57,7 +60,7 @@ from .source_graph import (
     resolve_project,
     resolve_type_symbols,
 )
-from .source_selection import select_project_sources
+from .source_selection import project_python_candidates, select_project_sources
 
 
 class _Parser(argparse.ArgumentParser):
@@ -362,6 +365,32 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Stage a source-free package tree for persisted-only releases",
     )
+    scan_parser = commands.add_parser(
+        "scan", help="Report experimental schema-aware project insights"
+    )
+    scan_parser.add_argument(
+        "-c", "--config", default=argparse.SUPPRESS, help="Select pyproject.toml"
+    )
+    scan_parser.add_argument(
+        "--schema", default=argparse.SUPPRESS, help="Select one configured schema"
+    )
+    scan_parser.add_argument(
+        "-f",
+        "--format",
+        choices=("text", "json"),
+        default=None,
+        help="Output format",
+    )
+    scan_parser.add_argument(
+        "--graph", action="store_true", help="Emit the pure graph JSON instead"
+    )
+    scan_parser.add_argument("-o", "--output", help="Write report to this file")
+    scan_parser.add_argument(
+        "-w",
+        "--fail-on-warn",
+        action="store_true",
+        help="Return failure when source discovery or parsing warnings occur",
+    )
     check_parser = commands.add_parser(
         "check", help="Validate project GraphQL documents or a wheel artifact"
     )
@@ -394,37 +423,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     check_parser.add_argument("--artifact", help="Verify a GraphQL Desk wheel")
     return parser
-
-
-def _python_candidates(config: ProjectConfig) -> tuple[Path, ...]:
-    ignored = {
-        ".git",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".tox",
-        ".venv",
-        "venv",
-        "__pycache__",
-        "node_modules",
-        "site-packages",
-        "build",
-        "dist",
-    }
-    candidates: list[Path] = []
-    for root in config.source_roots:
-        if not root.is_dir():
-            continue
-        for directory, names, files in os.walk(root, followlinks=False):
-            names[:] = sorted(
-                name
-                for name in names
-                if name not in ignored and not (Path(directory) / name).is_symlink()
-            )
-            candidates.extend(
-                Path(directory) / name for name in files if name.endswith(".py")
-            )
-    return tuple(sorted(candidates, key=lambda item: item.as_posix()))
 
 
 def check(
@@ -473,7 +471,7 @@ def check(
     try:
         files = select_project_sources(
             project_config,
-            _python_candidates(project_config),
+            project_python_candidates(project_config),
             validate_entrypoints=True,
         )
         project_id = project_config.path.as_uri()
@@ -907,7 +905,7 @@ def _generate_persisted(
         config, schema_name, explicit_output, stdout_is_terminal=stdout_is_terminal
     )
     project_id = config.path.as_uri()
-    candidate_files = _python_candidates(config)
+    candidate_files = project_python_candidates(config)
     selected_files = select_project_sources(
         config,
         candidate_files,
@@ -1096,6 +1094,81 @@ def _generate_persisted(
     if stdout_text is not None:
         print(stdout_text, end="")
     return 0
+
+
+def _scan(
+    config_path: Path | None,
+    schema_name: str | None,
+    output: str | None,
+    *,
+    output_format: str | None,
+    graph: bool,
+    fail_on_warn: bool,
+    stdout_is_terminal: bool,
+) -> int:
+    selected = effective_project(Path.cwd(), explicit_config=config_path)
+    if selected is None:
+        raise ValueError("No GraphQL Desk project configuration was found")
+    project = selected.config
+    report = scan_project(
+        config=config_path,
+        schema=schema_name,
+        environment=dict(os.environ),
+    )
+    machine = (
+        graph
+        or output_format == "json"
+        or (output_format is None and (output is not None or not stdout_is_terminal))
+    )
+    if machine:
+        text = json_report(report, graph=graph)
+    else:
+        width = min(shutil.get_terminal_size(fallback=(80, 24)).columns, 120)
+        text = terminal_report(report, width=width if stdout_is_terminal else None)
+    if output is None:
+        print(text, end="")
+        if machine and report.warnings and os.environ.get("GITHUB_ACTIONS") != "true":
+            print(
+                f"Scan completed with {len(report.warnings)} analysis warning(s).",
+                file=sys.stderr,
+            )
+    else:
+        destination = Path(output)
+        if not destination.is_absolute():
+            destination = Path.cwd() / destination
+        if destination.is_symlink():
+            raise ValueError("Scan output cannot replace a symlink")
+        if any(parent.is_symlink() for parent in destination.parents):
+            raise ValueError("Scan output cannot pass through a symlink")
+        resolved_destination = destination.resolve()
+        protected = {
+            project.path.resolve(),
+            *(
+                item.origin.local_path.resolve()
+                for item in project.schemas
+                if item.origin.local_path is not None
+            ),
+            *(item.resolve() for item in project_python_candidates(project)),
+            *(
+                (project.root / item.schema_output).resolve()
+                for item in project.schemas
+            ),
+            *(
+                (project.root / path).resolve()
+                for item in project.schemas
+                for path in (item.persisted_output, item.cache_output)
+                if path is not None
+            ),
+        }
+        if resolved_destination in protected:
+            raise ValueError("Scan output cannot overwrite a project input or artifact")
+        _stage_outputs({resolved_destination: text})
+        if report.warnings:
+            print(
+                f"Scan report written with {len(report.warnings)} analysis warning(s).",
+                file=sys.stderr,
+            )
+    return 1 if fail_on_warn and report.warnings else 0
 
 
 def generate_persisted(
@@ -1354,6 +1427,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fail_on_warn=arguments.fail_on_warn,
                 omit_runtime_source=arguments.omit_runtime_source,
                 environment=dict(os.environ),
+                stdout_is_terminal=sys.stdout.isatty(),
+            )
+        if arguments.command == "scan":
+            return _scan(
+                config_path,
+                schema_name,
+                arguments.output,
+                output_format=arguments.format,
+                graph=arguments.graph,
+                fail_on_warn=arguments.fail_on_warn,
                 stdout_is_terminal=sys.stdout.isatty(),
             )
         if arguments.command == "check":

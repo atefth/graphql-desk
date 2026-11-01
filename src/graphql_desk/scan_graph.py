@@ -306,20 +306,11 @@ def _module_facts(
                 key for key in identities if key[0] == project and not incoming[key]
             )
             continue
-        project_root = roots[project].resolve()
         by_path: dict[str, set[tuple[str, str]]] = defaultdict(set)
         for key, relative_path in relative_paths.items():
             if key[0] != project:
                 continue
-            source_path = Path(relative_path)
-            for configured_root in source_roots.get(project, (Path("."),)):
-                source_root = (
-                    configured_root.resolve().relative_to(project_root)
-                    if configured_root.is_absolute()
-                    else configured_root
-                )
-                if source_path.is_relative_to(source_root):
-                    by_path[source_path.relative_to(source_root).as_posix()].add(key)
+            by_path[relative_path].add(key)
         for entrypoint in configured:
             normalized = Path(entrypoint).as_posix()
             matches = by_path.get(normalized, set())
