@@ -582,10 +582,11 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!folder?.uri || folder.uri.scheme !== "file" || !trusted()) throw new Error("Trusted file workspace required");
     const state = await stateFor({ uri: folder.uri.toString() });
     if (!state || !trusted()) throw new Error("Python environment unavailable for Pyright config update");
-    const reply = await state.worker.request({ op: "pyright_config", workspace: state.root, text, action, managed_path: managedPath,
-      ownership: { topLevel: ownership.topLevel === true,
-        executionEnvironmentRoots: Array.isArray(ownership.executionEnvironmentRoots) ? ownership.executionEnvironmentRoots : [] } });
-    if (reply.ok !== true) throw new Error("Pyproject Pyright config could not be edited safely");
+    const reply = await enqueue(state, () => state.worker.request({ op: "pyright_config", workspace: state.root, text, action,
+      managed_path: managedPath, ownership: { topLevel: ownership.topLevel === true,
+        executionEnvironmentRoots: Array.isArray(ownership.executionEnvironmentRoots) ? ownership.executionEnvironmentRoots : [] } }),
+    `pyright_config:${action}`);
+    if (!reply || reply.ok !== true) throw new Error("Pyproject Pyright config could not be edited safely");
     return reply;
   }
   async function quarantine({ workspace, projects, invalidated_owners, preserve_current = false } = {}) {

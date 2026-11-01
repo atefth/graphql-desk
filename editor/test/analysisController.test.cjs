@@ -1823,3 +1823,42 @@ test("local schema watchers retire with their state while live external buffers 
   final.fire(Uri.file(replacement));
   assert.equal(invalidations, before);
 });
+
+test("Pyright config requests wait for in-flight worker analysis", async t => {
+  const fixture = await setup(t);
+  let analyzeStarted;
+  const started = new Promise(resolve => { analyzeStarted = resolve; });
+  let releaseAnalyze;
+  const hold = new Promise(resolve => { releaseAnalyze = resolve; });
+  let active = 0;
+  let configRequests = 0;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, async request(message, requestOptions) {
+      assert.equal(active, 0, "controller must serialize access to the single-request worker");
+      active += 1;
+      try {
+        const reply = await worker.request(message, requestOptions);
+        if (message.op === "analyze") { analyzeStarted(); await hold; }
+        if (message.op === "pyright_config") configRequests += 1;
+        return reply;
+      } finally { active -= 1; }
+    } };
+  } });
+  t.after(() => { releaseAnalyze(); controller.dispose(); });
+  const analysis = controller.analyze(controller.snapshot(fixture.main));
+  await started;
+  const folder = fixture.vscode.workspace.workspaceFolders[0];
+  const config = await fs.readFile(path.join(fixture.root, "pyproject.toml"), "utf8");
+  const inspection = controller.editPyrightConfig(folder, config, "inspect");
+  const inspected = inspection.then(reply => ({ reply }), error => ({ error }));
+  await new Promise(resolve => realTimeout(resolve, 20));
+  assert.equal(configRequests, 0, "config inspection stays queued while analysis owns the worker");
+  releaseAnalyze();
+  const [bundle, result] = await Promise.all([analysis, inspected]);
+  assert.ok(bundle);
+  assert.ok(result.reply, result.error?.message);
+  const reply = result.reply;
+  assert.equal(reply.found, false);
+  assert.equal(configRequests, 1);
+});
