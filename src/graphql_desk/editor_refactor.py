@@ -357,9 +357,6 @@ def extraction_contexts(
             node.end_lineno, node.end_col_offset
         )
 
-    extractable: list[ast.stmt] = list(tree.body)
-    function_assignments: set[int] = set()
-
     try_star_type = getattr(ast, "TryStar", None)
 
     def nested_suites(statement: ast.stmt) -> tuple[list[ast.stmt], ...]:
@@ -380,6 +377,22 @@ def extraction_contexts(
         if isinstance(statement, ast.Match):
             return tuple(case.body for case in statement.cases)
         return ()
+
+    def module_suites(statements: list[ast.stmt]) -> list[ast.stmt]:
+        result: list[ast.stmt] = []
+        pending = list(statements)
+        index = 0
+        while index < len(pending):
+            statement = pending[index]
+            index += 1
+            for suite in nested_suites(statement):
+                result.extend(suite)
+                pending.extend(suite)
+        return result
+
+    module_control_assignments = module_suites(tree.body)
+    extractable: list[ast.stmt] = [*tree.body, *module_control_assignments]
+    inline_assignments = {id(item) for item in module_control_assignments}
 
     def function_suites(statements: list[ast.stmt]) -> list[ast.stmt]:
         result: list[ast.stmt] = []
@@ -455,7 +468,7 @@ def extraction_contexts(
             if safe:
                 assignments = function_suites(candidate.body)
                 extractable.extend(assignments)
-                function_assignments.update(id(item) for item in assignments)
+                inline_assignments.update(id(item) for item in assignments)
 
     result: dict[tuple[int, int], dict[str, object]] = {}
     for statement in extractable:
@@ -554,6 +567,6 @@ def extraction_contexts(
             "indent": indent,
             "newline": ending.group() if ending else "\n",
             "factory": factory,
-            "scope": "function" if id(statement) in function_assignments else "module",
+            "scope": "function" if id(statement) in inline_assignments else "module",
         }
     return result

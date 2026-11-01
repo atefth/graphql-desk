@@ -141,7 +141,8 @@ async function run() {
   assert.ok(resultPath && path.isAbsolute(resultPath));
   const observed = { outcome: "fragment-rename-lsp-unverified", step: "setup", twoFileSuccess: false,
     closedTargetOpened: false, staleTargetRejectedWithoutPartialEdit: false, cancellation: false,
-    extractRoundtripUndo: false, extractFunctionRoundtripUndo: false,
+    extractRoundtripUndo: false, extractModuleConditionalRoundtripUndo: false,
+    extractFunctionRoundtripUndo: false,
     extractClassMethodRoundtripUndo: false,
     extractQualifiedRoundtripUndo: false, extractStaleRejected: false,
     extractCancellation: false, shutdown: false };
@@ -285,6 +286,20 @@ async function run() {
     assert.equal(extraction.document.getText(), extraction.source);
     observed.extractRoundtripUndo = true;
     await extractClient.stop();
+
+    observed.step = "extract-module-conditional-roundtrip-undo";
+    const conditionalSource = "# 😀\r\nfrom graphql_desk import gql\r\nif ENABLED:\r\n    # conditional query\r\n    query = gql('query Read { user { id name } }')\r\n";
+    const conditionalExtraction = await pythonExtractionDocument("extract-module-conditional", conditionalSource);
+    const conditionalClient = createRenameLanguageClient(vscode, conditionalExtraction.language, { isTrusted: () => true });
+    clients.push(conditionalClient);
+    await conditionalClient.start();
+    await vscode.window.showTextDocument(conditionalExtraction.document);
+    assert.equal(await requestExtract(conditionalClient.client, conditionalExtraction.document), true);
+    assert.match(conditionalExtraction.document.getText(), /if ENABLED:\r\n    # conditional query\r\n    query = gql\('query Read .*fragments=\[gql\(source="fragment UserFields on User/);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(conditionalExtraction.document.getText(), conditionalSource);
+    observed.extractModuleConditionalRoundtripUndo = true;
+    await conditionalClient.stop();
 
     observed.step = "extract-function-roundtrip-undo";
     const localSource = "# 😀\r\nfrom graphql_desk import gql\r\ndef read():\r\n    # local query\r\n    query: object = gql('query Read { user { id name } }')\r\n";

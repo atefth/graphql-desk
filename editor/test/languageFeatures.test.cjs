@@ -851,6 +851,19 @@ test("extraction in an if suite remains inline and reanalyzes", async () => {
   assert.equal(refreshed.response.calls[1].index.primary_fragment.name, "UserFields");
 });
 
+test("module-level conditional extraction keeps the fragment inline in the same branch", async () => {
+  const source = "from graphql_desk import gql\nif ENABLED:\n    query = gql('query Read { user { id name } }')\n";
+  const value = bundle(source);
+  const start = source.indexOf("id name");
+  const plan = await createLanguageFeatures(options(value)).extractFragment(document(value),
+    { start, end: start + 7 });
+  assert.equal(plan.length, 2);
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), source);
+  assert.match(updated, /if ENABLED:\n    query = gql\('query Read \{ user \{ \.\.\.UserFields \} \}', fragments=\[gql\(source="fragment UserFields on User/);
+  assert.deepEqual(bundle(updated).response.diagnostics, []);
+});
+
 test("extraction plans cover loop, try, with, and match suites", async () => {
   const source = [
     "from graphql_desk import gql",
