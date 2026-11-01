@@ -3189,6 +3189,13 @@ alias('{ id }')
             "    return gql('query { user { ...Card } }', fragments=[card])\n",
             "def read():\n"
             "    card = gql('fragment Card on User { id }')\n"
+            "    def rebind():\n"
+            "        nonlocal card\n"
+            "        card = gql('fragment Card on User { name }')\n"
+            "    rebind()\n"
+            "    return gql('query { user { ...Card } }', fragments=[card])\n",
+            "def read():\n"
+            "    card = gql('fragment Card on User { id }')\n"
             "    return gql('query { user { ...Card } }', fragments=make_list(card))\n",
             "def read():\n"
             "    card = gql('query Wrong { user { id } }')\n"

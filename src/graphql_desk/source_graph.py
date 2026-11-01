@@ -2491,6 +2491,11 @@ def _resolve(
             def is_single_fragment_use(
                 self, function: ast.FunctionDef | ast.AsyncFunctionDef, name: str
             ) -> bool:
+                if any(
+                    isinstance(item, ast.Nonlocal) and name in item.names
+                    for item in ast.walk(function)
+                ):
+                    return False
                 parents = {
                     child: parent
                     for parent in ast.walk(function)
