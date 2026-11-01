@@ -200,6 +200,43 @@ test("active ownership fails closed if the managed path was removed before resta
   managed.cleanup();
 });
 
+test("release removes remaining owned environment entries after the top-level path is removed", async t => {
+  const f = fixture(t, { json: '{"extraPaths":["vendor"],"executionEnvironments":[{"root":"src"}]}' });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const file = path.join(f.root, "pyrightconfig.json");
+  fs.writeFileSync(file, JSON.stringify({ extraPaths: ["vendor"], executionEnvironments: [
+    { root: "src", extraPaths: [MANAGED_PATH] },
+  ] }));
+  await managed.release();
+  managed.cleanup();
+  assert.equal(state.get(stateKey(f.root)), undefined);
+  assert.deepEqual(parseJsonConfig(fs.readFileSync(file, "utf8")).executionEnvironments[0].extraPaths, []);
+  const reopened = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  assert.equal(state.get(stateKey(f.root)).active, true);
+  await reopened.release();
+  reopened.cleanup();
+});
+
+test("an extraPaths alias of the reserved managed directory is rejected before config edits", async t => {
+  const original = '{"extraPaths":["./.graphql-desk/live-typings"]}';
+  const f = fixture(t, { json: original });
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker), /aliases the reserved GraphQL Desk path/);
+  assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), original);
+});
+
+test("release preserves ownership when a managed path was rewritten to an alias", async t => {
+  const f = fixture(t, { json: '{"extraPaths":["vendor"]}' });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const file = path.join(f.root, "pyrightconfig.json");
+  fs.writeFileSync(file, '{"extraPaths":["vendor","./.graphql-desk/live-typings"]}');
+  await assert.rejects(managed.release(), /aliases the reserved GraphQL Desk path; ownership preserved/);
+  assert.equal(state.get(stateKey(f.root)).active, true);
+  assert.match(fs.readFileSync(file, "utf8"), /\.\/\.graphql-desk\/live-typings/);
+  managed.cleanup();
+});
+
 test("globbed Pyright search paths fail closed before modifying the config", async t => {
   const original = '{"extraPaths":["vendor/*"]}';
   const f = fixture(t, { json: original });

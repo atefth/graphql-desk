@@ -240,11 +240,18 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   const key = stateKey(workspace);
   const saved = workspaceState?.get?.(key);
   const fileKey = path.relative(workspace, inspected.file).split(path.sep).join("/");
+  const configDirectory = path.dirname(inspected.file);
+  const managedRoot = normalized(path.resolve(configDirectory, MANAGED_PATH));
   const configuredPaths = config => [config.stubPath ?? "typings", ...config.extraPaths,
     ...config.executionEnvironments.flatMap(item => item.extraPaths)];
+  const hasManagedAlias = config => configuredPaths(config).some(value => value !== MANAGED_PATH &&
+    normalized(path.resolve(configDirectory, value)) === managedRoot);
   const hasGlob = value => value.includes("*") || value.includes("?") || /[\[\]{}]/.test(value);
   if (configuredPaths(inspected).some(value => value !== MANAGED_PATH && hasGlob(value))) {
     throw new Error("Pyright stubPath/extraPaths globs cannot be checked for generated-package collisions; preserved");
+  }
+  if (hasManagedAlias(inspected)) {
+    throw new Error("Pyright config aliases the reserved GraphQL Desk path; preserved");
   }
   const validOwnership = value => value && typeof value.topLevel === "boolean" &&
     Array.isArray(value.executionEnvironmentRoots) && value.executionEnvironmentRoots.every(root => typeof root === "string");
@@ -351,7 +358,11 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       if (!active) return;
       const latest = await updateProjectConfig(vscode, folder, "inspect", worker);
       if (!latest || path.resolve(latest.file) !== path.resolve(inspected.file)) throw new Error("Active Pyright config changed; preserved");
-      if (latest.extraPaths.includes(MANAGED_PATH)) await updateProjectConfig(vscode, folder, "remove", worker, saved?.ownership ?? {});
+      if (hasManagedAlias(latest)) throw new Error("Pyright config aliases the reserved GraphQL Desk path; ownership preserved");
+      if (hasAnyManagedPath(latest)) {
+        const released = await updateProjectConfig(vscode, folder, "remove", worker, saved?.ownership ?? {});
+        if (hasAnyManagedPath(released)) throw new Error("GraphQL Desk Pyright paths remain after release; ownership preserved");
+      }
       await workspaceState?.update?.(key, undefined);
       active = false;
     },
