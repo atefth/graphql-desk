@@ -24,12 +24,14 @@ from .external_type_sources import (
     external_class_base_symbols,
     interpreter_type_roots,
 )
+from .factory_generation import FactoryArtifacts, generate_project_factory_artifacts
 from .field_usage import FieldUsageOptions, field_usage_diagnostics
 from .fragments import (
     SchemaContext,
     index_fragments,
     unused_colocated_fragment_diagnostics,
 )
+from .output_generation import OutputGenerationConflict, publish_output_package
 from .persisted_bindings import generated_header, render_persisted_bindings
 from .persisted_manifest import collect_persisted_manifests
 from .project import (
@@ -75,6 +77,14 @@ class PersistedGenerationError(ValueError):
     def __init__(self, diagnostics: Sequence[str]) -> None:
         self.diagnostics = tuple(diagnostics)
         super().__init__("Persisted generation failed")
+
+
+class OutputGenerationError(ValueError):
+    """Sanitized schema-output generation failure with collected diagnostics."""
+
+    def __init__(self, diagnostics: Sequence[str]) -> None:
+        self.diagnostics = tuple(diagnostics)
+        super().__init__("Schema output generation failed")
 
 
 @dataclass(frozen=True)
@@ -364,6 +374,22 @@ def _parser() -> argparse.ArgumentParser:
         "--omit-runtime-source",
         action="store_true",
         help="Stage a source-free package tree for persisted-only releases",
+    )
+    output = commands.add_parser(
+        "generate-output", help="Generate schema and operation type packages"
+    )
+    output.add_argument(
+        "-c", "--config", default=argparse.SUPPRESS, help="Select pyproject.toml"
+    )
+    output.add_argument(
+        "--schema", default=argparse.SUPPRESS, help="Select one configured schema"
+    )
+    output.add_argument("-o", "--output", help="Select the configured schema stub path")
+    output.add_argument(
+        "--disable-preprocessing",
+        action="store_true",
+        default=None,
+        help="Disable schema-output preprocessing",
     )
     scan_parser = commands.add_parser(
         "scan", help="Report experimental schema-aware project insights"
@@ -1171,6 +1197,168 @@ def _scan(
     return 1 if fail_on_warn and report.warnings else 0
 
 
+def _generate_output(
+    config_path: Path | None,
+    schema_name: str | None,
+    explicit_output: str | None,
+    *,
+    disable_preprocessing: bool | None,
+    environment: Mapping[str, str],
+    stdout_is_terminal: bool,
+) -> int:
+    selected = effective_project(Path.cwd(), explicit_config=config_path)
+    if selected is None:
+        raise ValueError("No GraphQL Desk project configuration was found")
+    original = selected.config
+    validate_project_ownership((original,))
+    schemas = (
+        (select_schema(original, binding=schema_name),)
+        if schema_name is not None
+        else original.schemas
+    )
+    if explicit_output is not None and len(schemas) != 1:
+        raise ValueError("Select one schema when using --output")
+    to_stdout = explicit_output is None and not stdout_is_terminal
+    if to_stdout and len(schemas) != 1:
+        raise ValueError("Select one schema when writing generated types to stdout")
+    config = replace(
+        original,
+        schemas=schemas,
+        disable_preprocessing=(
+            original.disable_preprocessing
+            if disable_preprocessing is None
+            else original.disable_preprocessing or disable_preprocessing
+        ),
+    )
+    if explicit_output is not None:
+        destination = Path(explicit_output)
+        if not destination.is_absolute():
+            destination = Path.cwd() / destination
+        if destination.resolve() != schemas[0].schema_output.resolve():
+            raise ValueError(
+                "--output must be the selected schema_output inside generated_package"
+            )
+
+    project_id = config.path.as_uri()
+    source_files = select_project_sources(
+        config,
+        project_python_candidates(config),
+        include_stubs=False,
+        validate_entrypoints=True,
+    )
+    modules = tuple(
+        ModuleSnapshot(
+            project_id,
+            source.module,
+            source.path.as_uri(),
+            1,
+            source.path.read_text(encoding="utf-8-sig"),
+            source.is_package,
+        )
+        for source in source_files
+    )
+    bindings = project_bindings(config, project_id=project_id)
+    sources = resolve_project(
+        modules,
+        bindings=(bindings,),
+        collect_document_imports=config.check_colocated_fragments,
+    )
+    contexts: dict[tuple[str, str | None], SchemaContext] = {}
+    schema_contexts: list[SchemaContext] = []
+    for schema in schemas:
+        loaded = (
+            load_local_schema(schema.origin.local_path)
+            if schema.origin.local_path is not None
+            else load_from_url(schema.origin, environment=environment)
+        )
+        context = SchemaContext(
+            schema.name,
+            loaded,
+            f"factory-output:{project_id}:{schema.name}",
+        )
+        contexts[(project_id, schema.name)] = context
+        if bindings.default_schema == schema.name:
+            contexts[(project_id, None)] = context
+        schema_contexts.append(context)
+    index = index_fragments(sources, schemas=contexts)
+    artifacts: FactoryArtifacts = generate_project_factory_artifacts(
+        config,
+        tuple(schema_contexts),
+        index,
+        modules=modules,
+        project_id=project_id,
+    )
+    diagnostics = artifacts.diagnostics
+    if diagnostics:
+        _report_diagnostics(diagnostics, modules)
+    if not artifacts.files:
+        if not diagnostics:
+            print("Schema output could not be generated.", file=sys.stderr)
+        return 1
+
+    package_prefix = config.generated_package.replace(".", "/") + "/"
+    if to_stdout:
+        stub_path = package_prefix + schemas[0].name + ".pyi"
+        stub = next(
+            (item.text for item in artifacts.files if item.relative_path == stub_path),
+            None,
+        )
+        if stub is None:
+            raise ValueError("Generated schema stub is unavailable")
+        print(stub, end="")
+        return 0
+
+    package_files: dict[str, str] = {}
+    for item in artifacts.files:
+        if not item.relative_path.startswith(package_prefix):
+            raise ValueError("Generated output escapes generated_package")
+        package_files[item.relative_path.removeprefix(package_prefix)] = item.text
+    publish_output_package(
+        config.root.joinpath(*config.generated_package.split(".")),
+        package_files,
+        generated_package=config.generated_package,
+        disable_preprocessing=config.disable_preprocessing,
+    )
+    return 0
+
+
+def generate_output(
+    *,
+    config: Path | str | None = None,
+    schema: str | None = None,
+    output: Path | str | None = None,
+    disable_preprocessing: bool | None = None,
+    silent: bool = False,
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    """Generate configured schema and operation typing files."""
+    diagnostics = StringIO()
+    try:
+        with redirect_stderr(diagnostics):
+            result = _generate_output(
+                Path(config) if config is not None else None,
+                schema,
+                str(output) if output is not None else None,
+                disable_preprocessing=disable_preprocessing,
+                environment=os.environ if environment is None else environment,
+                stdout_is_terminal=True,
+            )
+    except OutputGenerationConflict as error:
+        raise OutputGenerationError((str(error),)) from None
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        messages = tuple(diagnostics.getvalue().splitlines())
+        raise OutputGenerationError(
+            messages or ("Check configuration, sources, schema access and outputs.",)
+        ) from None
+    messages = tuple(diagnostics.getvalue().splitlines())
+    if result:
+        raise OutputGenerationError(
+            messages or ("Check configuration, sources, schema access and outputs.",)
+        )
+    if messages and not silent:
+        print("\n".join(messages), file=sys.stderr)
+
+
 def generate_persisted(
     *,
     config: Path | str | None = None,
@@ -1406,9 +1594,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         command_line = list(sys.argv[1:] if argv is None else argv)
         for position in range(len(command_line) - 1):
-            if command_line[position : position + 2] == ["generate", "persisted"]:
+            alias = command_line[position : position + 2]
+            if alias == ["generate", "persisted"]:
                 command_line[position : position + 2] = ["generate-persisted"]
                 break
+            if alias == ["generate", "output"]:
+                command_line[position : position + 2] = ["generate-output"]
+                break
+        if "--force-ts-format" in command_line:
+            print(
+                "TypeScript output formats are unsupported; "
+                "GraphQL Desk generates Python stubs. "
+                "Remove --force-ts-format.",
+                file=sys.stderr,
+            )
+            return 2
         arguments = _parser().parse_args(command_line)
     except ValueError:
         print("Invalid arguments; use --help.", file=sys.stderr)
@@ -1418,6 +1618,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config_path = Path(arguments.config) if hasattr(arguments, "config") else None
         schema_name = arguments.schema if hasattr(arguments, "schema") else None
+        if arguments.command == "generate-output":
+            return _generate_output(
+                config_path,
+                schema_name,
+                arguments.output,
+                disable_preprocessing=arguments.disable_preprocessing,
+                environment=dict(os.environ),
+                stdout_is_terminal=sys.stdout.isatty(),
+            )
         if arguments.command == "generate-persisted":
             return _generate_persisted(
                 config_path,
@@ -1512,6 +1721,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(message, file=sys.stderr)
         return 130
+    except OutputGenerationConflict as error:
+        print(str(error), file=sys.stderr)
+        return 1
     except (OSError, RuntimeError, ValueError):
         print(
             "GraphQL Desk command failed; check configuration, sources and outputs.",
