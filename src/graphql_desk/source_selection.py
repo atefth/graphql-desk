@@ -24,6 +24,38 @@ class SourceFile:
     is_package: bool
 
 
+def project_python_candidates(config: ProjectConfig) -> tuple[Path, ...]:
+    """Enumerate configured Python roots without following links or cache dirs."""
+    ignored = {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "node_modules",
+        "site-packages",
+        "build",
+        "dist",
+    }
+    candidates: list[Path] = []
+    for root in config.source_roots:
+        if not root.is_dir():
+            continue
+        for directory, names, files in os.walk(root, followlinks=False):
+            names[:] = sorted(
+                name
+                for name in names
+                if name not in ignored and not (Path(directory) / name).is_symlink()
+            )
+            candidates.extend(
+                Path(directory) / name for name in files if name.endswith(".py")
+            )
+    return tuple(sorted(candidates, key=lambda item: item.as_posix()))
+
+
 def _matches(path: str, pattern: str) -> bool:
     """Full, case-sensitive component glob; ** consumes zero or more components."""
     parts = path.split("/")

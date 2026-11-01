@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 from graphql import (
@@ -16,7 +16,7 @@ from graphql.language import Visitor
 from typing_extensions import TypedDict
 
 from .fragments import FragmentIndex
-from .scan_graph import ScanGraph
+from .scan_graph import ScanDefinition, ScanGraph
 
 _SourceKey = tuple[str, str, int, int]
 _Coordinate = tuple[str, str, str]
@@ -30,6 +30,7 @@ class DirectiveUsageReference(TypedDict):
 
 class DirectiveUsageData(TypedDict):
     count: int
+    definitionIds: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -41,14 +42,19 @@ class DirectiveUsagePoint:
 
 
 class _DirectiveVisitor(Visitor):
-    def __init__(self, project: str, schema_name: str) -> None:
+    def __init__(self, definition: ScanDefinition) -> None:
         super().__init__()
-        self.project = project
-        self.schema_name = schema_name
+        self.definition = definition
         self.counts: Counter[_Coordinate] = Counter()
 
     def enter_directive(self, node: DirectiveNode, *_args: object) -> None:
-        self.counts[(self.project, self.schema_name, node.name.value)] += 1
+        self.counts[
+            (
+                self.definition.project,
+                self.definition.schema_name,
+                node.name.value,
+            )
+        ] += 1
 
 
 def directive_usage_rule(
@@ -69,6 +75,7 @@ def directive_usage_rule(
         dict[tuple[int, int], OperationDefinitionNode | FragmentDefinitionNode],
     ] = {}
     counts: Counter[_Coordinate] = Counter()
+    definition_ids: defaultdict[_Coordinate, set[str]] = defaultdict(set)
 
     for definition in graph.definitions:
         source_key = definition.source_key
@@ -89,9 +96,11 @@ def directive_usage_rule(
         )
         if node is None:
             raise ValueError("Scan definition range does not match its document")
-        visitor = _DirectiveVisitor(definition.project, definition.schema_name)
+        visitor = _DirectiveVisitor(definition)
         visit(node, visitor)
         counts.update(visitor.counts)
+        for coordinate in visitor.counts:
+            definition_ids[coordinate].add(definition.id)
 
     points: list[DirectiveUsagePoint] = []
     for (project, schema_name, directive_name), count in counts.items():
@@ -103,7 +112,12 @@ def directive_usage_rule(
                     "directiveName": directive_name,
                 },
                 message=f"@{directive_name} is applied {count} times",
-                data={"count": count},
+                data={
+                    "count": count,
+                    "definitionIds": tuple(
+                        sorted(definition_ids[(project, schema_name, directive_name)])
+                    ),
+                },
                 weight=count,
             )
         )
