@@ -96,14 +96,14 @@ async function pythonDocuments(directory) {
 }
 
 async function pythonExtractionDocument(directory,
-  source = "from graphql_desk import gql\nquery = gql('query Read { user { id name } }')\n") {
+  source = "from graphql_desk import gql\nquery = gql('query Read { user { id name } }')\n", extra = {}) {
   const folder = path.join(root, directory);
   await fs.mkdir(folder, { recursive: true });
   const file = path.join(folder, "main.py");
   await fs.writeFile(file, source, { flag: "wx" });
   let document = await vscode.workspace.openTextDocument(Uri.file(file));
   if (document.languageId !== "python") document = await vscode.languages.setTextDocumentLanguage(document, "python");
-  const value = bundle(source, { uri: document.uri.toString(), version: document.version });
+  const value = bundle(source, { ...extra, uri: document.uri.toString(), version: document.version });
   const service = createLanguageFeatures(options(value));
   return { document, source, language: {
     extractFragment: (item, selection, token) => service.extractFragment(
@@ -111,12 +111,12 @@ async function pythonExtractionDocument(directory,
   } };
 }
 
-async function requestExtract(client, document, token) {
-  const start = document.getText().indexOf("id name");
+async function requestExtract(client, document, token, selectionText = "id name") {
+  const start = document.getText().indexOf(selectionText);
   assert.notEqual(start, -1);
   return client.sendRequest(EXTRACT_REQUEST, {
     textDocument: { uri: document.uri.toString() }, version: document.version,
-    selection: { start, end: start + "id name".length },
+    selection: { start, end: start + selectionText.length },
   }, token);
 }
 
@@ -145,6 +145,7 @@ async function run() {
     extractFunctionRoundtripUndo: false,
     extractClassMethodRoundtripUndo: false,
     extractQualifiedRoundtripUndo: false, extractStaleRejected: false,
+    extractMultipleInlineDependenciesRoundtripUndo: false,
     extractCancellation: false, shutdown: false };
   const clients = [];
   try {
@@ -286,6 +287,27 @@ async function run() {
     assert.equal(extraction.document.getText(), extraction.source);
     observed.extractRoundtripUndo = true;
     await extractClient.stop();
+
+    observed.step = "extract-multiple-inline-dependencies-roundtrip-undo";
+    const multipleInlineSource = "from graphql_desk import gql\nquery = gql('query Read { user { friend { ...Card ...Name } name } }', [gql('fragment Card on User { id }'), gql('fragment Name on User { name }')])\n";
+    const multipleInlineSchema = "type User { id: ID! name: String! friend: User } type Query { user: User }";
+    const multipleInline = await pythonExtractionDocument("extract-multiple-inline", multipleInlineSource, {
+      schema: multipleInlineSchema,
+    });
+    const multipleInlineClient = createRenameLanguageClient(vscode, multipleInline.language, { isTrusted: () => true });
+    clients.push(multipleInlineClient);
+    await multipleInlineClient.start();
+    await vscode.window.showTextDocument(multipleInline.document);
+    assert.equal(await requestExtract(multipleInlineClient.client, multipleInline.document, undefined,
+      "friend { ...Card ...Name }"), true);
+    const multipleInlineUpdated = multipleInline.document.getText();
+    assert.ok(multipleInlineUpdated.includes("fragment_card = gql('fragment Card on User { id }')\nfragment_name = gql('fragment Name on User { name }')"));
+    assert.match(multipleInlineUpdated, /fragments=\[fragment_card, fragment_name\]/);
+    assert.match(multipleInlineUpdated, /\[user_fields, fragment_card, fragment_name\]/);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(multipleInline.document.getText(), multipleInlineSource);
+    observed.extractMultipleInlineDependenciesRoundtripUndo = true;
+    await multipleInlineClient.stop();
 
     observed.step = "extract-module-conditional-roundtrip-undo";
     const conditionalSource = "# 😀\r\nfrom graphql_desk import gql\r\nif ENABLED:\r\n    # conditional query\r\n    query = gql('query Read { user { id name } }')\r\n";
