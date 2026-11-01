@@ -39,7 +39,17 @@ operations, and unions reverse-import reach, areas, and entrypoints. Results
 are schema-qualified and omit unused and introspection fields. When a project
 has no entrypoints, weight falls back to the number of reached modules.
 
-This rule is a data-layer slice only; it is not wired to CLI output yet. The
-other seven scan rules, terminal/JSON/graph renderers, CLI integration, upstream
-conformance corpus, and product-scale performance acceptance remain in their
-separate stories. SCAN-01 and overall gql.tada parity remain open.
+`graphql_desk.scan_input_rules.input_usage_rule` counts schema-typed input
+object fields and enum literals in operations, fragments, directives, and
+variable defaults. Runtime variables and values without a schema-known input
+type do not produce rows; each row's weight is its syntactic occurrence count.
+
+`graphql_desk.scan_deprecation_rules.deprecated_usage_rule` reuses field-use
+reach and reports deprecated coordinates with distinct reaching operation IDs,
+their deprecation reason when present, and a zero count for deprecated fields
+used only by orphan fragments.
+
+These rules are data-layer slices only; they are not wired to CLI output yet.
+The other five scan rules, terminal/JSON/graph renderers, CLI integration,
+upstream conformance corpus, and product-scale performance acceptance remain in
+their separate stories. SCAN-01 and overall gql.tada parity remain open.

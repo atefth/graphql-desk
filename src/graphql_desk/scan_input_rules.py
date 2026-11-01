@@ -108,7 +108,8 @@ def input_usage_rule(
         for document in index.documents
     }
     parsed: dict[
-        _SourceKey, tuple[OperationDefinitionNode | FragmentDefinitionNode, ...]
+        _SourceKey,
+        dict[tuple[int, int], OperationDefinitionNode | FragmentDefinitionNode],
     ] = {}
     counts: Counter[tuple[_Coordinate, _InputKind]] = Counter()
 
@@ -121,21 +122,18 @@ def input_usage_rule(
             raise ValueError("Scan definitions must have their schema context")
         nodes = parsed.get(definition.source_key)
         if nodes is None:
-            nodes = tuple(
-                node
+            nodes = {
+                (node.loc.start, node.loc.end): node
                 for node in parse(document.call.source).definitions
                 if isinstance(node, (OperationDefinitionNode, FragmentDefinitionNode))
-            )
+                and node.loc is not None
+            }
             parsed[definition.source_key] = nodes
-        node = next(
+        node = nodes.get(
             (
-                item
-                for item in nodes
-                if item.loc is not None
-                and item.loc.start == definition.definition_range.start
-                and item.loc.end == definition.definition_range.end
-            ),
-            None,
+                definition.definition_range.start,
+                definition.definition_range.end,
+            )
         )
         if node is None:
             raise ValueError("Scan definition range does not match its document")
