@@ -253,7 +253,7 @@ test("analyze replies validate persisted facts against captured source identitie
   const persistedIdInsertion = { module, range, insertion: insertionRange, expected_id: `sha256:${"1".repeat(64)}`, positional: false };
   const requestData = { request_id: "snapshot", modules: [{ ...module, source: `${" ".repeat(15)}document`, is_package: false }], bindings: [], schemas: [] };
   const response = { request_id: "snapshot", modules: [module], schemas: [], calls: [], persisted: [persisted],
-    persisted_id_insertions: [persistedIdInsertion], diagnostics: [] };
+    persisted_id_insertions: [persistedIdInsertion], unused_selections: [], diagnostics: [] };
   const valid = { ok: true, id: "job", request: requestData, response, unavailable_schemas: [], remote_schemas: [] };
   const positionalInsertion = { ...persistedIdInsertion, insertion: {
     codepoint: { start: 15, end: 15 }, utf16: { start: 15, end: 15 },
@@ -279,6 +279,31 @@ test("analyze replies validate persisted facts against captured source identitie
     const { worker, workspace } = setup(t, fake);
     const pending = worker.request({ ...message(workspace), op: "analyze", id: "job", schema_buffers: [] });
     if (index < 2) assert.deepEqual(await pending, { ...valid, ...result });
+    else await assert.rejects(pending, generic);
+  }
+});
+
+test("unused selection facts require matching diagnostic, document and decoded ranges", async t => {
+  const { bundle } = require("./featureFixtures.cjs");
+  const value = bundle("from graphql_desk import gql\nfrom graphql_desk.testing import read_result\n" +
+    "query=gql('{ user { id name } }')\nresult=read_result(query, {})\nprint(result['user']['id'])");
+  const selection = value.response.unused_selections[0];
+  assert.ok(selection);
+  const malformed = [
+    null,
+    { ...selection, range: { start: 0, end: 1000 } },
+    { ...selection, range: { start: 1, end: 1 } },
+    { ...selection, document: { ...selection.document, module: { ...selection.document.module, version: 2 } } },
+    { ...selection, diagnostic: { ...selection.diagnostic, code: "graphql.validation" } },
+    { ...selection, diagnostic: { ...selection.diagnostic, message: "unmatched diagnostic" } },
+  ];
+  for (const [index, item] of [selection, ...malformed].entries()) {
+    const reply = { ok: true, id: "job", ...value,
+      response: { ...value.response, unused_selections: [item] }, unavailable_schemas: [], remote_schemas: [] };
+    const fake = fakeSpawn(child => child.stdout.write(JSON.stringify(reply) + "\n"));
+    const { worker, workspace } = setup(t, fake);
+    const pending = worker.request({ ...message(workspace), op: "analyze", id: "job", schema_buffers: [] });
+    if (index === 0) assert.deepEqual(await pending, reply);
     else await assert.rejects(pending, generic);
   }
 });

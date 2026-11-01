@@ -29,6 +29,7 @@ async function run() {
     "persisted.py": `from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted("sha256:${"0".repeat(64)}", query)\n`,
     "missingPersisted.py": "from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted(document=query)\n",
     "missingPersistedPositional.py": "from graphql_desk import gql\nquery = gql('query Saved { user { name } }')\nsaved = gql.persisted(query)\n",
+    "unused.py": "# 😀\r\nfrom graphql_desk import gql\r\nfrom graphql_desk.testing import read_result\r\nquery = gql('''{ user {\r\n  id\r\n  label: name\r\n} }''')\r\nresult = read_result(query, {})\r\nprint(result['user']['id'])\r\n",
     "partial.py": "from graphql_desk import gql\nq=gql('{ user { na')\n",
     "blank.py": "# 😀\r\nfrom graphql_desk import gql\r\nq=gql('''\r\n\r\n''')\r\n",
     "lexical.py": "from graphql_desk import gql\nq=gql('''query Read { user { name",
@@ -193,6 +194,34 @@ async function run() {
     assert.equal(positionalDocument.getText(positionalEdit.range), "");
     assert.match(positionalEdit.newText, /^"sha256:[0-9a-f]{64}", $/);
     observations.positionalPersistedIdInsertion = true;
+    const unused = documents.get("unused.py");
+    await vscode.window.showTextDocument(unused);
+    await registration.refresh(unused);
+    const unusedDiagnostic = vscode.languages.getDiagnostics(unused.uri).find(item => item.code === "graphql-desk.52005");
+    assert.ok(unusedDiagnostic);
+    assert.equal(unused.getText(unusedDiagnostic.range), "user");
+    const unusedActions = await codeActionProvider.provideCodeActions(unused, unusedDiagnostic.range,
+      { diagnostics: [unusedDiagnostic], only: vscode.CodeActionKind.QuickFix });
+    assert.equal(unusedActions.length, 1);
+    const remove = unusedActions[0];
+    assert.equal(remove.title, "Remove unused selection 'label'");
+    const removeEdits = remove.edit.entries();
+    assert.equal(removeEdits.length, 1);
+    assert.equal(removeEdits[0][0].toString(), unused.uri.toString());
+    assert.equal(removeEdits[0][1].length, 1);
+    assert.equal(unused.getText(removeEdits[0][1][0].range), "  label: name\r\n");
+    assert.equal(removeEdits[0][1][0].newText, "");
+    assert.equal(await vscode.workspace.applyEdit(remove.edit), true);
+    assert.equal(unused.getText(), fixtures["unused.py"].replace("  label: name\r\n", ""));
+    await registration.refresh(unused);
+    assert.deepEqual(vscode.languages.getDiagnostics(unused.uri).filter(item => item.source === "GraphQL Desk"), []);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(unused.getText(), fixtures["unused.py"]);
+    assert.equal(unused.isDirty, false);
+    await registration.refresh(unused);
+    assert.ok(vscode.languages.getDiagnostics(unused.uri).some(item => item.code === "graphql-desk.52005"));
+    observations.unusedSelectionEditAndUndo = true;
+    await recordProgress("unused-selection-edit-undo");
     const partial = documents.get("partial.py");
     const completion = await vscode.commands.executeCommand("vscode.executeCompletionItemProvider", partial.uri,
       partial.positionAt(partial.getText().indexOf("na'") + 2));

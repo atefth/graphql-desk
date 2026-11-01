@@ -247,6 +247,57 @@ function editableRange(bundle, call, span, snapshot) {
   return origin.range;
 }
 
+function unusedSelectionActions(bundle, snapshot, diagnostics) {
+  const result = [];
+  for (const item of bundle.response.unused_selections ?? []) {
+    const diagnostic = item.diagnostic;
+    if (diagnostic.module.uri !== snapshot.uri || diagnostic.module.version !== snapshot.version ||
+        !diagnostics.some(d => d.code === "graphql-desk.52005" &&
+          d.range.start === diagnostic.range.utf16.start && d.range.end === diagnostic.range.utf16.end)) continue;
+    const call = bundle.response.calls.find(call => documentKey(call.identity) === documentKey(item.document));
+    if (!call || call.identity.module.uri !== snapshot.uri || call.identity.module.version !== snapshot.version) continue;
+    const ast = gql.parse(call.source);
+    // shortcut: only plain query leaves are removable; expand with fragment/directive safety proofs.
+    if (ast.definitions.length !== 1 || ast.definitions[0].kind !== gql.Kind.OPERATION_DEFINITION ||
+        ast.definitions[0].operation !== "query" || call.source.includes("#")) continue;
+    let unsafe = false;
+    let selected;
+    gql.visit(ast, {
+      Directive() { unsafe = true; },
+      FragmentSpread() { unsafe = true; },
+      InlineFragment() { unsafe = true; },
+      SelectionSet(node) {
+        const field = node.selections.find(field => field.loc.start === item.range.start && field.loc.end === item.range.end);
+        if (field?.kind === gql.Kind.FIELD && !field.selectionSet && !field.arguments.length && node.selections.length > 1) selected = field;
+      },
+    });
+    if (unsafe || !selected) continue;
+    let { start, end } = selected.loc;
+    const lineStart = call.source.lastIndexOf("\n", start - 1) + 1;
+    const nextLine = call.source.indexOf("\n", end);
+    if (/^[ \t]*$/.test(call.source.slice(lineStart, start)) && nextLine !== -1 &&
+        /^[ \t\r]*$/.test(call.source.slice(end, nextLine))) {
+      start = lineStart;
+      end = nextLine + 1;
+    } else {
+      const following = /^[ \t,]+/.exec(call.source.slice(end));
+      if (following) end += following[0].length;
+      else start -= /[ \t,]*$/.exec(call.source.slice(0, start))[0].length;
+    }
+    const parts = callMappedParts(call, { start, end }, call.identity.module);
+    if (!parts || parts.some(part => {
+      const decoded = call.source.slice(part.decoded.start, part.decoded.end);
+      const host = snapshot.text.slice(part.range.start, part.range.end);
+      return part.linear ? decoded !== host : decoded !== "\n" || host !== "\r\n";
+    })) continue;
+    const range = { start: parts[0].range.start, end: parts.at(-1).range.end };
+    const callRange = call.identity.call_range.utf16;
+    if (range.start < callRange.start || range.end > callRange.end) continue;
+    result.push({ title: `Remove unused selection '${selected.alias?.value ?? selected.name.value}'`, range, replacement: "" });
+  }
+  return unique(result);
+}
+
 function nodeLocation(bundle, node) {
   if (!node?.loc) return [];
   const owner = bundle.response.calls.find((item) => documentKey(item.identity) === node.loc.source.name);
@@ -820,7 +871,8 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
           }
           semantic = suggestionActions(bundle, snapshot, diagnostics, validated);
         }
-        return await finish(bundle, snapshot, token, [...stale, ...insertions, ...semantic], []);
+        const removals = unusedSelectionActions(bundle, snapshot, diagnostics);
+        return await finish(bundle, snapshot, token, [...stale, ...insertions, ...semantic, ...removals], []);
       } catch { return []; }
     },
     async diagnostics(snapshot, token) {
@@ -947,7 +999,7 @@ function registerLanguageFeatures(vscode, options) {
         const current = () => !cancelled(token) && document.version === version && !document.isClosed;
         const diagnostics = context.diagnostics.filter((item) =>
           ["graphql-desk.persisted-hash-mismatch", "graphql-desk.persisted-id-missing",
-            "graphql.validation", "graphql.deprecation"].includes(item.code));
+            "graphql.validation", "graphql.deprecation", "graphql-desk.52005"].includes(item.code));
         const items = diagnostics.map((item) => ({
           code: item.code,
           message: item.message,

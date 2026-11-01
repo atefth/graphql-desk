@@ -57,6 +57,13 @@ class FieldUsageOptions:
     client_directives: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class UnusedSelection:
+    diagnostic: GraphDiagnostic
+    document: DocumentIdentity
+    range: Span
+
+
 class _Writes(ast.NodeVisitor):
     """Bindings here, excluding nested scopes and comprehension iteration targets."""
 
@@ -570,6 +577,7 @@ class _State:
     used: set[tuple[str, ...]] = field(default_factory=set[tuple[str, ...]])
     escaped: set[tuple[str, ...]] = field(default_factory=set[tuple[str, ...]])
     accesses: int = 0
+    execution_arguments: set[Span] = field(default_factory=set[Span])
 
 
 @dataclass(frozen=True)
@@ -1772,6 +1780,16 @@ class _Flow:
                     values[position] if len(values) > position else keywords.get(name)
                 )
 
+            def executed(state: _State, source: _Document) -> None:
+                state.execution_arguments.update(
+                    self.owner.span(expression)
+                    for expression, value in (
+                        *zip(node.args, values),
+                        *((item.value, keywords[item.arg]) for item in node.keywords),
+                    )
+                    if value is source
+                )
+
             if target in ("graphql_desk.testing.read_result",):
                 source = argument(0, "document")
                 if isinstance(source, _Document):
@@ -1784,6 +1802,7 @@ class _Flow:
                         state is not None
                         and state.document.selected_operation is not None
                     ):
+                        executed(state, source)
                         return self.shape(state, _Return())
             if target in (
                 "graphql_desk.read_fragment",
@@ -1853,6 +1872,7 @@ class _Flow:
                         state is not None
                         and state.document.selected_operation is not None
                     ):
+                        executed(state, source)
                         return self.shape(state, shape)
             _consume(function)
             for item in (*values, *keywords.values()):
@@ -2260,11 +2280,51 @@ class _Flow:
             self.functions.clear()
 
 
+def _removable_document(
+    owner: _Module, state: _State, modules: Mapping[tuple[str, str], _Module]
+) -> bool:
+    # shortcut: direct bindings only, widen when document escapes can be tracked.
+    if any(
+        module.star
+        for module in modules.values()
+        if module.snapshot.project == owner.snapshot.project
+    ):
+        return False
+    if any(
+        imported == owner.snapshot.module
+        or imported.startswith(f"{owner.snapshot.module}.")
+        for module in modules.values()
+        if module is not owner and module.snapshot.project == owner.snapshot.project
+        for node in ast.walk(module.tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for imported in module.imports(node).values()
+    ):
+        return False
+    for statement in owner.tree.body:
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and owner.span(statement.value) == state.document.call.range
+        ):
+            binding = statement.targets[0].id
+            return all(
+                owner.span(node) in state.execution_arguments
+                for node in ast.walk(owner.tree)
+                if isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)
+                and node.id == binding
+            )
+    return False
+
+
 def field_usage_diagnostics(
     modules: tuple[ModuleSnapshot, ...],
     index: FragmentIndex,
     schemas: Mapping[tuple[str, str | None], SchemaContext],
     options: Mapping[str, FieldUsageOptions] | None = None,
+    *,
+    unused_selections: list[UnusedSelection] | None = None,
 ) -> tuple[GraphDiagnostic, ...]:
     """Report only proven same-file reads; unfamiliar Python remains silent."""
     parsed: dict[tuple[str, str], _Module] = {}
@@ -2316,6 +2376,9 @@ def field_usage_diagnostics(
         for state in states.values():
             if not state.accesses or () in state.escaped:
                 continue
+            removable = unused_selections is not None and _removable_document(
+                owner, state, parsed
+            )
             groups: dict[tuple[str, ...], list[_Node]] = {}
             nodes_by_path: dict[tuple[str, ...], _Node] = {}
 
@@ -2374,4 +2437,25 @@ def field_usage_diagnostics(
                             )
                             if diagnostic not in diagnostics:
                                 diagnostics.append(diagnostic)
+                            if removable and unused_selections is not None:
+                                for unused in nodes:
+                                    for unused_call, unused_field in unused.fields:
+                                        if (
+                                            unused_call == state.document.call
+                                            and unused_field.loc is not None
+                                            and unused_field.name.value not in reserved
+                                        ):
+                                            unused_selections.append(
+                                                UnusedSelection(
+                                                    diagnostic,
+                                                    DocumentIdentity(
+                                                        unused_call.module,
+                                                        unused_call.range,
+                                                    ),
+                                                    Span(
+                                                        unused_field.loc.start,
+                                                        unused_field.loc.end,
+                                                    ),
+                                                )
+                                            )
     return tuple(diagnostics)

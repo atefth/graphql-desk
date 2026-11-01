@@ -127,20 +127,30 @@ function validReply(reply, request) {
             source.source.slice(value.insertion.utf16.start, value.insertion.utf16.start + "document".length) === "document"));
     const sameModule = (left, right) => left.project === right.project && left.module === right.module &&
       left.uri === right.uri && left.version === right.version;
+    const unusedSelection = value => keys(value, ["diagnostic", "document", "range"]) &&
+      keys(value.document, ["module", "call_range"]) && module(value.document.module) && sourceRange(value.document.call_range) &&
+      keys(value.diagnostic, ["module", "code", "message", "range"]) && module(value.diagnostic.module) &&
+      value.diagnostic.code === "52005" && string(value.diagnostic.message) && sourceRange(value.diagnostic.range) &&
+      sameModule(value.diagnostic.module, value.document.module) && span(value.range) && value.range.end > value.range.start &&
+      reply.response.diagnostics.some(item => JSON.stringify(item) === JSON.stringify(value.diagnostic)) &&
+      reply.response.calls.some(call => call?.identity && sameModule(call.identity.module, value.document.module) &&
+        sourceRange(call.identity.call_range) && JSON.stringify(call.identity.call_range) === JSON.stringify(value.document.call_range) &&
+        typeof call.source === "string" && value.range.end <= call.source.length);
     return keys(reply, ["ok", "id", "request", "response", "unavailable_schemas", "remote_schemas"]) && reply.id === request.id &&
       Array.isArray(reply.remote_schemas) && reply.remote_schemas.every(item =>
         keys(item, ["project", "schema_name", "status"]) && string(item.project) && string(item.schema_name) &&
         ["ready", "stale", "unavailable"].includes(item.status)) &&
       keys(reply.request, ["request_id", "modules", "bindings", "schemas"]) &&
-      keys(reply.response, ["request_id", "modules", "schemas", "calls", "persisted", "persisted_id_insertions", "diagnostics"]) &&
+      keys(reply.response, ["request_id", "modules", "schemas", "calls", "persisted", "persisted_id_insertions", "unused_selections", "diagnostics"]) &&
       string(reply.request.request_id) && reply.request.request_id === reply.response.request_id &&
       [reply.request.modules, reply.request.bindings, reply.request.schemas, reply.response.modules,
         reply.response.schemas, reply.response.calls, reply.response.persisted,
-        reply.response.persisted_id_insertions, reply.response.diagnostics,
+        reply.response.persisted_id_insertions, reply.response.unused_selections, reply.response.diagnostics,
         reply.unavailable_schemas].every(Array.isArray) && reply.response.persisted.every(item =>
           persisted(item) && reply.response.modules.some(source => module(source) && sameModule(source, item.module))) &&
       reply.response.persisted_id_insertions.every(item => persistedInsertion(item) &&
-        reply.response.modules.some(source => module(source) && sameModule(source, item.module)));
+        reply.response.modules.some(source => module(source) && sameModule(source, item.module))) &&
+      reply.response.unused_selections.every(unusedSelection);
   }
   if (request.op === "artifacts") {
     if (keys(reply, ["ok", "id", "current"])) return string(reply.id) && reply.id === request.id && reply.current === false;
