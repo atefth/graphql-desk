@@ -588,7 +588,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
       initialPylanceType: observed.initialPylanceType, refreshedPylanceType: observed.refreshedPylanceType };
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (factorySuite) {
-    if (["typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "malformedRecovery"].includes(suite)) {
+    if (["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "malformedRecovery"].includes(suite)) {
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "complete.json"));
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated", "default.pyi"));
     } else if (suite === "parserOverlay") {
