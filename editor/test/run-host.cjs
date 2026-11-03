@@ -629,7 +629,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
       if (persistedStubPath !== observed.lifecycle.configuredStubPath) {
         observed.lifecycle.persistedStubPath = persistedStubPath;
       }
-    } else if ((suite === "typingMatrix" || suite === "externalMappings" || suite === "malformedRecovery") && persistedStubPath !== observed.lifecycle.configuredStubPath) {
+    } else if ((suite === "factoryArtifacts" || suite === "typingMatrix" || suite === "externalMappings" || suite === "malformedRecovery") && persistedStubPath !== observed.lifecycle.configuredStubPath) {
       assert.ok(persistedStubPath.replaceAll("\\", "/").startsWith(`.graphql-desk/${managedBase}/generations/g-`),
         "A later typing refresh may select another managed generation before shutdown");
       const persistedRoot = path.resolve(workspace, persistedStubPath);

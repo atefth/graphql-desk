@@ -599,9 +599,11 @@ exports.run = async () => {
     assert.ok(await until(async () => (await hover(8, 2)).includes("None") && diagnostics().some(item => item.range.start.line === 10), "saved consumer reopens with current Pylance types"));
     assert.equal(reopenedConsumer.isDirty, false);
     results.lifecycle.savedConsumerEditorReopen = true;
+    const dirtyRoot = path.join(workspace, ".graphql-desk", "dirty-artifact-test");
+    await fs.mkdir(dirtyRoot, { recursive: true });
     const dirtyFiles = [{ relative_path: "dirty_fixture/default.pyi", text: "value: str\n" }];
-    const dirtyHandle = createOwnedAnalysisArtifacts(vscode, workspace, stubRoot, "dirty_fixture", dirtyFiles);
-    const dirtyUri = vscode.Uri.file(path.join(stubRoot, "dirty_fixture", "default.pyi"));
+    const dirtyHandle = createOwnedAnalysisArtifacts(vscode, workspace, dirtyRoot, "dirty_fixture", dirtyFiles);
+    const dirtyUri = vscode.Uri.file(path.join(dirtyRoot, "dirty_fixture", "default.pyi"));
     const dirtyDocument = await vscode.workspace.openTextDocument(dirtyUri);
     const dirtyEditor = await vscode.window.showTextDocument(dirtyDocument, { preview: false });
     const dirtyDisk = await fs.readFile(dirtyUri.fsPath);
