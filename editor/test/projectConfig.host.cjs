@@ -136,8 +136,8 @@ async function run() {
     const before = await fs.readFile(schemaFile, "utf8");
     assert.match(before, /selected: String!/);
     await fs.writeFile(schemaFile, before.replace("selected: String!", "selected: String"), "utf8");
-    current = await until(generation, value => value?.setting !== first.setting && value.text?.includes("None"),
-      "Pylance refreshes live from a nullable schema edit");
+    current = await until(generation, value => value?.setting !== first.setting && value.text?.includes("None") && value.pythonSetting === value.setting,
+      "Pylance refreshes live from a nullable schema edit and selects the same completed generation as Pyright");
     assert.equal(await pythonStubPath(), current.setting, "Pylance setting rotates with the completed project generation");
     refreshedType = current.text;
   } else {
