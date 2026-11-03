@@ -583,13 +583,24 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
 
   if (saved?.version === 3 && saved.phase === "release") {
     const latest = await inspectLatest();
-    const expected = latest.hasStubPath ? latest.stubPath : "";
-    if (expected !== (saved.currentStubPath ?? "") && expected !== (saved.originalStubPath ?? "")) {
+    const restored = latest.hasStubPath === saved.originalStubPathPresent &&
+      (!saved.originalStubPathPresent || latest.stubPath === saved.originalStubPath);
+    if (restored && saved.customStubPathAdded && customPathPresent(latest)) {
+      throw new Error("Pyright config changed during GraphQL Desk cleanup; preserved");
+    }
+    if (!restored && (!latest.hasStubPath || latest.stubPath !== saved.currentStubPath)) {
       throw new Error("Pyright stubPath changed during GraphQL Desk cleanup; preserved");
     }
-    const release = await updateProjectConfig(vscode, folder, "release_stub_path", worker, {
-      ...restoreOwnership, expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath,
-    }, MANAGED_PATH, onOwnedWrite);
+    if (!restored) {
+      const released = await updateProjectConfig(vscode, folder, "release_stub_path", worker, {
+        ...restoreOwnership, expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath,
+      }, MANAGED_PATH, onOwnedWrite);
+      if (released.hasStubPath !== saved.originalStubPathPresent ||
+          saved.originalStubPathPresent && released.stubPath !== saved.originalStubPath ||
+          saved.customStubPathAdded && customPathPresent(released)) {
+        throw new Error("GraphQL Desk Pyright config cleanup could not be verified; preserved");
+      }
+    }
     await restorePythonStubPath();
     await clearOwner();
     await workspaceState?.update?.(generationKeys.stateKey, undefined);

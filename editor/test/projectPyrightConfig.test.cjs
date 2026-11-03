@@ -374,9 +374,9 @@ test("release recovery removes only the recorded custom stub root after a restar
   const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
   const owner = state.get(stateKey(f.root));
   fs.writeFileSync(path.join(f.root, "pyrightconfig.json"), JSON.stringify({
-    stubPath: "custom-stubs", extraPaths: ["vendor", "custom-stubs"],
+    stubPath: MANAGED_PATH, extraPaths: ["vendor", "custom-stubs"],
   }));
-  await state.update(stateKey(f.root), { ...owner, phase: "release", currentStubPath: "custom-stubs" });
+  await state.update(stateKey(f.root), { ...owner, phase: "release" });
   managed.cleanup();
 
   const reopened = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
@@ -384,6 +384,28 @@ test("release recovery removes only the recorded custom stub root after a restar
   assert.equal(active.stubPath, MANAGED_PATH);
   assert.equal(active.extraPaths.filter(item => item === "custom-stubs").length, 1);
   assert.ok(active.extraPaths.includes("vendor"));
+  await reopened.release();
+  reopened.cleanup();
+  const restored = parseJsonConfig(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"));
+  assert.equal(restored.stubPath, "custom-stubs");
+  assert.deepEqual(restored.extraPaths, ["vendor"]);
+});
+
+test("release recovery accepts a project config restored before restart", async t => {
+  const original = '{"stubPath":"custom-stubs","extraPaths":["vendor"]}';
+  const f = fixture(t, { json: original });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const owner = state.get(stateKey(f.root));
+  fs.writeFileSync(path.join(f.root, "pyrightconfig.json"), original);
+  await state.update(stateKey(f.root), { ...owner, phase: "release" });
+  managed.cleanup();
+
+  const reopened = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const active = parseJsonConfig(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"));
+  assert.equal(active.stubPath, MANAGED_PATH);
+  assert.ok(active.extraPaths.includes("vendor"));
+  assert.equal(active.extraPaths.filter(item => item === "custom-stubs").length, 1);
   await reopened.release();
   reopened.cleanup();
   const restored = parseJsonConfig(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"));

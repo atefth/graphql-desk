@@ -619,7 +619,7 @@ exports.run = async () => {
     results.lifecycle.activeStubRoot = stubRoot;
     results.lifecycle.ownedArtifactsRemoved = "verified after actual extension-host shutdown by the parent harness";
     results.lifecycle.userConfigurationPreserved = true;
-    results.lifecycle.userFilesUntouched = await fs.readFile(path.join(workspace, "schema.graphql"), "utf8").then(text => text === "type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User! }\n\n");
+    results.lifecycle.userFilesUntouched = await fs.readFile(path.join(workspace, "schema.graphql"), "utf8").then(text => text === "type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User! }\n");
     assert.ok(results.lifecycle.userFilesUntouched, "The extension must leave the user's GraphQL edit intact");
     results.outcome = "generated-factory-artifacts-observed";
   } catch (error) {

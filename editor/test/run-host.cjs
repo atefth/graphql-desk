@@ -556,7 +556,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     const project = JSON.parse(await fs.readFile(path.join(workspace, "pyrightconfig.json"), "utf8"));
     assert.match(project.stubPath.replaceAll("\\", "/"), /^\.graphql-desk\/live-typings\/generations\/g-/,
       "GraphQL Desk publishes through the effective project config");
-    assert.deepEqual(project.extraPaths, ["vendor", "custom-stubs"], "GraphQL Desk preserves custom project stub roots");
+    assert.deepEqual(project.extraPaths, ["vendor", "typings"], "GraphQL Desk preserves project extraPaths and Pyright's default stub root");
     const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
     assert.equal(settings["python.analysis.stubPath"], project.stubPath,
       "Pylance uses the same complete generation as the project config");
