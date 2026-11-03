@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { createHash, randomUUID } = require("node:crypto");
 const test = require("node:test");
 const { parseJsonConfig, modifyJsonConfig, updateProjectConfig, createManagedProjectConfig, MANAGED_PATH, stateKey } = require("../src/projectPyrightConfig");
 const { managedStateKeys } = require("../src/managedStubPath");
@@ -238,6 +239,28 @@ test("pending ownership recovers before and after the atomic config edit", async
     assert.deepEqual(restored.extraPaths, ["vendor"]);
     assert.equal(restored.executionEnvironments[0].hasExtraPaths, false);
   }
+});
+
+test("restart removes only the recorded atomic Pyright config temporary", async t => {
+  const f = fixture(t, { json: '{"extraPaths":["vendor"]}' });
+  const state = stateStore();
+  const config = path.join(f.root, "pyrightconfig.json");
+  const temporary = path.join(f.root, `.graphql-desk-${randomUUID()}.tmp`);
+  const unrelated = path.join(f.root, `.graphql-desk-${randomUUID()}.tmp`);
+  const pendingText = '{"extraPaths":["vendor","typings"]}';
+  fs.writeFileSync(temporary, pendingText);
+  fs.writeFileSync(unrelated, "leave this unowned file alone");
+  await state.update(`${stateKey(f.root)}:pending-config-write`, {
+    version: 1, file: "pyrightconfig.json", temporaryPath: temporary,
+    hash: createHash("sha256").update(pendingText).digest("hex"),
+  });
+
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  assert.equal(fs.existsSync(temporary), false);
+  assert.equal(fs.existsSync(unrelated), true);
+  assert.equal(state.get(`${stateKey(f.root)}:pending-config-write`), undefined);
+  await managed.release();
+  managed.cleanup();
 });
 
 test("pending TOML recovery carries its saved ownership through the worker bridge", async t => {
