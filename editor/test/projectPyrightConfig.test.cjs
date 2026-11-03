@@ -413,6 +413,22 @@ test("release recovery accepts a project config restored before restart", async 
   assert.deepEqual(restored.extraPaths, ["vendor"]);
 });
 
+test("release recovery preserves a re-added custom stub path", async t => {
+  const original = '{"stubPath":"custom-stubs","extraPaths":["vendor"]}';
+  const f = fixture(t, { json: original });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const owner = state.get(stateKey(f.root));
+  const changed = '{"stubPath":"custom-stubs","extraPaths":["vendor","custom-stubs"]}';
+  fs.writeFileSync(path.join(f.root, "pyrightconfig.json"), changed);
+  await state.update(stateKey(f.root), { ...owner, phase: "release" });
+  managed.cleanup();
+
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker), /changed during GraphQL Desk cleanup/);
+  assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), changed);
+  assert.equal(state.get(stateKey(f.root)).phase, "release");
+});
+
 test("an extraPaths alias of the reserved managed directory is rejected before config edits", async t => {
   const original = '{"extraPaths":["./.graphql-desk/live-typings"]}';
   const f = fixture(t, { json: original });
