@@ -618,6 +618,7 @@ exports.run = async () => {
     results.lifecycle.foreignDirtyGeneratedBufferPreserved = true;
     await vscode.window.showTextDocument(consumer, { preview: false });
     results.lifecycle.configuredStubPath = settings["python.analysis.stubPath"];
+    stubRoot = selectedStubRoot();
     results.lifecycle.activeStubRoot = stubRoot;
     results.lifecycle.activeDefaultStub = await fs.readFile(path.join(stubRoot, "graphql_desk_generated", "default.pyi"), "utf8");
     results.lifecycle.ownedArtifactsRemoved = "verified after actual extension-host shutdown by the parent harness";
