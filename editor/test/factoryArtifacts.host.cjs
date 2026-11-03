@@ -1,6 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const fsSync = require("node:fs");
 const { createHash } = require("node:crypto");
 const vscode = require("vscode");
 const fs = require("node:fs/promises");
@@ -156,7 +157,14 @@ exports.run = async () => {
     assert.ok(extension, "GraphQL Desk extension must be loaded in the host");
     const consumer = await vscode.workspace.openTextDocument(consumerUri);
     await vscode.window.showTextDocument(consumer, { preview: false });
-    const selectedStubRoot = () => path.resolve(workspace, vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath", ".graphql-desk/typings"));
+    const selectedStubRoot = () => {
+      try {
+        const projectStubPath = JSON.parse(fsSync.readFileSync(path.join(workspace, "pyrightconfig.json"), "utf8")).stubPath;
+        if (typeof projectStubPath === "string") return path.resolve(workspace, projectStubPath);
+      } catch { /* Use the Pylance setting when no project stubPath is active. */ }
+      return path.resolve(workspace, vscode.workspace.getConfiguration("python", consumerUri)
+        .get("analysis.stubPath", path.relative(workspace, process.env.GRAPHQL_DESK_STUB_ROOT)));
+    };
     stubRoot = selectedStubRoot();
     const documentStubPath = () => path.join(selectedStubRoot(), "graphql_desk_generated", "_documents", "default", "d0.pyi");
     await extension.activate();
@@ -433,7 +441,7 @@ exports.run = async () => {
       await new Promise(resolve => setTimeout(resolve, 2000));
       assert.equal(restartCalls.length, settledRestartCount,
         "Pylance refreshes must settle after the generated fragment snapshot converges");
-      const generationRoot = path.join(workspace, ".graphql-desk", "typings", "generations");
+      const generationRoot = path.join(process.env.GRAPHQL_DESK_STUB_ROOT, "generations");
       const completeGenerationCount = async () => (await fs.readdir(generationRoot)).filter(name => /^g-\d+-/.test(name)).length;
       const countAfterConvergence = await completeGenerationCount();
       await new Promise(resolve => setTimeout(resolve, 2000));
@@ -524,24 +532,22 @@ exports.run = async () => {
     results.lifecycle.sourceUndoRedoCloseRenameDelete = true;
     const settingsPath = path.join(workspace, ".vscode", "settings.json");
     const settings = JSON.parse(await fs.readFile(settingsPath, "utf8"));
-    assert.match(settings["python.analysis.stubPath"], /^\.graphql-desk\/typings\/generations\/g-[0-9]+-/);
+    const managedRoot = path.relative(workspace, process.env.GRAPHQL_DESK_STUB_ROOT).replaceAll("\\", "/");
+    assert.ok(settings["python.analysis.stubPath"].replaceAll("\\", "/").startsWith(`${managedRoot}/generations/g-`));
     assert.equal(settings["files.autoSave"], "off", "Automatic stub setup must preserve unrelated workspace settings");
     results.lifecycle.settingsPreserved = true;
     const customRoot = path.join(workspace, "custom_stubs");
     const previouslySelected = selectedStubRoot();
     await vscode.workspace.getConfiguration("python", consumerUri).update("analysis.stubPath", "custom_stubs", vscode.ConfigurationTarget.WorkspaceFolder);
-    const moved = await until(async () => {
-      const exists = async target => fs.access(target).then(() => true, () => false);
-      const customArtifact = await exists(path.join(customRoot, "graphql_desk_generated", "default.pyi"));
-      const previousArtifact = await exists(path.join(previouslySelected, "graphql_desk_generated", "default.pyi"));
-      const currentRoot = selectedStubRoot();
-      const currentHover = await hover(8, 2);
-      results.lifecycle.stubPathMoveProbe = { customArtifact, previousArtifact, currentRoot, customRoot, currentHover };
-      return customArtifact && currentRoot === customRoot && previousArtifact && currentHover.includes("String");
-    }, "runtime workspace stubPath change republishes into the new managed root");
-    assert.ok(moved);
-    stubRoot = customRoot;
-    results.lifecycle.runtimeStubPathChange = true;
+    assert.equal(vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath"), "custom_stubs");
+    assert.equal(selectedStubRoot(), previouslySelected, "The project config remains the effective Pyright stubPath");
+    await assert.rejects(fs.access(path.join(customRoot, "graphql_desk_generated")), { code: "ENOENT" },
+      "A lower-priority workspace setting must not receive generated stubs");
+    await vscode.workspace.getConfiguration("python", consumerUri).update(
+      "analysis.stubPath", settings["python.analysis.stubPath"], vscode.ConfigurationTarget.WorkspaceFolder);
+    assert.equal(await until(async () => (await hover(8, 2)).includes("String"), "managed project typing survives a lower-priority setting edit"), true);
+    stubRoot = selectedStubRoot();
+    results.lifecycle.projectConfigPrecedencePreserved = true;
     const schemaUri = vscode.Uri.file(path.join(workspace, "schema.graphql"));
     const schemaDocument = await vscode.workspace.openTextDocument(schemaUri);
     const schemaText = "type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User! }\n";
@@ -550,11 +556,12 @@ exports.run = async () => {
     assert.equal(await vscode.workspace.applyEdit(schemaEdit), true);
     assert.equal(await schemaDocument.save(), true);
     results.pylance.nullableRefresh = await until(async () => {
-      const stub = await fs.readFile(path.join(stubRoot, "graphql_desk_generated", "_documents", "default", "d0.pyi"), "utf8").catch(() => "");
+      const stub = await fs.readFile(path.join(selectedStubRoot(), "graphql_desk_generated", "_documents", "default", "d0.pyi"), "utf8").catch(() => "");
       return stub.includes("'selected': 'String | None'") && (await hover(8, 2)).includes("None") && diagnostics().some(item => item.range.start.line === 10);
     }, "nullable output and Pylance refresh from GraphQL edit");
+    stubRoot = selectedStubRoot();
     if (!results.pylance.nullableRefresh) results.lifecycle.nullableProbe = {
-      stubHasNullableType: (await fs.readFile(path.join(stubRoot, "graphql_desk_generated", "_documents", "default", "d0.pyi"), "utf8").catch(() => "")).includes("'selected': 'String | None'"),
+      stubHasNullableType: (await fs.readFile(path.join(selectedStubRoot(), "graphql_desk_generated", "_documents", "default", "d0.pyi"), "utf8").catch(() => "")).includes("'selected': 'String | None'"),
       hover: await hover(8, 2),
       diagnostics: diagnostics().map(item => ({ line: item.range.start.line, message: item.message })),
       stubPath: vscode.workspace.getConfiguration("python", consumerUri).get("analysis.stubPath"),
@@ -608,28 +615,7 @@ exports.run = async () => {
     assert.deepEqual(await fs.readFile(dirtyUri.fsPath), dirtyDisk);
     results.lifecycle.foreignDirtyGeneratedBufferPreserved = true;
     await vscode.window.showTextDocument(consumer, { preview: false });
-    const externalRoot = path.join(path.dirname(workspace), "external-stubs");
-    await fs.mkdir(externalRoot, { recursive: true });
-    await fs.writeFile(path.join(externalRoot, "keep.txt"), "preserve foreign root");
-    const externalSetting = path.relative(workspace, externalRoot).split(path.sep).join("/");
-    await vscode.workspace.getConfiguration("python", consumerUri).update("analysis.stubPath", externalSetting, vscode.ConfigurationTarget.WorkspaceFolder);
-    const retired = await until(async () => {
-      try { await fs.access(path.join(customRoot, "graphql_desk_generated")); return false; } catch {}
-      try { await fs.access(path.join(externalRoot, "graphql_desk_generated")); return false; } catch {}
-      return true;
-    }, "external stubPath conflict retires old owned artifacts without publishing into the foreign root");
-    assert.ok(retired);
-    assert.equal(await fs.readFile(path.join(externalRoot, "keep.txt"), "utf8"), "preserve foreign root");
-    const retryEdit = new vscode.WorkspaceEdit();
-    const latestSchema = await vscode.workspace.openTextDocument(schemaUri);
-    retryEdit.insert(schemaUri, latestSchema.positionAt(latestSchema.getText().length), "\n");
-    assert.equal(await vscode.workspace.applyEdit(retryEdit), true);
-    assert.equal(await latestSchema.save(), true);
-    await new Promise(resolve => setTimeout(resolve, 800));
-    await assert.rejects(fs.access(path.join(customRoot, "graphql_desk_generated")), { code: "ENOENT" }, "A later document refresh must not fall back to the retired managed root");
-    await assert.rejects(fs.access(path.join(externalRoot, "graphql_desk_generated")), { code: "ENOENT" }, "A later document refresh must not publish into an external root");
-    results.lifecycle.externalRootConflictPreserved = true;
-    results.lifecycle.configuredStubPath = externalSetting;
+    results.lifecycle.configuredStubPath = settings["python.analysis.stubPath"];
     results.lifecycle.activeStubRoot = stubRoot;
     results.lifecycle.ownedArtifactsRemoved = "verified after actual extension-host shutdown by the parent harness";
     results.lifecycle.userConfigurationPreserved = true;

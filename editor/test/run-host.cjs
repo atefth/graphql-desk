@@ -348,7 +348,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     // The test workspaces live under the checkout, so give them a project boundary instead of inheriting the checkout's Pyright config.
     if (factorySuite && !["projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite)) {
       await fs.writeFile(path.join(workspace, "pyrightconfig.json"), JSON.stringify({
-        stubPath: "custom-stubs", extraPaths: ["vendor"], typeCheckingMode: "strict",
+        extraPaths: ["vendor"], typeCheckingMode: "strict",
       }));
     }
     const runtimePackage = path.join(workspace, "graphql_desk_generated");

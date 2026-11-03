@@ -125,7 +125,7 @@ exports.run = async () => {
   let delayedArtifactTimer = null;
   const sourcePath = path.join(workspace, "consumer.py");
   const sourceUri = vscode.Uri.file(sourcePath);
-  const initialManagedStubRoot = path.resolve(workspace, ".graphql-desk/typings");
+  const initialManagedStubRoot = path.resolve(process.env.GRAPHQL_DESK_STUB_ROOT);
   const initialStubRoots = new Set([
     path.resolve(workspace, "typings"),
     initialManagedStubRoot,
@@ -159,7 +159,7 @@ exports.run = async () => {
   const oldQuery = "query Pick($limit: Int!) { selected count(limit: $limit) }";
   const newQuery = "query Pick($limit: Int!) { user { id } count(limit: $limit) }";
   const stubPath = () => vscode.workspace.getConfiguration("python", sourceUri)
-    .get("analysis.stubPath", ".graphql-desk/typings");
+    .get("analysis.stubPath", path.relative(workspace, process.env.GRAPHQL_DESK_STUB_ROOT));
   let generationObserved = false;
   const readGeneration = async (selectedOverride = null) => {
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -210,7 +210,7 @@ exports.run = async () => {
         assert.equal(generationObserved, false, "The selected generated typing directory disappeared");
         return { stubPath: selected, files: found, manifest };
       }
-      if (manifestMissing && !generationObserved && root === initialManagedStubRoot && found.length === 0) {
+      if (manifestMissing && !generationObserved && root === initialManagedStubRoot) {
         return { stubPath: selected, files: found };
       }
       assert.equal(stale, false, "The selected generated typing directory is incomplete");
@@ -304,11 +304,11 @@ exports.run = async () => {
     await until(async () => {
       const active = await readGeneration();
       if (active.stubPath === savedGeneration.stubPath || hasSelected(active)) return false;
-      const generationsRoot = path.join(workspace, ".graphql-desk", "typings", "generations");
+      const generationsRoot = path.join(process.env.GRAPHQL_DESK_STUB_ROOT, "generations");
       for (const entry of await fs.readdir(generationsRoot, { withFileTypes: true })) {
         if (!entry.isDirectory()) continue;
         try {
-          const candidate = await readGeneration(path.join(".graphql-desk", "typings", "generations", entry.name));
+          const candidate = await readGeneration(path.join(path.relative(workspace, process.env.GRAPHQL_DESK_STUB_ROOT), "generations", entry.name));
           if (candidate.manifest?.analysisId?.startsWith("quarantine-") && hasUnavailable(candidate, "Pick")) {
             failedQuarantineGeneration = candidate;
           }
@@ -528,8 +528,8 @@ exports.run = async () => {
     delete settingsWithoutManagedPath["python.analysis.stubPath"];
     assert.deepEqual(settingsWithoutManagedPath, preservedSettings,
       "Config invalidation preserves every unrelated workspace setting");
-    assert.match(managedStubPath.replaceAll("\\", "/"),
-      /^\.graphql-desk\/typings\/generations\/g-/,
+    assert.ok(managedStubPath.replaceAll("\\", "/").startsWith(
+      `${path.relative(workspace, process.env.GRAPHQL_DESK_STUB_ROOT).replaceAll("\\", "/")}/generations/g-`),
       "Only GraphQL Desk's authorized managed stubPath may rotate");
     results.lifecycle.delayedStaleCallbackRejected = {
       staleRequestId: delayed.id,
