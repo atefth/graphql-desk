@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { randomUUID, createHash } = require("node:crypto");
 const { parse, parseTree, modify, applyEdits } = require("jsonc-parser");
-const { createManagedStubPath, managedStateKeys, isManagedGeneration } = require("./managedStubPath");
+const { createManagedStubPath, managedStateKeys, isManagedGeneration, updateManagedState } = require("./managedStubPath");
 
 const MANAGED_PATH = ".graphql-desk/live-typings";
 const OWNER_FILE = "project-config-owner.json";
@@ -645,8 +645,8 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     await restorePythonStubPath();
     await clearOwner();
     await workspaceState?.update?.(generationKeys.stateKey, undefined);
-    await workspaceState?.update?.(generationKeys.generationStateKey, undefined);
-    await workspaceState?.update?.(generationKeys.stagingStateKey, undefined);
+    await updateManagedState(workspaceState, generationKeys.generationStateKey, undefined);
+    await updateManagedState(workspaceState, generationKeys.stagingStateKey, undefined);
     return createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite: originalOnOwnedWrite, onOwnership });
   }
 

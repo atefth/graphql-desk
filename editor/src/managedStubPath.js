@@ -20,6 +20,10 @@ function serializeStateUpdate(workspaceState, key, update) {
   return pending;
 }
 
+function updateManagedState(workspaceState, key, value) {
+  return serializeStateUpdate(workspaceState, key, () => workspaceState?.update?.(key, value));
+}
+
 function isManagedGeneration(workspace, setting, baseSetting = ".graphql-desk/typings") {
   const relative = setting.replaceAll("\\", "/");
   const prefix = baseSetting.replaceAll("\\", "/").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -327,4 +331,4 @@ function managedStateKeys(workspace, suffix = "") {
   };
 }
 
-module.exports = { createManagedStubPath, managedStateKeys, isManagedGeneration };
+module.exports = { createManagedStubPath, managedStateKeys, isManagedGeneration, updateManagedState };

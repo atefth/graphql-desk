@@ -6,7 +6,7 @@ const fs = require("node:fs/promises");
 const { createHash } = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
-const { createManagedStubPath, managedStateKeys } = require("../src/managedStubPath");
+const { createManagedStubPath, managedStateKeys, updateManagedState } = require("../src/managedStubPath");
 
 async function fixture(t, setting, dirty = false, settingLayer = "workspaceFolderValue") {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-stub-path-"));
@@ -280,7 +280,7 @@ test("serializes overlapping generation selection so the latest edit wins", asyn
   assert.equal(f.values["analysis.stubPath"], managed.selectedSetting);
 });
 
-test("serializes staging ownership across managers sharing workspace state", async t => {
+test("serializes staging ownership and release cleanup across managers", async t => {
   const f = await fixture(t, undefined);
   const first = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
   const second = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
@@ -305,6 +305,13 @@ test("serializes staging ownership across managers sharing workspace state", asy
   ]);
   assert.deepEqual(results, [true, true]);
   assert.equal(Object.keys(first.stagingEntries()).length, 2);
+  const cleanup = updateManagedState(f.workspaceState, stagingStateKey, undefined);
+  const next = first.recordStaging(
+    path.join(generations, "g-3-00000000-0000-0000-0000-000000000000"), "c".repeat(64),
+    ".graphql-desk-00000000-0000-0000-0000-000000000005-marker-00000000-0000-0000-0000-000000000006.tmp");
+  await cleanup;
+  assert.equal(await next, true);
+  assert.deepEqual(Object.keys(first.stagingEntries()), ["g-3-00000000-0000-0000-0000-000000000000"]);
 });
 
 test("a stale first generation rollback leaves an originally absent stubPath unset", async t => {
