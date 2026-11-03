@@ -248,6 +248,12 @@ jobs:
             suite: lifecycle
           - version: "1.142.0"
             suite: restartRecoveryChangedInputs
+          - version: "1.142.0"
+            suite: projectConfig
+          - version: "1.142.0"
+            suite: projectConfigEnvironment
+          - version: "1.142.0"
+            suite: projectConfigToml
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0

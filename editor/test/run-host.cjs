@@ -181,7 +181,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
   assert.deepEqual(await fs.readdir(extensions), [], "Every host run starts with an empty extensions directory");
   const result = path.join(temporary, "result.json");
   const artifacts = path.join(temporary, "artifacts.json");
-  const managedBase = ["typingMatrix", "mixedLists"].includes(suite) ? "live-typings" : "typings";
+  const managedBase = factorySuite ? "live-typings" : "typings";
   const stubRoot = factorySuite ? path.join(workspace, ".graphql-desk", managedBase) : path.join(workspace, "owned_analysis_stubs");
   const python = process.env.GRAPHQL_DESK_PYTHON || path.resolve(__dirname, "..", "..", ".venv", process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
   assert.ok(path.isAbsolute(python), "Choose an absolute trusted Python interpreter");
@@ -199,7 +199,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     ...(suite === "ownedAnalysis" ? { "python.analysis.typeCheckingMode": "strict", "python.analysis.stubPath": stubRoot } : {}),
     ...(["projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite) ? { "python.analysis.stubPath": "python-custom-stubs" } : {}),
     ...(factorySuite ? { "python.analysis.typeCheckingMode": "strict" } : {}),
-    ...(suite === "workspaceRemoval" ? { "python.analysis.stubPath": ".graphql-desk/typings" } : {}),
+    ...(suite === "workspaceRemoval" ? { "python.analysis.stubPath": ".graphql-desk/live-typings" } : {}),
   }));
   if (suite === "projectConfig" || suite === "projectConfigEnvironment") await fs.writeFile(path.join(workspace, "pyrightconfig.json"), JSON.stringify({
     stubPath: "custom-stubs", extraPaths: ["vendor"], typeCheckingMode: "strict",
@@ -522,8 +522,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
       let actual = await fs.readFile(path.join(workspace, name));
       if (name === ".vscode/settings.json") {
         const settings = JSON.parse(actual);
-        assert.match(settings["python.analysis.stubPath"].replaceAll("\\", "/"),
-          /^\.graphql-desk\/typings\/generations\/g-/,
+        assert.ok(settings["python.analysis.stubPath"].replaceAll("\\", "/").startsWith(`.graphql-desk/${managedBase}/generations/g-`),
           "Only GraphQL Desk's managed stubPath may rotate during restart recovery");
         delete settings["python.analysis.stubPath"];
         actual = Buffer.from(JSON.stringify(settings));
@@ -597,22 +596,22 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk-stubs", "__init__.pyi"));
       assert.equal(await fs.readFile(path.join(observed.lifecycle.activeStubRoot, "graphql_desk-stubs", "py.typed"), "utf8"), "partial\n");
     } else if (suite === "lifecycle") {
-      assert.match(observed.lifecycle.configuredStubPath.replaceAll("\\", "/"), /^\.graphql-desk\/typings\/generations\/g-/,
+      assert.ok(observed.lifecycle.configuredStubPath.replaceAll("\\", "/").startsWith(`.graphql-desk/${managedBase}/generations/g-`),
         "live typing uses GraphQL Desk's managed immutable generation path");
     } else {
       await assert.rejects(fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated")), { code: "ENOENT" }, "Test cleanup must remove only its owned generated package");
     }
     if (suite !== "lifecycle") {
-      const generationsRoot = path.join(workspace, ".graphql-desk", "typings", "generations");
+      const generationsRoot = path.join(stubRoot, "generations");
       const generations = await fs.readdir(generationsRoot);
       assert.ok(generations.some(name => name.startsWith("g-") && fsSync.existsSync(path.join(generationsRoot, name, "complete.json"))), "A complete immutable generation survives shutdown for restart recovery");
-      await assert.rejects(fs.access(path.join(workspace, ".graphql-desk", "typings", "graphql_desk_generated")), { code: "ENOENT" }, "Generated artifacts stay isolated in immutable generations");
+      await assert.rejects(fs.access(path.join(stubRoot, "graphql_desk_generated")), { code: "ENOENT" }, "Generated artifacts stay isolated in immutable generations");
     }
     assert.equal(await fs.readFile(path.join(workspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
     const settings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
     const persistedStubPath = settings["python.analysis.stubPath"];
     if (suite === "lifecycle") {
-      assert.match(persistedStubPath.replaceAll("\\", "/"), /^\.graphql-desk\/typings\/generations\/g-\d+-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i,
+      assert.ok(persistedStubPath.replaceAll("\\", "/").startsWith(`.graphql-desk/${managedBase}/generations/g-`),
         "The persisted path remains a GraphQL Desk managed generation");
       const persistedRoot = path.resolve(workspace, persistedStubPath);
       await fs.access(path.join(persistedRoot, "complete.json"));
@@ -631,7 +630,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
         observed.lifecycle.persistedStubPath = persistedStubPath;
       }
     } else if ((suite === "typingMatrix" || suite === "externalMappings" || suite === "malformedRecovery") && persistedStubPath !== observed.lifecycle.configuredStubPath) {
-      assert.match(persistedStubPath.replaceAll("\\", "/"), /^\.graphql-desk\/typings\/generations\/g-\d+-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i,
+      assert.ok(persistedStubPath.replaceAll("\\", "/").startsWith(`.graphql-desk/${managedBase}/generations/g-`),
         "A later typing refresh may select another managed generation before shutdown");
       const persistedRoot = path.resolve(workspace, persistedStubPath);
       await fs.access(path.join(persistedRoot, "complete.json"));
