@@ -345,7 +345,8 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
       ...(suite === "lifecycle" ? [fs.writeFile(path.join(workspace, "lifecycle_calls.py"), "from graphql_desk_generated.default import graphql\nextra = graphql('query Extra { user { id } }')\n")] : []),
       ...(suite === "lifecycle" ? [fs.writeFile(path.join(workspace, "preserved_user.py"), "value = 'saved'\n")] : []),
     ]);
-    if (["typingMatrix", "mixedLists"].includes(suite)) {
+    // The test workspaces live under the checkout, so give them a project boundary instead of inheriting the checkout's Pyright config.
+    if (factorySuite && !["projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite)) {
       await fs.writeFile(path.join(workspace, "pyrightconfig.json"), JSON.stringify({
         stubPath: "custom-stubs", extraPaths: ["vendor"], typeCheckingMode: "strict",
       }));
