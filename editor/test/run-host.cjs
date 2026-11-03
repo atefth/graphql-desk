@@ -589,8 +589,9 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (factorySuite) {
     if (["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "malformedRecovery"].includes(suite)) {
-      await fs.access(path.join(observed.lifecycle.activeStubRoot, "complete.json"));
-      await fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated", "default.pyi"));
+      const selectedStubRoot = path.resolve(workspace, JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"))["python.analysis.stubPath"]);
+      await fs.access(path.join(selectedStubRoot, "complete.json"));
+      await fs.access(path.join(selectedStubRoot, "graphql_desk_generated", "default.pyi"));
     } else if (suite === "parserOverlay") {
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "complete.json"));
       await fs.access(path.join(observed.lifecycle.activeStubRoot, "graphql_desk-stubs", "__init__.pyi"));
@@ -634,9 +635,12 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
         "A later typing refresh may select another managed generation before shutdown");
       const persistedRoot = path.resolve(workspace, persistedStubPath);
       await fs.access(path.join(persistedRoot, "complete.json"));
+      const expectedDefaultStub = suite === "factoryArtifacts"
+        ? observed.lifecycle.activeDefaultStub
+        : await fs.readFile(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated", "default.pyi"), "utf8");
       assert.equal(
         await fs.readFile(path.join(persistedRoot, "graphql_desk_generated", "default.pyi"), "utf8"),
-        await fs.readFile(path.join(observed.lifecycle.activeStubRoot, "graphql_desk_generated", "default.pyi"), "utf8"),
+        expectedDefaultStub,
         "The persisted generation keeps the exact typing Pylance observed",
       );
       observed.lifecycle.persistedStubPath = persistedStubPath;

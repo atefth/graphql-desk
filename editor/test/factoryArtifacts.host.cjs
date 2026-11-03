@@ -619,6 +619,7 @@ exports.run = async () => {
     await vscode.window.showTextDocument(consumer, { preview: false });
     results.lifecycle.configuredStubPath = settings["python.analysis.stubPath"];
     results.lifecycle.activeStubRoot = stubRoot;
+    results.lifecycle.activeDefaultStub = await fs.readFile(path.join(stubRoot, "graphql_desk_generated", "default.pyi"), "utf8");
     results.lifecycle.ownedArtifactsRemoved = "verified after actual extension-host shutdown by the parent harness";
     results.lifecycle.userConfigurationPreserved = true;
     results.lifecycle.userFilesUntouched = await fs.readFile(path.join(workspace, "schema.graphql"), "utf8").then(text => text === "type User { id: ID! name: String! }\ntype Query { selected: String count(limit: Int!): Int! user: User! }\n");
