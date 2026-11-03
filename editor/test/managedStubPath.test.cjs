@@ -6,7 +6,7 @@ const fs = require("node:fs/promises");
 const { createHash } = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
-const { createManagedStubPath } = require("../src/managedStubPath");
+const { createManagedStubPath, managedStateKeys } = require("../src/managedStubPath");
 
 async function fixture(t, setting, dirty = false, settingLayer = "workspaceFolderValue") {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-stub-path-"));
@@ -278,6 +278,33 @@ test("serializes overlapping generation selection so the latest edit wins", asyn
   assert.equal(await latestSelection, true);
   assert.equal(managed.selectedSetting, path.relative(f.workspace, second).split(path.sep).join("/"));
   assert.equal(f.values["analysis.stubPath"], managed.selectedSetting);
+});
+
+test("serializes staging ownership across managers sharing workspace state", async t => {
+  const f = await fixture(t, undefined);
+  const first = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const second = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const stagingStateKey = managedStateKeys(f.workspace).stagingStateKey;
+  const update = f.workspaceState.update;
+  f.workspaceState.update = async (key, value) => {
+    if (key === stagingStateKey) await new Promise(resolve => setImmediate(resolve));
+    return update(key, value);
+  };
+  const generations = path.join(first.root, "generations");
+  const paths = [
+    path.join(generations, "g-1-00000000-0000-0000-0000-000000000000"),
+    path.join(generations, "g-2-00000000-0000-0000-0000-000000000000"),
+  ];
+  const temporary = [
+    ".graphql-desk-00000000-0000-0000-0000-000000000001-marker-00000000-0000-0000-0000-000000000002.tmp",
+    ".graphql-desk-00000000-0000-0000-0000-000000000003-marker-00000000-0000-0000-0000-000000000004.tmp",
+  ];
+  const results = await Promise.all([
+    first.recordStaging(paths[0], "a".repeat(64), temporary[0]),
+    second.recordStaging(paths[1], "b".repeat(64), temporary[1]),
+  ]);
+  assert.deepEqual(results, [true, true]);
+  assert.equal(Object.keys(first.stagingEntries()).length, 2);
 });
 
 test("a stale first generation rollback leaves an originally absent stubPath unset", async t => {

@@ -9,6 +9,16 @@ const inside = (root, value) => {
   const relative = path.relative(root, value);
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 };
+const stateUpdateQueues = new WeakMap();
+
+function serializeStateUpdate(workspaceState, key, update) {
+  if (!workspaceState || (typeof workspaceState !== "object" && typeof workspaceState !== "function")) return Promise.resolve().then(update);
+  let queues = stateUpdateQueues.get(workspaceState);
+  if (!queues) stateUpdateQueues.set(workspaceState, queues = new Map());
+  const pending = (queues.get(key) ?? Promise.resolve()).then(update, update);
+  queues.set(key, pending.catch(() => {}));
+  return pending;
+}
 
 function isManagedGeneration(workspace, setting, baseSetting = ".graphql-desk/typings") {
   const relative = setting.replaceAll("\\", "/");
@@ -73,7 +83,6 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
     return config.get("analysis.stubPath", "") === expected;
   };
   const ownershipError = () => `Pylance stubPath ownership changed; preserved (expected ${JSON.stringify(setting)}, actual ${JSON.stringify(config.inspect?.("analysis.stubPath"))})`;
-  let generationStateQueue = Promise.resolve();
   if (!setting && explicitlyConfigured && options.forceOwned !== true) {
     setting = "typings";
   } else if (!setting && options.forceOwned !== true) {
@@ -138,9 +147,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
           await workspaceState?.update?.(generationStateKey, { ...records, [path.basename(target)]: manifestFingerprint });
           return this.ownsGeneration(target, manifestFingerprint);
         };
-        const pending = generationStateQueue.then(record, record);
-        generationStateQueue = pending.catch(() => {});
-        return pending;
+        return serializeStateUpdate(workspaceState, generationStateKey, record);
       },
       forgetGeneration(directory, manifestFingerprint) {
         const target = path.resolve(directory);
@@ -154,9 +161,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
           await workspaceState?.update?.(generationStateKey, next);
           return true;
         };
-        const pending = generationStateQueue.then(forget, forget);
-        generationStateQueue = pending.catch(() => {});
-        return pending;
+        return serializeStateUpdate(workspaceState, generationStateKey, forget);
       },
       ownsStaging(directory, markerFingerprint) {
         const target = path.resolve(directory);
@@ -183,9 +188,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
           await workspaceState?.update?.(stagingStateKey, { ...records, [path.basename(target)]: { fingerprint: markerFingerprint, markerTemporary } });
           return this.ownsStaging(target, markerFingerprint);
         };
-        const pending = generationStateQueue.then(record, record);
-        generationStateQueue = pending.catch(() => {});
-        return pending;
+        return serializeStateUpdate(workspaceState, stagingStateKey, record);
       },
       forgetStaging(directory, markerFingerprint) {
         const target = path.resolve(directory);
@@ -199,9 +202,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
           await workspaceState?.update?.(stagingStateKey, next);
           return true;
         };
-        const pending = generationStateQueue.then(forget, forget);
-        generationStateQueue = pending.catch(() => {});
-        return pending;
+        return serializeStateUpdate(workspaceState, stagingStateKey, forget);
       },
       selectGeneration(generationRoot, isCurrent = () => true, verification) {
         const select = async () => {
