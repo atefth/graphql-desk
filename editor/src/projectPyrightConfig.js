@@ -433,16 +433,17 @@ function atomicReplace(vscode, workspace, file, text, expected, expectedHash, te
 async function atomicReplaceOwnedConfig(vscode, workspace, file, text, snapshot, onOwnedWrite) {
   const nextHash = createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
   const temporaryPath = path.join(path.dirname(file), `.graphql-desk-${randomUUID()}.tmp`);
-  if (await onOwnedWrite(file, nextHash, { phase: "begin", previousHash: snapshot.hash, temporaryPath }) === false) {
+  const begin = onOwnedWrite(file, nextHash, { phase: "begin", previousHash: snapshot.hash, temporaryPath });
+  if ((begin && typeof begin.then === "function" ? await begin : begin) === false) {
     throw new Error("GraphQL Desk could not establish Pyright config write ownership; preserved");
   }
   try {
     atomicReplace(vscode, workspace, file, text, snapshot.identity, snapshot.hash, temporaryPath);
   } catch (error) {
-    await onOwnedWrite(file, null, { phase: "cancel" });
+    onOwnedWrite(file, null, { phase: "cancel" });
     throw error;
   }
-  await onOwnedWrite(file, nextHash, { phase: "commit" });
+  onOwnedWrite(file, nextHash, { phase: "commit" });
 }
 
 async function invokeToml(folder, text, action, worker, ownership = {}, managedPath = MANAGED_PATH) {
@@ -501,22 +502,19 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   const workspace = inspected.workspace;
   await recoverPendingConfigWrite(workspace, inspected.file, workspaceState);
   const originalOnOwnedWrite = onOwnedWrite;
-  onOwnedWrite = async (filename, fingerprint, operation) => {
+  onOwnedWrite = (filename, fingerprint, operation) => {
     if (!operation) return originalOnOwnedWrite(filename, fingerprint);
     const key = pendingConfigWriteKey(workspace);
     if (operation.phase === "begin") {
       if (originalOnOwnedWrite(filename, fingerprint, operation) === false) return false;
-      try {
-        await workspaceState.update(key, { version: 1, file: path.relative(workspace, filename).split(path.sep).join("/"),
-          temporaryPath: operation.temporaryPath, hash: fingerprint });
-        return true;
-      } catch (error) {
+      return workspaceState.update(key, { version: 1, file: path.relative(workspace, filename).split(path.sep).join("/"),
+        temporaryPath: operation.temporaryPath, hash: fingerprint }).then(() => true, error => {
         originalOnOwnedWrite(filename, null, { phase: "cancel" });
         throw error;
-      }
+      });
     }
     const result = originalOnOwnedWrite(filename, fingerprint, operation);
-    await workspaceState.update(key, undefined);
+    void workspaceState.update(key, undefined).catch(() => {});
     return result;
   };
   const key = stateKey(workspace);
