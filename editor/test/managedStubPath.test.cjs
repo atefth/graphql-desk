@@ -307,6 +307,19 @@ test("waits for generation rotation before recording staging ownership", async t
   assert.equal(await staging, true);
 });
 
+test("refuses staging when Pyright ownership changed and preserves the user setting", async t => {
+  const f = await fixture(t, undefined);
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  f.values["analysis.stubPath"] = "user-stubs";
+  const generation = path.join(managed.root, "generations", "g-1-00000000-0000-0000-0000-000000000000");
+  await assert.rejects(managed.recordStaging(generation, "a".repeat(64),
+    ".graphql-desk-00000000-0000-0000-0000-000000000001-marker-00000000-0000-0000-0000-000000000002.tmp"),
+  /ownership changed.*expected.*actual/);
+
+  assert.deepEqual(managed.stagingEntries(), {});
+  assert.equal(f.values["analysis.stubPath"], "user-stubs");
+});
+
 test("serializes staging ownership and release cleanup across managers", async t => {
   const f = await fixture(t, undefined);
   const first = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);

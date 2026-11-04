@@ -192,11 +192,13 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
             !/^g-[0-9]+-[0-9a-f-]{36}$/i.test(path.basename(target)) || !/^[a-f0-9]{64}$/.test(markerFingerprint ?? "") ||
             !/^\.graphql-desk-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}-marker-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp$/i.test(markerTemporary ?? "")) return Promise.resolve(false);
         const record = async () => {
-          if (!ownsSetting || !ownsCurrentValue(setting)) return false;
+          if (!ownsSetting) throw new Error("Managed stubPath is not owned; preserved");
+          if (!ownsCurrentValue(setting)) throw new Error(ownershipError());
           const current = workspaceState?.get?.(stagingStateKey);
           const records = current && typeof current === "object" && !Array.isArray(current) ? current : {};
           await workspaceState?.update?.(stagingStateKey, { ...records, [path.basename(target)]: { fingerprint: markerFingerprint, markerTemporary } });
-          return this.ownsStaging(target, markerFingerprint);
+          if (!this.ownsStaging(target, markerFingerprint)) throw new Error("Staging ownership record did not persist; preserved");
+          return true;
         };
         return serializeSelection(() => serializeStateUpdate(workspaceState, stagingStateKey, record));
       },
