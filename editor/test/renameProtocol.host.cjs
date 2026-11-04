@@ -334,6 +334,28 @@ async function run() {
     observed.extractNestedFragmentRoundtripUndo = true;
     await nestedFragmentClient.stop();
 
+    observed.step = "extract-captured-local-fragment-roundtrip-undo";
+    const capturedLocalSource = "from graphql_desk import gql\ndef build():\n    card = gql('fragment Card on User { id }')\n    def read():\n        query = gql('query Read { user { friend { ...Card } name } }', fragments=[card])\n        return query\n    return read\n";
+    const capturedLocalSchema = "type User { id: ID! name: String! friend: User } type Query { user: User }";
+    const capturedLocal = await pythonExtractionDocument("extract-captured-local", capturedLocalSource, {
+      schema: capturedLocalSchema,
+    });
+    const capturedLocalClient = createRenameLanguageClient(vscode, capturedLocal.language, { isTrusted: () => true });
+    clients.push(capturedLocalClient);
+    await capturedLocalClient.start();
+    await vscode.window.showTextDocument(capturedLocal.document);
+    assert.equal(await requestExtract(capturedLocalClient.client, capturedLocal.document, undefined, "friend { ...Card }"), true);
+    assert.match(capturedLocal.document.getText(), /fragment UserFields on User .*fragments=\[card\]/);
+    const capturedLocalUpdated = bundle(capturedLocal.document.getText(), {
+      uri: capturedLocal.document.uri.toString(), version: capturedLocal.document.version,
+      schema: capturedLocalSchema,
+    });
+    assert.deepEqual(capturedLocalUpdated.response.diagnostics, []);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(capturedLocal.document.getText(), capturedLocalSource);
+    observed.extractCapturedLocalFragmentRoundtripUndo = true;
+    await capturedLocalClient.stop();
+
     observed.step = "extract-module-conditional-roundtrip-undo";
     const conditionalSource = "# 😀\r\nfrom graphql_desk import gql\r\nif ENABLED:\r\n    # conditional query\r\n    query = gql('query Read { user { id name } }')\r\n";
     const conditionalExtraction = await pythonExtractionDocument("extract-module-conditional", conditionalSource);

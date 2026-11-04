@@ -3160,6 +3160,28 @@ alias('{ id }')
         self.assertEqual(len(annotated_async.calls), 2)
         self.assertEqual(len(annotated_async.calls[-1].fragments), 1)
 
+        captured = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def build():\n"
+                    "    card = gql('fragment Card on User { id }')\n"
+                    "    def read():\n"
+                    "        return gql('query UserCard { user { ...Card } }', "
+                    "fragments=[card])\n"
+                    "    return read\n",
+                ),
+            )
+        )
+        self.assertEqual(captured.diagnostics, ())
+        self.assertEqual(len(captured.calls), 2)
+        self.assertEqual(len(captured.calls[-1].fragments), 1)
+        self.assertEqual(
+            captured.calls[-1].fragments[0].target,
+            DocumentIdentity(captured.calls[0].module, captured.calls[0].range),
+        )
+
         rejected = (
             "def read(flag):\n"
             "    if flag:\n"
@@ -3197,6 +3219,25 @@ alias('{ id }')
             "def read():\n"
             "    card = gql('fragment Card on User { id }')\n"
             "    return gql('query { user { ...Card } }', fragments=make_list(card))\n",
+            "def build():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    def read():\n"
+            "        return gql('query { user { ...Card } }', fragments=[card])\n"
+            "    return card, read\n",
+            "def build():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    def read():\n"
+            "        return gql('query { user { ...Card } }', fragments=[card])\n"
+            "    def other():\n"
+            "        return gql('query { user { ...Card } }', fragments=[card])\n"
+            "    return read, other\n",
+            "def build():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    def read():\n"
+            "        nonlocal card\n"
+            "        card = gql('fragment Card on User { name }')\n"
+            "        return gql('query { user { ...Card } }', fragments=[card])\n"
+            "    return read\n",
             "def read():\n"
             "    card = gql('query Wrong { user { id } }')\n"
             "    return gql('query { user { ...Wrong } }', fragments=[card])\n",

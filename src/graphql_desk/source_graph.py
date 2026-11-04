@@ -2013,8 +2013,9 @@ class _Graph:
 
 
 class _CallScopes(ast.NodeVisitor):
-    def __init__(self, module: _Module) -> None:
+    def __init__(self, module: _Module, graph: _Graph | None = None) -> None:
         self.module = module
+        self.graph = graph
         self.scoped = False
         self.function_body: bool = False
         self.class_method: bool = False
@@ -2033,17 +2034,44 @@ class _CallScopes(ast.NodeVisitor):
                     None,
                 )
             )
-            local_references: set[int] = (
-                {
-                    id(item)
-                    for item in fragments.elts
-                    if isinstance(item, ast.Name)
-                    and item.id in getattr(self, "local_documents", {})
-                }
-                if getattr(self, "straight_line", True)
-                and isinstance(fragments, (ast.List, ast.Tuple))
-                else set()
-            )
+            local_references: set[int] = set()
+            if getattr(self, "straight_line", True):
+                for candidate in ast.walk(node):
+                    if not isinstance(candidate, ast.Call):
+                        continue
+                    if candidate is not node:
+                        if self.graph is None:
+                            continue
+                        try:
+                            callable_ = self.graph.expression(
+                                self.module,
+                                candidate.func,
+                                (candidate.lineno, candidate.col_offset),
+                                set(),
+                            )
+                        except (_Unresolved, RecursionError):
+                            continue
+                        if callable_.kind != "callable":
+                            continue
+                    fragments = (
+                        candidate.args[1]
+                        if len(candidate.args) == 2
+                        else next(
+                            (
+                                item.value
+                                for item in candidate.keywords
+                                if item.arg == "fragments"
+                            ),
+                            None,
+                        )
+                    )
+                    if isinstance(fragments, (ast.List, ast.Tuple)):
+                        local_references.update(
+                            id(item)
+                            for item in fragments.elts
+                            if isinstance(item, ast.Name)
+                            and item.id in getattr(self, "local_documents", {})
+                        )
             if any(
                 isinstance(item, ast.Name)
                 and isinstance(item.ctx, ast.Load)
@@ -2433,7 +2461,7 @@ def _resolve(
 
         class Calls(_CallScopes):
             def __init__(self, module: _Module) -> None:
-                super().__init__(module)
+                super().__init__(module, graph)
                 self.local_documents: dict[str, _Value] = {}
                 self.local_scopes: list[
                     tuple[dict[str, _Value], dict[str, ast.Call], bool]
@@ -2461,10 +2489,23 @@ def _resolve(
             def begin_function(
                 self, node: ast.FunctionDef | ast.AsyncFunctionDef
             ) -> None:
+                inherited_documents = self.local_documents
                 self.local_scopes.append(
                     (self.local_documents, self.local_candidates, self.straight_line)
                 )
-                self.local_documents = {}
+                local_names = {
+                    name for statement in node.body for name in module.writes(statement)
+                }
+                local_names.update(
+                    item.arg
+                    for item in ast.walk(node.args)
+                    if isinstance(item, ast.arg)
+                )
+                self.local_documents = {
+                    name: value
+                    for name, value in inherited_documents.items()
+                    if name not in local_names
+                }
                 self.local_candidates = {}
                 self.straight_line = True
                 graph.local_documents = self.local_documents
@@ -2483,12 +2524,12 @@ def _resolve(
                     if (
                         sum(name in module.writes(item) for item in node.body) != 1
                         or name in arguments
-                        or not self.is_single_fragment_use(node, name)
+                        or not self.has_static_fragment_uses(node, name)
                     ):
                         continue
                     self.local_candidates[name] = value
 
-            def is_single_fragment_use(
+            def has_static_fragment_uses(
                 self, function: ast.FunctionDef | ast.AsyncFunctionDef, name: str
             ) -> bool:
                 if any(
@@ -2508,63 +2549,102 @@ def _resolve(
                     and isinstance(item.ctx, ast.Load)
                     and item.id == name
                 ]
-                if len(references) != 1:
+                if not references:
                     return False
-                reference = references[0]
-                fragments = parents.get(reference)
-                if not isinstance(fragments, (ast.List, ast.Tuple)):
-                    return False
-                holder = parents.get(fragments)
-                if isinstance(holder, ast.keyword):
-                    holder = parents.get(holder)
-                call = holder
-                if not isinstance(call, ast.Call) or reference not in fragments.elts:
-                    return False
-                fragments_argument = (
-                    call.args[1]
-                    if len(call.args) == 2
-                    else next(
-                        (
-                            item.value
-                            for item in call.keywords
-                            if item.arg == "fragments"
-                        ),
-                        None,
-                    )
-                )
-                if fragments_argument is not fragments:
-                    return False
-                try:
-                    callable_ = graph.expression(
-                        module, call.func, (call.lineno, call.col_offset), set()
-                    )
-                except (_Unresolved, RecursionError):
-                    return False
-                if callable_.kind != "callable":
-                    return False
-                parent = parents.get(call)
-                while parent is not function:
-                    if parent is None:
+                captured_function: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+                for reference in references:
+                    fragments = parents.get(reference)
+                    if not isinstance(fragments, (ast.List, ast.Tuple)):
                         return False
-                    if type(parent).__name__ == "TryStar" or isinstance(
-                        parent,
-                        (
-                            ast.If,
-                            ast.For,
-                            ast.AsyncFor,
-                            ast.While,
-                            ast.Try,
-                            ast.With,
-                            ast.AsyncWith,
-                            ast.Match,
-                            ast.FunctionDef,
-                            ast.AsyncFunctionDef,
-                            ast.Lambda,
-                            ast.ClassDef,
-                        ),
+                    holder = parents.get(fragments)
+                    if isinstance(holder, ast.keyword):
+                        holder = parents.get(holder)
+                    call = holder
+                    if (
+                        not isinstance(call, ast.Call)
+                        or reference not in fragments.elts
                     ):
                         return False
-                    parent = parents.get(parent)
+                    fragments_argument = (
+                        call.args[1]
+                        if len(call.args) == 2
+                        else next(
+                            (
+                                item.value
+                                for item in call.keywords
+                                if item.arg == "fragments"
+                            ),
+                            None,
+                        )
+                    )
+                    if fragments_argument is not fragments:
+                        return False
+                    try:
+                        callable_ = graph.expression(
+                            module, call.func, (call.lineno, call.col_offset), set()
+                        )
+                    except (_Unresolved, RecursionError):
+                        return False
+                    if callable_.kind != "callable":
+                        return False
+                    parent = parents.get(call)
+                    nested_function: ast.FunctionDef | ast.AsyncFunctionDef | None = (
+                        None
+                    )
+                    while parent is not function:
+                        if parent is None:
+                            return False
+                        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            if (
+                                nested_function is not None
+                                or parent not in function.body
+                            ):
+                                return False
+                            nested_function = parent
+                        elif type(parent).__name__ == "TryStar" or isinstance(
+                            parent,
+                            (
+                                ast.If,
+                                ast.For,
+                                ast.AsyncFor,
+                                ast.While,
+                                ast.Try,
+                                ast.With,
+                                ast.AsyncWith,
+                                ast.Match,
+                                ast.Lambda,
+                                ast.ClassDef,
+                            ),
+                        ):
+                            return False
+                        parent = parents.get(parent)
+                    if nested_function is not None:
+                        if captured_function not in (None, nested_function):
+                            return False
+                        captured_function = nested_function
+                        child: ast.AST = call
+                        while parents.get(child) is not nested_function:
+                            next_child = parents.get(child)
+                            if next_child is None:
+                                return False
+                            child = next_child
+                        if child not in nested_function.body or any(
+                            isinstance(item, (ast.Global, ast.Nonlocal))
+                            for item in ast.walk(nested_function)
+                        ):
+                            return False
+                        nested_names = {
+                            local
+                            for statement in nested_function.body
+                            for local in module.writes(statement)
+                        }
+                        nested_names.update(
+                            item.arg
+                            for item in ast.walk(nested_function.args)
+                            if isinstance(item, ast.arg)
+                        )
+                        if name in nested_names:
+                            return False
                 return True
 
             def after_function_statement(self, statement: ast.stmt) -> None:
