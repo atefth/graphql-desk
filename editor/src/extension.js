@@ -123,7 +123,20 @@ function typingFingerprint(groups) {
   return createHash("sha256").update(JSON.stringify(files)).digest("hex");
 }
 
-async function reconfigureWorkspaceRoots({ roots, folders, create, retire }) {
+const rootReconfigurationQueues = new WeakMap();
+function reconfigureWorkspaceRoots(options) {
+  const previous = rootReconfigurationQueues.get(options.roots) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(() => reconfigureWorkspaceRootsNow({
+    ...options, folders: typeof options.folders === "function" ? options.folders() : options.folders,
+  }));
+  rootReconfigurationQueues.set(options.roots, next);
+  return next;
+}
+function waitForRootReconfigurations(roots) {
+  return (rootReconfigurationQueues.get(roots) ?? Promise.resolve()).catch(() => {});
+}
+
+async function reconfigureWorkspaceRootsNow({ roots, folders, create, retire }) {
   const errors = [];
   for (const [folderRoot, promise] of [...roots]) {
     let current;
@@ -155,6 +168,14 @@ async function reconfigureWorkspaceRoots({ roots, folders, create, retire }) {
     }
   }
   if (errors.length) throw new AggregateError(errors, "One or more workspace stub roots could not be reconfigured");
+}
+
+async function artifactsWithRetry(controller, snapshot, token, onFailure, canRetry) {
+  let failureReason;
+  const captureFailure = reason => { failureReason = reason; onFailure(reason); };
+  const result = await controller.artifacts(snapshot, token, captureFailure);
+  if (result || !canRetry() || !["worker-artifacts-failed", "worker-artifacts-stale"].includes(failureReason)) return result;
+  return controller.artifacts(snapshot, token, captureFailure);
 }
 
 let active;
@@ -246,7 +267,7 @@ function activate(context) {
     managed.cleanup();
   }
   async function reconfigureRoots() {
-    await reconfigureWorkspaceRoots({ roots, folders: vscode.workspace.workspaceFolders ?? [],
+    await reconfigureWorkspaceRoots({ roots, folders: () => vscode.workspace.workspaceFolders ?? [],
       create: createManagedRoot, retire: retireRoot });
   }
   async function managedStubPathsAreCurrent() {
@@ -480,13 +501,8 @@ function activate(context) {
       return;
     }
     const snapshot = controller.snapshot(document);
-    let artifactFailureReason;
-    const captureArtifactFailure = reason => { artifactFailureReason = reason; traceSkip(reason); };
-    let result = await controller.artifacts(snapshot, token, captureArtifactFailure);
-    if (!result && artifactFailureReason === "worker-artifacts-failed" &&
-        !disposed && ticket === generation && !token?.isCancellationRequested) {
-      result = await controller.artifacts(snapshot, token, captureArtifactFailure);
-    }
+    const result = await artifactsWithRetry(controller, snapshot, token, traceSkip,
+      () => !disposed && ticket === generation && !token?.isCancellationRequested);
     if (!result) return;
     output.appendLine(`GraphQL Desk trace: artifacts projects=${result.projects.length} files=${result.projects.reduce((sum, item) => sum + item.files.length, 0)} operations=${result.projects.reduce((sum, item) => sum + item.provenance.length, 0)} input=${result.input_fingerprint} saved=${result.saved_source_fingerprint}`);
     const analysisCurrent = result.isCurrent();
@@ -648,6 +664,7 @@ function activate(context) {
       // Our own generation switch selects already complete immutable output. Treat a
       // mismatch as an external setting edit and rebuild the manager around it.
       void managedStubPathsAreCurrent().then(ownedSelection => {
+        if (disposed) return;
         output.appendLine(`GraphQL Desk trace: stubPath event owned=${ownedSelection}`);
         if (ownedSelection) return;
         generation += 1;
@@ -674,6 +691,7 @@ function activate(context) {
     await renameClient.stop();
     disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
     configChanged.dispose(); language.dispose(); highlighting.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
+    await waitForRootReconfigurations(roots);
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
     outputs.clear();
     const managedRoots = await Promise.all([...roots.values()].map(promise => promise.catch(() => null)));
@@ -692,5 +710,5 @@ function activate(context) {
   refreshVisible(null, true);
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate, operationDependencyImpact, reconfigureWorkspaceRoots, typingFingerprint };
+module.exports = { activate, deactivate, artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, typingFingerprint, waitForRootReconfigurations };
 
