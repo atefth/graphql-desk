@@ -115,6 +115,26 @@ test("a stubPath conflict retires only its workspace and reconfigures the remain
   assert.equal(await roots.get(secondPath), nextSecond, "other workspace still receives its new root");
 });
 
+test("reconfiguration reuses a root that still owns its setting", async () => {
+  const root = path.resolve("active-workspace");
+  const folder = { uri: { fsPath: root } };
+  let created = false;
+  let retired = false;
+  const managed = { root: path.join(root, "typings"), stillOwnsSetting: () => true, cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(managed)]]);
+
+  await reconfigureWorkspaceRoots({
+    roots,
+    folders: [folder],
+    create: async () => { created = true; return { ...managed }; },
+    retire: async () => { retired = true; },
+  });
+
+  assert.equal(created, false);
+  assert.equal(retired, false);
+  assert.equal(await roots.get(root), managed);
+});
+
 test("removing a workspace retires its managed root and leaves other roots active", async () => {
   const removedPath = path.resolve("removed-workspace");
   const activePath = path.resolve("active-workspace");
