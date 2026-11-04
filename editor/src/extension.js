@@ -124,6 +124,13 @@ function typingFingerprint(groups) {
 }
 
 const rootReconfigurationQueues = new WeakMap();
+const stubPathChangeQueues = new WeakMap();
+function serializeStubPathChange(roots, operation) {
+  const previous = stubPathChangeQueues.get(roots) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(operation);
+  stubPathChangeQueues.set(roots, next.catch(() => {}));
+  return next;
+}
 function reconfigureWorkspaceRoots(options) {
   const previous = rootReconfigurationQueues.get(options.roots) ?? Promise.resolve();
   const next = previous.catch(() => {}).then(() => reconfigureWorkspaceRootsNow({
@@ -691,14 +698,16 @@ function activate(context) {
   const configChanged = vscode.workspace.onDidChangeConfiguration(event => {
     if ((vscode.workspace.workspaceFolders ?? []).some(folder =>
       event.affectsConfiguration("python.analysis.stubPath", folder.uri))) {
-      // Our own generation switch selects already complete immutable output. Treat a
-      // mismatch as an external setting edit and rebuild the manager around it.
-      void managedStubPathsAreCurrent().then(ownedSelection => {
+      // Check and reconfigure as one step so duplicate events cannot reuse a stale root.
+      void serializeStubPathChange(roots, async () => {
+        await waitForRootReconfigurations(roots);
+        const ownedSelection = await managedStubPathsAreCurrent();
         if (disposed) return;
         output.appendLine(`GraphQL Desk trace: stubPath event owned=${ownedSelection}`);
         if (ownedSelection) return;
         generation += 1;
-        return reconfigureRoots().then(() => refreshVisible(null, true), () => { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(null, true); });
+        try { await reconfigureRoots(); await refreshVisible(null, true); }
+        catch { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(null, true); }
       });
     } else if (event.affectsConfiguration("graphqlDesk")) refreshVisible(null, true);
   });
@@ -741,5 +750,5 @@ function activate(context) {
   refreshVisible(null, true);
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate, artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, typingFingerprint, waitForRootReconfigurations };
+module.exports = { activate, deactivate, artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations };
 

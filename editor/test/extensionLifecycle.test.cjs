@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, typingFingerprint, waitForRootReconfigurations } = require("../src/extension");
+const { artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations } = require("../src/extension");
 
 test("stale artifact replies retry once when the publish is still current", async () => {
   let calls = 0;
@@ -207,6 +207,27 @@ test("root reconfiguration waits for in-flight generation selection before repla
   await reconfiguration;
   assert.equal(created, true);
   assert.equal(await roots.get(root), replacement);
+});
+
+test("overlapping stubPath changes reconcile in order", async () => {
+  const roots = new Map();
+  const order = [];
+  let finishFirst;
+  let firstStarted;
+  const firstGate = new Promise(resolve => { finishFirst = resolve; });
+  const started = new Promise(resolve => { firstStarted = resolve; });
+  const first = serializeStubPathChange(roots, async () => {
+    order.push("first-start");
+    firstStarted();
+    await firstGate;
+    order.push("first-end");
+  });
+  await started;
+  const second = serializeStubPathChange(roots, async () => { order.push("second"); });
+  assert.deepEqual(order, ["first-start"], "the later event cannot inspect a stale root during the earlier reconciliation");
+  finishFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(order, ["first-start", "first-end", "second"]);
 });
 
 test("concurrent root reconfigurations create and retire a replacement only once", async () => {
