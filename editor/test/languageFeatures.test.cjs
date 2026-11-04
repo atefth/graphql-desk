@@ -723,6 +723,33 @@ test("extracting complete sibling fields creates a colocated fragment and compos
   assert.equal(refreshed.response.calls[1].fragments.length, 1);
 });
 
+test("fragment extraction accepts complete field runs and rejects non-field ranges", async () => {
+  const commented = "from graphql_desk import gql\nq = gql(\"\"\"query Read { user { id, # keep this comment\n name } }\"\"\")\n";
+  const commentedValue = bundle(commented);
+  const start = commented.indexOf("id,");
+  const end = commented.indexOf("name") + "name".length;
+  const plan = await createLanguageFeatures(options(commentedValue)).extractFragment(document(commentedValue), { start, end });
+  assert.equal(plan.length, 3);
+  const updated = [...plan].sort((a, b) => b.range.start - a.range.start)
+    .reduce((text, item) => text.slice(0, item.range.start) + item.replacement + text.slice(item.range.end), commented);
+  assert.ok(updated.includes('fragment UserFields on User {\\nid, # keep this comment\\n name\\n}'));
+  assert.deepEqual(bundle(updated).response.diagnostics, []);
+
+  for (const [source, selected] of [
+    ["from graphql_desk import gql\ncard = gql('fragment Card on User { id }')\nq = gql('query Read { user { ...Card name } }', [card])\n", "...Card"],
+    ["from graphql_desk import gql\nq = gql('query Read { user { ... on User { name } id } }')\n", "... on User { name }"],
+  ]) {
+    const value = bundle(source), selectedStart = source.indexOf(selected);
+    assert.equal(await createLanguageFeatures(options(value)).extractFragment(document(value), {
+      start: selectedStart, end: selectedStart + selected.length,
+    }), null, selected);
+  }
+  const collapsedStart = commented.indexOf("id,");
+  assert.equal(await createLanguageFeatures(options(commentedValue)).extractFragment(document(commentedValue), {
+    start: collapsedStart, end: collapsedStart,
+  }), null);
+});
+
 test("fragment extraction reuses opted-in custom and generated factory aliases", async () => {
   const cases = [
     {
