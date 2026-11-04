@@ -3182,6 +3182,39 @@ alias('{ id }')
             DocumentIdentity(captured.calls[0].module, captured.calls[0].range),
         )
 
+        sibling_captures = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def build():\n"
+                    "    card = gql('fragment Card on User { id }')\n"
+                    "    def read():\n"
+                    "        return gql('query R{user{...Card}}', fragments=[card])\n"
+                    "    def other():\n"
+                    "        return gql('query O{user{...Card}}', fragments=[card])\n"
+                    "    return read, other\n",
+                ),
+            )
+        )
+        self.assertEqual(sibling_captures.diagnostics, ())
+        self.assertEqual(len(sibling_captures.calls), 3)
+        sibling_operations = [
+            call
+            for call in sibling_captures.calls
+            if call.source.startswith("query R") or call.source.startswith("query O")
+        ]
+        self.assertEqual(len(sibling_operations), 2)
+        for operation in sibling_operations:
+            self.assertEqual(len(operation.fragments), 1)
+            self.assertEqual(
+                operation.fragments[0].target,
+                DocumentIdentity(
+                    sibling_captures.calls[0].module,
+                    sibling_captures.calls[0].range,
+                ),
+            )
+
         rejected = (
             "def read(flag):\n"
             "    if flag:\n"
@@ -3228,7 +3261,7 @@ alias('{ id }')
             "    card = gql('fragment Card on User { id }')\n"
             "    def read():\n"
             "        return gql('query { user { ...Card } }', fragments=[card])\n"
-            "    def other():\n"
+            "    def other(card):\n"
             "        return gql('query { user { ...Card } }', fragments=[card])\n"
             "    return read, other\n",
             "def build():\n"

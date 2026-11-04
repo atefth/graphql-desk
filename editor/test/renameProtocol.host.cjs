@@ -335,7 +335,7 @@ async function run() {
     await nestedFragmentClient.stop();
 
     observed.step = "extract-captured-local-fragment-roundtrip-undo";
-    const capturedLocalSource = "from graphql_desk import gql\ndef build():\n    card = gql('fragment Card on User { id }')\n    def read():\n        query = gql('query Read { user { friend { ...Card } name } }', fragments=[card])\n        return query\n    return read\n";
+    const capturedLocalSource = "from graphql_desk import gql\ndef build():\n    card = gql('fragment Card on User { id }')\n    def read():\n        query = gql('query Read { user { friend { ...Card } name } }', fragments=[card])\n        return query\n    def other():\n        query = gql('query Other { user { friend { ...Card } id } }', fragments=[card])\n        return query\n    return read, other\n";
     const capturedLocalSchema = "type User { id: ID! name: String! friend: User } type Query { user: User }";
     const capturedLocal = await pythonExtractionDocument("extract-captured-local", capturedLocalSource, {
       schema: capturedLocalSchema,
@@ -351,6 +351,7 @@ async function run() {
       schema: capturedLocalSchema,
     });
     assert.deepEqual(capturedLocalUpdated.response.diagnostics, []);
+    assert.equal(capturedLocalUpdated.response.calls.length, 4);
     await vscode.commands.executeCommand("undo");
     assert.equal(capturedLocal.document.getText(), capturedLocalSource);
     observed.extractCapturedLocalFragmentRoundtripUndo = true;
