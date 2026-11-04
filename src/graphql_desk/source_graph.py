@@ -2542,6 +2542,33 @@ def _resolve(
                     for parent in ast.walk(function)
                     for child in ast.iter_child_nodes(parent)
                 }
+                nested_bindings: dict[
+                    ast.FunctionDef | ast.AsyncFunctionDef,
+                    tuple[set[str], set[str], set[str]],
+                ] = {}
+
+                def bindings(
+                    scope: ast.FunctionDef | ast.AsyncFunctionDef,
+                ) -> tuple[set[str], set[str], set[str]]:
+                    if scope not in nested_bindings:
+                        local_names = {
+                            local
+                            for statement in scope.body
+                            for local in module.writes(statement)
+                        }
+                        local_names.update(
+                            item.arg
+                            for item in ast.walk(scope.args)
+                            if isinstance(item, ast.arg)
+                        )
+                        globals_, nonlocals_ = self.function_declarations(scope)
+                        nested_bindings[scope] = (
+                            local_names,
+                            globals_,
+                            nonlocals_,
+                        )
+                    return nested_bindings[scope]
+
                 references = [
                     item
                     for item in ast.walk(function)
@@ -2551,7 +2578,30 @@ def _resolve(
                 ]
                 if not references:
                     return False
+                captures_fragment = False
                 for reference in references:
+                    scopes: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+                    parent = parents.get(reference)
+                    while parent is not function:
+                        if parent is None:
+                            return False
+                        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            scopes.append(parent)
+                        parent = parents.get(parent)
+                    shadowed = False
+                    for scope in scopes:
+                        local_names, global_names, nonlocal_names = bindings(scope)
+                        if name in nonlocal_names:
+                            return False
+                        if name in local_names:
+                            shadowed = True
+                            break
+                        if name in global_names:
+                            shadowed = True
+                            break
+                    if shadowed:
+                        continue
+                    captures_fragment = True
                     fragments = parents.get(reference)
                     if not isinstance(fragments, (ast.List, ast.Tuple)):
                         return False
@@ -2587,19 +2637,12 @@ def _resolve(
                     if callable_.kind != "callable":
                         return False
                     parent = parents.get(call)
-                    nested_function: ast.FunctionDef | ast.AsyncFunctionDef | None = (
-                        None
-                    )
+                    nested_functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
                     while parent is not function:
                         if parent is None:
                             return False
                         if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                            if (
-                                nested_function is not None
-                                or parent not in function.body
-                            ):
-                                return False
-                            nested_function = parent
+                            nested_functions.append(parent)
                         elif type(parent).__name__ == "TryStar" or isinstance(
                             parent,
                             (
@@ -2617,31 +2660,51 @@ def _resolve(
                         ):
                             return False
                         parent = parents.get(parent)
-                    if nested_function is not None:
+                    if nested_functions:
+                        nested_functions.reverse()
+                        if len(nested_functions) > 2:
+                            return False
+                        enclosing = function
+                        for nested_function in nested_functions:
+                            if nested_function not in enclosing.body:
+                                return False
+                            enclosing = nested_function
+
                         child: ast.AST = call
-                        while parents.get(child) is not nested_function:
+                        while parents.get(child) is not nested_functions[-1]:
                             next_child = parents.get(child)
                             if next_child is None:
                                 return False
                             child = next_child
-                        if child not in nested_function.body or any(
-                            isinstance(item, (ast.Global, ast.Nonlocal))
-                            for item in ast.walk(nested_function)
-                        ):
+                        if child not in nested_functions[-1].body:
                             return False
-                        nested_names = {
-                            local
-                            for statement in nested_function.body
-                            for local in module.writes(statement)
-                        }
-                        nested_names.update(
-                            item.arg
-                            for item in ast.walk(nested_function.args)
-                            if isinstance(item, ast.arg)
-                        )
-                        if name in nested_names:
-                            return False
-                return True
+                return captures_fragment
+
+            @staticmethod
+            def function_declarations(
+                function: ast.FunctionDef | ast.AsyncFunctionDef,
+            ) -> tuple[set[str], set[str]]:
+                globals_: set[str] = set()
+                nonlocals: set[str] = set()
+                pending: list[ast.AST] = list(function.body)
+                while pending:
+                    item = pending.pop()
+                    if isinstance(
+                        item,
+                        (
+                            ast.FunctionDef,
+                            ast.AsyncFunctionDef,
+                            ast.ClassDef,
+                            ast.Lambda,
+                        ),
+                    ):
+                        continue
+                    if isinstance(item, ast.Global):
+                        globals_.update(item.names)
+                    elif isinstance(item, ast.Nonlocal):
+                        nonlocals.update(item.names)
+                    pending.extend(ast.iter_child_nodes(item))
+                return globals_, nonlocals
 
             def after_function_statement(self, statement: ast.stmt) -> None:
                 assigned = self.assigned_name(statement)
