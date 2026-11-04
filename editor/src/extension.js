@@ -135,6 +135,7 @@ async function reconfigureWorkspaceRoots({ roots, folders, create, retire }) {
       try { await retire(folderRoot, current); } catch (error) { errors.push(error); }
       continue;
     }
+    if (current.stillOwnsSetting?.() === true) continue;
     let next;
     try { next = await create(folder); }
     catch (error) {
