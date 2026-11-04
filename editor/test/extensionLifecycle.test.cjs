@@ -5,7 +5,16 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations } = require("../src/extension");
+const { analysisRequestIsCurrent, artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations } = require("../src/extension");
+
+test("superseded typing tickets cannot recover or publish generated types", () => {
+  const result = { isCurrent: () => true };
+  assert.equal(analysisRequestIsCurrent(4, 4, false, result), true);
+  assert.equal(analysisRequestIsCurrent(4, 5, false, result), false, "a newer refresh supersedes the old request");
+  assert.equal(analysisRequestIsCurrent(4, 4, true, result), false, "disposed extensions cannot publish");
+  assert.equal(analysisRequestIsCurrent(4, 4, false, { isCurrent: () => false }), false,
+    "stale worker snapshots remain rejected");
+});
 
 test("stale artifact replies retry once when the publish is still current", async () => {
   let calls = 0;
