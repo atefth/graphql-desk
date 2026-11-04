@@ -1413,6 +1413,25 @@ send(second)
         )
         self.assertEqual(warnings(source), [])
 
+    def test_field_line_suppression_only_hides_that_field_warning(self) -> None:
+        source = PREFIX.replace(
+            'query = gql("{ user { id name email } }")',
+            'query = gql(\n'
+            '    "{\\n"\n'
+            '    "  user { id name email }\\n" # graphql-desk: ignore[52005]\n'
+            '    "\\n"\n'
+            '    "  other { id name email }\\n"\n'
+            '    "}"\n'
+            ')',
+        ) + (
+            'result=execute(query, {})\n'
+            'print(result["user"]["name"])\n'
+            'print(result["other"]["name"])'
+        )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["other"])
+        self.assertIn("other.email", found[0][1])
+
     def test_same_shape_documents_keep_distinct_consumption_identity(self) -> None:
         source = (
             PREFIX
