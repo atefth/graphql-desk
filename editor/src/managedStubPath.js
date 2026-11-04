@@ -9,13 +9,28 @@ const inside = (root, value) => {
   const relative = path.relative(root, value);
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 };
+const stateUpdateQueues = new WeakMap();
 
-function isManagedGeneration(workspace, setting) {
+function serializeStateUpdate(workspaceState, key, update) {
+  if (!workspaceState || (typeof workspaceState !== "object" && typeof workspaceState !== "function")) return Promise.resolve().then(update);
+  let queues = stateUpdateQueues.get(workspaceState);
+  if (!queues) stateUpdateQueues.set(workspaceState, queues = new Map());
+  const pending = (queues.get(key) ?? Promise.resolve()).then(update, update);
+  queues.set(key, pending.catch(() => {}));
+  return pending;
+}
+
+function updateManagedState(workspaceState, key, value) {
+  return serializeStateUpdate(workspaceState, key, () => workspaceState?.update?.(key, value));
+}
+
+function isManagedGeneration(workspace, setting, baseSetting = ".graphql-desk/typings") {
   const relative = setting.replaceAll("\\", "/");
-  const match = /^\.graphql-desk\/typings\/generations\/(g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/.exec(relative);
+  const prefix = baseSetting.replaceAll("\\", "/").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`^${prefix}/generations/(g-\\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$`).exec(relative);
   if (!match) return false;
   const directory = path.resolve(workspace, ...relative.split("/"));
-  if (!inside(path.join(workspace, ".graphql-desk", "typings", "generations"), directory)) return false;
+  if (!inside(path.join(workspace, ...baseSetting.split("/").concat("generations")), directory)) return false;
   let current = workspace;
   try {
     for (const part of path.relative(workspace, directory).split(path.sep)) {
@@ -34,45 +49,47 @@ function isManagedGeneration(workspace, setting) {
   } catch { return false; }
 }
 
-async function createManagedStubPath(vscode, folder, workspaceState) {
+async function createManagedStubPath(vscode, folder, workspaceState, options = {}) {
   if (!folder || folder.uri.scheme !== "file" || !path.isAbsolute(folder.uri.fsPath) || !vscode.workspace.isTrusted) throw new Error("Trusted file workspace required");
   const workspace = path.resolve(folder.uri.fsPath);
-  const config = vscode.workspace.getConfiguration("python", folder.uri);
+  const config = options.config ?? vscode.workspace.getConfiguration("python", folder.uri);
+  const managedBase = options.baseSetting ?? ".graphql-desk/typings";
+  const suffix = options.stateSuffix ?? "";
   const inspection = config.inspect?.("analysis.stubPath");
   const explicitlyConfigured = inspection && [inspection.globalValue, inspection.workspaceValue, inspection.workspaceFolderValue].some(value => value !== undefined);
   const configured = explicitlyConfigured
     ? config.get("analysis.stubPath", "") : "";
   let setting = typeof configured === "string" ? configured.trim() : "";
-  const stateKey = `managed-analysis-stub:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
-  const generationStateKey = `managed-analysis-generations:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
-  const stagingStateKey = `managed-analysis-staging:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
+  const keys = managedStateKeys(workspace, suffix);
+  const { stateKey, generationStateKey, stagingStateKey } = keys;
   const previousOwner = workspaceState?.get?.(stateKey);
   const inspectedSettings = [inspection?.globalValue, inspection?.workspaceValue, inspection?.workspaceFolderValue]
     .filter(value => value !== undefined);
   const selectedWorkspaceSetting = (inspection?.workspaceValue === setting || inspection?.workspaceFolderValue === setting) &&
     inspectedSettings.every(value => value === setting);
-  const owned = Boolean(previousOwner?.base === ".graphql-desk/typings" &&
+  const owned = Boolean(previousOwner?.base === managedBase &&
     (previousOwner.current === setting || (previousOwner.pending === true && previousOwner.previous === setting)) ||
-    !previousOwner && selectedWorkspaceSetting && isManagedGeneration(workspace, setting));
-  let ownsSetting = owned;
-  let baseSetting = owned ? previousOwner?.base ?? ".graphql-desk/typings" : setting;
+    !previousOwner && selectedWorkspaceSetting && isManagedGeneration(workspace, setting, managedBase));
+  let settingPresent = ownedSettingPresent(previousOwner, setting, explicitlyConfigured);
+  if (options.forceOwned === true && previousOwner && !owned) throw new Error("Pyright stubPath ownership changed; preserved");
+  let ownsSetting = options.forceOwned === true || owned;
+  let baseSetting = owned ? previousOwner?.base ?? managedBase : ownsSetting ? managedBase : setting;
   const ownsCurrentValue = expected => {
     const current = config.inspect?.("analysis.stubPath");
     if (current) {
-      const configuredValues = [current.globalValue, current.workspaceValue, current.workspaceFolderValue]
-        .filter(value => value !== undefined);
-      if (expected === "") return configuredValues.length === 0;
       // VS Code may serialize a WorkspaceFolder target as workspaceValue for a
-      // single-folder workspace. Ownership is the persisted value, not that layer.
-      return configuredValues.length > 0 && configuredValues.every(value => value === expected);
+      // single-folder workspace. Compare the effective explicit layer so an owned
+      // empty override remains distinct from an inherited nonempty setting.
+      const value = current.workspaceFolderValue !== undefined ? current.workspaceFolderValue :
+        current.workspaceValue !== undefined ? current.workspaceValue : current.globalValue ?? "";
+      return value === expected;
     }
     return config.get("analysis.stubPath", "") === expected;
   };
   const ownershipError = () => `Pylance stubPath ownership changed; preserved (expected ${JSON.stringify(setting)}, actual ${JSON.stringify(config.inspect?.("analysis.stubPath"))})`;
-  let generationStateQueue = Promise.resolve();
-  if (!setting && explicitlyConfigured) {
+  if (!setting && explicitlyConfigured && options.forceOwned !== true) {
     setting = "typings";
-  } else if (!setting) {
+  } else if (!setting && options.forceOwned !== true) {
     const target = path.join(workspace, ".vscode", "settings.json");
     const workspaceFile = vscode.workspace.workspaceFile?.scheme === "file" ? vscode.workspace.workspaceFile.fsPath : null;
     const dirty = vscode.workspace.textDocuments?.some(document => document.isDirty &&
@@ -82,13 +99,24 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
     setting = "";
     ownsSetting = true;
     baseSetting = ".graphql-desk/typings";
-    await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
+    settingPresent = false;
+    await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: false });
+  }
+  if (options.forceOwned === true && !previousOwner) {
+    const dirty = options.isDirty?.();
+    if (dirty) throw new Error("Dirty Pyright config buffer; preserved");
+    await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: settingPresent });
   }
   if (ownsSetting && !inside(workspace, path.resolve(workspace, baseSetting))) throw new Error("Owned Pylance stubPath is outside the workspace; preserved");
   const root = path.resolve(workspace, ownsSetting ? baseSetting : setting);
   if (!inside(workspace, root)) throw new Error("Configured Pylance stubPath is outside the workspace; preserved");
   const created = [];
   let selectionQueue = Promise.resolve();
+  const serializeSelection = operation => {
+    const pending = selectionQueue.then(operation, operation);
+    selectionQueue = pending.catch(() => {});
+    return pending;
+  };
   try {
     const relative = path.relative(workspace, root);
     let current = workspace;
@@ -128,9 +156,7 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
           await workspaceState?.update?.(generationStateKey, { ...records, [path.basename(target)]: manifestFingerprint });
           return this.ownsGeneration(target, manifestFingerprint);
         };
-        const pending = generationStateQueue.then(record, record);
-        generationStateQueue = pending.catch(() => {});
-        return pending;
+        return serializeStateUpdate(workspaceState, generationStateKey, record);
       },
       forgetGeneration(directory, manifestFingerprint) {
         const target = path.resolve(directory);
@@ -144,9 +170,7 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
           await workspaceState?.update?.(generationStateKey, next);
           return true;
         };
-        const pending = generationStateQueue.then(forget, forget);
-        generationStateQueue = pending.catch(() => {});
-        return pending;
+        return serializeStateUpdate(workspaceState, generationStateKey, forget);
       },
       ownsStaging(directory, markerFingerprint) {
         const target = path.resolve(directory);
@@ -164,18 +188,19 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
       recordStaging(directory, markerFingerprint, markerTemporary) {
         const target = path.resolve(directory);
         const generations = path.join(root, "generations");
-        if (!ownsSetting || !ownsCurrentValue(setting) || !inside(generations, target) || target === generations ||
+        if (!inside(generations, target) || target === generations ||
             !/^g-[0-9]+-[0-9a-f-]{36}$/i.test(path.basename(target)) || !/^[a-f0-9]{64}$/.test(markerFingerprint ?? "") ||
             !/^\.graphql-desk-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}-marker-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp$/i.test(markerTemporary ?? "")) return Promise.resolve(false);
         const record = async () => {
+          if (!ownsSetting) throw new Error("Managed stubPath is not owned; preserved");
+          if (!ownsCurrentValue(setting)) throw new Error(ownershipError());
           const current = workspaceState?.get?.(stagingStateKey);
           const records = current && typeof current === "object" && !Array.isArray(current) ? current : {};
           await workspaceState?.update?.(stagingStateKey, { ...records, [path.basename(target)]: { fingerprint: markerFingerprint, markerTemporary } });
-          return this.ownsStaging(target, markerFingerprint);
+          if (!this.ownsStaging(target, markerFingerprint)) throw new Error("Staging ownership record did not persist; preserved");
+          return true;
         };
-        const pending = generationStateQueue.then(record, record);
-        generationStateQueue = pending.catch(() => {});
-        return pending;
+        return serializeSelection(() => serializeStateUpdate(workspaceState, stagingStateKey, record));
       },
       forgetStaging(directory, markerFingerprint) {
         const target = path.resolve(directory);
@@ -189,9 +214,7 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
           await workspaceState?.update?.(stagingStateKey, next);
           return true;
         };
-        const pending = generationStateQueue.then(forget, forget);
-        generationStateQueue = pending.catch(() => {});
-        return pending;
+        return serializeStateUpdate(workspaceState, stagingStateKey, forget);
       },
       selectGeneration(generationRoot, isCurrent = () => true, verification) {
         const select = async () => {
@@ -220,32 +243,39 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
           const settingsPath = path.join(workspace, ".vscode", "settings.json");
           const workspaceFile = vscode.workspace.workspaceFile?.scheme === "file" ? vscode.workspace.workspaceFile.fsPath : null;
           const dirty = vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === "file" && document.uri.fsPath &&
-            (normalized(document.uri.fsPath) === normalized(settingsPath) || (workspaceFile && normalized(document.uri.fsPath) === normalized(workspaceFile))));
+            (normalized(document.uri.fsPath) === normalized(settingsPath) || (workspaceFile && normalized(document.uri.fsPath) === normalized(workspaceFile)))) ||
+            options.isDirty?.();
           if (dirty) throw new Error("Dirty workspace settings; preserved");
           const oldSetting = setting;
+          const oldSettingPresent = settingPresent;
           try {
             setting = targetSetting;
-            await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, previous: oldSetting, pending: true });
+            settingPresent = true;
+            await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting,
+              previous: oldSetting, previousPresent: oldSettingPresent, pending: true });
             verifyGeneration();
             if (!ownsCurrentValue(oldSetting)) throw new Error(ownershipError());
             verifyGeneration();
             await config.update("analysis.stubPath", targetSetting, vscode.ConfigurationTarget.WorkspaceFolder);
             verifyGeneration();
-            await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
+            await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: true });
+            settingPresent = true;
             if (isCurrent() !== true && ownsCurrentValue(targetSetting)) {
               setting = oldSetting;
-              await config.update("analysis.stubPath", oldSetting || undefined, vscode.ConfigurationTarget.WorkspaceFolder);
-              await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting });
+              await config.update("analysis.stubPath", oldSettingPresent ? oldSetting : undefined, vscode.ConfigurationTarget.WorkspaceFolder);
+              settingPresent = oldSettingPresent;
+              await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: settingPresent });
               return false;
             }
             return ownsCurrentValue(targetSetting);
           } catch (error) {
             if (ownsCurrentValue(targetSetting)) {
-              await config.update("analysis.stubPath", oldSetting || undefined, vscode.ConfigurationTarget.WorkspaceFolder);
+              await config.update("analysis.stubPath", oldSettingPresent ? oldSetting : undefined, vscode.ConfigurationTarget.WorkspaceFolder);
             }
             if (ownsCurrentValue(oldSetting)) {
               setting = oldSetting;
-              try { await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting }); }
+              settingPresent = oldSettingPresent;
+              try { await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: settingPresent }); }
               catch { /* A failed state write before the setting change leaves the prior record authoritative. */ }
             } else if (!ownsCurrentValue(targetSetting)) {
               // A third value belongs to the user; stop managing it and leave it intact.
@@ -256,9 +286,7 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
             throw error;
           }
         };
-        const pending = selectionQueue.then(select, select);
-        selectionQueue = pending.catch(() => {});
-        return pending;
+        return serializeSelection(select);
       },
       cleanup() {
         for (const [directory, stat] of [...created].reverse()) {
@@ -268,6 +296,16 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
             fs.rmdirSync(directory);
           } catch { /* Preserve paths that are no longer verified as ours. */ }
         }
+      },
+      async release() {
+        if (options.restoreOnRelease !== true || !ownsSetting) return;
+        if (!ownsCurrentValue(setting)) throw new Error(ownershipError());
+        const restored = options.restoreSetting;
+        await config.update("analysis.stubPath", restored, vscode.ConfigurationTarget.WorkspaceFolder);
+        if (!ownsCurrentValue(restored ?? "")) throw new Error("Original Pyright stubPath restoration could not be verified; preserved");
+        setting = restored ?? "";
+        ownsSetting = false;
+        await workspaceState?.update?.(stateKey, undefined);
       },
     };
   } catch (error) {
@@ -281,4 +319,22 @@ async function createManagedStubPath(vscode, folder, workspaceState) {
   }
 }
 
-module.exports = { createManagedStubPath };
+function ownedSettingPresent(previousOwner, setting, explicitlyConfigured) {
+  if (!previousOwner || (previousOwner.current !== setting &&
+      !(previousOwner.pending === true && previousOwner.previous === setting))) return explicitlyConfigured;
+  if (previousOwner.pending === true && previousOwner.previous === setting) {
+    return previousOwner.previousPresent ?? (setting !== "");
+  }
+  return previousOwner.currentPresent ?? (setting !== "");
+}
+
+function managedStateKeys(workspace, suffix = "") {
+  const digest = createHash("sha256").update(normalized(workspace)).digest("hex");
+  return {
+    stateKey: `managed-analysis-stub:${digest}${suffix}`,
+    generationStateKey: `managed-analysis-generations:${digest}${suffix}`,
+    stagingStateKey: `managed-analysis-staging:${digest}${suffix}`,
+  };
+}
+
+module.exports = { createManagedStubPath, managedStateKeys, isManagedGeneration, updateManagedState };

@@ -545,6 +545,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
       token: stagingToken,
       files: stagingFiles,
     }, null, 2)}\n`, "utf8");
+    const markerFingerprint = digest(markerBytes);
     let markerIdentity;
     if (isCurrent() !== true) return false;
     verifyRoot();
@@ -555,7 +556,10 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
     let temporaryIdentity;
     let stagingRecorded = false;
     try {
-      if (!await managed.recordStaging(directory, digest(markerBytes), markerTemporaryName)) throw new Error("Could not record staging ownership");
+      if (!await managed.recordStaging(directory, markerFingerprint, markerTemporaryName)) {
+        const retained = managed.stagingEntries?.()?.[id]?.fingerprint === markerFingerprint;
+        throw new Error(`Could not record staging ownership (stubPathOwned=${managed.stillOwnsSetting?.() === true}; markerRetained=${retained})`);
+      }
       stagingRecorded = true;
       const markerDescriptor = fs.openSync(markerTemporary, "wx");
       try { fs.writeFileSync(markerDescriptor, markerBytes); fs.fsyncSync(markerDescriptor); }

@@ -7,6 +7,9 @@ const { TextDecoder } = require("node:util");
 const { validOperationManifest } = require("./analysisGenerations");
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+const LIVE_STUB_ROOT = ".graphql-desk/live-typings";
+const generationStubPath = value => typeof value === "string" &&
+  /^\.graphql-desk\/live-typings\/generations\/g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
 const failure = () => new Error("GraphQL Desk worker request failed");
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const keys = (value, expected) => object(value) && Object.keys(value).sort().join(",") === [...expected].sort().join(",");
@@ -41,9 +44,10 @@ function parseFrame(buffer) {
 
 function validReply(reply, request) {
   if (!object(reply) || reply.ok !== true) return false;
-  if (request.op === "pyright_config") return keys(reply, ["ok", "found", "text", "stub_path", "extra_paths", "has_execution_environments", "execution_environments", "ownership"]) &&
+  if (request.op === "pyright_config") return keys(reply, ["ok", "found", "text", "stub_path", "has_stub_path", "extra_paths", "has_execution_environments", "execution_environments", "ownership"]) &&
     typeof reply.found === "boolean" && typeof reply.text === "string" &&
     (reply.stub_path === null || typeof reply.stub_path === "string") &&
+    typeof reply.has_stub_path === "boolean" &&
     Array.isArray(reply.extra_paths) && reply.extra_paths.length <= 1024 && reply.extra_paths.every(value => typeof value === "string") &&
     typeof reply.has_execution_environments === "boolean" &&
     Array.isArray(reply.execution_environments) && reply.execution_environments.length <= 1024 && reply.execution_environments.every(item =>
@@ -51,7 +55,7 @@ function validReply(reply, request) {
       item.extra_paths.length <= 1024 && item.extra_paths.every(string) && typeof item.has_extra_paths === "boolean") &&
     keys(reply.ownership, ["top_level", "execution_environment_roots"]) && typeof reply.ownership.top_level === "boolean" &&
     Array.isArray(reply.ownership.execution_environment_roots) && reply.ownership.execution_environment_roots.every(string) &&
-    (reply.found || reply.text === request.text && reply.stub_path === null && reply.extra_paths.length === 0 && !reply.has_execution_environments);
+    (reply.found || reply.text === request.text && reply.stub_path === null && !reply.has_stub_path && reply.extra_paths.length === 0 && !reply.has_execution_environments);
   if (request.op === "prepare") {
     const extended = Object.hasOwn(request, "remote_revisions");
     const expected = ["ok", "id", "local_schemas", "remote_schemas", "required_buffers", "configuration_diagnostics"];
@@ -304,7 +308,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
     process.stdin.on("error", failed);
     process.stdout.on("error", failed);
     process.stderr.on("error", failed);
-    process.stderr.on("data", failed);
+    process.stderr.on("data", chunk => { globalThis.process.stderr.write(`Worker stderr: ${String(chunk)}\n`); failed(); });
     process.stdout.on("data", chunk => {
       if (child !== process) return;
       try {
@@ -323,7 +327,11 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
           const active = pending;
           if (!active || !trusted()) throw failure();
           const reply = parseFrame(Buffer.concat(parts, bytes));
-          if (!validReply(reply, active.request)) throw failure();
+          if (active.request.op === "pyright_config" && reply?.ok !== true) process.stderr.write(`Failed Pyright worker reply: ${JSON.stringify({ request: active.request, reply })}\n`);
+          if (!validReply(reply, active.request)) {
+            if (active.request.op === "pyright_config") process.stderr.write(`Invalid Pyright worker reply: ${JSON.stringify({ request: active.request, reply })}\n`);
+            throw failure();
+          }
           parts.length = 0;
           bytes = 0;
           pending = null;
@@ -344,10 +352,15 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
             message.workspace !== workspace) throw failure();
         if (message.op === "pyright_config") {
           if (!keys(message, ["op", "workspace", "text", "action", "managed_path", "ownership"]) || typeof message.text !== "string" ||
-              Buffer.byteLength(message.text, "utf8") > 1024 * 1024 || !["inspect", "add", "remove"].includes(message.action) ||
-              message.managed_path !== ".graphql-desk/live-typings" || !keys(message.ownership, ["topLevel", "executionEnvironmentRoots"]) ||
+              Buffer.byteLength(message.text, "utf8") > 1024 * 1024 || !["inspect", "add", "remove", "set_stub_path", "restore_stub_path", "prepare_stub_path", "release_stub_path"].includes(message.action) ||
+              (message.action === "set_stub_path" ? !generationStubPath(message.managed_path) : message.managed_path !== LIVE_STUB_ROOT) || !object(message.ownership) ||
+              Object.keys(message.ownership).some(key => !["topLevel", "executionEnvironmentRoots", "expected_stub_path_present", "expected_stub_path",
+                "restore_stub_path_present", "restore_stub_path", "custom_stub_path", "custom_stub_path_added", "remove_extra_paths_key",
+                "original_stub_path_present", "original_stub_path", "remove_managed_paths", "legacy_top_level", "legacy_execution_environment_roots"].includes(key)) ||
               typeof message.ownership.topLevel !== "boolean" || !Array.isArray(message.ownership.executionEnvironmentRoots) ||
-              !message.ownership.executionEnvironmentRoots.every(string)) throw failure();
+              !message.ownership.executionEnvironmentRoots.every(string) ||
+              ["set_stub_path", "restore_stub_path", "prepare_stub_path", "release_stub_path"].includes(message.action) &&
+                typeof message.ownership.expected_stub_path_present !== "boolean") throw failure();
         } else if (message.op === "quarantine") {
           const projects = message.projects;
           const operations = Array.isArray(projects) ? projects.map(project => ({
@@ -374,6 +387,18 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
         const wireMessage = message.op === "pyright_config" ? { ...message, ownership: {
           top_level: message.ownership.topLevel,
           execution_environment_roots: message.ownership.executionEnvironmentRoots,
+          expected_stub_path_present: message.ownership.expected_stub_path_present,
+          expected_stub_path: message.ownership.expected_stub_path,
+          restore_stub_path_present: message.ownership.restore_stub_path_present,
+          restore_stub_path: message.ownership.restore_stub_path,
+          custom_stub_path: message.ownership.custom_stub_path,
+          custom_stub_path_added: message.ownership.custom_stub_path_added,
+          remove_extra_paths_key: message.ownership.remove_extra_paths_key,
+          original_stub_path_present: message.ownership.original_stub_path_present,
+          original_stub_path: message.ownership.original_stub_path,
+          remove_managed_paths: message.ownership.remove_managed_paths,
+          legacy_top_level: message.ownership.legacy_top_level,
+          legacy_execution_environment_roots: message.ownership.legacy_execution_environment_roots,
         } } : message;
         encoded = Buffer.from(JSON.stringify(wireMessage) + "\n", "utf8");
         if (encoded.length > MAX_FRAME_BYTES) throw failure();

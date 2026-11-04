@@ -6,7 +6,7 @@ const fs = require("node:fs/promises");
 const { createHash } = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
-const { createManagedStubPath } = require("../src/managedStubPath");
+const { createManagedStubPath, managedStateKeys, updateManagedState } = require("../src/managedStubPath");
 
 async function fixture(t, setting, dirty = false, settingLayer = "workspaceFolderValue") {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-stub-path-"));
@@ -179,7 +179,7 @@ test("recovers ownership when activation interrupts a managed stubPath rotation"
   const pendingOwner = [...f.stored.values()].find(value => value?.pending === true);
   assert.deepEqual(pendingOwner, {
     base: ".graphql-desk/typings", current: next,
-    previous: "", pending: true,
+    previous: "", previousPresent: false, pending: true,
   });
   assert.equal(f.values["analysis.stubPath"], undefined, "the setting write has not happened yet");
 
@@ -190,7 +190,7 @@ test("recovers ownership when activation interrupts a managed stubPath rotation"
   releaseSettingsWrite();
   assert.equal(await selection, true);
   assert.deepEqual([...f.stored.values()].find(value => value?.current === next), {
-    base: ".graphql-desk/typings", current: next,
+    base: ".graphql-desk/typings", current: next, currentPresent: true,
   }, "successful rotation clears the pending marker");
 
   f.values["analysis.stubPath"] = ".graphql-desk/typings";
@@ -278,6 +278,104 @@ test("serializes overlapping generation selection so the latest edit wins", asyn
   assert.equal(await latestSelection, true);
   assert.equal(managed.selectedSetting, path.relative(f.workspace, second).split(path.sep).join("/"));
   assert.equal(f.values["analysis.stubPath"], managed.selectedSetting);
+});
+
+test("waits for generation rotation before recording staging ownership", async t => {
+  const f = await fixture(t, undefined);
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const generations = path.join(managed.root, "generations");
+  await fs.mkdir(generations);
+  const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
+  await fs.mkdir(generation);
+  const verified = { directory: generation, manifest: {
+    owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(generation), artifactFingerprint: "a",
+  }, verify() { return this; } };
+  await ownGeneration(managed, verified);
+
+  const releaseSettingsWrite = f.delayNextUpdate();
+  const selection = managed.selectGeneration(generation, () => true, verified);
+  await new Promise(resolve => setImmediate(resolve));
+  let stagingSettled = false;
+  const staging = managed.recordStaging(generation, "b".repeat(64),
+    ".graphql-desk-00000000-0000-0000-0000-000000000001-marker-00000000-0000-0000-0000-000000000002.tmp")
+    .then(result => { stagingSettled = true; return result; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stagingSettled, false, "staging waits while the configured path is rotating");
+
+  releaseSettingsWrite();
+  assert.equal(await selection, true);
+  assert.equal(await staging, true);
+});
+
+test("refuses staging when Pyright ownership changed and preserves the user setting", async t => {
+  const f = await fixture(t, undefined);
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  f.values["analysis.stubPath"] = "user-stubs";
+  const generation = path.join(managed.root, "generations", "g-1-00000000-0000-0000-0000-000000000000");
+  await assert.rejects(managed.recordStaging(generation, "a".repeat(64),
+    ".graphql-desk-00000000-0000-0000-0000-000000000001-marker-00000000-0000-0000-0000-000000000002.tmp"),
+  /ownership changed.*expected.*actual/);
+
+  assert.deepEqual(managed.stagingEntries(), {});
+  assert.equal(f.values["analysis.stubPath"], "user-stubs");
+});
+
+test("serializes staging ownership and release cleanup across managers", async t => {
+  const f = await fixture(t, undefined);
+  const first = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const second = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const stagingStateKey = managedStateKeys(f.workspace).stagingStateKey;
+  const update = f.workspaceState.update;
+  f.workspaceState.update = async (key, value) => {
+    if (key === stagingStateKey) await new Promise(resolve => setImmediate(resolve));
+    return update(key, value);
+  };
+  const generations = path.join(first.root, "generations");
+  const paths = [
+    path.join(generations, "g-1-00000000-0000-0000-0000-000000000000"),
+    path.join(generations, "g-2-00000000-0000-0000-0000-000000000000"),
+  ];
+  const temporary = [
+    ".graphql-desk-00000000-0000-0000-0000-000000000001-marker-00000000-0000-0000-0000-000000000002.tmp",
+    ".graphql-desk-00000000-0000-0000-0000-000000000003-marker-00000000-0000-0000-0000-000000000004.tmp",
+  ];
+  const results = await Promise.all([
+    first.recordStaging(paths[0], "a".repeat(64), temporary[0]),
+    second.recordStaging(paths[1], "b".repeat(64), temporary[1]),
+  ]);
+  assert.deepEqual(results, [true, true]);
+  assert.equal(Object.keys(first.stagingEntries()).length, 2);
+  const cleanup = updateManagedState(f.workspaceState, stagingStateKey, undefined);
+  const next = first.recordStaging(
+    path.join(generations, "g-3-00000000-0000-0000-0000-000000000000"), "c".repeat(64),
+    ".graphql-desk-00000000-0000-0000-0000-000000000005-marker-00000000-0000-0000-0000-000000000006.tmp");
+  await cleanup;
+  assert.equal(await next, true);
+  assert.deepEqual(Object.keys(first.stagingEntries()), ["g-3-00000000-0000-0000-0000-000000000000"]);
+});
+
+test("a stale first generation rollback leaves an originally absent stubPath unset", async t => {
+  const f = await fixture(t, undefined);
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const generations = path.join(managed.root, "generations");
+  await fs.mkdir(generations);
+  const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
+  await fs.mkdir(generation);
+  const verified = { directory: generation, manifest: {
+    owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(generation), artifactFingerprint: "a",
+  }, verify() { return this; } };
+  await ownGeneration(managed, verified);
+  let currentChecks = 0;
+
+  assert.equal(await managed.selectGeneration(generation, () => ++currentChecks === 1, verified), false);
+  assert.equal(f.values["analysis.stubPath"], undefined);
+  assert.equal(Object.hasOwn(JSON.parse(await fs.readFile(f.settingsPath, "utf8")), "analysis.stubPath"), false,
+    "rollback must remove its override instead of writing an empty value");
+  assert.deepEqual(f.updates.map(([, value]) => value), [
+    ".graphql-desk/typings/generations/g-1-00000000-0000-0000-0000-000000000000", undefined,
+  ]);
+  assert.ok([...f.stored.values()].some(value => value.current === "" && value.currentPresent === false),
+    "persisted ownership records that the prior setting was absent");
 });
 
 test("revalidates generation bytes immediately before selecting stubPath", async t => {

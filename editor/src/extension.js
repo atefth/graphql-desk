@@ -213,7 +213,13 @@ function activate(context) {
   }
   function createManagedRoot(folder) {
     return (async () => await createManagedProjectConfig(vscode, folder, context.workspaceState,
-      (target, text, action, managedPath, ownership) => controller.editPyrightConfig(target, text, action, managedPath, ownership)) ??
+      (target, text, action, managedPath, ownership) => controller.editPyrightConfig(target, text, action, managedPath, ownership), {
+        onOwnedWrite: (filename, fingerprint, operation) => operation
+          ? controller.trackOwnedProjectConfigWrite(filename, fingerprint, operation)
+          : controller.markOwnedProjectConfig(filename, fingerprint),
+        onOwnership: (filename, value, previousValue, previousPresent) =>
+          controller.setManagedProjectStubPath(folder.uri.fsPath, filename, value, previousValue, previousPresent),
+      }) ??
       await createManagedStubPath(vscode, folder, context.workspaceState))();
   }
   function managedRoot(folder, folderRoot, generatedPackages = []) {
@@ -458,6 +464,20 @@ function activate(context) {
   }
   async function publishTypes(editor, ticket, token, quarantineContext) {
     const document = editor.document;
+    const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (!folder) { traceSkip("document-outside-workspace"); return; }
+    const folderRoot = path.resolve(folder.uri.fsPath);
+    // Establish ownership before asking the worker to recheck its snapshot. On
+    // restart, an existing project stubPath is already in the config and must be
+    // distinguished from an external edit by the persisted owner record.
+    try { await managedRoot(folder, folderRoot); }
+    catch (error) {
+      output.appendLine(`Managed stub root unavailable: ${String(error)}`);
+      traceSkip("managed-stub-root-unavailable");
+      status.text = "GraphQL Desk: managed typing unavailable";
+      status.show();
+      return;
+    }
     const snapshot = controller.snapshot(document);
     let artifactFailureReason;
     const captureArtifactFailure = reason => { artifactFailureReason = reason; traceSkip(reason); };
@@ -467,13 +487,11 @@ function activate(context) {
       result = await controller.artifacts(snapshot, token, captureArtifactFailure);
     }
     if (!result) return;
+    output.appendLine(`GraphQL Desk trace: artifacts projects=${result.projects.length} files=${result.projects.reduce((sum, item) => sum + item.files.length, 0)} operations=${result.projects.reduce((sum, item) => sum + item.provenance.length, 0)} input=${result.input_fingerprint} saved=${result.saved_source_fingerprint}`);
     const analysisCurrent = result.isCurrent();
     if (disposed || ticket !== generation || !analysisCurrent) {
-      traceSkip("analysis-snapshot-stale"); return;
+      traceSkip("analysis-snapshot-stale-before-managed-root"); return;
     }
-    const folder = vscode.workspace.getWorkspaceFolder(document.uri);
-    if (!folder) { traceSkip("document-outside-workspace"); return; }
-    const folderRoot = path.resolve(folder.uri.fsPath);
     if (quarantineContext?.previousByFolder.has(folderRoot) && !quarantineContext.refined.has(folderRoot)) {
       quarantineContext.refined.add(folderRoot);
       const previous = quarantineContext.previousByFolder.get(folderRoot);
@@ -488,7 +506,8 @@ function activate(context) {
     try {
       const managedPromise = managedRoot(folder, folderRoot, result.projects.map(project => project.generated_package));
       managed = await managedPromise;
-    } catch {
+    } catch (error) {
+      output.appendLine(`Managed stub root unavailable: ${String(error)}`);
       traceSkip("managed-stub-root-unavailable");
       status.text = "GraphQL Desk: managed typing unavailable";
       status.show();
@@ -496,7 +515,7 @@ function activate(context) {
     }
     const analysisStillCurrent = result.isCurrent();
     if (disposed || ticket !== generation || !analysisStillCurrent) {
-      traceSkip("analysis-snapshot-stale"); return;
+      traceSkip("analysis-snapshot-stale-after-managed-root"); return;
     }
     try {
       const groups = new Map();
@@ -519,8 +538,10 @@ function activate(context) {
         changedArtifacts = await publisher.recover(managed, result.isCurrent,
           result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
         if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale-after-recovery"); return; }
-        changedArtifacts = (await publisher.publish(groups, result.id, result.isCurrent, managed,
-          result.input_fingerprint, result.saved_source_fingerprint, operationManifest)) || changedArtifacts;
+        const published = await publisher.publish(groups, result.id, result.isCurrent, managed,
+          result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
+        output.appendLine(`GraphQL Desk trace: publish changed=${published} selected=${managed.selectedSetting} files=${[...groups.values()].reduce((sum, files) => sum + files.length, 0)} operations=${operationManifest.reduce((sum, item) => sum + item.operations.length, 0)}`);
+        changedArtifacts = published || changedArtifacts;
       } else {
         for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !groups.has(key.split("\0")[2])) {
           changedArtifacts = (await handle.publish([], result.isCurrent)) || changedArtifacts;
@@ -601,7 +622,9 @@ function activate(context) {
   status.name = "GraphQL Desk";
   status.command = "graphqlDesk.refreshSchema";
   status.tooltip = "GraphQL Desk: refresh a remote schema; positive schema_refresh_interval enables trusted background polling. Check configuration and interpreter settings if unavailable.";
-  const controller = createAnalysisController(vscode, { changed: (sourceUri, ranges) => refreshVisible(sourceUri, true, ranges),
+  const controller = createAnalysisController(vscode, { changed: (sourceUri, ranges) => {
+      return refreshVisible(sourceUri, true, ranges);
+    },
     configurationDiagnostics: updateConfigDiagnostics,
     status: message => {
       if (message) { status.text = `GraphQL Desk: ${message}`; status.show(); }
@@ -624,6 +647,7 @@ function activate(context) {
       // Our own generation switch selects already complete immutable output. Treat a
       // mismatch as an external setting edit and rebuild the manager around it.
       void managedStubPathsAreCurrent().then(ownedSelection => {
+        output.appendLine(`GraphQL Desk trace: stubPath event owned=${ownedSelection}`);
         if (ownedSelection) return;
         generation += 1;
         return reconfigureRoots().then(() => refreshVisible(null, true), () => { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(null, true); });

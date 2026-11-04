@@ -136,6 +136,353 @@ class EditorWorkerTests(unittest.TestCase):
         )
         self.assertFalse(removed_environments[1]["has_extra_paths"])
 
+    def test_pyproject_stub_path_prepare_rotate_and_release_preserves_user_search_paths(
+        self,
+    ) -> None:
+        text = (
+            "# keep this comment\n[tool.pyright]\n"
+            'stubPath = "custom-stubs" # original\n'
+            'extraPaths = ["vendor"] # preserve\n'
+            "\n[tool.other]\nvalue = 1\n"
+        )
+        base = {
+            "op": "pyright_config",
+            "workspace": str(Path.cwd().resolve()),
+            "managed_path": ".graphql-desk/live-typings",
+        }
+        prepared = EditorWorker().handle(
+            {
+                **base,
+                "text": text,
+                "action": "prepare_stub_path",
+                "ownership": {
+                    "top_level": False,
+                    "execution_environment_roots": [],
+                    "expected_stub_path_present": True,
+                    "expected_stub_path": "custom-stubs",
+                    "custom_stub_path": "custom-stubs",
+                    "custom_stub_path_added": True,
+                    "remove_extra_paths_key": False,
+                    "remove_managed_paths": False,
+                    "legacy_top_level": False,
+                    "legacy_execution_environment_roots": [],
+                },
+            }
+        )
+        self.assertTrue(prepared["ok"], prepared)
+        self.assertEqual(prepared["stub_path"], ".graphql-desk/live-typings")
+        self.assertTrue(prepared["has_stub_path"])
+        self.assertEqual(prepared["extra_paths"], ["vendor", "custom-stubs"])
+        self.assertIn("# keep this comment", cast(str, prepared["text"]))
+        self.assertIn("# original", cast(str, prepared["text"]))
+        self.assertIn("# preserve", cast(str, prepared["text"]))
+        self.assertIn("[tool.other]\nvalue = 1", cast(str, prepared["text"]))
+
+        generation = (
+            ".graphql-desk/live-typings/generations/"
+            "g-7-01234567-89ab-cdef-0123-456789abcdef"
+        )
+        rotated = EditorWorker().handle(
+            {
+                **base,
+                "text": cast(str, prepared["text"]),
+                "managed_path": generation,
+                "action": "set_stub_path",
+                "ownership": {
+                    "top_level": False,
+                    "execution_environment_roots": [],
+                    "expected_stub_path_present": True,
+                    "expected_stub_path": ".graphql-desk/live-typings",
+                },
+            }
+        )
+        self.assertTrue(rotated["ok"], rotated)
+        self.assertEqual(rotated["stub_path"], generation)
+        for invalid_generation in (
+            "../vendor/stubs",
+            ".graphql-desk/live-typings/generations/../../vendor/stubs",
+            ".graphql-desk/other/generations/g-7-01234567-89ab-cdef-0123-456789abcdef",
+        ):
+            invalid_rotation = EditorWorker().handle(
+                {
+                    **base,
+                    "text": cast(str, prepared["text"]),
+                    "managed_path": invalid_generation,
+                    "action": "set_stub_path",
+                    "ownership": {
+                        "top_level": False,
+                        "execution_environment_roots": [],
+                        "expected_stub_path_present": True,
+                        "expected_stub_path": ".graphql-desk/live-typings",
+                    },
+                }
+            )
+            self.assertFalse(invalid_rotation["ok"], invalid_rotation)
+
+        released = EditorWorker().handle(
+            {
+                **base,
+                "text": cast(str, rotated["text"]),
+                "action": "release_stub_path",
+                "ownership": {
+                    "top_level": False,
+                    "execution_environment_roots": [],
+                    "expected_stub_path_present": True,
+                    "expected_stub_path": generation,
+                    "custom_stub_path": "custom-stubs",
+                    "custom_stub_path_added": True,
+                    "remove_extra_paths_key": False,
+                    "original_stub_path_present": True,
+                    "original_stub_path": "custom-stubs",
+                },
+            }
+        )
+        self.assertTrue(released["ok"], released)
+        self.assertEqual(released["stub_path"], "custom-stubs")
+        self.assertEqual(released["extra_paths"], ["vendor"])
+        self.assertIn("# keep this comment", cast(str, released["text"]))
+
+    def test_worker_accepts_exact_owned_pyproject_stub_rotation(
+        self,
+    ) -> None:
+        first_path = (
+            ".graphql-desk/live-typings/generations/"
+            "g-1-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )
+        next_path = (
+            ".graphql-desk/live-typings/generations/"
+            "g-2-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )
+        original = self.config.read_text(encoding="utf8") + (
+            '[tool.pyright]\nstubPath = "' + first_path + '"\nextraPaths = ["vendor"]\n'
+        )
+        self.config.write_text(original, encoding="utf8")
+        owner = {
+            "managed_pyright_config_path": "pyproject.toml",
+            "managed_pyright_stub_path": first_path,
+        }
+        prepared = self.worker.handle(
+            {
+                "op": "prepare",
+                **self.capture(),
+                **owner,
+                "remote_revisions": [],
+            }
+        )
+        self.assertTrue(prepared["ok"], prepared)
+        analyzed = self.worker.handle(
+            {
+                "op": "analyze",
+                **self.capture(),
+                **owner,
+                "id": prepared["id"],
+                "schema_buffers": [],
+                "remote_revisions": [],
+            }
+        )
+        self.assertTrue(analyzed["ok"], analyzed)
+
+        self.config.write_text(original.replace(first_path, next_path), encoding="utf8")
+        current = self.worker.handle(
+            {
+                "op": "current",
+                **self.capture(),
+                "managed_pyright_config_path": "pyproject.toml",
+                "managed_pyright_stub_path": next_path,
+                "id": prepared["id"],
+                "schema_buffers": [],
+                "remote_revisions": [],
+            }
+        )
+        self.assertTrue(current["current"], current)
+        rotated = self.worker.handle(
+            {
+                "op": "artifacts",
+                **self.capture(),
+                "managed_pyright_config_path": "pyproject.toml",
+                "managed_pyright_stub_path": next_path,
+                "id": prepared["id"],
+                "schema_buffers": [],
+                "remote_revisions": [],
+            }
+        )
+        self.assertTrue(rotated["ok"], rotated)
+
+        invalid = EditorWorker().handle(
+            {
+                "op": "prepare",
+                **self.capture(),
+                "managed_pyright_config_path": "../pyproject.toml",
+                "managed_pyright_stub_path": next_path,
+                "remote_revisions": [],
+            }
+        )
+        self.assertFalse(invalid["ok"])
+
+    def test_worker_accepts_owned_project_stub_path_takeover_but_not_other_edits(
+        self,
+    ) -> None:
+        original_path = "custom-stubs"
+        managed_path = ".graphql-desk/live-typings"
+        original = self.config.read_text(encoding="utf8") + (
+            '[tool.pyright]\nstubPath = "'
+            + original_path
+            + '"\nextraPaths = ["vendor"]\n'
+        )
+        self.config.write_text(original, encoding="utf8")
+        prepared = self.worker.handle(
+            {"op": "prepare", **self.capture(), "remote_revisions": []}
+        )
+        self.assertTrue(prepared["ok"], prepared)
+        analyzed = self.worker.handle(
+            {
+                "op": "analyze",
+                **self.capture(),
+                "id": prepared["id"],
+                "schema_buffers": [],
+                "remote_revisions": [],
+            }
+        )
+        self.assertTrue(analyzed["ok"], analyzed)
+
+        replacement = original.replace(
+            f'stubPath = "{original_path}"', f'stubPath = "{managed_path}"'
+        )
+        self.config.write_text(replacement, encoding="utf8")
+        owner = {
+            "managed_pyright_config_path": "pyproject.toml",
+            "managed_pyright_stub_path": managed_path,
+            "managed_pyright_previous_stub_path": original_path,
+            "managed_pyright_previous_stub_path_present": True,
+        }
+        current = self.worker.handle(
+            {
+                "op": "current",
+                **self.capture(),
+                **owner,
+                "id": prepared["id"],
+                "schema_buffers": [],
+                "remote_revisions": [],
+            }
+        )
+        self.assertTrue(current["current"], current)
+        artifacts = self.worker.handle(
+            {
+                "op": "artifacts",
+                **self.capture(),
+                **owner,
+                "id": prepared["id"],
+                "schema_buffers": [],
+                "remote_revisions": [],
+            }
+        )
+        self.assertTrue(artifacts["ok"], artifacts)
+
+        self.config.write_text(
+            replacement + 'typeCheckingMode = "strict"\n',
+            encoding="utf8",
+        )
+        changed = self.worker.handle(
+            {
+                "op": "current",
+                **self.capture(),
+                **owner,
+                "id": prepared["id"],
+                "schema_buffers": [],
+                "remote_revisions": [],
+            }
+        )
+        self.assertTrue(changed["ok"], changed)
+        self.assertFalse(changed["current"])
+
+    def test_worker_accepts_owned_project_stub_path_takeover_from_unset(self) -> None:
+        original = self.config.read_text(encoding="utf8")
+        managed_path = ".graphql-desk/live-typings"
+        self.config.write_text(
+            original + f'\n[tool.pyright]\nstubPath = "{managed_path}"\n',
+            encoding="utf8",
+        )
+        owner = {
+            "managed_pyright_config_path": "pyproject.toml",
+            "managed_pyright_stub_path": managed_path,
+            "managed_pyright_previous_stub_path_present": False,
+        }
+        prepared = self.worker.handle(
+            {"op": "prepare", **self.capture(), **owner, "remote_revisions": []}
+        )
+        self.assertTrue(prepared["ok"], prepared)
+        analyzed = self.worker.handle(
+            {
+                "op": "analyze",
+                **self.capture(),
+                **owner,
+                "id": prepared["id"],
+                "schema_buffers": [],
+                "remote_revisions": [],
+            }
+        )
+        self.assertTrue(analyzed["ok"], analyzed)
+
+        current = self.worker.handle(
+            {
+                "op": "current",
+                **self.capture(),
+                **owner,
+                "id": prepared["id"],
+                "schema_buffers": [],
+                "remote_revisions": [],
+            }
+        )
+        self.assertTrue(current["ok"], current)
+        self.assertTrue(current["current"], current)
+
+        self.config.write_text(
+            original
+            + f'\n[tool.pyright]\nstubPath = "{managed_path}"\n'
+            + 'typeCheckingMode = "strict"\n',
+            encoding="utf8",
+        )
+        changed = self.worker.handle(
+            {
+                "op": "current",
+                **self.capture(),
+                **owner,
+                "id": prepared["id"],
+                "schema_buffers": [],
+                "remote_revisions": [],
+            }
+        )
+        self.assertTrue(changed["ok"], changed)
+        self.assertFalse(changed["current"])
+
+    def test_pyright_stub_path_setup_rejects_changed_value_without_editing(
+        self,
+    ) -> None:
+        text = '[tool.pyright]\nstubPath = "user-edit"\n'
+        result = EditorWorker().handle(
+            {
+                "op": "pyright_config",
+                "workspace": str(Path.cwd().resolve()),
+                "text": text,
+                "action": "prepare_stub_path",
+                "managed_path": ".graphql-desk/live-typings",
+                "ownership": {
+                    "top_level": False,
+                    "execution_environment_roots": [],
+                    "expected_stub_path_present": True,
+                    "expected_stub_path": "old-value",
+                    "custom_stub_path": "old-value",
+                    "custom_stub_path_added": True,
+                    "remove_extra_paths_key": True,
+                    "remove_managed_paths": False,
+                    "legacy_top_level": False,
+                    "legacy_execution_environment_roots": [],
+                },
+            }
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "editor-request-failed")
+
     def test_field_usage_uses_captured_project_configuration(self) -> None:
         self.schema.write_text(
             "type Query { name: String email: String }", encoding="utf8"

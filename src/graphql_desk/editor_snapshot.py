@@ -5,10 +5,12 @@ import json
 import os
 import re
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, MutableMapping
 from dataclasses import astuple, dataclass, field, replace
 from pathlib import Path
 from typing import cast
+
+import tomlkit
 
 from .config import ProjectConfig, SchemaOrigin
 from .external_type_sources import (
@@ -41,6 +43,15 @@ class _Observation:
     origin: str
     version: int | None
     digest: str | None
+    managed_stub_path: str | None = field(default=None, repr=False, compare=False)
+    pyright_stub_path: str | None = field(default=None, repr=False, compare=False)
+    pyright_stub_path_present: bool = field(default=False, repr=False, compare=False)
+    pyright_stub_neutral_digest: str | None = field(
+        default=None, repr=False, compare=False
+    )
+    pyright_stub_absent_digest: str | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True)
@@ -152,6 +163,29 @@ class EditorSnapshot:
         """Backing-file source snapshots, independent of open-buffer overlays."""
         return self._saved_modules
 
+    def config_observation(self, path: Path) -> _Observation | None:
+        """Return one captured configuration file fact by exact path."""
+        return next(
+            (
+                item
+                for item in self._observations
+                if item.path == path and item.origin == "config-disk"
+            ),
+            None,
+        )
+
+    def with_managed_config_observation(
+        self, path: Path, digest: str, managed_stub_path: str
+    ) -> "EditorSnapshot":
+        """Normalize one owner-verified config edit for freshness comparison."""
+        observations = tuple(
+            replace(item, digest=digest, managed_stub_path=managed_stub_path)
+            if item.path == path and item.origin == "config-disk"
+            else item
+            for item in self._observations
+        )
+        return replace(self, _observations=observations)
+
     def reuse_disk_sources(self, previous: "EditorSnapshot") -> "EditorSnapshot":
         """Retain only exactly matching captured disk module versions."""
         _validate_previous(previous, self.workspace, self.generation)
@@ -221,6 +255,100 @@ def _text_digest(text: str) -> str:
     return _digest(text.encode("utf-8", "surrogatepass"))
 
 
+def _owned_pyright_config_digest(
+    path: Path, text: str, digest: str, managed_stub_path: str | None
+) -> str:
+    """Ignore only the exact active GraphQL Desk stubPath value in TOML."""
+    if managed_stub_path is None or path.name != "pyproject.toml":
+        return digest
+    try:
+        document = cast(MutableMapping[str, object], tomlkit.parse(text))
+        tool = cast(MutableMapping[str, object], document.get("tool", {}))
+        pyright = cast(MutableMapping[str, object], tool.get("pyright", {}))
+        if pyright.get("stubPath") != managed_stub_path:
+            return digest
+    except (TypeError, ValueError, KeyError):
+        return digest
+
+    lines = text.splitlines(keepends=True)
+    section_start = None
+    section_end = len(lines)
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "[tool.pyright]":
+            if section_start is not None:
+                return digest
+            section_start = index
+        elif (
+            section_start is not None
+            and stripped.startswith("[")
+            and stripped.endswith("]")
+        ):
+            section_end = index
+            break
+    if section_start is None:
+        return digest
+    assignment = re.compile(
+        r"^(\s*stubPath\s*=\s*)(['\"])([^'\"]*)\2(\s*(?:#.*)?)(\r?\n?)$"
+    )
+    match_index = None
+    match = None
+    for index in range(section_start + 1, section_end):
+        candidate = assignment.match(lines[index])
+        if candidate:
+            if match is not None:
+                return digest
+            match_index, match = index, candidate
+    if match is None or match.group(3) != managed_stub_path:
+        return digest
+    assert match_index is not None
+    lines[match_index] = (
+        f"{match.group(1)}{match.group(2)}<graphql-desk-managed-stub-path>"
+        f"{match.group(2)}{match.group(4)}{match.group(5)}"
+    )
+    # Preserve a UTF-8 BOM distinction even though the decoded text omits it.
+    bom = path.is_file() and path.read_bytes().startswith(b"\xef\xbb\xbf")
+    return _digest(bytes([bool(bom)]) + "".join(lines).encode("utf-8", "surrogatepass"))
+
+
+def _pyright_stub_path(text: str) -> tuple[bool, str | None]:
+    try:
+        document = cast(MutableMapping[str, object], tomlkit.parse(text))
+        tool = cast(MutableMapping[str, object], document.get("tool", {}))
+        value = cast(MutableMapping[str, object], tool.get("pyright", {}))
+        if "stubPath" not in value:
+            return False, None
+        path = value["stubPath"]
+        return (True, path) if isinstance(path, str) else (False, None)
+    except (TypeError, ValueError, KeyError):
+        return False, None
+
+
+def _pyright_stub_absent_digest(path: Path, text: str, digest: str) -> str | None:
+    """Digest TOML as if only its root Pyright stubPath had not been added."""
+    bom = path.is_file() and path.read_bytes().startswith(b"\xef\xbb\xbf")
+    try:
+        document = cast(MutableMapping[str, object], tomlkit.parse(text))
+        tool = cast(MutableMapping[str, object], document.get("tool", {}))
+        pyright = cast(MutableMapping[str, object], tool.get("pyright", {}))
+        if "stubPath" not in pyright:
+            return _digest(bytes([bool(bom)]) + text.encode("utf-8", "surrogatepass"))
+        del pyright["stubPath"]
+        if not pyright:
+            del tool["pyright"]
+        if not tool:
+            del document["tool"]
+        normalized_text = tomlkit.dumps(document)
+        # Removing the newly-added final table leaves its section separator as
+        # one extra terminal newline. The prior file never had that separator.
+        if normalized_text.endswith("\n\n"):
+            normalized_text = normalized_text[:-1]
+        normalized = normalized_text.encode("utf-8", "surrogatepass")
+    except (TypeError, ValueError, KeyError):
+        return None
+    return _digest(bytes([bool(bom)]) + normalized)
+
+
 def _utf16_position(text: str, offset: int) -> tuple[int, int]:
     offset = min(max(offset, 0), len(text))
     line = 0
@@ -256,6 +384,8 @@ def _capture_projects(
     candidates: tuple[Path, ...],
     buffers: tuple[OpenBuffer, ...],
     editor_fallback: Mapping[str, object] | None,
+    managed_pyright_config_path: str | None = None,
+    managed_pyright_stub_path: str | None = None,
 ) -> _CapturedProjects:
     base = _path(workspace)
     if not base.is_dir():
@@ -299,8 +429,46 @@ def _capture_projects(
             text = digest = None
             origin = "config-disk"
         config_texts[canonical] = text
+        managed_config = (
+            managed_pyright_config_path is not None
+            and path == base / managed_pyright_config_path
+        )
+        captured_stub_present, captured_stub_path = (False, None)
+        neutral_digest = None
+        absent_digest = None
+        if (
+            text is not None
+            and digest is not None
+            and origin == "config-disk"
+            and path.name == "pyproject.toml"
+        ):
+            captured_stub_present, captured_stub_path = _pyright_stub_path(text)
+            if captured_stub_present and captured_stub_path is not None:
+                neutral_digest = _owned_pyright_config_digest(
+                    path, text, digest, captured_stub_path
+                )
+            absent_digest = _pyright_stub_absent_digest(path, text, digest)
+        observation_digest = digest
+        if (
+            text is not None
+            and digest is not None
+            and origin == "config-disk"
+            and managed_config
+        ):
+            observation_digest = _owned_pyright_config_digest(
+                path, text, digest, managed_pyright_stub_path
+            )
         observations[(path, "config")] = _Observation(
-            path, canonical, origin, buffer.version if buffer else None, digest
+            path,
+            canonical,
+            origin,
+            buffer.version if buffer else None,
+            observation_digest,
+            managed_pyright_stub_path if managed_config else None,
+            captured_stub_path if captured_stub_present else None,
+            captured_stub_present,
+            neutral_digest,
+            absent_digest,
         )
 
     # Complete the closed capture before any discovery or ownership helper runs.
@@ -390,7 +558,13 @@ def _check_observations(observations: Iterable[_Observation]) -> None:
         if _identity(observation.path) != observation.canonical:
             raise ValueError("Inputs changed during snapshot acquisition")
         if observation.origin == "config-disk":
-            digest = _read(observation.path)[1] if observation.path.is_file() else None
+            if observation.path.is_file():
+                text, digest = _read(observation.path)
+                digest = _owned_pyright_config_digest(
+                    observation.path, text, digest, observation.managed_stub_path
+                )
+            else:
+                digest = None
             if digest != observation.digest:
                 raise ValueError("Inputs changed during snapshot acquisition")
         elif observation.origin == "saved-disk":
@@ -468,6 +642,8 @@ def prepare_editor_snapshot(
     candidates: tuple[Path, ...],
     buffers: tuple[OpenBuffer, ...] = (),
     editor_fallback: Mapping[str, object] | None = None,
+    managed_pyright_config_path: str | None = None,
+    managed_pyright_stub_path: str | None = None,
 ) -> EditorPreparation:
     """List configured local schema paths before reading source/schema contents.
 
@@ -477,7 +653,14 @@ def prepare_editor_snapshot(
     the caller can capture open buffers before full acquisition. This does not
     prove complete enumeration, trust, freshness or schema validity.
     """
-    captured = _capture_projects(workspace, candidates, buffers, editor_fallback)
+    captured = _capture_projects(
+        workspace,
+        candidates,
+        buffers,
+        editor_fallback,
+        managed_pyright_config_path,
+        managed_pyright_stub_path,
+    )
     _check_observations(captured.observations.values())
     return _preparation(captured)
 
@@ -492,6 +675,8 @@ def acquire_editor_snapshot(
     previous: EditorSnapshot | None = None,
     preparation: EditorPreparation | None = None,
     remote_schemas: tuple[RemoteSchemaSnapshot, ...] = (),
+    managed_pyright_config_path: str | None = None,
+    managed_pyright_stub_path: str | None = None,
 ) -> EditorSnapshot:
     """Acquire exact analyzer facts without processes, imports, writes or fetching.
 
@@ -511,7 +696,14 @@ def acquire_editor_snapshot(
     records remain unavailable and never provide trusted analyzer contexts.
     """
     _check_version(generation)
-    captured = _capture_projects(workspace, candidates, buffers, editor_fallback)
+    captured = _capture_projects(
+        workspace,
+        candidates,
+        buffers,
+        editor_fallback,
+        managed_pyright_config_path,
+        managed_pyright_stub_path,
+    )
     base, paths = captured.workspace, captured.paths
     if previous is not None:
         _validate_previous(previous, base, generation)
@@ -776,6 +968,11 @@ def is_editor_snapshot_current(
     buffers: tuple[OpenBuffer, ...] = (),
     editor_fallback: Mapping[str, object] | None = None,
     remote_schemas: tuple[RemoteSchemaSnapshot, ...] = (),
+    managed_pyright_config_path: str | None = None,
+    managed_pyright_stub_path: str | None = None,
+    managed_pyright_previous_stub_path: str | None = None,
+    managed_pyright_previous_stub_path_present: bool = False,
+    managed_pyright_previous_stub_path_known: bool = False,
 ) -> bool:
     """Reobserve finite inputs; a true result still needs the latest-job guard."""
     try:
@@ -787,7 +984,42 @@ def is_editor_snapshot_current(
             editor_fallback=editor_fallback,
             previous=snapshot,
             remote_schemas=remote_schemas,
+            managed_pyright_config_path=managed_pyright_config_path,
+            managed_pyright_stub_path=managed_pyright_stub_path,
         )
     except (OSError, ValueError, RuntimeError):
         return False
+    if (
+        managed_pyright_config_path == "pyproject.toml"
+        and managed_pyright_stub_path is not None
+        and managed_pyright_previous_stub_path_known
+    ):
+        config_path = snapshot.workspace / managed_pyright_config_path
+        previous = snapshot.config_observation(config_path)
+        current = observed.config_observation(config_path)
+        if (
+            previous is not None
+            and current is not None
+            and current.digest is not None
+            and current.pyright_stub_path_present
+            and current.pyright_stub_path == managed_pyright_stub_path
+            and previous.pyright_stub_path_present
+            == managed_pyright_previous_stub_path_present
+            and (
+                previous.pyright_stub_path == managed_pyright_previous_stub_path
+                if managed_pyright_previous_stub_path_present
+                else managed_pyright_previous_stub_path is None
+                and previous.pyright_stub_path is None
+            )
+            and (
+                previous.pyright_stub_neutral_digest
+                == current.pyright_stub_neutral_digest
+                if managed_pyright_previous_stub_path_present
+                else previous.pyright_stub_absent_digest
+                == current.pyright_stub_absent_digest
+            )
+        ):
+            snapshot = snapshot.with_managed_config_observation(
+                config_path, current.digest, managed_pyright_stub_path
+            )
     return observed == snapshot
