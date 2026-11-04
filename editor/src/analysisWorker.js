@@ -327,11 +327,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
           const active = pending;
           if (!active || !trusted()) throw failure();
           const reply = parseFrame(Buffer.concat(parts, bytes));
-          if (active.request.op === "pyright_config" && reply?.ok !== true) process.stderr.write(`Failed Pyright worker reply: ${JSON.stringify({ request: active.request, reply })}\n`);
-          if (!validReply(reply, active.request)) {
-            if (active.request.op === "pyright_config") process.stderr.write(`Invalid Pyright worker reply: ${JSON.stringify({ request: active.request, reply })}\n`);
-            throw failure();
-          }
+          if (!validReply(reply, active.request)) throw failure();
           parts.length = 0;
           bytes = 0;
           pending = null;

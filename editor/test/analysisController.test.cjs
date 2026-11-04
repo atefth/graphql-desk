@@ -2103,3 +2103,57 @@ test("Pyright config requests wait for in-flight worker analysis", async t => {
   assert.equal(reply.found, false);
   assert.equal(configRequests, 1);
 });
+
+for (const scenario of ["source invalidation", "same-action requests", "trust revocation"]) {
+  test(`Pyright config requests handle ${scenario} safely`, async t => {
+    const fixture = await setup(t);
+    let releaseAnalysis;
+    const hold = new Promise(resolve => { releaseAnalysis = resolve; });
+    let analysisStarted;
+    const started = new Promise(resolve => { analysisStarted = resolve; });
+    const configRequests = [];
+    let active = false;
+    const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+      const worker = createAnalysisWorker(options);
+      return { ...worker, async request(message, requestOptions) {
+        assert.equal(active, false, "configuration and analysis still share a single-request worker");
+        active = true;
+        try {
+          const reply = await worker.request(message, requestOptions);
+          if (message.op === "analyze") { analysisStarted(); await hold; }
+          if (message.op === "pyright_config") configRequests.push(message.text);
+          return reply;
+        } finally { active = false; }
+      } };
+    } });
+    t.after(() => { releaseAnalysis(); controller.dispose(); });
+    const analysis = controller.analyze(controller.snapshot(fixture.main));
+    await started;
+    const names = scenario === "same-action requests" ? ["first", "second"] : ["first"];
+    const texts = names.map(name => `[tool.pyright]\nextraPaths = ["${name}"]\n`);
+    const inspections = texts.map(text => controller.editPyrightConfig(
+      fixture.vscode.workspace.workspaceFolders[0], text, "inspect")
+      .then(reply => ({ reply }), error => ({ error })));
+    await new Promise(resolve => realTimeout(resolve, 20));
+    if (scenario === "source invalidation") {
+      fixture.main.version += 1;
+      fixture.main.text += "\n";
+      fixture.events.onDidChangeTextDocument.fire({ document: fixture.main,
+        contentChanges: [{ rangeOffset: 0, rangeLength: 0, text: "\n" }] });
+    }
+    if (scenario === "trust revocation") fixture.vscode.workspace.isTrusted = false;
+    releaseAnalysis();
+    await analysis;
+    const results = await Promise.all(inspections);
+    if (scenario === "trust revocation") {
+      assert.deepEqual(configRequests, [], "untrusted config requests must not reach the worker");
+      assert.ok(results[0].error);
+      return;
+    }
+    assert.deepEqual(configRequests, texts, "each captured configuration request must reach the worker once");
+    for (const [index, result] of results.entries()) {
+      assert.ok(result.reply, result.error?.message);
+      assert.deepEqual(result.reply.extra_paths, [names[index]], "callers receive their own text's reply");
+    }
+  });
+}
