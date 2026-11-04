@@ -357,34 +357,34 @@ async function run() {
     observed.extractCapturedLocalFragmentRoundtripUndo = true;
     await capturedLocalClient.stop();
 
-    observed.step = "extract-two-level-captured-local-fragment-roundtrip-undo";
-    const twoLevelCapturedSource = "from graphql_desk import gql\ndef build():\n    card = gql('fragment Card on User { id }')\n    def scope():\n        def read():\n            query = gql('query Read { user { friend { ...Card } name } }', fragments=[card])\n            return query\n        return read\n    return scope\n";
-    const twoLevelCapturedSchema = "type User { id: ID! name: String! friend: User } type Query { user: User }";
-    const twoLevelCaptured = await pythonExtractionDocument("extract-two-level-captured-local", twoLevelCapturedSource, {
-      schema: twoLevelCapturedSchema,
+    observed.step = "extract-three-level-mixed-async-captured-local-fragment-roundtrip-undo";
+    const deepCapturedSource = "from graphql_desk import gql\ndef build():\n    card = gql('fragment Card on User { id }')\n    async def outer():\n        def middle():\n            async def read():\n                query = gql('query Read { user { friend { ...Card } name } }', fragments=[card])\n                return query\n            return read\n        return middle\n    return outer\n";
+    const deepCapturedSchema = "type User { id: ID! name: String! friend: User } type Query { user: User }";
+    const deepCaptured = await pythonExtractionDocument("extract-deep-captured-local", deepCapturedSource, {
+      schema: deepCapturedSchema,
     });
-    const twoLevelCapturedClient = createRenameLanguageClient(vscode, twoLevelCaptured.language, { isTrusted: () => true });
-    clients.push(twoLevelCapturedClient);
-    await twoLevelCapturedClient.start();
-    await vscode.window.showTextDocument(twoLevelCaptured.document);
-    assert.equal(await requestExtract(twoLevelCapturedClient.client, twoLevelCaptured.document, undefined,
+    const deepCapturedClient = createRenameLanguageClient(vscode, deepCaptured.language, { isTrusted: () => true });
+    clients.push(deepCapturedClient);
+    await deepCapturedClient.start();
+    await vscode.window.showTextDocument(deepCaptured.document);
+    assert.equal(await requestExtract(deepCapturedClient.client, deepCaptured.document, undefined,
       "friend { ...Card }"), true);
-    assert.match(twoLevelCaptured.document.getText(), /fragment UserFields on User .*fragments=\[card\]/);
-    const twoLevelCapturedUpdated = bundle(twoLevelCaptured.document.getText(), {
-      uri: twoLevelCaptured.document.uri.toString(), version: twoLevelCaptured.document.version,
-      schema: twoLevelCapturedSchema,
+    assert.match(deepCaptured.document.getText(), /fragment UserFields on User .*fragments=\[card\]/);
+    const deepCapturedUpdated = bundle(deepCaptured.document.getText(), {
+      uri: deepCaptured.document.uri.toString(), version: deepCaptured.document.version,
+      schema: deepCapturedSchema,
     });
-    assert.deepEqual(twoLevelCapturedUpdated.response.diagnostics, []);
-    assert.equal(twoLevelCapturedUpdated.response.calls.length, 3);
+    assert.deepEqual(deepCapturedUpdated.response.diagnostics, []);
+    assert.equal(deepCapturedUpdated.response.calls.length, 3);
     await vscode.commands.executeCommand("undo");
-    assert.equal(twoLevelCaptured.document.getText(), twoLevelCapturedSource);
-    observed.extractTwoLevelCapturedLocalFragmentRoundtripUndo = true;
-    await twoLevelCapturedClient.stop();
+    assert.equal(deepCaptured.document.getText(), deepCapturedSource);
+    observed.extractDeepCapturedLocalFragmentRoundtripUndo = true;
+    await deepCapturedClient.stop();
 
-    observed.step = "extract-two-level-capture-with-unrelated-inner-declaration-roundtrip-undo";
+    observed.step = "extract-deep-capture-with-unrelated-inner-declaration-roundtrip-undo";
     const unrelatedDeclarationSource = "from graphql_desk import gql\ndef build():\n    card = gql('fragment Card on User { id }')\n    def scope():\n        def unrelated():\n            global cache\n        def read():\n            query = gql('query Read { user { friend { ...Card } name } }', fragments=[card])\n            return query\n        return read\n    return scope\n";
     const unrelatedDeclaration = await pythonExtractionDocument("extract-unrelated-inner-declaration", unrelatedDeclarationSource, {
-      schema: twoLevelCapturedSchema,
+      schema: deepCapturedSchema,
     });
     const unrelatedDeclarationClient = createRenameLanguageClient(vscode, unrelatedDeclaration.language, { isTrusted: () => true });
     clients.push(unrelatedDeclarationClient);
@@ -395,7 +395,7 @@ async function run() {
     assert.match(unrelatedDeclaration.document.getText(), /fragment UserFields on User .*fragments=\[card\]/);
     const unrelatedDeclarationUpdated = bundle(unrelatedDeclaration.document.getText(), {
       uri: unrelatedDeclaration.document.uri.toString(), version: unrelatedDeclaration.document.version,
-      schema: twoLevelCapturedSchema,
+      schema: deepCapturedSchema,
     });
     assert.deepEqual(unrelatedDeclarationUpdated.response.diagnostics, []);
     assert.equal(unrelatedDeclarationUpdated.response.calls.length, 3);

@@ -3242,6 +3242,64 @@ alias('{ id }')
             ),
         )
 
+        three_level_capture = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def build():\n"
+                    "    card = gql('fragment Card on User { id }')\n"
+                    "    def outer():\n"
+                    "        def middle():\n"
+                    "            def read():\n"
+                    "                return gql('query R{user{...Card}}', "
+                    "fragments=[card])\n"
+                    "            return read\n"
+                    "        return middle\n"
+                    "    return outer\n",
+                ),
+            )
+        )
+        self.assertEqual(three_level_capture.diagnostics, ())
+        self.assertEqual(len(three_level_capture.calls), 2)
+        self.assertEqual(len(three_level_capture.calls[-1].fragments), 1)
+        self.assertEqual(
+            three_level_capture.calls[-1].fragments[0].target,
+            DocumentIdentity(
+                three_level_capture.calls[0].module,
+                three_level_capture.calls[0].range,
+            ),
+        )
+
+        mixed_async_capture = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def build():\n"
+                    "    card = gql('fragment Card on User { id }')\n"
+                    "    async def outer():\n"
+                    "        def middle():\n"
+                    "            async def read():\n"
+                    "                return gql('query R{user{...Card}}', "
+                    "fragments=[card])\n"
+                    "            return read\n"
+                    "        return middle\n"
+                    "    return outer\n",
+                ),
+            )
+        )
+        self.assertEqual(mixed_async_capture.diagnostics, ())
+        self.assertEqual(len(mixed_async_capture.calls), 2)
+        self.assertEqual(len(mixed_async_capture.calls[-1].fragments), 1)
+        self.assertEqual(
+            mixed_async_capture.calls[-1].fragments[0].target,
+            DocumentIdentity(
+                mixed_async_capture.calls[0].module,
+                mixed_async_capture.calls[0].range,
+            ),
+        )
+
         unrelated_inner_declaration = resolve_project(
             (
                 module(
@@ -3358,12 +3416,29 @@ alias('{ id }')
             "def build():\n"
             "    card = gql('fragment Card on User { id }')\n"
             "    def scope():\n"
-            "        def nested():\n"
-            "            def read():\n"
-            "                return gql('query { user { ...Card } }', "
+            "        def outer():\n"
+            "            def middle():\n"
+            "                card = make_fragment()\n"
+            "                def read():\n"
+            "                    return gql('query { user { ...Card } }', "
             "fragments=[card])\n"
-            "            return read\n"
-            "        return nested\n"
+            "                return read\n"
+            "            return middle\n"
+            "        return outer\n"
+            "    return scope\n",
+            "def build():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    def scope():\n"
+            "        def outer():\n"
+            "            def middle():\n"
+            "                nonlocal card\n"
+            "                card = gql('fragment Card on User { name }')\n"
+            "                def read():\n"
+            "                    return gql('query { user { ...Card } }', "
+            "fragments=[card])\n"
+            "                return read\n"
+            "            return middle\n"
+            "        return outer\n"
             "    return scope\n",
             "def read():\n"
             "    card = gql('query Wrong { user { id } }')\n"

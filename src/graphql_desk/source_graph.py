@@ -2662,8 +2662,6 @@ def _resolve(
                         parent = parents.get(parent)
                     if nested_functions:
                         nested_functions.reverse()
-                        if len(nested_functions) > 2:
-                            return False
                         enclosing = function
                         for nested_function in nested_functions:
                             if nested_function not in enclosing.body:
