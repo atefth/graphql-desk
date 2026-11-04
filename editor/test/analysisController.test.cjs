@@ -48,7 +48,7 @@ function event() {
 }
 async function setup(t, config = 'schema="schema.graphql"\n', { deferCleanup = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-controller-"));
-  const cleanup = () => fs.rm(root, { recursive: true, force: true });
+  const cleanup = () => fs.rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
   if (!deferCleanup) t.after(cleanup);
   await fs.writeFile(path.join(root, "schema.graphql"), "type Query { title: String }");
   await fs.writeFile(path.join(root, "pyproject.toml"), `[tool.graphql-desk]\n${config}schema_output="graphql_desk_generated/default.pyi"\n`);
