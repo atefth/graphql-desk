@@ -64,6 +64,84 @@ function warningContents(document, warning) {
   assert.equal(warning.item.message, warning.message);
 }
 
+function assertNoQuarantineFailures(trace, label) {
+  const failures = trace.filter(line => /Typing quarantine failed|quarantine (?:request|protocol).*(?:error|failed|rejected)/i.test(line));
+  assert.deepEqual(failures, [], `${label}: ${failures.join("\n")}`);
+}
+
+async function assertPrecisionWarnings(document, expectedWarnings, label) {
+  await until(() => {
+    const current = precisionDiagnostics(document);
+    if (current.length !== expectedWarnings.length) return false;
+    return expectedWarnings.every(expected => {
+      const contextStart = document.getText().indexOf(expected.context);
+      const operandStart = expected.context.indexOf(expected.operand);
+      if (contextStart < 0 || operandStart < 0) return false;
+      const offset = contextStart + operandStart;
+      const start = document.positionAt(offset);
+      const end = document.positionAt(offset + expected.operand.length);
+      return current.some(item => document.getText().slice(document.offsetAt(item.range.start), document.offsetAt(item.range.end)) === expected.operand &&
+        item.range.isEqual(new vscode.Range(start, end)) && item.source === "GraphQL Desk" &&
+        String(item.code) === "factory-precision" && item.severity === vscode.DiagnosticSeverity.Warning && item.message === expected.message);
+    });
+  }, label);
+  const found = precisionDiagnostics(document);
+  for (const expected of expectedWarnings) {
+    const item = found.find(candidate => document.getText().slice(document.offsetAt(candidate.range.start), document.offsetAt(candidate.range.end)) === expected.operand);
+    assert.ok(item, `Missing precision warning on ${expected.operand}: ${JSON.stringify(found.map(value => value.message))}`);
+    warningContents(document, { ...expected, item });
+  }
+  assert.deepEqual(found.map(item => document.getText().slice(document.offsetAt(item.range.start), document.offsetAt(item.range.end))).sort(),
+    expectedWarnings.map(item => item.operand).sort(), "Only the expected widened source, selector, and list operands receive precision warnings");
+  return found;
+}
+
+async function assertPreciseControls(document, label) {
+  let observed;
+  await until(async () => {
+    observed = {
+      finalSource: await hover(document, "final_source_value"),
+      literalSource: await hover(document, "literal_source_value"),
+      finalOperation: await hover(document, "final_source_operation"),
+      literalOperation: await hover(document, "literal_source_operation"),
+      operationValue: await hover(document, "precise_operation_value"),
+      operationName: await hover(document, "precise_operation_name"),
+      fragmentId: await hover(document, "tuple_fragment_id"),
+    };
+    return /String|str/.test(observed.finalSource) && /String|str/.test(observed.literalSource) &&
+      /Literal\[['"]SourceFinal['"]\]/.test(observed.finalOperation) &&
+      /Literal\[['"]SourceLiteral['"]\]/.test(observed.literalOperation) &&
+      /Int|int/.test(observed.operationValue) && /Literal\[['"]Second['"]\]/.test(observed.operationName) &&
+      /ID|str/.test(observed.fragmentId);
+  }, label);
+  await until(() => lineDiagnostics(document, "final_source_ok").length === 0 &&
+    lineDiagnostics(document, "precise_operation_ok").length === 0 &&
+    lineDiagnostics(document, "precise_operation_bad_variables").length > 0 &&
+    lineDiagnostics(document, "tuple_fragment_id_ok").length === 0,
+  "Pylance confirms precise result and variable types");
+  return observed;
+}
+
+async function assertRepairedControls(document, label) {
+  let observed;
+  await until(async () => {
+    observed = {
+      sourceOperation: await hover(document, "loose_source_operation"),
+      operationName: await hover(document, "loose_operation_name"),
+      operationValue: await hover(document, "loose_operation_value"),
+      fragmentId: await hover(document, "loose_fragment_id"),
+      fragmentName: await hover(document, "loose_fragment_name"),
+    };
+    return precisionDiagnostics(document).length === 0 &&
+      /Literal\[['"]SourceLoose['"]\]/.test(observed.sourceOperation) &&
+      /Literal\[['"]Second['"]\]/.test(observed.operationName) && /Int|int/.test(observed.operationValue) &&
+      /ID|str/.test(observed.fragmentId) && /String|str/.test(observed.fragmentName) &&
+      ["loose_source_result", "loose_operation_result", "loose_fragment_result"]
+        .every(name => lineDiagnostics(document, name).length === 0);
+  }, label);
+  return observed;
+}
+
 async function updateWorkspaceFolders(start, deleteCount, ...folders) {
   let changed = false;
   const listener = vscode.workspace.onDidChangeWorkspaceFolders(() => { changed = true; });
@@ -87,6 +165,8 @@ exports.run = async () => {
   }
   const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
   const python = process.env.GRAPHQL_DESK_PYTHON;
+  const extensionsRoot = path.resolve(process.env.GRAPHQL_DESK_TEST_EXTENSIONS || "");
+  assert.ok(process.env.GRAPHQL_DESK_TEST_EXTENSIONS, "The host runner must provide its isolated extensions directory");
   const sourceUri = vscode.Uri.file(path.join(workspace, "consumer.py"));
   const results = { host: vscode.version, extensions: {}, warnings: [], trace: [] };
   const originalCreateOutputChannel = vscode.window.createOutputChannel;
@@ -103,12 +183,24 @@ exports.run = async () => {
     } });
   };
   try {
-    for (const [id, version] of [["ms-python.python", "2026.10.0"], ["ms-python.vscode-pylance", "2026.4.1"]]) {
+    const pinnedCoreExtensions = new Map([["ms-python.python", "2026.10.0"], ["ms-python.vscode-pylance", "2026.4.1"]]);
+    const extensionIds = [...pinnedCoreExtensions.keys(), "ms-python.debugpy", "ms-python.vscode-python-envs"];
+    for (const id of extensionIds) {
       const extension = vscode.extensions.getExtension(id);
       assert.ok(extension, `${id} must be installed`);
-      assert.equal(extension.packageJSON.version, version);
-      await extension.activate();
-      results.extensions[id] = version;
+      if (pinnedCoreExtensions.has(id)) {
+        assert.equal(extension.packageJSON.version, pinnedCoreExtensions.get(id));
+        await extension.activate();
+      }
+      const extensionPath = path.resolve(extension.extensionPath);
+      const relativePath = path.relative(extensionsRoot, extensionPath);
+      assert.ok(relativePath && !path.isAbsolute(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${path.sep}`),
+        `${id} must load from this host run's isolated extensions directory: ${extensionPath}`);
+      results.extensions[id] = {
+        version: extension.packageJSON.version,
+        path: relativePath.replaceAll("\\", "/"),
+        active: extension.isActive,
+      };
     }
     const graphQlDesk = vscode.extensions.getExtension("graphql-desk.graphql-desk-editor");
     assert.ok(graphQlDesk, "GraphQL Desk extension must be loaded");
@@ -192,6 +284,7 @@ exports.run = async () => {
       return Object.values(results.repairedChecks).every(Boolean);
     }, "Repairs clear warnings, restore typed overloads, and remove fallback errors");
     assert.ok(repaired, JSON.stringify(results));
+    assertNoQuarantineFailures(results.trace, "The repaired source refresh must complete its worker quarantine request");
 
     for (const name of ["final_source_ok", "literal_source_ok", "precise_operation_ok", "tuple_fragment_id_ok", "tuple_fragment_name_ok"]) {
       assert.equal(lineDiagnostics(document, name).length, 0, `${name} should type-check`);
@@ -234,11 +327,21 @@ exports.run = async () => {
       const removedSourceUri = vscode.Uri.file(path.join(removedWorkspace, "consumer.py"));
       const removedDocument = await vscode.workspace.openTextDocument(removedSourceUri);
       await vscode.window.showTextDocument(removedDocument, { preview: false });
-      await until(() => precisionDiagnostics(removedDocument).length === 3, "Second project publishes its independent precision diagnostics");
+      await assertPrecisionWarnings(removedDocument, initialWarnings, "Second project publishes its exact independent precision diagnostics");
+      await assertPreciseControls(removedDocument, "Second project receives precise Final/Literal and tuple inference");
+      await replace(removedDocument, 'SOURCE_LOOSE = "query SourceLoose { selected }"', 'SOURCE_LOOSE: Final = "query SourceLoose { selected }"');
+      await replace(removedDocument, 'operation=SELECTOR_LOOSE)', 'operation="Second")');
+      await replace(removedDocument, '"query FragmentList { user { id ...Card } }", [card]', '"query FragmentList { user { id ...Card } }", (card,)');
+      await assertRepairedControls(removedDocument, "Second project repairs restore typed overloads and clear fallback errors");
+      assertNoQuarantineFailures(results.trace, "The second root's repaired source refresh must complete its worker quarantine request");
+      await replace(removedDocument, 'SOURCE_LOOSE: Final = "query SourceLoose { selected }"', 'SOURCE_LOOSE = "query SourceLoose { selected }"');
+      await replace(removedDocument, 'operation="Second")', 'operation=SELECTOR_LOOSE)');
+      await replace(removedDocument, '"query FragmentList { user { id ...Card } }", (card,)', '"query FragmentList { user { id ...Card } }", [card]');
+      await assertPrecisionWarnings(removedDocument, initialWarnings, "Second project restores exact warnings after reverting the three widened expressions");
       const dirtyEdit = new vscode.WorkspaceEdit();
       dirtyEdit.insert(removedSourceUri, new vscode.Position(0, 0), "# user edit\n");
       assert.equal(await vscode.workspace.applyEdit(dirtyEdit), true);
-      await until(() => precisionDiagnostics(removedDocument).length === 3, "Dirty-buffer analysis keeps current warnings");
+      await assertPrecisionWarnings(removedDocument, initialWarnings, "Second project's dirty buffer keeps exact warning ranges and messages");
       const removedBuffer = removedDocument.getText();
       const removedVersion = removedDocument.version;
       const removedDisk = await fs.readFile(removedSourceUri.fsPath, "utf8");
@@ -254,6 +357,13 @@ exports.run = async () => {
       assert.equal(removedDocument.isDirty, true);
       assert.equal(await fs.readFile(removedSourceUri.fsPath, "utf8"), removedDisk);
       assert.equal(await fs.readFile(path.join(removedWorkspace, ".graphql-desk", "keep.txt"), "utf8"), "preserve this user file");
+      results.secondRoot = {
+        exactWarnings: true,
+        preciseControls: true,
+        repairedControls: true,
+        restoredWarnings: true,
+        dirtyBufferWarnings: true,
+      };
     }
     assert.equal(await fs.readFile(sourceUri.fsPath, "utf8"), originalDisk, "GraphQL Desk preserves the user's source file on cleanup");
     assert.equal(document.isDirty, true, "Editor repairs remain in the user's dirty buffer");

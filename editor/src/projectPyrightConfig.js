@@ -845,7 +845,6 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     },
     cleanup() { managed.cleanup(); cleanupCreated([...preflight.created, ...ownerCreatedDirectories]); },
     projectConfig: true,
-    needsInitialRestart: true,
     async validateGeneratedPackages(packages) {
       const latest = await assertEffectiveOwner();
       const roots = [saved.customStubPathAdded ? saved.customStubPath : null, ...latest.extraPaths,

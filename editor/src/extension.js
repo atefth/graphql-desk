@@ -687,13 +687,10 @@ function activate(context) {
           } else if (handle) changedArtifacts = (await handle.publish(files, isCurrent)) || changedArtifacts;
         }
       }
-      if (changedArtifacts && managed.projectConfig && managed.needsInitialRestart) {
-        schedulePylanceRestart();
-        managed.needsInitialRestart = false;
-      } else if (changedArtifacts && !managed.ownsSetting && !managed.projectConfig && typingChanged) schedulePylanceRestart();
+      if (changedArtifacts && !managed.ownsSetting && !managed.projectConfig && typingChanged) schedulePylanceRestart();
       latestArtifacts.set(folderRoot, { managedRoot: managed.root, selectedSetting: managed.selectedSetting,
-        operationManifest, projects: result.projects.map(({ project, generated_package, provenance, files, diagnostics }) =>
-          ({ project, generated_package, provenance, files, diagnostics })),
+        operationManifest, projects: result.projects.map(({ project, generated_package, provenance, files }) =>
+          ({ project, generated_package, provenance, files })),
         parserOverlay: result.parser_overlay,
         ...(artifactTypingFingerprint === undefined ? {} : { typingFingerprint: artifactTypingFingerprint }),
         inputFingerprint: result.input_fingerprint, savedSourceFingerprint: result.saved_source_fingerprint, analysisId: result.id });

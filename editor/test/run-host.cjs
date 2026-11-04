@@ -458,7 +458,7 @@ async function runHost(version, suite, factorySuite, temporary, osTemp, cachePat
   const isolation = [`--user-data-dir=${profile}`, `--extensions-dir=${extensions}`];
   let launchTarget = workspace;
   let precisionRemovedWorkspace;
-  if (suite === "factoryPrecision" && version === "1.142.0") {
+  if (suite === "factoryPrecision") {
     precisionRemovedWorkspace = path.join(temporary, "factory-precision-removed");
     await fs.mkdir(precisionRemovedWorkspace);
     launchTarget = path.join(temporary, "factory-precision.code-workspace");
@@ -496,6 +496,7 @@ async function runHost(version, suite, factorySuite, temporary, osTemp, cachePat
     extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["projectConfigToml", "projectConfigEnvironment"].includes(suite) ? "projectConfig" : ["parserOverlay", "externalMappings", "mixedLists", "fragmentTyping"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
     extensionTestsEnv: {
       GRAPHQL_DESK_TEST_WORKSPACE: workspace,
+      GRAPHQL_DESK_TEST_EXTENSIONS: extensions,
       GRAPHQL_DESK_TEST_TEMP_ROOT: temporary,
       TEMP: osTemp,
       TMP: osTemp,
