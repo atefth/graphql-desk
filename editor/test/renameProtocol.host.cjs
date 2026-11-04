@@ -357,6 +357,53 @@ async function run() {
     observed.extractCapturedLocalFragmentRoundtripUndo = true;
     await capturedLocalClient.stop();
 
+    observed.step = "extract-two-level-captured-local-fragment-roundtrip-undo";
+    const twoLevelCapturedSource = "from graphql_desk import gql\ndef build():\n    card = gql('fragment Card on User { id }')\n    def scope():\n        def read():\n            query = gql('query Read { user { friend { ...Card } name } }', fragments=[card])\n            return query\n        return read\n    return scope\n";
+    const twoLevelCapturedSchema = "type User { id: ID! name: String! friend: User } type Query { user: User }";
+    const twoLevelCaptured = await pythonExtractionDocument("extract-two-level-captured-local", twoLevelCapturedSource, {
+      schema: twoLevelCapturedSchema,
+    });
+    const twoLevelCapturedClient = createRenameLanguageClient(vscode, twoLevelCaptured.language, { isTrusted: () => true });
+    clients.push(twoLevelCapturedClient);
+    await twoLevelCapturedClient.start();
+    await vscode.window.showTextDocument(twoLevelCaptured.document);
+    assert.equal(await requestExtract(twoLevelCapturedClient.client, twoLevelCaptured.document, undefined,
+      "friend { ...Card }"), true);
+    assert.match(twoLevelCaptured.document.getText(), /fragment UserFields on User .*fragments=\[card\]/);
+    const twoLevelCapturedUpdated = bundle(twoLevelCaptured.document.getText(), {
+      uri: twoLevelCaptured.document.uri.toString(), version: twoLevelCaptured.document.version,
+      schema: twoLevelCapturedSchema,
+    });
+    assert.deepEqual(twoLevelCapturedUpdated.response.diagnostics, []);
+    assert.equal(twoLevelCapturedUpdated.response.calls.length, 3);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(twoLevelCaptured.document.getText(), twoLevelCapturedSource);
+    observed.extractTwoLevelCapturedLocalFragmentRoundtripUndo = true;
+    await twoLevelCapturedClient.stop();
+
+    observed.step = "extract-two-level-capture-with-unrelated-inner-declaration-roundtrip-undo";
+    const unrelatedDeclarationSource = "from graphql_desk import gql\ndef build():\n    card = gql('fragment Card on User { id }')\n    def scope():\n        def unrelated():\n            global cache\n        def read():\n            query = gql('query Read { user { friend { ...Card } name } }', fragments=[card])\n            return query\n        return read\n    return scope\n";
+    const unrelatedDeclaration = await pythonExtractionDocument("extract-unrelated-inner-declaration", unrelatedDeclarationSource, {
+      schema: twoLevelCapturedSchema,
+    });
+    const unrelatedDeclarationClient = createRenameLanguageClient(vscode, unrelatedDeclaration.language, { isTrusted: () => true });
+    clients.push(unrelatedDeclarationClient);
+    await unrelatedDeclarationClient.start();
+    await vscode.window.showTextDocument(unrelatedDeclaration.document);
+    assert.equal(await requestExtract(unrelatedDeclarationClient.client, unrelatedDeclaration.document, undefined,
+      "friend { ...Card }"), true);
+    assert.match(unrelatedDeclaration.document.getText(), /fragment UserFields on User .*fragments=\[card\]/);
+    const unrelatedDeclarationUpdated = bundle(unrelatedDeclaration.document.getText(), {
+      uri: unrelatedDeclaration.document.uri.toString(), version: unrelatedDeclaration.document.version,
+      schema: twoLevelCapturedSchema,
+    });
+    assert.deepEqual(unrelatedDeclarationUpdated.response.diagnostics, []);
+    assert.equal(unrelatedDeclarationUpdated.response.calls.length, 3);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(unrelatedDeclaration.document.getText(), unrelatedDeclarationSource);
+    observed.extractCapturedLocalWithUnrelatedDeclarationRoundtripUndo = true;
+    await unrelatedDeclarationClient.stop();
+
     observed.step = "extract-module-conditional-roundtrip-undo";
     const conditionalSource = "# 😀\r\nfrom graphql_desk import gql\r\nif ENABLED:\r\n    # conditional query\r\n    query = gql('query Read { user { id name } }')\r\n";
     const conditionalExtraction = await pythonExtractionDocument("extract-module-conditional", conditionalSource);
