@@ -280,6 +280,33 @@ test("serializes overlapping generation selection so the latest edit wins", asyn
   assert.equal(f.values["analysis.stubPath"], managed.selectedSetting);
 });
 
+test("waits for generation rotation before recording staging ownership", async t => {
+  const f = await fixture(t, undefined);
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const generations = path.join(managed.root, "generations");
+  await fs.mkdir(generations);
+  const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
+  await fs.mkdir(generation);
+  const verified = { directory: generation, manifest: {
+    owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(generation), artifactFingerprint: "a",
+  }, verify() { return this; } };
+  await ownGeneration(managed, verified);
+
+  const releaseSettingsWrite = f.delayNextUpdate();
+  const selection = managed.selectGeneration(generation, () => true, verified);
+  await new Promise(resolve => setImmediate(resolve));
+  let stagingSettled = false;
+  const staging = managed.recordStaging(generation, "b".repeat(64),
+    ".graphql-desk-00000000-0000-0000-0000-000000000001-marker-00000000-0000-0000-0000-000000000002.tmp")
+    .then(result => { stagingSettled = true; return result; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stagingSettled, false, "staging waits while the configured path is rotating");
+
+  releaseSettingsWrite();
+  assert.equal(await selection, true);
+  assert.equal(await staging, true);
+});
+
 test("serializes staging ownership and release cleanup across managers", async t => {
   const f = await fixture(t, undefined);
   const first = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);

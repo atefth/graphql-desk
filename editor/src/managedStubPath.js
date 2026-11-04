@@ -112,6 +112,11 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
   if (!inside(workspace, root)) throw new Error("Configured Pylance stubPath is outside the workspace; preserved");
   const created = [];
   let selectionQueue = Promise.resolve();
+  const serializeSelection = operation => {
+    const pending = selectionQueue.then(operation, operation);
+    selectionQueue = pending.catch(() => {});
+    return pending;
+  };
   try {
     const relative = path.relative(workspace, root);
     let current = workspace;
@@ -183,16 +188,17 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
       recordStaging(directory, markerFingerprint, markerTemporary) {
         const target = path.resolve(directory);
         const generations = path.join(root, "generations");
-        if (!ownsSetting || !ownsCurrentValue(setting) || !inside(generations, target) || target === generations ||
+        if (!inside(generations, target) || target === generations ||
             !/^g-[0-9]+-[0-9a-f-]{36}$/i.test(path.basename(target)) || !/^[a-f0-9]{64}$/.test(markerFingerprint ?? "") ||
             !/^\.graphql-desk-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}-marker-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp$/i.test(markerTemporary ?? "")) return Promise.resolve(false);
         const record = async () => {
+          if (!ownsSetting || !ownsCurrentValue(setting)) return false;
           const current = workspaceState?.get?.(stagingStateKey);
           const records = current && typeof current === "object" && !Array.isArray(current) ? current : {};
           await workspaceState?.update?.(stagingStateKey, { ...records, [path.basename(target)]: { fingerprint: markerFingerprint, markerTemporary } });
           return this.ownsStaging(target, markerFingerprint);
         };
-        return serializeStateUpdate(workspaceState, stagingStateKey, record);
+        return serializeSelection(() => serializeStateUpdate(workspaceState, stagingStateKey, record));
       },
       forgetStaging(directory, markerFingerprint) {
         const target = path.resolve(directory);
@@ -278,9 +284,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
             throw error;
           }
         };
-        const pending = selectionQueue.then(select, select);
-        selectionQueue = pending.catch(() => {});
-        return pending;
+        return serializeSelection(select);
       },
       cleanup() {
         for (const [directory, stat] of [...created].reverse()) {
