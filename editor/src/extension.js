@@ -143,6 +143,17 @@ function waitForRootReconfigurations(roots) {
   return (rootReconfigurationQueues.get(roots) ?? Promise.resolve()).catch(() => {});
 }
 
+async function drainPublications(publications, cancel) {
+  await Promise.allSettled([...publications]);
+  cancel();
+}
+
+function trackPublication(publications, promise) {
+  publications.add(promise);
+  void promise.then(() => publications.delete(promise), () => publications.delete(promise));
+  return promise;
+}
+
 function analysisRequestIsCurrent(ticket, generation, disposed, result) {
   return !disposed && ticket === generation && result.isCurrent();
 }
@@ -153,14 +164,14 @@ async function reconfigureWorkspaceRootsNow({ roots, folders, create, retire, ab
     let current;
     try { current = await promise; }
     catch (error) { if (roots.get(folderRoot) === promise) roots.delete(folderRoot); errors.push(error); continue; }
-    await current.waitForGenerationSelection?.();
+    const stillOwnsSetting = await current.checkSettingOwnership();
     const folder = folders.find(item => path.resolve(item.uri.fsPath) === folderRoot);
     if (!folder) {
       if (roots.get(folderRoot) === promise) roots.delete(folderRoot);
       try { await retire(folderRoot, current); } catch (error) { errors.push(error); }
       continue;
     }
-    if (current.stillOwnsSetting?.() === true) continue;
+    if (stillOwnsSetting) continue;
     let next;
     try { next = await create(folder); }
     catch (error) {
@@ -205,9 +216,12 @@ function activate(context) {
   let timer;
   let pylanceRestartTimer;
   let disposed = false;
+  let disposing = false;
+  let disposePromise;
   let generation = 0;
   let refreshCancellation;
   let lastSkipReason;
+  const publications = new Set();
   const outputs = new Map();
   const generations = new Map();
   const roots = new Map();
@@ -297,8 +311,8 @@ function activate(context) {
       if (!folder) return false;
       try {
         const managed = await promise;
-        await managed.waitForGenerationSelection?.();
-        if (!managed.stillOwnsSetting()) {
+        const stillOwnsSetting = await managed.checkSettingOwnership();
+        if (!stillOwnsSetting) {
           output.appendLine(`GraphQL Desk trace: ownership details ${JSON.stringify(managed.ownershipStatus?.() ?? { managerCurrent: false })}`);
           return false;
         }
@@ -382,6 +396,7 @@ function activate(context) {
     if (!previous || previous.managedRoot !== managed.root ||
         (!previousOverride && previous.selectedSetting !== managed.selectedSetting)) {
       if (publisher && managed.ownsSetting) {
+        if (disposing || disposed) return [];
         const isCurrent = () => !disposed && ticket === generation && controller.isTrusted();
         await publisher.publish(new Map(), `quarantine-startup-${Date.now()}`, isCurrent, managed,
           "0".repeat(64), "0".repeat(64), []);
@@ -483,6 +498,7 @@ function activate(context) {
       nextProjects = previous.projects.map(project => ({ ...project, files: [] }));
     }
     try {
+      if (disposing || disposed) return [];
       if (managed.ownsSetting) {
         await publisher.publish(packages, `quarantine-${Date.now()}`, isCurrent, managed,
           previous.inputFingerprint, previous.savedSourceFingerprint, nextManifest);
@@ -510,7 +526,7 @@ function activate(context) {
   }
   function retryStaleAnalysis(ticket, token, recoveryAttempt, reason) {
     traceSkip(reason);
-    if (!disposed && ticket === generation && !token?.isCancellationRequested && recoveryAttempt === 0) {
+    if (!disposing && !disposed && ticket === generation && !token?.isCancellationRequested && recoveryAttempt === 0) {
       refreshVisible(null, true, null, 1);
     }
   }
@@ -584,6 +600,7 @@ function activate(context) {
         latestArtifacts.get(folderRoot)?.typingFingerprint !== artifactTypingFingerprint;
       let changedArtifacts = false;
       if (managed.ownsSetting) {
+        if (disposing || disposed) return;
         const key = `${folderRoot}\0${managed.root}`;
         let publisher = generations.get(key);
         if (!publisher) { publisher = createAnalysisGenerations(vscode, folderRoot, managed.root); generations.set(key, publisher); }
@@ -594,6 +611,7 @@ function activate(context) {
           else traceSkip("analysis-snapshot-stale-after-recovery");
           return;
         }
+        if (disposing || disposed) return;
         const published = await publisher.publish(groups, result.id, isCurrent, managed,
           result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
         output.appendLine(`GraphQL Desk trace: publish changed=${published} selected=${managed.selectedSetting} files=${[...groups.values()].reduce((sum, files) => sum + files.length, 0)} operations=${operationManifest.reduce((sum, item) => sum + item.operations.length, 0)}`);
@@ -605,11 +623,13 @@ function activate(context) {
         }
         changedArtifacts = published || changedArtifacts;
       } else {
+        if (disposing || disposed) return;
         for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !groups.has(key.split("\0")[2])) {
+          if (disposing || disposed) return;
           changedArtifacts = (await handle.publish([], isCurrent)) || changedArtifacts;
         }
         for (const [packageName, files] of groups) {
-          if (!isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
+          if (disposing || disposed || !isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
           const key = `${folderRoot}\0${managed.root}\0${packageName}`;
           let handle = outputs.get(key);
           if (!handle && files.length) {
@@ -644,14 +664,15 @@ function activate(context) {
     }
   }
   const refreshVisible = (sourceUri, invalidateTypes = Boolean(sourceUri), sourceRanges = null, recoveryAttempt = 0) => {
+    if (disposing || disposed) return;
     const ticket = invalidateTypes ? ++generation : generation;
     const parsed = sourceUri ? vscode.Uri.parse(sourceUri) : null;
     const targetedSource = parsed?.scheme === "file" && path.extname(parsed.fsPath).toLowerCase() === ".py";
     const quarantineContext = { previousByFolder: new Map(), refined: new Set() };
-    const quarantine = (invalidateTypes ? quarantinePublishedTyping(sourceUri, ticket, !targetedSource,
+    const quarantine = trackPublication(publications, (invalidateTypes ? quarantinePublishedTyping(sourceUri, ticket, !targetedSource,
       sourceRanges, null, null, !sourceUri) : Promise.resolve([]))
       .then(results => { for (const item of results ?? []) quarantineContext.previousByFolder.set(item.folderRoot, item.previous); })
-      .catch(error => { output.appendLine(`Typing quarantine failed: ${String(error)}`); traceSkip("typing-quarantine-failed"); });
+      .catch(error => { output.appendLine(`Typing quarantine failed: ${String(error)}`); traceSkip("typing-quarantine-failed"); }));
     refreshCancellation?.cancel();
     refreshCancellation?.dispose();
     refreshCancellation = new vscode.CancellationTokenSource();
@@ -660,7 +681,7 @@ function activate(context) {
     // Drop published semantic diagnostics immediately; rebuild after the edit settles.
     for (const document of vscode.workspace.textDocuments) language?.close(document.uri);
     timer = setTimeout(() => {
-      if (disposed) return;
+      if (disposing || disposed) return;
       const editors = vscode.window.visibleTextEditors.filter(editor => editor.document.languageId === "python");
       const publishers = new Set();
       const workspaceRoots = new Set();
@@ -674,8 +695,11 @@ function activate(context) {
       }
       for (const editor of editors) {
         void Promise.allSettled([language.refresh(editor.document), highlighting.refresh(editor)]).then(() => {
-          if (!publishers.has(editor) || disposed || ticket !== generation) return;
-          return quarantine.then(() => publishTypes(editor, ticket, token, quarantineContext, recoveryAttempt));
+          if (!publishers.has(editor) || disposing || disposed || ticket !== generation) return;
+          return quarantine.then(() => {
+            if (disposing || disposed || ticket !== generation) return;
+            return trackPublication(publications, publishTypes(editor, ticket, token, quarantineContext, recoveryAttempt));
+          });
         });
       }
     }, 100);
@@ -732,31 +756,40 @@ function activate(context) {
     });
   });
   const command = vscode.commands.registerCommand("graphqlDesk.refreshSchema", () => controller.refresh());
-  const lifecycle = { async dispose() {
-    if (disposed) return;
-    await renameStarted;
-    await renameClient.stop();
-    disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
-    configChanged.dispose(); language.dispose(); highlighting.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
-    await waitForRootReconfigurations(roots);
-    await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
-    outputs.clear();
-    for (const managed of supersededRoots.splice(0)) managed.cleanup();
-    const managedRoots = await Promise.all([...roots.values()].map(promise => promise.catch(() => null)));
-    for (const managed of managedRoots) {
-      try { await managed?.release?.(); } catch (error) { output.appendLine(`Pyright config cleanup failed: ${String(error)}`); }
-      managed?.cleanup();
-    }
-    controller.dispose();
-    output.dispose();
-    roots.clear();
-    latestArtifacts.clear();
-    try { await vscode.commands.executeCommand("python.analysis.restartLanguageServer"); } catch { /* Pylance may already be deactivating. */ }
+  const lifecycle = { dispose() {
+    if (disposePromise) return disposePromise;
+    if (disposed) return Promise.resolve();
+    disposing = true;
+    disposePromise = (async () => {
+      clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose(); configChanged.dispose();
+      await renameStarted;
+      await renameClient.stop();
+      await drainPublications(publications, () => {
+        refreshCancellation?.cancel(); refreshCancellation?.dispose();
+        disposed = true; generation += 1;
+      });
+      language.dispose(); highlighting.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
+      await waitForRootReconfigurations(roots);
+      await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
+      outputs.clear();
+      for (const managed of supersededRoots.splice(0)) managed.cleanup();
+      const managedRoots = await Promise.all([...roots.values()].map(promise => promise.catch(() => null)));
+      for (const managed of managedRoots) {
+        try { await managed?.release?.(); } catch (error) { output.appendLine(`Pyright config cleanup failed: ${String(error)}`); }
+        managed?.cleanup();
+      }
+      controller.dispose();
+      output.dispose();
+      roots.clear();
+      latestArtifacts.clear();
+      try { await vscode.commands.executeCommand("python.analysis.restartLanguageServer"); } catch { /* Pylance may already be deactivating. */ }
+    })();
+    return disposePromise;
   } };
   context.subscriptions.push(lifecycle);
   active = lifecycle;
   refreshVisible(null, true);
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate, analysisRequestIsCurrent, artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations };
+module.exports = { activate, deactivate, analysisRequestIsCurrent, artifactsWithRetry, drainPublications, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations };
 

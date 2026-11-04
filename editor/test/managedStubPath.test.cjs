@@ -7,6 +7,7 @@ const { createHash } = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
 const { createManagedStubPath, managedStateKeys, updateManagedState } = require("../src/managedStubPath");
+const { drainPublications } = require("../src/extension");
 
 async function fixture(t, setting, dirty = false, settingLayer = "workspaceFolderValue") {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-stub-path-"));
@@ -134,7 +135,68 @@ test("setting-change checks wait for selection and retain an intervening user ov
   assert.equal(f.values["analysis.stubPath"], "user-stubs");
   assert.equal(managed.ownsSetting, false);
   assert.equal(managed.stillOwnsSetting(), false);
+  assert.equal(await managed.checkSettingOwnership(), false);
   assert.equal(f.stored.get(managedStateKeys(f.workspace).stateKey), undefined);
+});
+
+test("ownership inspection waits for an in-flight selection rollback", async t => {
+  const f = await fixture(t, undefined);
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const directory = path.join(managed.root, "generations", "g-1-00000000-0000-0000-0000-000000000000");
+  await fs.mkdir(directory, { recursive: true });
+  const verified = { directory, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+    id: path.basename(directory), artifactFingerprint: "a" }, verify() { return this; } };
+  await ownGeneration(managed, verified);
+  let current = true;
+  let selected;
+  const written = new Promise(resolve => { selected = resolve; });
+  f.onConfigWrite(selected);
+  const finishSelection = f.delayNextUpdateAfterWrite();
+  const selecting = managed.selectGeneration(directory, () => current, verified);
+  await written;
+  current = false;
+  const finishRollback = f.delayNextUpdate();
+  let rollingBack;
+  const rollback = new Promise(resolve => { rollingBack = resolve; });
+  f.onConfigUpdate(rollingBack);
+  finishSelection();
+  await rollback;
+  assert.equal(managed.stillOwnsSetting(), false, "the local selection changes before the setting rollback completes");
+  let inspected = false;
+  const owned = managed.checkSettingOwnership(() => { inspected = true; return true; });
+  await Promise.resolve();
+  assert.equal(inspected, false, "ownership must not be inspected in the middle of the rollback");
+  finishRollback();
+  assert.equal(await selecting, false);
+  assert.equal(await owned, true);
+  assert.equal(inspected, true);
+  assert.equal(f.values["analysis.stubPath"], undefined);
+});
+
+test("shutdown preserves the completed generation when its setting update is in flight", async t => {
+  const f = await fixture(t, undefined);
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const directory = path.join(managed.root, "generations", "g-1-00000000-0000-0000-0000-000000000000");
+  await fs.mkdir(directory, { recursive: true });
+  const verified = { directory, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+    id: path.basename(directory), artifactFingerprint: "a" }, verify() { return this; } };
+  await ownGeneration(managed, verified);
+  const finishUpdate = f.delayNextUpdateAfterWrite();
+  let selected;
+  const written = new Promise(resolve => { selected = resolve; });
+  f.onConfigWrite(selected);
+  let cancelled = false;
+  const selecting = managed.selectGeneration(directory, () => !cancelled, verified);
+  await written;
+  const shutdown = drainPublications(new Set([selecting]), () => { cancelled = true; });
+  await Promise.resolve();
+  assert.equal(cancelled, false, "the current request stays valid until the selection commits");
+  finishUpdate();
+  await shutdown;
+  assert.equal(await selecting, true);
+  assert.equal(cancelled, true);
+  assert.equal(path.resolve(f.workspace, f.values["analysis.stubPath"]), directory);
+  assert.equal(JSON.parse(await fs.readFile(f.settingsPath, "utf8"))["analysis.stubPath"], managed.selectedSetting);
 });
 
 test("recovers the reserved managed root after workspace state is lost", async t => {

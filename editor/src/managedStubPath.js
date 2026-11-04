@@ -138,6 +138,9 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
       get ownsSetting() { return ownsSetting; },
       get selectedSetting() { return setting; },
       waitForGenerationSelection() { return selectionQueue; },
+      checkSettingOwnership(check = () => true) {
+        return serializeSelection(() => ownsSetting && ownsCurrentValue(setting) && check());
+      },
       stillOwnsSetting() { return ownsSetting && ownsCurrentValue(setting); },
       ownsGeneration(directory, manifestFingerprint) {
         const target = path.resolve(directory);

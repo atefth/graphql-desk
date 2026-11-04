@@ -526,6 +526,7 @@ test("editing an existing TOML config invalidates its managed owner", async t =>
   fs.writeFileSync(path.join(f.root, "pyproject.toml"), file.replace("custom-stubs", "user-stubs"));
 
   assert.equal(managed.stillOwnsSetting(), false);
+  assert.equal(await managed.checkSettingOwnership(), false);
   managed.cleanup();
 });
 
@@ -553,6 +554,8 @@ test("a managed generation update is owned before the workspace setting change e
     verify: () => ({ directory: generationDirectory, manifest, manifestFingerprint: fingerprint }),
   });
   assert.equal(selected, true);
+  assert.equal(managed.selectedSetting, path.relative(f.root, generationDirectory).split(path.sep).join("/"));
+  assert.equal(await managed.checkSettingOwnership(), true);
   assert.deepEqual(observed, [{ owned: true, value: path.relative(f.root, generationDirectory).split(path.sep).join("/"),
     projectStubPath: path.relative(f.root, generationDirectory).split(path.sep).join("/") }]);
   assert.equal(f.pythonStubPath, path.relative(f.root, generationDirectory).split(path.sep).join("/"));
