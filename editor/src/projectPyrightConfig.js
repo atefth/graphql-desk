@@ -829,6 +829,11 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       return configStillEffective() && managed.stillOwnsSetting() &&
         (pythonSettings.effective() || "") === (pythonOwner.current || "");
     },
+    ownershipStatus() {
+      return { configCurrent: configStillEffective(), managerCurrent: managed.stillOwnsSetting(),
+        pythonCurrent: (pythonSettings.effective() || "") === (pythonOwner.current || ""), phase: saved.phase,
+        rotationPending: pythonOwner.pending !== undefined };
+    },
     cleanup() { managed.cleanup(); cleanupCreated([...preflight.created, ...ownerCreatedDirectories]); },
     projectConfig: true,
     needsInitialRestart: true,

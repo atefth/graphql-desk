@@ -294,7 +294,10 @@ function activate(context) {
       try {
         const managed = await promise;
         await managed.waitForGenerationSelection?.();
-        if (!managed.stillOwnsSetting()) return false;
+        if (!managed.stillOwnsSetting()) {
+          output.appendLine(`GraphQL Desk trace: ownership details ${JSON.stringify(managed.ownershipStatus?.() ?? { managerCurrent: false })}`);
+          return false;
+        }
       } catch { return false; }
     }
     return true;
