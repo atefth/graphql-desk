@@ -74,6 +74,13 @@ async function updateWorkspaceFolders(start, deleteCount, ...folders) {
 }
 
 exports.run = async () => {
+  const temporaryRoot = process.env.GRAPHQL_DESK_TEST_TEMP_ROOT;
+  assert.ok(temporaryRoot, "The host runner must provide its owned temporary root");
+  const expectedOsTemp = path.join(temporaryRoot, "os-temp");
+  for (const name of ["TEMP", "TMP"]) {
+    assert.equal(path.resolve(process.env[name] || ""), expectedOsTemp, `${name} must stay inside this host run's temporary root`);
+  }
+  await fs.access(expectedOsTemp);
   if (process.env.GRAPHQL_DESK_TEST_NODE_PATH) {
     process.env.NODE_PATH = process.env.GRAPHQL_DESK_TEST_NODE_PATH;
     require("node:module").Module._initPaths();

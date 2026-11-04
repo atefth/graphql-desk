@@ -185,10 +185,13 @@ async function main() {
   await fs.mkdir(cachePath, { recursive: true });
   await fs.mkdir(temporaryRoot, { recursive: true });
   const temporary = await fs.mkdtemp(path.join(temporaryRoot, "graphql-desk-features-"));
+  const osTemp = path.join(temporary, "os-temp");
+  await fs.mkdir(osTemp);
   try {
-    await runHost(version, suite, factorySuite, temporary, cachePath);
+    await runHost(version, suite, factorySuite, temporary, osTemp, cachePath);
   } finally {
     await fs.rm(temporary, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
+    await assert.rejects(fs.access(osTemp), { code: "ENOENT" }, "Host operating-system temporary data must be removed");
     await assert.rejects(fs.access(temporary), { code: "ENOENT" }, "Host-test temporary data must be removed");
     for (const directory of [temporaryRoot, path.dirname(temporaryRoot)]) {
       try { await fs.rmdir(directory); }
@@ -197,8 +200,8 @@ async function main() {
   }
 }
 
-async function runHost(version, suite, factorySuite, temporary, cachePath) {
-  assert.deepEqual(await fs.readdir(temporary), [], "Every host run starts from a new temporary root");
+async function runHost(version, suite, factorySuite, temporary, osTemp, cachePath) {
+  assert.deepEqual(await fs.readdir(temporary), ["os-temp"], "Every host run starts with only its owned operating-system temp directory");
   const workspace = path.join(temporary, "workspace");
   const profile = path.join(temporary, "profile");
   assert.equal(fsSync.existsSync(workspace), false, "The host workspace must not be reused");
@@ -478,7 +481,11 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
       await preparePinnedPythonExtensions(process.env.GRAPHQL_DESK_VSCODE_EXTENSION_CACHE, extensions);
     } else {
       for (const extension of ["ms-python.python@2026.10.0", "ms-python.vscode-pylance@2026.4.1"]) {
-        await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], { version, cachePath });
+        await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], {
+          version,
+          cachePath,
+          spawn: { env: { ...process.env, TEMP: osTemp, TMP: osTemp } },
+        });
       }
     }
   }
@@ -489,6 +496,9 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["projectConfigToml", "projectConfigEnvironment"].includes(suite) ? "projectConfig" : ["parserOverlay", "externalMappings", "mixedLists", "fragmentTyping"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
     extensionTestsEnv: {
       GRAPHQL_DESK_TEST_WORKSPACE: workspace,
+      GRAPHQL_DESK_TEST_TEMP_ROOT: temporary,
+      TEMP: osTemp,
+      TMP: osTemp,
       GRAPHQL_DESK_TEST_REMOVED_WORKSPACE: precisionRemovedWorkspace || "",
       GRAPHQL_DESK_TEST_PROFILE: profile,
       GRAPHQL_DESK_RESULT_PATH: result,
