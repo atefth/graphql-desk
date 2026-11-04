@@ -510,6 +510,25 @@ test("managed config owns one stable path and restores only its exact addition",
   assert.equal(fs.existsSync(managed.root), false);
 });
 
+test("a newly effective JSON config invalidates the managed TOML owner", async t => {
+  const f = fixture(t, { toml: '[tool.pyright]\nstubPath = "custom-stubs"\n' });
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker);
+  fs.writeFileSync(path.join(f.root, "pyrightconfig.json"), '{"stubPath":"another-stub-root"}');
+
+  assert.equal(managed.stillOwnsSetting(), false);
+  managed.cleanup();
+});
+
+test("editing an existing TOML config invalidates its managed owner", async t => {
+  const file = "[tool.pyright]\nstubPath = \"custom-stubs\"\npythonVersion = \"3.12\"\n";
+  const f = fixture(t, { toml: file });
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker);
+  fs.writeFileSync(path.join(f.root, "pyproject.toml"), file.replace("custom-stubs", "user-stubs"));
+
+  assert.equal(managed.stillOwnsSetting(), false);
+  managed.cleanup();
+});
+
 test("a managed generation update is owned before the workspace setting change event fires", async t => {
   const f = fixture(t, { json: '{"stubPath":"custom-stubs","extraPaths":["vendor"]}', pythonStubPath: "python-custom" });
   const state = stateStore();

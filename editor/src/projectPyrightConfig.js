@@ -479,7 +479,7 @@ async function updateProjectConfig(vscode, folder, action, worker, ownership = {
   const format = jsonExists ? "jsonc" : "toml";
   const inspected = format === "jsonc" ? modifyJsonConfig(snapshot.text, "inspect") : await invokeToml(folder, snapshot.text, "inspect", worker);
   if (!inspected.found) return null;
-  if (action === "inspect") return { ...inspected, file, format, identity: snapshot.identity, workspace };
+  if (action === "inspect") return { ...inspected, file, format, identity: snapshot.identity, workspace, hash: snapshot.hash };
   if (action === "remove_stale_generations" && format === "jsonc") {
     const updated = removeStaleGenerationSearchPaths(snapshot.text, workspace);
     const result = modifyJsonConfig(updated, "inspect");
@@ -493,7 +493,7 @@ async function updateProjectConfig(vscode, folder, action, worker, ownership = {
   if (update.text !== snapshot.text) {
     await atomicReplaceOwnedConfig(vscode, workspace, file, update.text, snapshot, onOwnedWrite);
   }
-  return { ...update, file, format, workspace };
+  return { ...update, file, format, workspace, hash: createHash("sha256").update(update.text, "utf8").digest("hex") };
 }
 
 async function createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite = () => {}, onOwnership = () => {} } = {}) {
@@ -502,6 +502,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   const workspace = inspected.workspace;
   await recoverPendingConfigWrite(workspace, inspected.file, workspaceState);
   const originalOnOwnedWrite = onOwnedWrite;
+  let activeConfigHash = inspected.hash;
   onOwnedWrite = (filename, fingerprint, operation) => {
     if (!operation) return originalOnOwnedWrite(filename, fingerprint);
     const key = pendingConfigWriteKey(workspace);
@@ -514,6 +515,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       });
     }
     const result = originalOnOwnedWrite(filename, fingerprint, operation);
+    if (operation.phase === "commit" && path.resolve(filename) === path.resolve(inspected.file)) activeConfigHash = fingerprint;
     void workspaceState.update(key, undefined).catch(() => {});
     return result;
   };
@@ -743,6 +745,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
 
   if (!saved || saved.version !== 3 || saved.phase !== "active") throw new Error("GraphQL Desk Pyright stubPath setup is incomplete; preserved");
   const activeConfig = await inspectLatest();
+  activeConfigHash = activeConfig.hash;
   const preflight = ensureWorkspaceRoot(workspace, Boolean(saved?.version === 2 || saved?.version === 3));
   let currentSetting = saved.currentStubPath;
   let currentPresent = true;
@@ -777,6 +780,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       const updated = await updateProjectConfig(vscode, folder, "set_stub_path", worker, ownership, target, onOwnedWrite);
       currentSetting = updated.hasStubPath ? updated.stubPath : "";
       currentPresent = updated.hasStubPath;
+      activeConfigHash = updated.hash;
       if ((pythonSettings.effective() || "") !== target) await setPythonStubPath(target, pythonOwner.current || "");
       validatePythonStubPath(pythonSettings, target);
       pythonOwner = { ...pythonOwner, current: target, pending: undefined };
@@ -786,6 +790,12 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       onOwnership(inspected.format === "toml" ? inspected.file : null, currentSetting,
         previousSetting, true);
     },
+  };
+  const configStillEffective = () => {
+    if (inspected.format === "jsonc" ? !fs.existsSync(inspected.file) :
+      fs.existsSync(path.join(workspace, "pyrightconfig.json")) || !fs.existsSync(inspected.file)) return false;
+    try { return readFileSafe(vscode, workspace, inspected.file).hash === activeConfigHash; }
+    catch { return false; }
   };
   const managed = await createManagedStubPath(vscode, folder, workspaceState, {
     config, baseSetting: MANAGED_PATH, forceOwned: true, stateSuffix,
@@ -815,7 +825,8 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   return {
     ...managed,
     stillOwnsSetting() {
-      return managed.stillOwnsSetting() && (pythonSettings.effective() || "") === (pythonOwner.current || "");
+      return configStillEffective() && managed.stillOwnsSetting() &&
+        (pythonSettings.effective() || "") === (pythonOwner.current || "");
     },
     cleanup() { managed.cleanup(); cleanupCreated([...preflight.created, ...ownerCreatedDirectories]); },
     projectConfig: true,
