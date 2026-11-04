@@ -1416,15 +1416,15 @@ send(second)
     def test_field_line_suppression_only_hides_that_field_warning(self) -> None:
         source = PREFIX.replace(
             'query = gql("{ user { id name email } }")',
-            'query = gql(\n'
+            "query = gql(\n"
             '    "{\\n"\n'
             '    "  user { id name email }\\n" # graphql-desk: ignore[52005]\n'
             '    "\\n"\n'
             '    "  other { id name email }\\n"\n'
             '    "}"\n'
-            ')',
+            ")",
         ) + (
-            'result=execute(query, {})\n'
+            "result=execute(query, {})\n"
             'print(result["user"]["name"])\n'
             'print(result["other"]["name"])'
         )
