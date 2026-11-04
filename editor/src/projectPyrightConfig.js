@@ -831,6 +831,8 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     },
     ownershipStatus() {
       return { configCurrent: configStillEffective(), managerCurrent: managed.stillOwnsSetting(),
+        managerOwned: managed.ownsSetting, managerSelection: managed.selectedSetting, projectSelection: currentSetting,
+        pythonExpected: pythonOwner.current || "", pythonActual: pythonSettings.effective() || "",
         pythonCurrent: (pythonSettings.effective() || "") === (pythonOwner.current || ""), phase: saved.phase,
         rotationPending: pythonOwner.pending !== undefined };
     },
