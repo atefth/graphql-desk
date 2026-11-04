@@ -23,7 +23,8 @@ The explicit `graphql_desk.testing.read_result` helper also establishes a result
 
 Within the same file the analyzer follows normal assignments, aliases, tuple
 unpacking, response attributes and string subscripts, numeric list indices,
-`for` loops and comprehensions, and nullable guards. Response aliases are path
+`for` loops and comprehensions, nullable guards, and one-argument `dict.get()`
+calls with a constant string key on a tracked result. Response aliases are path
 keys; reserved-name matching uses the schema field name. Same-file
 `read_fragment` aliases preserve matching document/schema provenance and track
 the fragment's reads. Masked fragment-only subtrees are exempt from query
@@ -36,6 +37,8 @@ callback captures, wildcard imports and reflection do not produce speculative
 findings. Ordinary callbacks are escapes rather than interprocedural analysis.
 An invalid Python/GraphQL document, mutation/subscription, or result with no local
 consumption produces no field-use warning. Cross-file reads are not analyzed.
+Dynamic `get()` keys and calls with a default argument remain opaque and consume
+the tracked mapping conservatively.
 
 This bounded implementation analyzes module statements, top-level function
 bodies, methods in module-scope classes, and methods in function-local classes

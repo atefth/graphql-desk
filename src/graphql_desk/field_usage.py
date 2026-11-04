@@ -1760,6 +1760,24 @@ class _Flow:
             )
             if document is not None:
                 return _Document(document)
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and len(node.args) == 1
+                and not node.keywords
+            ):
+                base = self.expression(node.func.value, env)
+                key = node.args[0]
+                if (
+                    isinstance(base, _Reference)
+                    and isinstance(key, ast.Constant)
+                    and isinstance(key.value, str)
+                ):
+                    return self.select(base, key.value)
+                _consume(base)
+                for argument_node in node.args:
+                    _consume(self.expression(argument_node, env))
+                return None
             function = self.expression(node.func, env)
             values = [self.expression(item, env) for item in node.args]
             keywords = {
