@@ -123,12 +123,33 @@ function typingFingerprint(groups) {
   return createHash("sha256").update(JSON.stringify(files)).digest("hex");
 }
 
-async function reconfigureWorkspaceRoots({ roots, folders, create, retire }) {
+const rootReconfigurationQueues = new WeakMap();
+const stubPathChangeQueues = new WeakMap();
+function serializeStubPathChange(roots, operation) {
+  const previous = stubPathChangeQueues.get(roots) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(operation);
+  stubPathChangeQueues.set(roots, next.catch(() => {}));
+  return next;
+}
+function reconfigureWorkspaceRoots(options) {
+  const previous = rootReconfigurationQueues.get(options.roots) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(() => reconfigureWorkspaceRootsNow({
+    ...options, folders: typeof options.folders === "function" ? options.folders() : options.folders,
+  }));
+  rootReconfigurationQueues.set(options.roots, next);
+  return next;
+}
+function waitForRootReconfigurations(roots) {
+  return (rootReconfigurationQueues.get(roots) ?? Promise.resolve()).catch(() => {});
+}
+
+async function reconfigureWorkspaceRootsNow({ roots, folders, create, retire, abandon = () => {} }) {
   const errors = [];
   for (const [folderRoot, promise] of [...roots]) {
     let current;
     try { current = await promise; }
     catch (error) { if (roots.get(folderRoot) === promise) roots.delete(folderRoot); errors.push(error); continue; }
+    await current.waitForGenerationSelection?.();
     const folder = folders.find(item => path.resolve(item.uri.fsPath) === folderRoot);
     if (!folder) {
       if (roots.get(folderRoot) === promise) roots.delete(folderRoot);
@@ -144,7 +165,14 @@ async function reconfigureWorkspaceRoots({ roots, folders, create, retire }) {
       errors.push(error);
       continue;
     }
-    if (next.root === current.root) { next.cleanup(); continue; }
+    if (next.root === current.root) {
+      const replacement = Promise.resolve(next);
+      if (roots.get(folderRoot) === promise) {
+        roots.set(folderRoot, replacement);
+        abandon(current);
+      } else next.cleanup();
+      continue;
+    }
     const replacement = Promise.resolve(next);
     if (roots.get(folderRoot) === promise) roots.set(folderRoot, replacement);
     try { await retire(folderRoot, current); }
@@ -155,6 +183,14 @@ async function reconfigureWorkspaceRoots({ roots, folders, create, retire }) {
     }
   }
   if (errors.length) throw new AggregateError(errors, "One or more workspace stub roots could not be reconfigured");
+}
+
+async function artifactsWithRetry(controller, snapshot, token, onFailure, canRetry) {
+  let failureReason;
+  const captureFailure = reason => { failureReason = reason; onFailure(reason); };
+  const result = await controller.artifacts(snapshot, token, captureFailure);
+  if (result || !canRetry() || !["worker-artifacts-failed", "worker-artifacts-stale"].includes(failureReason)) return result;
+  return controller.artifacts(snapshot, token, captureFailure);
 }
 
 let active;
@@ -171,6 +207,7 @@ function activate(context) {
   const outputs = new Map();
   const generations = new Map();
   const roots = new Map();
+  const supersededRoots = [];
   const latestArtifacts = new Map();
   const invalidatedDiagnostics = vscode.languages.createDiagnosticCollection("graphql-desk-typing");
   const invalidatedDiagnosticUris = new Map();
@@ -246,8 +283,8 @@ function activate(context) {
     managed.cleanup();
   }
   async function reconfigureRoots() {
-    await reconfigureWorkspaceRoots({ roots, folders: vscode.workspace.workspaceFolders ?? [],
-      create: createManagedRoot, retire: retireRoot });
+    await reconfigureWorkspaceRoots({ roots, folders: () => vscode.workspace.workspaceFolders ?? [],
+      create: createManagedRoot, retire: retireRoot, abandon: managed => supersededRoots.push(managed) });
   }
   async function managedStubPathsAreCurrent() {
     if (!roots.size) return false;
@@ -256,7 +293,11 @@ function activate(context) {
       if (!folder) return false;
       try {
         const managed = await promise;
-        if (!managed.stillOwnsSetting()) return false;
+        await managed.waitForGenerationSelection?.();
+        if (!managed.stillOwnsSetting()) {
+          output.appendLine(`GraphQL Desk trace: ownership details ${JSON.stringify(managed.ownershipStatus?.() ?? { managerCurrent: false })}`);
+          return false;
+        }
       } catch { return false; }
     }
     return true;
@@ -463,7 +504,13 @@ function activate(context) {
     }
     return broad && !previousOverride ? [{ folderRoot, previous }] : [];
   }
-  async function publishTypes(editor, ticket, token, quarantineContext) {
+  function retryStaleAnalysis(ticket, token, recoveryAttempt, reason) {
+    traceSkip(reason);
+    if (!disposed && ticket === generation && !token?.isCancellationRequested && recoveryAttempt === 0) {
+      refreshVisible(null, true, null, 1);
+    }
+  }
+  async function publishTypes(editor, ticket, token, quarantineContext, recoveryAttempt = 0) {
     const document = editor.document;
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
     if (!folder) { traceSkip("document-outside-workspace"); return; }
@@ -480,18 +527,15 @@ function activate(context) {
       return;
     }
     const snapshot = controller.snapshot(document);
-    let artifactFailureReason;
-    const captureArtifactFailure = reason => { artifactFailureReason = reason; traceSkip(reason); };
-    let result = await controller.artifacts(snapshot, token, captureArtifactFailure);
-    if (!result && artifactFailureReason === "worker-artifacts-failed" &&
-        !disposed && ticket === generation && !token?.isCancellationRequested) {
-      result = await controller.artifacts(snapshot, token, captureArtifactFailure);
-    }
+    const result = await artifactsWithRetry(controller, snapshot, token, traceSkip,
+      () => !disposed && ticket === generation && !token?.isCancellationRequested);
     if (!result) return;
     output.appendLine(`GraphQL Desk trace: artifacts projects=${result.projects.length} files=${result.projects.reduce((sum, item) => sum + item.files.length, 0)} operations=${result.projects.reduce((sum, item) => sum + item.provenance.length, 0)} input=${result.input_fingerprint} saved=${result.saved_source_fingerprint}`);
     const analysisCurrent = result.isCurrent();
     if (disposed || ticket !== generation || !analysisCurrent) {
-      traceSkip("analysis-snapshot-stale-before-managed-root"); return;
+      if (ticket === generation && !disposed && !analysisCurrent) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-before-managed-root");
+      else traceSkip("analysis-snapshot-stale-before-managed-root");
+      return;
     }
     if (quarantineContext?.previousByFolder.has(folderRoot) && !quarantineContext.refined.has(folderRoot)) {
       quarantineContext.refined.add(folderRoot);
@@ -516,7 +560,9 @@ function activate(context) {
     }
     const analysisStillCurrent = result.isCurrent();
     if (disposed || ticket !== generation || !analysisStillCurrent) {
-      traceSkip("analysis-snapshot-stale-after-managed-root"); return;
+      if (ticket === generation && !disposed && !analysisStillCurrent) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-after-managed-root");
+      else traceSkip("analysis-snapshot-stale-after-managed-root");
+      return;
     }
     try {
       const groups = new Map();
@@ -538,10 +584,20 @@ function activate(context) {
         if (!publisher) { publisher = createAnalysisGenerations(vscode, folderRoot, managed.root); generations.set(key, publisher); }
         changedArtifacts = await publisher.recover(managed, result.isCurrent,
           result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
-        if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale-after-recovery"); return; }
+        if (disposed || ticket !== generation || !result.isCurrent()) {
+          if (ticket === generation && !disposed && !result.isCurrent()) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-after-recovery");
+          else traceSkip("analysis-snapshot-stale-after-recovery");
+          return;
+        }
         const published = await publisher.publish(groups, result.id, result.isCurrent, managed,
           result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
         output.appendLine(`GraphQL Desk trace: publish changed=${published} selected=${managed.selectedSetting} files=${[...groups.values()].reduce((sum, files) => sum + files.length, 0)} operations=${operationManifest.reduce((sum, item) => sum + item.operations.length, 0)}`);
+        const publishStillCurrent = result.isCurrent();
+        if (disposed || ticket !== generation || !publishStillCurrent) {
+          if (ticket === generation && !disposed && !publishStillCurrent) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-after-publish");
+          else traceSkip("analysis-snapshot-stale-after-publish");
+          return;
+        }
         changedArtifacts = published || changedArtifacts;
       } else {
         for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !groups.has(key.split("\0")[2])) {
@@ -582,7 +638,7 @@ function activate(context) {
       status.show();
     }
   }
-  const refreshVisible = (sourceUri, invalidateTypes = Boolean(sourceUri), sourceRanges = null) => {
+  const refreshVisible = (sourceUri, invalidateTypes = Boolean(sourceUri), sourceRanges = null, recoveryAttempt = 0) => {
     const ticket = invalidateTypes ? ++generation : generation;
     const parsed = sourceUri ? vscode.Uri.parse(sourceUri) : null;
     const targetedSource = parsed?.scheme === "file" && path.extname(parsed.fsPath).toLowerCase() === ".py";
@@ -614,7 +670,7 @@ function activate(context) {
       for (const editor of editors) {
         void Promise.allSettled([language.refresh(editor.document), highlighting.refresh(editor)]).then(() => {
           if (!publishers.has(editor) || disposed || ticket !== generation) return;
-          return quarantine.then(() => publishTypes(editor, ticket, token, quarantineContext));
+          return quarantine.then(() => publishTypes(editor, ticket, token, quarantineContext, recoveryAttempt));
         });
       }
     }, 100);
@@ -645,13 +701,16 @@ function activate(context) {
   const configChanged = vscode.workspace.onDidChangeConfiguration(event => {
     if ((vscode.workspace.workspaceFolders ?? []).some(folder =>
       event.affectsConfiguration("python.analysis.stubPath", folder.uri))) {
-      // Our own generation switch selects already complete immutable output. Treat a
-      // mismatch as an external setting edit and rebuild the manager around it.
-      void managedStubPathsAreCurrent().then(ownedSelection => {
+      // Check and reconfigure as one step so duplicate events cannot reuse a stale root.
+      void serializeStubPathChange(roots, async () => {
+        await waitForRootReconfigurations(roots);
+        const ownedSelection = await managedStubPathsAreCurrent();
+        if (disposed) return;
         output.appendLine(`GraphQL Desk trace: stubPath event owned=${ownedSelection}`);
         if (ownedSelection) return;
         generation += 1;
-        return reconfigureRoots().then(() => refreshVisible(null, true), () => { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(null, true); });
+        try { await reconfigureRoots(); await refreshVisible(null, true); }
+        catch { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(null, true); }
       });
     } else if (event.affectsConfiguration("graphqlDesk")) refreshVisible(null, true);
   });
@@ -674,8 +733,10 @@ function activate(context) {
     await renameClient.stop();
     disposed = true; generation += 1; refreshCancellation?.cancel(); refreshCancellation?.dispose(); clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose();
     configChanged.dispose(); language.dispose(); highlighting.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
+    await waitForRootReconfigurations(roots);
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
     outputs.clear();
+    for (const managed of supersededRoots.splice(0)) managed.cleanup();
     const managedRoots = await Promise.all([...roots.values()].map(promise => promise.catch(() => null)));
     for (const managed of managedRoots) {
       try { await managed?.release?.(); } catch (error) { output.appendLine(`Pyright config cleanup failed: ${String(error)}`); }
@@ -692,5 +753,5 @@ function activate(context) {
   refreshVisible(null, true);
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate, operationDependencyImpact, reconfigureWorkspaceRoots, typingFingerprint };
+module.exports = { activate, deactivate, artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations };
 

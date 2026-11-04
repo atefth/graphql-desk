@@ -5,7 +5,38 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { operationDependencyImpact, reconfigureWorkspaceRoots, typingFingerprint } = require("../src/extension");
+const { artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations } = require("../src/extension");
+
+test("stale artifact replies retry once when the publish is still current", async () => {
+  let calls = 0;
+  const skipped = [];
+  const result = await artifactsWithRetry({ artifacts: async (_snapshot, _token, onFailure) => {
+    calls += 1;
+    if (calls === 1) { onFailure("worker-artifacts-stale"); return null; }
+    return { ok: true };
+  } }, {}, undefined, reason => skipped.push(reason), () => true);
+  assert.deepEqual(result, { ok: true });
+  assert.equal(calls, 2);
+  assert.deepEqual(skipped, ["worker-artifacts-stale"]);
+
+  calls = 0;
+  const stillStale = await artifactsWithRetry({ artifacts: async (_snapshot, _token, onFailure) => {
+    calls += 1;
+    onFailure("worker-artifacts-stale");
+    return null;
+  } }, {}, undefined, () => {}, () => true);
+  assert.equal(stillStale, null);
+  assert.equal(calls, 2, "a second stale reply does not create an unbounded retry");
+
+  calls = 0;
+  const cancelled = await artifactsWithRetry({ artifacts: async (_snapshot, _token, onFailure) => {
+    calls += 1;
+    onFailure("worker-artifacts-stale");
+    return null;
+  } }, {}, undefined, () => {}, () => false);
+  assert.equal(cancelled, null);
+  assert.equal(calls, 1, "cancelled or superseded typing does not retry");
+});
 
 test("typing fingerprint follows Pylance stub inputs and ignores runtime-only changes", () => {
   const files = [
@@ -133,6 +164,124 @@ test("reconfiguration reuses a root that still owns its setting", async () => {
   assert.equal(created, false);
   assert.equal(retired, false);
   assert.equal(await roots.get(root), managed);
+});
+
+test("same-root reconfiguration retains the fresh manager without releasing shared settings", async () => {
+  const root = path.resolve("same-root-workspace");
+  const folder = { uri: { fsPath: root } };
+  const directory = path.join(root, ".graphql-desk", "live-typings");
+  const abandoned = [];
+  const current = { root: directory, stillOwnsSetting: () => false, release: () => assert.fail("stale manager must not release shared settings"), cleanup() {} };
+  const replacement = { root: directory, stillOwnsSetting: () => true, cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(current)]]);
+
+  await reconfigureWorkspaceRoots({ roots, folders: [folder], create: async () => replacement,
+    retire: async () => assert.fail("same-root replacement must not release settings"),
+    abandon: managed => abandoned.push(managed) });
+
+  assert.equal(await roots.get(root), replacement);
+  assert.deepEqual(abandoned, [current], "stale cleanup is deferred until active outputs are retired");
+});
+
+test("root reconfiguration waits for in-flight generation selection before replacing its manager", async () => {
+  const root = path.resolve("rotating-workspace");
+  const folder = { uri: { fsPath: root } };
+  let finishSelection;
+  let selectionStarted;
+  const selection = new Promise(resolve => { finishSelection = resolve; });
+  const started = new Promise(resolve => { selectionStarted = resolve; });
+  let created = false;
+  const current = { root: path.join(root, ".graphql-desk", "live-typings"),
+    waitForGenerationSelection() { selectionStarted(); return selection; },
+    stillOwnsSetting() { assert.equal(selectionFinished, true); return false; }, cleanup() {} };
+  const replacement = { root: path.join(root, "custom"), cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(current)]]);
+  let selectionFinished = false;
+  const reconfiguration = reconfigureWorkspaceRoots({ roots, folders: [folder],
+    create: async () => { created = true; return replacement; }, retire: async () => {} });
+
+  await started;
+  assert.equal(created, false, "a manager cannot be replaced during its setting rotation");
+  selectionFinished = true;
+  finishSelection();
+  await reconfiguration;
+  assert.equal(created, true);
+  assert.equal(await roots.get(root), replacement);
+});
+
+test("overlapping stubPath changes reconcile in order", async () => {
+  const roots = new Map();
+  const order = [];
+  let finishFirst;
+  let firstStarted;
+  const firstGate = new Promise(resolve => { finishFirst = resolve; });
+  const started = new Promise(resolve => { firstStarted = resolve; });
+  const first = serializeStubPathChange(roots, async () => {
+    order.push("first-start");
+    firstStarted();
+    await firstGate;
+    order.push("first-end");
+  });
+  await started;
+  const second = serializeStubPathChange(roots, async () => { order.push("second"); });
+  assert.deepEqual(order, ["first-start"], "the later event cannot inspect a stale root during the earlier reconciliation");
+  finishFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(order, ["first-start", "first-end", "second"]);
+});
+
+test("concurrent root reconfigurations create and retire a replacement only once", async () => {
+  const root = path.resolve("concurrent-workspace");
+  const folder = { uri: { fsPath: root } };
+  const current = { root: path.join(root, "old"), stillOwnsSetting: () => false, cleanup() {} };
+  const replacement = { root: path.join(root, "new"), stillOwnsSetting: () => true, cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(current)]]);
+  const retired = [];
+  let releaseCreate;
+  let startedCreate;
+  const createStarted = new Promise(resolve => { startedCreate = resolve; });
+  const creating = new Promise(resolve => { releaseCreate = resolve; });
+  let creates = 0;
+  const create = async () => { creates += 1; startedCreate(); await creating; return replacement; };
+  const retire = async (_root, managed) => retired.push(managed);
+  const first = reconfigureWorkspaceRoots({ roots, folders: () => [folder], create, retire });
+  await createStarted;
+  const second = reconfigureWorkspaceRoots({ roots, folders: () => [folder], create, retire });
+  releaseCreate();
+  await Promise.all([first, second]);
+  assert.equal(creates, 1);
+  assert.deepEqual(retired, [current]);
+  assert.equal(await roots.get(root), replacement);
+});
+
+test("queued root reconfiguration uses the latest workspace list and shutdown can drain it", async () => {
+  const root = path.resolve("removed-during-reconfiguration");
+  const folder = { uri: { fsPath: root } };
+  const current = { root: path.join(root, "old"), stillOwnsSetting: () => false, cleanup() {} };
+  const replacement = { root: path.join(root, "new"), cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(current)]]);
+  const folders = [folder];
+  const retired = [];
+  let releaseCreate;
+  let startedCreate;
+  const createStarted = new Promise(resolve => { startedCreate = resolve; });
+  const creating = new Promise(resolve => { releaseCreate = resolve; });
+  const first = reconfigureWorkspaceRoots({ roots, folders: () => folders, create: async () => {
+    startedCreate(); await creating; return replacement;
+  }, retire: async (_root, managed) => retired.push(managed) });
+  await createStarted;
+  folders.length = 0;
+  const second = reconfigureWorkspaceRoots({ roots, folders: () => folders, create: async () => assert.fail("removed workspaces are not recreated"),
+    retire: async (_root, managed) => retired.push(managed) });
+  let drained = false;
+  const drain = waitForRootReconfigurations(roots).then(() => { drained = true; });
+  await Promise.resolve();
+  assert.equal(drained, false);
+  releaseCreate();
+  await Promise.all([first, second, drain]);
+  assert.deepEqual(retired, [current, replacement]);
+  assert.equal(roots.has(root), false);
+  assert.equal(drained, true);
 });
 
 test("removing a workspace retires its managed root and leaves other roots active", async () => {

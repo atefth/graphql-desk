@@ -135,8 +135,9 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
     }
     return {
       root,
-      ownsSetting,
+      get ownsSetting() { return ownsSetting; },
       get selectedSetting() { return setting; },
+      waitForGenerationSelection() { return selectionQueue; },
       stillOwnsSetting() { return ownsSetting && ownsCurrentValue(setting); },
       ownsGeneration(directory, manifestFingerprint) {
         const target = path.resolve(directory);
@@ -267,7 +268,8 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
               await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: settingPresent });
               return false;
             }
-            return ownsCurrentValue(targetSetting);
+            if (!ownsCurrentValue(targetSetting)) throw new Error(ownershipError());
+            return true;
           } catch (error) {
             if (ownsCurrentValue(targetSetting)) {
               await config.update("analysis.stubPath", oldSettingPresent ? oldSetting : undefined, vscode.ConfigurationTarget.WorkspaceFolder);

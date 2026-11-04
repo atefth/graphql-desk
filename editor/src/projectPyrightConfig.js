@@ -824,9 +824,17 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   };
   return {
     ...managed,
+    get ownsSetting() { return managed.ownsSetting; },
     stillOwnsSetting() {
       return configStillEffective() && managed.stillOwnsSetting() &&
         (pythonSettings.effective() || "") === (pythonOwner.current || "");
+    },
+    ownershipStatus() {
+      return { configCurrent: configStillEffective(), managerCurrent: managed.stillOwnsSetting(),
+        managerOwned: managed.ownsSetting, managerSelection: managed.selectedSetting, projectSelection: currentSetting,
+        pythonExpected: pythonOwner.current || "", pythonActual: pythonSettings.effective() || "",
+        pythonCurrent: (pythonSettings.effective() || "") === (pythonOwner.current || ""), phase: saved.phase,
+        rotationPending: pythonOwner.pending !== undefined };
     },
     cleanup() { managed.cleanup(); cleanupCreated([...preflight.created, ...ownerCreatedDirectories]); },
     projectConfig: true,

@@ -20,6 +20,9 @@ async function fixture(t, setting, dirty = false, settingLayer = "workspaceFolde
   let rejectNextUpdate = false;
   let rejectNextStateUpdate = false;
   let delayedUpdate;
+  let delayedAfterWrite;
+  let onConfigUpdate;
+  let onConfigWrite;
   let onStateUpdate;
   const workspaceState = { get: key => stored.get(key), update: async (key, value) => {
     onStateUpdate?.(value);
@@ -34,10 +37,13 @@ async function fixture(t, setting, dirty = false, settingLayer = "workspaceFolde
       assert.equal(key, "analysis.stubPath");
       assert.equal(target, 2);
       if (rejectNextUpdate) { rejectNextUpdate = false; throw new Error("settings write failed"); }
+      onConfigUpdate?.();
       if (delayedUpdate) { const delay = delayedUpdate; delayedUpdate = null; await delay.promise; }
       values[key] = value;
       settings[key] = value;
       await fs.writeFile(settingsPath, JSON.stringify(settings));
+      onConfigWrite?.();
+      if (delayedAfterWrite) { const delay = delayedAfterWrite; delayedAfterWrite = null; await delay.promise; }
     },
   };
   const vscode = { ConfigurationTarget: { WorkspaceFolder: 2 }, workspace: {
@@ -51,6 +57,9 @@ async function fixture(t, setting, dirty = false, settingLayer = "workspaceFolde
     rejectNextUpdate() { rejectNextUpdate = true; },
     rejectNextStateUpdate() { rejectNextStateUpdate = true; },
     delayNextUpdate() { let release; const promise = new Promise(resolve => { release = resolve; }); delayedUpdate = { promise }; return release; },
+    delayNextUpdateAfterWrite() { let release; const promise = new Promise(resolve => { release = resolve; }); delayedAfterWrite = { promise }; return release; },
+    onConfigUpdate(callback) { onConfigUpdate = callback; },
+    onConfigWrite(callback) { onConfigWrite = callback; },
     onStateUpdate(callback) { onStateUpdate = callback; },
     stored };
 }
@@ -96,6 +105,36 @@ test("rotates only the extension-owned setting and restores ownership across act
   const customPath = custom.values["analysis.stubPath"];
   assert.equal(await userManager.selectGeneration(generation, () => true, verified), false);
   assert.equal(custom.values["analysis.stubPath"], customPath);
+});
+
+test("setting-change checks wait for selection and retain an intervening user override", async t => {
+  const f = await fixture(t, undefined);
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const generations = path.join(managed.root, "generations");
+  await fs.mkdir(generations);
+  const generation = path.join(generations, "g-1-00000000-0000-0000-0000-000000000000");
+  await fs.mkdir(generation);
+  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+    id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
+  await ownGeneration(managed, verified);
+  const releaseUpdate = f.delayNextUpdateAfterWrite();
+  let writeFinished;
+  const written = new Promise(resolve => { writeFinished = resolve; });
+  f.onConfigWrite(writeFinished);
+
+  const selecting = managed.selectGeneration(generation, () => true, verified);
+  await written;
+  const settled = managed.waitForGenerationSelection();
+  f.values["analysis.stubPath"] = "user-stubs";
+  f.settings["analysis.stubPath"] = "user-stubs";
+  await fs.writeFile(f.settingsPath, JSON.stringify(f.settings));
+  releaseUpdate();
+  await assert.rejects(selecting, /ownership changed/);
+  await settled;
+  assert.equal(f.values["analysis.stubPath"], "user-stubs");
+  assert.equal(managed.ownsSetting, false);
+  assert.equal(managed.stillOwnsSetting(), false);
+  assert.equal(f.stored.get(managedStateKeys(f.workspace).stateKey), undefined);
 });
 
 test("recovers the reserved managed root after workspace state is lost", async t => {
