@@ -2551,7 +2551,6 @@ def _resolve(
                 ]
                 if not references:
                     return False
-                captured_function: ast.FunctionDef | ast.AsyncFunctionDef | None = None
                 for reference in references:
                     fragments = parents.get(reference)
                     if not isinstance(fragments, (ast.List, ast.Tuple)):
@@ -2619,9 +2618,6 @@ def _resolve(
                             return False
                         parent = parents.get(parent)
                     if nested_function is not None:
-                        if captured_function not in (None, nested_function):
-                            return False
-                        captured_function = nested_function
                         child: ast.AST = call
                         while parents.get(child) is not nested_function:
                             next_child = parents.get(child)
