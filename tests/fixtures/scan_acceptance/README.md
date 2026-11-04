@@ -2,7 +2,11 @@
 
 This fixture is a stable Python project used to exercise all eight scan rules,
 the project/import/fragment graph, multiple schemas, warnings, and each report
-format. `expected-report.json`, `expected-graph.json`, and
+format. Python source inputs are stored as `.py.txt` and materialized in a temporary
+project by the test, so intentionally malformed inputs and generated imports are
+data rather than files checked as repository code.
+
+`expected-report.json`, `expected-graph.json`, and
 `expected-terminal.txt` are GraphQL Desk contract snapshots. They are not
 claimed to be byte-for-byte gql.tada output: Python adds schema identity,
 project-relative paths, coverage, and discovery warnings as specified in

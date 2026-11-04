@@ -2,6 +2,8 @@
 
 import io
 import json
+import shutil
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -15,8 +17,16 @@ FIXTURE = Path(__file__).parent / "fixtures" / "scan_acceptance"
 
 
 class ScanAcceptanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        shutil.copytree(FIXTURE, self.root, dirs_exist_ok=True)
+        for source in self.root.rglob("*.py.txt"):
+            source.rename(source.with_suffix(""))
+
     def test_all_rules_and_report_formats_match_contract_snapshots(self) -> None:
-        with patch.object(Path, "cwd", return_value=FIXTURE.resolve()):
+        with patch.object(Path, "cwd", return_value=self.root):
             report = scan_project()
             repeated = scan_project()
 
@@ -130,7 +140,7 @@ class ScanAcceptanceTests(unittest.TestCase):
         )
 
     def test_pinned_upstream_examples_and_cli_warning_policy(self) -> None:
-        with patch.object(Path, "cwd", return_value=FIXTURE.resolve()):
+        with patch.object(Path, "cwd", return_value=self.root):
             stdout = io.StringIO()
             stderr = io.StringIO()
             with redirect_stdout(stdout), redirect_stderr(stderr):
