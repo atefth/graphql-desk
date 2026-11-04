@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const test = require("node:test");
+const { createAnalysisWorker } = require("../src/analysisWorker");
 const { parseJsonConfig, modifyJsonConfig, updateProjectConfig, createManagedProjectConfig, MANAGED_PATH, stateKey } = require("../src/projectPyrightConfig");
 const { managedStateKeys } = require("../src/managedStubPath");
 
@@ -311,6 +312,61 @@ test("restart recovers durable config ownership and removes only verified genera
   assert.deepEqual(restored.extraPaths, ["vendor"]);
   assert.equal(f.pythonStubPath, "python-custom-stubs");
   assert.equal(fs.existsSync(path.join(f.root, ...MANAGED_PATH.split("/"), "project-config-owner.json")), false);
+});
+
+test("real worker accepts rollback from the first generation to the managed base", async t => {
+  const f = fixture(t, { toml: '[tool.pyright]\nstubPath = "custom-stubs"\n' });
+  const python = process.env.GRAPHQL_DESK_PYTHON ?? path.join(path.resolve(__dirname, "../.."), ".venv",
+    process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
+  const realWorker = createAnalysisWorker({ python, workspace: f.root, isTrusted: () => true });
+  t.after(() => realWorker.dispose());
+  const actions = [];
+  const worker = (folder, text, action, managedPath, ownership = {}) => {
+    actions.push({ action, managedPath });
+    return realWorker.request({ op: "pyright_config",
+      workspace: folder.uri.fsPath, text, action, managed_path: managedPath, ownership: {
+        topLevel: ownership.topLevel ?? false, executionEnvironmentRoots: ownership.executionEnvironmentRoots ?? [],
+        ...(ownership.expectedStubPathPresent === undefined ? {} : { expected_stub_path_present: ownership.expectedStubPathPresent }),
+        ...(ownership.expectedStubPath === undefined ? {} : { expected_stub_path: ownership.expectedStubPath }),
+        ...(ownership.restoreStubPathPresent === undefined ? {} : { restore_stub_path_present: ownership.restoreStubPathPresent }),
+        ...(ownership.restoreStubPath === undefined ? {} : { restore_stub_path: ownership.restoreStubPath }),
+        ...(ownership.customStubPath === undefined ? {} : { custom_stub_path: ownership.customStubPath }),
+        ...(ownership.customStubPathAdded === undefined ? {} : { custom_stub_path_added: ownership.customStubPathAdded }),
+        ...(ownership.removeExtraPathsKey === undefined ? {} : { remove_extra_paths_key: ownership.removeExtraPathsKey }),
+        ...(ownership.originalStubPathPresent === undefined ? {} : { original_stub_path_present: ownership.originalStubPathPresent }),
+        ...(ownership.originalStubPath === undefined ? {} : { original_stub_path: ownership.originalStubPath }),
+        ...(ownership.removeManagedPaths === undefined ? {} : { remove_managed_paths: ownership.removeManagedPaths }),
+        ...(ownership.legacyTopLevel === undefined ? {} : { legacy_top_level: ownership.legacyTopLevel }),
+        ...(ownership.legacyExecutionEnvironmentRoots === undefined ? {} : { legacy_execution_environment_roots: ownership.legacyExecutionEnvironmentRoots }),
+      } });
+  };
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, worker);
+  const id = `g-1-${"a".repeat(8)}-${"b".repeat(4)}-${"c".repeat(4)}-${"d".repeat(4)}-${"e".repeat(12)}`;
+  const directory = path.join(managed.root, "generations", id);
+  fs.mkdirSync(directory, { recursive: true });
+  const manifest = { owner: "graphql-desk-analysis-generation", format: 2, id, sequence: 1, files: [], operationManifest: [],
+    inputFingerprint: "a".repeat(64), artifactFingerprint: "b".repeat(64) };
+  const fingerprint = "b".repeat(64);
+  const keys = managedStateKeys(f.root, `:project-${createHash("sha256").update("pyproject.toml").digest("hex").slice(0, 16)}`);
+  await state.update(keys.generationStateKey, { [id]: fingerprint });
+
+  let currentChecks = 0;
+  assert.equal(await managed.selectGeneration(directory, () => ++currentChecks === 1, {
+    directory, manifest, manifestFingerprint: fingerprint,
+    verify: () => ({ directory, manifest, manifestFingerprint: fingerprint }),
+  }), false);
+  assert.equal(currentChecks, 2);
+  assert.ok(actions.some(item => item.action === "set_stub_path" && item.managedPath.endsWith(id)),
+    "the generation must be selected before the stale result triggers rollback");
+  assert.ok(actions.some(item => item.action === "restore_stub_path" && item.managedPath === MANAGED_PATH),
+    "the base path must use the worker's explicit restore action");
+  assert.equal((await realWorker.request({ op: "pyright_config", workspace: f.root,
+    text: fs.readFileSync(path.join(f.root, "pyproject.toml"), "utf8"), action: "inspect", managed_path: MANAGED_PATH,
+    ownership: { topLevel: false, executionEnvironmentRoots: [] } })).stub_path, MANAGED_PATH);
+  assert.equal(state.get(stateKey(f.root)).phase, "active");
+  await managed.release();
+  managed.cleanup();
 });
 
 test("active ownership fails closed if the managed path was removed before restart", async t => {

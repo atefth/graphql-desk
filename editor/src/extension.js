@@ -355,7 +355,7 @@ function activate(context) {
     const folder = vscode.workspace.getWorkspaceFolder(parsed);
     if (!folder) return;
     const folderRoot = path.resolve(folder.uri.fsPath);
-    const previous = previousOverride ?? latestArtifacts.get(folderRoot);
+    let previous = previousOverride ?? latestArtifacts.get(folderRoot);
     let managed;
     try { managed = await managedRoot(folder, folderRoot, previous?.operationManifest?.map(item => item.generated_package) ?? []); } catch { return; }
     if (disposed || ticket !== generation || !controller.isTrusted()) return;
