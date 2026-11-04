@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -140,7 +141,10 @@ class ScanAcceptanceTests(unittest.TestCase):
         )
 
     def test_pinned_upstream_examples_and_cli_warning_policy(self) -> None:
-        with patch.object(Path, "cwd", return_value=self.root):
+        with (
+            patch.object(Path, "cwd", return_value=self.root),
+            patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}),
+        ):
             stdout = io.StringIO()
             stderr = io.StringIO()
             with redirect_stdout(stdout), redirect_stderr(stderr):
@@ -152,6 +156,18 @@ class ScanAcceptanceTests(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertEqual(stdout.getvalue(), expected_json)
+
+            ci_stdout = io.StringIO()
+            ci_stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}),
+                redirect_stdout(ci_stdout),
+                redirect_stderr(ci_stderr),
+            ):
+                ci_code = main(["scan", "--format", "json"])
+            self.assertEqual(ci_code, 0)
+            self.assertEqual(ci_stdout.getvalue(), expected_json)
+            self.assertEqual(ci_stderr.getvalue(), "")
 
             graph_stdout = io.StringIO()
             graph_stderr = io.StringIO()
