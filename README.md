@@ -40,6 +40,8 @@ The [scalar helpers](docs/implementation/scalar-helpers.md) return identical val
 The [runtime factories](docs/implementation/runtime-factories.md) provide untyped `graphql`/`gql` construction and schema-name binding; precise generated inference remains open.
 The [schema loaders](docs/implementation/schema-loading.md) validate explicit SDL, introspection JSON and configured HTTP(S) inputs. The trusted worker supports explicit remote refresh; the complete schema workflow remains open.
 
+The [schema generation command and callable](docs/implementation/schema-generation.md) download or convert SDL/introspection JSON/HTTP(S) inputs to SDL, with repeatable headers, sanitized errors, protected file output, and clean redirected stdout. `graphql-desk generate-schema INPUT` and `graphql_desk.cli.generate_schema(input=...)` reuse the same schema loaders.
+
 The [configuration model](docs/implementation/configuration.md) supplies single/named-schema facts, nearest-project ownership/routing and captured configuration text. Finite [editor snapshots](docs/implementation/editor-snapshots.md) acquire explicit candidates and current buffers without executing project Python; the installed `graphql-desk doctor` command inspects configuration and schemas without writes, and explicitly reports unverified editor/bridge health as degraded. Complete CLI integration remains open under #27.
 
 ## Typed-document boundary

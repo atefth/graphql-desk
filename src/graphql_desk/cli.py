@@ -1,4 +1,4 @@
-"""Explicit read-only diagnostics; importing this module performs no work."""
+"""Project diagnostics and explicit generation; importing performs no work."""
 
 import argparse
 import ast
@@ -13,11 +13,11 @@ from dataclasses import dataclass, replace
 from importlib import metadata
 from io import StringIO
 from pathlib import Path
-from typing import Literal, NoReturn
+from typing import Literal, NoReturn, cast
 
-from graphql import GraphQLError
+from graphql import GraphQLError, print_schema
 
-from .config import ProjectConfig, SchemaConfig
+from .config import ProjectConfig, SchemaConfig, SchemaOrigin, generated_output_paths
 from .document_validation import validate_indexed_document
 from .external_type_sources import (
     capture_external_type_sources,
@@ -85,6 +85,14 @@ class OutputGenerationError(ValueError):
     def __init__(self, diagnostics: Sequence[str]) -> None:
         self.diagnostics = tuple(diagnostics)
         super().__init__("Schema output generation failed")
+
+
+class SchemaGenerationError(ValueError):
+    """Sanitized schema-download or conversion failure."""
+
+    def __init__(self, diagnostics: Sequence[str]) -> None:
+        self.diagnostics = tuple(diagnostics)
+        super().__init__("Schema generation failed")
 
 
 @dataclass(frozen=True)
@@ -390,6 +398,25 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         default=None,
         help="Disable schema-output preprocessing",
+    )
+    schema = commands.add_parser(
+        "generate-schema", help="Download or convert a schema to SDL"
+    )
+    schema.add_argument("input", help="Schema SDL/introspection JSON file or URL")
+    schema.add_argument(
+        "-c", "--config", default=argparse.SUPPRESS, help="Select pyproject.toml"
+    )
+    schema.add_argument(
+        "--schema",
+        default=argparse.SUPPRESS,
+        help="Select configured destination and headers",
+    )
+    schema.add_argument("-o", "--output", help="Write SDL to this file")
+    schema.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        help="HTTP header 'Name: value' (repeatable)",
     )
     scan_parser = commands.add_parser(
         "scan", help="Report experimental schema-aware project insights"
@@ -1197,6 +1224,164 @@ def _scan(
     return 1 if fail_on_warn and report.warnings else 0
 
 
+def _schema_header_arguments(entries: Sequence[str]) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for entry in entries:
+        name, separator, value = entry.partition(":")
+        if not separator or not name.strip(" "):
+            raise ValueError("Invalid schema header")
+        headers[name.strip(" ")] = value.lstrip(" ")
+    return headers
+
+
+def _generate_schema(
+    input: str,
+    config_path: Path | None,
+    schema_name: str | None,
+    explicit_output: str | None,
+    *,
+    headers: object,
+    environment: Mapping[str, str],
+    stdout_is_terminal: bool,
+) -> int:
+    selected = effective_project(Path.cwd(), explicit_config=config_path)
+    project = selected.config if selected is not None else None
+    configured = None
+    if schema_name is not None:
+        if project is None:
+            raise ValueError("Schema selection requires a project configuration")
+        configured = select_schema(project, binding=schema_name)
+    elif project is not None and len(project.schemas) == 1:
+        if project.schemas[0].name == "default":
+            configured = select_schema(project)
+
+    if input.lower().startswith(("http:", "https:")):
+        origin = SchemaOrigin(url=input)
+        if configured is not None and configured.origin.url == input:
+            origin = configured.origin
+    else:
+        source = Path(input)
+        origin = SchemaOrigin(
+            local_path=source if source.is_absolute() else Path.cwd() / source
+        )
+    if headers is not None:
+        if not isinstance(headers, Mapping):
+            raise ValueError("Invalid schema headers")
+        if headers and origin.url is None:
+            raise ValueError("Schema headers require a URL input")
+        overrides: dict[str, tuple[str, str]] = {}
+        for name, value in cast(Mapping[object, object], headers).items():
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise ValueError("Invalid schema headers")
+            overrides[name.lower()] = (name, value)
+        origin = replace(
+            origin,
+            headers=tuple(
+                pair for pair in origin.headers if pair[0].lower() not in overrides
+            )
+            + tuple(overrides.values()),
+        )
+
+    destination = None
+    if explicit_output is not None:
+        if "://" in explicit_output:
+            raise ValueError("Schema output must be a local path")
+        destination = Path(explicit_output)
+        if not destination.is_absolute():
+            destination = Path.cwd() / destination
+    elif not stdout_is_terminal:
+        destination = None
+    elif (
+        configured is not None
+        and configured.origin.local_path is not None
+        and configured.origin.local_path.suffix.lower() in {".graphql", ".gql", ".sdl"}
+    ):
+        destination = (
+            configured.origin.configured_local_path or configured.origin.local_path
+        )
+    else:
+        raise ValueError("Select --output, a configured SDL path, or redirect stdout")
+
+    if destination is not None:
+        if destination.is_symlink() or any(
+            parent.is_symlink() for parent in destination.parents
+        ):
+            raise ValueError("Schema output cannot pass through a symlink")
+        if destination.suffix.lower() in {".py", ".pyi"}:
+            raise ValueError("Schema output cannot replace Python sources or stubs")
+        protected: set[Path] = set()
+        if (
+            origin.local_path is not None
+            and origin.local_path.suffix.lower() == ".json"
+        ):
+            protected.add(origin.local_path.resolve())
+        if project is not None:
+            protected.add(project.path.resolve())
+            package = project.root.joinpath(*project.generated_package.split("."))
+            if destination.resolve().is_relative_to(package.resolve()):
+                raise ValueError("Schema output cannot modify the generated package")
+            protected.update(
+                path.resolve()
+                for path in generated_output_paths(
+                    project.root, package, project.schemas
+                )
+            )
+            for item in project.schemas:
+                if (
+                    item.origin.local_path is not None
+                    and item.origin.local_path.suffix.lower() == ".json"
+                ):
+                    protected.add(item.origin.local_path.resolve())
+        if destination.resolve() in protected:
+            raise ValueError(
+                "Schema output cannot replace project configuration or artifacts"
+            )
+
+    loaded = (
+        load_local_schema(origin.local_path)
+        if origin.local_path is not None
+        else load_from_url(origin, environment=environment)
+    )
+    text = print_schema(loaded)
+    if destination is None:
+        print(text, end="")
+    else:
+        _stage_outputs({destination: text})
+    print("Schema generated.", file=sys.stderr)
+    return 0
+
+
+def generate_schema(
+    *,
+    input: Path | str,
+    config: Path | str | None = None,
+    schema: str | None = None,
+    output: Path | str | None = None,
+    headers: Mapping[str, str] | None = None,
+    silent: bool = False,
+    environment: Mapping[str, str] | None = None,
+) -> None:
+    """Download or convert a schema to SDL without exiting the caller."""
+    reporting = StringIO()
+    try:
+        with redirect_stderr(reporting):
+            _generate_schema(
+                str(input),
+                Path(config) if config is not None else None,
+                schema,
+                str(output) if output is not None else None,
+                headers=headers,
+                environment=os.environ if environment is None else environment,
+                stdout_is_terminal=True,
+            )
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        raise SchemaGenerationError(
+            ("Check schema input, access, configuration and destination.",)
+        ) from None
+    if not silent:
+        print(reporting.getvalue(), end="", file=sys.stderr)
+
+
 def _generate_output(
     config_path: Path | None,
     schema_name: str | None,
@@ -1601,6 +1786,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             if alias == ["generate", "output"]:
                 command_line[position : position + 2] = ["generate-output"]
                 break
+            if alias == ["generate", "schema"]:
+                command_line[position : position + 2] = ["generate-schema"]
+                break
         if "--force-ts-format" in command_line:
             print(
                 "TypeScript output formats are unsupported; "
@@ -1618,6 +1806,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config_path = Path(arguments.config) if hasattr(arguments, "config") else None
         schema_name = arguments.schema if hasattr(arguments, "schema") else None
+        if arguments.command == "generate-schema":
+            return _generate_schema(
+                arguments.input,
+                config_path,
+                schema_name,
+                arguments.output,
+                headers=_schema_header_arguments(arguments.header),
+                environment=dict(os.environ),
+                stdout_is_terminal=sys.stdout.isatty(),
+            )
         if arguments.command == "generate-output":
             return _generate_output(
                 config_path,

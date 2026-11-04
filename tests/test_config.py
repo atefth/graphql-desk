@@ -40,6 +40,21 @@ class ConfigTests(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.path = self.root / "pyproject.toml"
 
+    def test_local_origin_retains_lexical_path_and_canonical_identity(self) -> None:
+        config = parse_project_config(
+            _BASE.replace("schema.graphql", "${configDir}/schemas/../schema.graphql"),
+            config_path=self.path,
+        )
+        assert config is not None
+        origin = config.schemas[0].origin
+        self.assertEqual(origin.local_path, self.root / "schema.graphql")
+        self.assertEqual(
+            origin.configured_local_path,
+            self.root / "schemas" / ".." / "schema.graphql",
+        )
+        self.assertEqual(origin, SchemaOrigin(local_path=self.root / "schema.graphql"))
+        self.assertNotIn("configured_local_path", repr(origin))
+
     def test_external_source_roots_require_explicit_non_toml_scope(self) -> None:
         text = (
             _BASE + 'source_roots=["../external"]\n'

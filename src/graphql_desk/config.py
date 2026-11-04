@@ -100,6 +100,10 @@ class SchemaOrigin:
     local_path: Path | None = None
     url: str | None = field(default=None, repr=False)
     headers: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    # Preserve lexical spelling so writers can reject symlinks before resolution.
+    configured_local_path: Path | None = field(
+        default=None, repr=False, compare=False, kw_only=True
+    )
 
 
 @dataclass(frozen=True)
@@ -259,7 +263,10 @@ def _origin(value: object, root: Path) -> SchemaOrigin:
     local_path = _path(text, root, "schema")
     if local_path.is_dir():
         raise ValueError("Local schema must be a file path")
-    return SchemaOrigin(local_path=local_path)
+    return SchemaOrigin(
+        local_path=local_path,
+        configured_local_path=root / text.replace("${configDir}", str(root)),
+    )
 
 
 def resolve_schema_headers(
