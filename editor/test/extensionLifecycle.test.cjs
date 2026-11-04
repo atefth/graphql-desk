@@ -183,6 +183,32 @@ test("same-root reconfiguration retains the fresh manager without releasing shar
   assert.deepEqual(abandoned, [current], "stale cleanup is deferred until active outputs are retired");
 });
 
+test("root reconfiguration waits for in-flight generation selection before replacing its manager", async () => {
+  const root = path.resolve("rotating-workspace");
+  const folder = { uri: { fsPath: root } };
+  let finishSelection;
+  let selectionStarted;
+  const selection = new Promise(resolve => { finishSelection = resolve; });
+  const started = new Promise(resolve => { selectionStarted = resolve; });
+  let created = false;
+  const current = { root: path.join(root, ".graphql-desk", "live-typings"),
+    waitForGenerationSelection() { selectionStarted(); return selection; },
+    stillOwnsSetting() { assert.equal(selectionFinished, true); return false; }, cleanup() {} };
+  const replacement = { root: path.join(root, "custom"), cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(current)]]);
+  let selectionFinished = false;
+  const reconfiguration = reconfigureWorkspaceRoots({ roots, folders: [folder],
+    create: async () => { created = true; return replacement; }, retire: async () => {} });
+
+  await started;
+  assert.equal(created, false, "a manager cannot be replaced during its setting rotation");
+  selectionFinished = true;
+  finishSelection();
+  await reconfiguration;
+  assert.equal(created, true);
+  assert.equal(await roots.get(root), replacement);
+});
+
 test("concurrent root reconfigurations create and retire a replacement only once", async () => {
   const root = path.resolve("concurrent-workspace");
   const folder = { uri: { fsPath: root } };

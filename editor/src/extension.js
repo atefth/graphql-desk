@@ -142,6 +142,7 @@ async function reconfigureWorkspaceRootsNow({ roots, folders, create, retire, ab
     let current;
     try { current = await promise; }
     catch (error) { if (roots.get(folderRoot) === promise) roots.delete(folderRoot); errors.push(error); continue; }
+    await current.waitForGenerationSelection?.();
     const folder = folders.find(item => path.resolve(item.uri.fsPath) === folderRoot);
     if (!folder) {
       if (roots.get(folderRoot) === promise) roots.delete(folderRoot);
@@ -581,6 +582,12 @@ function activate(context) {
         const published = await publisher.publish(groups, result.id, result.isCurrent, managed,
           result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
         output.appendLine(`GraphQL Desk trace: publish changed=${published} selected=${managed.selectedSetting} files=${[...groups.values()].reduce((sum, files) => sum + files.length, 0)} operations=${operationManifest.reduce((sum, item) => sum + item.operations.length, 0)}`);
+        const publishStillCurrent = result.isCurrent();
+        if (disposed || ticket !== generation || !publishStillCurrent) {
+          if (ticket === generation && !disposed && !publishStillCurrent) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-after-publish");
+          else traceSkip("analysis-snapshot-stale-after-publish");
+          return;
+        }
         changedArtifacts = published || changedArtifacts;
       } else {
         for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !groups.has(key.split("\0")[2])) {
