@@ -65,6 +65,27 @@ class FieldUsageTests(unittest.TestCase):
                 self.assertEqual([field for field, _ in found], ["user"])
                 self.assertIn("user.email", found[0][1])
 
+    def test_static_mapping_get_tracks_graphql_field_reads(self) -> None:
+        for read in (
+            'print(result.get("user").get("name"))',
+            'user = result.get("user")\nprint(user["name"])',
+            'print(result["user"].get("name"))',
+        ):
+            with self.subTest(read=read):
+                found = warnings(PREFIX + "result = execute(query, {})\n" + read)
+                self.assertEqual([field for field, _ in found], ["user"])
+                self.assertIn("user.email", found[0][1])
+
+        for read in (
+            'print(result.get(key).get("name"))',
+            'print(result.get("user", fallback)["name"])',
+            'print(ordinary.get("user")["name"])',
+        ):
+            with self.subTest(read=read):
+                self.assertEqual(
+                    warnings(PREFIX + "result = execute(query, {})\n" + read), []
+                )
+
     def test_no_result_consumption_and_unknown_provenance_stay_silent(self) -> None:
         for use in (
             "result = execute(query, {})",
