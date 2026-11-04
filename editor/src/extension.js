@@ -143,6 +143,10 @@ function waitForRootReconfigurations(roots) {
   return (rootReconfigurationQueues.get(roots) ?? Promise.resolve()).catch(() => {});
 }
 
+function analysisRequestIsCurrent(ticket, generation, disposed, result) {
+  return !disposed && ticket === generation && result.isCurrent();
+}
+
 async function reconfigureWorkspaceRootsNow({ roots, folders, create, retire, abandon = () => {} }) {
   const errors = [];
   for (const [folderRoot, promise] of [...roots]) {
@@ -530,8 +534,9 @@ function activate(context) {
     const result = await artifactsWithRetry(controller, snapshot, token, traceSkip,
       () => !disposed && ticket === generation && !token?.isCancellationRequested);
     if (!result) return;
+    const isCurrent = () => analysisRequestIsCurrent(ticket, generation, disposed, result);
     output.appendLine(`GraphQL Desk trace: artifacts projects=${result.projects.length} files=${result.projects.reduce((sum, item) => sum + item.files.length, 0)} operations=${result.projects.reduce((sum, item) => sum + item.provenance.length, 0)} input=${result.input_fingerprint} saved=${result.saved_source_fingerprint}`);
-    const analysisCurrent = result.isCurrent();
+    const analysisCurrent = isCurrent();
     if (disposed || ticket !== generation || !analysisCurrent) {
       if (ticket === generation && !disposed && !analysisCurrent) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-before-managed-root");
       else traceSkip("analysis-snapshot-stale-before-managed-root");
@@ -558,7 +563,7 @@ function activate(context) {
       status.show();
       return;
     }
-    const analysisStillCurrent = result.isCurrent();
+    const analysisStillCurrent = isCurrent();
     if (disposed || ticket !== generation || !analysisStillCurrent) {
       if (ticket === generation && !disposed && !analysisStillCurrent) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-after-managed-root");
       else traceSkip("analysis-snapshot-stale-after-managed-root");
@@ -582,29 +587,29 @@ function activate(context) {
         const key = `${folderRoot}\0${managed.root}`;
         let publisher = generations.get(key);
         if (!publisher) { publisher = createAnalysisGenerations(vscode, folderRoot, managed.root); generations.set(key, publisher); }
-        changedArtifacts = await publisher.recover(managed, result.isCurrent,
+        changedArtifacts = await publisher.recover(managed, isCurrent,
           result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
-        if (disposed || ticket !== generation || !result.isCurrent()) {
-          if (ticket === generation && !disposed && !result.isCurrent()) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-after-recovery");
+        if (!isCurrent()) {
+          if (!disposed && ticket === generation && !result.isCurrent()) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-after-recovery");
           else traceSkip("analysis-snapshot-stale-after-recovery");
           return;
         }
-        const published = await publisher.publish(groups, result.id, result.isCurrent, managed,
+        const published = await publisher.publish(groups, result.id, isCurrent, managed,
           result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
         output.appendLine(`GraphQL Desk trace: publish changed=${published} selected=${managed.selectedSetting} files=${[...groups.values()].reduce((sum, files) => sum + files.length, 0)} operations=${operationManifest.reduce((sum, item) => sum + item.operations.length, 0)}`);
-        const publishStillCurrent = result.isCurrent();
-        if (disposed || ticket !== generation || !publishStillCurrent) {
-          if (ticket === generation && !disposed && !publishStillCurrent) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-after-publish");
+        const publishStillCurrent = isCurrent();
+        if (!publishStillCurrent) {
+          if (!disposed && ticket === generation && !result.isCurrent()) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-after-publish");
           else traceSkip("analysis-snapshot-stale-after-publish");
           return;
         }
         changedArtifacts = published || changedArtifacts;
       } else {
         for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !groups.has(key.split("\0")[2])) {
-          changedArtifacts = (await handle.publish([], result.isCurrent)) || changedArtifacts;
+          changedArtifacts = (await handle.publish([], isCurrent)) || changedArtifacts;
         }
         for (const [packageName, files] of groups) {
-          if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
+          if (!isCurrent()) { traceSkip("analysis-snapshot-stale"); return; }
           const key = `${folderRoot}\0${managed.root}\0${packageName}`;
           let handle = outputs.get(key);
           if (!handle && files.length) {
@@ -612,7 +617,7 @@ function activate(context) {
               { inMemoryManagedUpdates: managed.projectConfig });
             outputs.set(key, handle);
             changedArtifacts = true;
-          } else if (handle) changedArtifacts = (await handle.publish(files, result.isCurrent)) || changedArtifacts;
+          } else if (handle) changedArtifacts = (await handle.publish(files, isCurrent)) || changedArtifacts;
         }
       }
       if (changedArtifacts && managed.projectConfig && managed.needsInitialRestart) {
@@ -753,5 +758,5 @@ function activate(context) {
   refreshVisible(null, true);
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate, artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations };
+module.exports = { activate, deactivate, analysisRequestIsCurrent, artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations };
 
