@@ -1,0 +1,16 @@
+directive @audit on FIELD
+
+enum Sort { NEWEST OLDEST }
+input Filter { sort: Sort limit: Int }
+
+type Query {
+  users(filter: Filter): [User!]!
+  user(id: ID!): User!
+}
+
+type User {
+  id: ID!
+  name: String!
+  legacy: String @deprecated(reason: "old")
+  deprecatedOnly: String @deprecated(reason: "unused")
+}

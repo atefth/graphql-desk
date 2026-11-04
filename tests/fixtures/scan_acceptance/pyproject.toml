@@ -1,0 +1,9 @@
+[[tool.graphql-desk.schemas]]
+name = "default"
+schema = "schema-default.graphql"
+schema_output = "graphql_desk_generated/default.pyi"
+
+[[tool.graphql-desk.schemas]]
+name = "admin"
+schema = "schema-admin.graphql"
+schema_output = "graphql_desk_generated/admin.pyi"

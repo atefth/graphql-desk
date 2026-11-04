@@ -1,0 +1,927 @@
+{
+  "version": 1,
+  "overview": {
+    "operations": 5,
+    "fragments": 4,
+    "modules": 12,
+    "operationsByKind": {
+      "query": 5,
+      "mutation": 0,
+      "subscription": 0
+    },
+    "coverage": {
+      "usedFields": 8,
+      "totalFields": 9,
+      "percent": 89
+    },
+    "coverageBySchema": {
+      "admin": {
+        "usedFields": 2,
+        "totalFields": 3,
+        "percent": 67
+      },
+      "default": {
+        "usedFields": 6,
+        "totalFields": 6,
+        "percent": 100
+      }
+    }
+  },
+  "operations": [
+    {
+      "id": "project:admin:query:AdminDashboard",
+      "name": "AdminDashboard",
+      "schemaName": "admin",
+      "module": "features.admin.queries",
+      "loc": {
+        "file": "features/admin/queries.py",
+        "line": 3,
+        "column": 22
+      },
+      "variables": [],
+      "fragmentSpreads": [],
+      "hash": "512457aef2c4c9fc",
+      "kind": "query"
+    },
+    {
+      "id": "project:default:query:Profile",
+      "name": "Profile",
+      "schemaName": "default",
+      "module": "features.profile.queries",
+      "loc": {
+        "file": "features/profile/queries.py",
+        "line": 5,
+        "column": 6
+      },
+      "variables": [],
+      "fragmentSpreads": [
+        "UserFields"
+      ],
+      "hash": "80f38096d8f15052",
+      "kind": "query"
+    },
+    {
+      "id": "project:default:query:Simple",
+      "name": "Simple",
+      "schemaName": "default",
+      "module": "features.users.queries",
+      "loc": {
+        "file": "features/users/queries.py",
+        "line": 20,
+        "column": 19
+      },
+      "variables": [],
+      "fragmentSpreads": [],
+      "hash": "53283f0546d8e547",
+      "kind": "query"
+    },
+    {
+      "id": "project:default:query:UserCard",
+      "name": "UserCard",
+      "schemaName": "default",
+      "module": "features.users.queries",
+      "loc": {
+        "file": "features/users/queries.py",
+        "line": 21,
+        "column": 22
+      },
+      "variables": [],
+      "fragmentSpreads": [],
+      "hash": "fa36fabcfd429742",
+      "kind": "query"
+    },
+    {
+      "id": "project:default:query:Users",
+      "name": "Users",
+      "schemaName": "default",
+      "module": "features.users.queries",
+      "loc": {
+        "file": "features/users/queries.py",
+        "line": 6,
+        "column": 5
+      },
+      "variables": [
+        {
+          "name": "filter",
+          "type": "Filter",
+          "defaultValue": "{ sort: NEWEST, limit: 5 }"
+        }
+      ],
+      "fragmentSpreads": [
+        "UserFields",
+        "UserIdentity"
+      ],
+      "hash": "6a7f54edef0d71fc",
+      "kind": "query"
+    }
+  ],
+  "fragments": [
+    {
+      "id": "project:default:fragment:OrphanChild",
+      "name": "OrphanChild",
+      "schemaName": "default",
+      "module": "features.users.queries",
+      "loc": {
+        "file": "features/users/queries.py",
+        "line": 22,
+        "column": 25
+      },
+      "variables": [],
+      "fragmentSpreads": [],
+      "hash": "c8185586fa17b399",
+      "typeCondition": "User"
+    },
+    {
+      "id": "project:default:fragment:OrphanParent",
+      "name": "OrphanParent",
+      "schemaName": "default",
+      "module": "features.users.queries",
+      "loc": {
+        "file": "features/users/queries.py",
+        "line": 24,
+        "column": 6
+      },
+      "variables": [],
+      "fragmentSpreads": [
+        "OrphanChild"
+      ],
+      "hash": "854d286e2ba2159e",
+      "typeCondition": "User"
+    },
+    {
+      "id": "project:default:fragment:UserFields",
+      "name": "UserFields",
+      "schemaName": "default",
+      "module": "features.shared.fragments",
+      "loc": {
+        "file": "features/shared/fragments.py",
+        "line": 3,
+        "column": 23
+      },
+      "variables": [],
+      "fragmentSpreads": [],
+      "hash": "54e35df28e404c04",
+      "typeCondition": "User"
+    },
+    {
+      "id": "project:default:fragment:UserIdentity",
+      "name": "UserIdentity",
+      "schemaName": "default",
+      "module": "features.shared.fragments",
+      "loc": {
+        "file": "features/shared/fragments.py",
+        "line": 4,
+        "column": 25
+      },
+      "variables": [],
+      "fragmentSpreads": [],
+      "hash": "606dab48e5083078",
+      "typeCondition": "User"
+    }
+  ],
+  "rules": {
+    "field-usage": [
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "User",
+          "fieldName": "name"
+        },
+        "message": "User.name is selected by 4 definitions",
+        "data": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "User",
+          "fieldName": "name",
+          "fieldType": "String!",
+          "deprecated": false,
+          "count": 4,
+          "directUsages": [
+            {
+              "defId": "project:default:fragment:UserFields",
+              "module": "features.shared.fragments"
+            },
+            {
+              "defId": "project:default:query:Simple",
+              "module": "features.users.queries"
+            },
+            {
+              "defId": "project:default:query:UserCard",
+              "module": "features.users.queries"
+            },
+            {
+              "defId": "project:default:query:Users",
+              "module": "features.users.queries"
+            }
+          ],
+          "operations": [
+            "project:default:query:Profile",
+            "project:default:query:Simple",
+            "project:default:query:UserCard",
+            "project:default:query:Users"
+          ],
+          "reach": {
+            "modules": [
+              "app",
+              "features.profile.queries",
+              "features.shared.fragments",
+              "features.users.queries",
+              "features.users.routes"
+            ],
+            "areas": [
+              "(root)",
+              "features/profile",
+              "features/shared",
+              "features/users"
+            ],
+            "entryPoints": [
+              "app"
+            ]
+          }
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "Query",
+          "fieldName": "user"
+        },
+        "message": "Query.user is selected by 2 definitions",
+        "data": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "Query",
+          "fieldName": "user",
+          "fieldType": "User!",
+          "deprecated": false,
+          "count": 2,
+          "directUsages": [
+            {
+              "defId": "project:default:query:Profile",
+              "module": "features.profile.queries"
+            },
+            {
+              "defId": "project:default:query:UserCard",
+              "module": "features.users.queries"
+            }
+          ],
+          "operations": [
+            "project:default:query:Profile",
+            "project:default:query:UserCard"
+          ],
+          "reach": {
+            "modules": [
+              "app",
+              "features.profile.queries",
+              "features.users.queries",
+              "features.users.routes"
+            ],
+            "areas": [
+              "(root)",
+              "features/profile",
+              "features/users"
+            ],
+            "entryPoints": [
+              "app"
+            ]
+          }
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "Query",
+          "fieldName": "users"
+        },
+        "message": "Query.users is selected by 2 definitions",
+        "data": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "Query",
+          "fieldName": "users",
+          "fieldType": "[User!]!",
+          "deprecated": false,
+          "count": 2,
+          "directUsages": [
+            {
+              "defId": "project:default:query:Simple",
+              "module": "features.users.queries"
+            },
+            {
+              "defId": "project:default:query:Users",
+              "module": "features.users.queries"
+            }
+          ],
+          "operations": [
+            "project:default:query:Simple",
+            "project:default:query:Users"
+          ],
+          "reach": {
+            "modules": [
+              "app",
+              "features.users.queries",
+              "features.users.routes"
+            ],
+            "areas": [
+              "(root)",
+              "features/users"
+            ],
+            "entryPoints": [
+              "app"
+            ]
+          }
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "User",
+          "fieldName": "id"
+        },
+        "message": "User.id is selected by 2 definitions",
+        "data": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "User",
+          "fieldName": "id",
+          "fieldType": "ID!",
+          "deprecated": false,
+          "count": 2,
+          "directUsages": [
+            {
+              "defId": "project:default:fragment:UserIdentity",
+              "module": "features.shared.fragments"
+            },
+            {
+              "defId": "project:default:query:Users",
+              "module": "features.users.queries"
+            }
+          ],
+          "operations": [
+            "project:default:query:Users"
+          ],
+          "reach": {
+            "modules": [
+              "app",
+              "features.profile.queries",
+              "features.shared.fragments",
+              "features.users.queries",
+              "features.users.routes"
+            ],
+            "areas": [
+              "(root)",
+              "features/profile",
+              "features/shared",
+              "features/users"
+            ],
+            "entryPoints": [
+              "app"
+            ]
+          }
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "admin",
+          "typeName": "Query",
+          "fieldName": "users"
+        },
+        "message": "Query.users is selected by 1 definitions",
+        "data": {
+          "project": "project",
+          "schemaName": "admin",
+          "typeName": "Query",
+          "fieldName": "users",
+          "fieldType": "[User!]!",
+          "deprecated": false,
+          "count": 1,
+          "directUsages": [
+            {
+              "defId": "project:admin:query:AdminDashboard",
+              "module": "features.admin.queries"
+            }
+          ],
+          "operations": [
+            "project:admin:query:AdminDashboard"
+          ],
+          "reach": {
+            "modules": [
+              "app",
+              "features.admin.queries"
+            ],
+            "areas": [
+              "(root)",
+              "features/admin"
+            ],
+            "entryPoints": [
+              "app"
+            ]
+          }
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "admin",
+          "typeName": "User",
+          "fieldName": "id"
+        },
+        "message": "User.id is selected by 1 definitions",
+        "data": {
+          "project": "project",
+          "schemaName": "admin",
+          "typeName": "User",
+          "fieldName": "id",
+          "fieldType": "ID!",
+          "deprecated": false,
+          "count": 1,
+          "directUsages": [
+            {
+              "defId": "project:admin:query:AdminDashboard",
+              "module": "features.admin.queries"
+            }
+          ],
+          "operations": [
+            "project:admin:query:AdminDashboard"
+          ],
+          "reach": {
+            "modules": [
+              "app",
+              "features.admin.queries"
+            ],
+            "areas": [
+              "(root)",
+              "features/admin"
+            ],
+            "entryPoints": [
+              "app"
+            ]
+          }
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "User",
+          "fieldName": "deprecatedOnly"
+        },
+        "message": "User.deprecatedOnly is selected by 1 definitions",
+        "data": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "User",
+          "fieldName": "deprecatedOnly",
+          "fieldType": "String",
+          "deprecated": true,
+          "count": 1,
+          "directUsages": [
+            {
+              "defId": "project:default:fragment:OrphanChild",
+              "module": "features.users.queries"
+            }
+          ],
+          "operations": [],
+          "reach": {
+            "modules": [
+              "app",
+              "features.users.queries",
+              "features.users.routes"
+            ],
+            "areas": [
+              "(root)",
+              "features/users"
+            ],
+            "entryPoints": [
+              "app"
+            ]
+          },
+          "deprecationReason": "unused"
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "User",
+          "fieldName": "legacy"
+        },
+        "message": "User.legacy is selected by 1 definitions",
+        "data": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "User",
+          "fieldName": "legacy",
+          "fieldType": "String",
+          "deprecated": true,
+          "count": 1,
+          "directUsages": [
+            {
+              "defId": "project:default:query:Users",
+              "module": "features.users.queries"
+            }
+          ],
+          "operations": [
+            "project:default:query:Users"
+          ],
+          "reach": {
+            "modules": [
+              "app",
+              "features.users.queries",
+              "features.users.routes"
+            ],
+            "areas": [
+              "(root)",
+              "features/users"
+            ],
+            "entryPoints": [
+              "app"
+            ]
+          },
+          "deprecationReason": "old"
+        },
+        "weight": 1
+      }
+    ],
+    "input-usage": [
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "Filter",
+          "fieldName": "limit"
+        },
+        "message": "Filter.limit appears 1 times",
+        "data": {
+          "kind": "input-field",
+          "count": 1
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "Filter",
+          "fieldName": "sort"
+        },
+        "message": "Filter.sort appears 1 times",
+        "data": {
+          "kind": "input-field",
+          "count": 1
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "Sort",
+          "fieldName": "NEWEST"
+        },
+        "message": "Sort.NEWEST appears 1 times",
+        "data": {
+          "kind": "enum-value",
+          "count": 1
+        },
+        "weight": 1
+      }
+    ],
+    "deprecated-usage": [
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "User",
+          "fieldName": "legacy"
+        },
+        "message": "User.legacy is deprecated and selected by 1 operations",
+        "data": {
+          "count": 1,
+          "operations": [
+            "project:default:query:Users"
+          ],
+          "reason": "old"
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "typeName": "User",
+          "fieldName": "deprecatedOnly"
+        },
+        "message": "User.deprecatedOnly is deprecated and selected by 0 operations",
+        "data": {
+          "count": 0,
+          "operations": [],
+          "reason": "unused"
+        },
+        "weight": 0
+      }
+    ],
+    "orphan-fragments": [
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "fragmentId": "project:default:fragment:OrphanParent",
+          "name": "OrphanParent"
+        },
+        "message": "Fragment OrphanParent is never a resolved spread target",
+        "data": {
+          "typeCondition": "User",
+          "module": "features.users.queries"
+        }
+      }
+    ],
+    "cross-feature-fragments": [
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "fragmentId": "project:default:fragment:UserFields",
+          "name": "UserFields"
+        },
+        "message": "Fragment UserFields is spread from 2 external areas",
+        "data": {
+          "definingArea": "features/shared",
+          "consumerAreas": [
+            "features/profile",
+            "features/users"
+          ],
+          "spreadCount": 2
+        },
+        "weight": 2
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "fragmentId": "project:default:fragment:UserIdentity",
+          "name": "UserIdentity"
+        },
+        "message": "Fragment UserIdentity is spread from 1 external areas",
+        "data": {
+          "definingArea": "features/shared",
+          "consumerAreas": [
+            "features/users"
+          ],
+          "spreadCount": 1
+        },
+        "weight": 1
+      }
+    ],
+    "operation-complexity": [
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "operationId": "project:default:query:Users",
+          "operationName": "Users",
+          "module": "features.users.queries"
+        },
+        "message": "Users has static complexity score 11; this is not a server execution-cost estimate",
+        "data": {
+          "depth": 2,
+          "fieldCount": 4,
+          "listFields": 1,
+          "fields": [
+            "Query.users",
+            "User.id",
+            "User.legacy",
+            "User.name"
+          ],
+          "score": 11
+        },
+        "weight": 11
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "admin",
+          "operationId": "project:admin:query:AdminDashboard",
+          "operationName": "AdminDashboard",
+          "module": "features.admin.queries"
+        },
+        "message": "AdminDashboard has static complexity score 9; this is not a server execution-cost estimate",
+        "data": {
+          "depth": 2,
+          "fieldCount": 2,
+          "listFields": 1,
+          "fields": [
+            "Query.users",
+            "User.id"
+          ],
+          "score": 9
+        },
+        "weight": 9
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "operationId": "project:default:query:Simple",
+          "operationName": "Simple",
+          "module": "features.users.queries"
+        },
+        "message": "Simple has static complexity score 9; this is not a server execution-cost estimate",
+        "data": {
+          "depth": 2,
+          "fieldCount": 2,
+          "listFields": 1,
+          "fields": [
+            "Query.users",
+            "User.name"
+          ],
+          "score": 9
+        },
+        "weight": 9
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "operationId": "project:default:query:Profile",
+          "operationName": "Profile",
+          "module": "features.profile.queries"
+        },
+        "message": "Profile has static complexity score 6; this is not a server execution-cost estimate",
+        "data": {
+          "depth": 2,
+          "fieldCount": 2,
+          "listFields": 0,
+          "fields": [
+            "Query.user",
+            "User.name"
+          ],
+          "score": 6
+        },
+        "weight": 6
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "operationId": "project:default:query:UserCard",
+          "operationName": "UserCard",
+          "module": "features.users.queries"
+        },
+        "message": "UserCard has static complexity score 6; this is not a server execution-cost estimate",
+        "data": {
+          "depth": 2,
+          "fieldCount": 2,
+          "listFields": 0,
+          "fields": [
+            "Query.user",
+            "User.name"
+          ],
+          "score": 6
+        },
+        "weight": 6
+      }
+    ],
+    "fetch-depth": [
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "operationId": "project:default:query:Simple",
+          "operationName": "Simple",
+          "module": "features.users.queries"
+        },
+        "message": "Query Simple has import depth 2",
+        "data": {
+          "depth": 2,
+          "area": "features/users",
+          "module": "features.users.queries"
+        },
+        "weight": 2
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "operationId": "project:default:query:UserCard",
+          "operationName": "UserCard",
+          "module": "features.users.queries"
+        },
+        "message": "Query UserCard has import depth 2",
+        "data": {
+          "depth": 2,
+          "area": "features/users",
+          "module": "features.users.queries"
+        },
+        "weight": 2
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "operationId": "project:default:query:Users",
+          "operationName": "Users",
+          "module": "features.users.queries"
+        },
+        "message": "Query Users has import depth 2",
+        "data": {
+          "depth": 2,
+          "area": "features/users",
+          "module": "features.users.queries"
+        },
+        "weight": 2
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "admin",
+          "operationId": "project:admin:query:AdminDashboard",
+          "operationName": "AdminDashboard",
+          "module": "features.admin.queries"
+        },
+        "message": "Query AdminDashboard has import depth 1",
+        "data": {
+          "depth": 1,
+          "area": "features/admin",
+          "module": "features.admin.queries"
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "operationId": "project:default:query:Profile",
+          "operationName": "Profile",
+          "module": "features.profile.queries"
+        },
+        "message": "Query Profile has import depth 1",
+        "data": {
+          "depth": 1,
+          "area": "features/profile",
+          "module": "features.profile.queries"
+        },
+        "weight": 1
+      }
+    ],
+    "directive-usage": [
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "directiveName": "audit"
+        },
+        "message": "@audit is applied 1 times",
+        "data": {
+          "count": 1
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "directiveName": "include"
+        },
+        "message": "@include is applied 1 times",
+        "data": {
+          "count": 1
+        },
+        "weight": 1
+      },
+      {
+        "ref": {
+          "project": "project",
+          "schemaName": "default",
+          "directiveName": "skip"
+        },
+        "message": "@skip is applied 1 times",
+        "data": {
+          "count": 1
+        },
+        "weight": 1
+      }
+    ]
+  },
+  "warnings": [
+    {
+      "code": "invalid-python",
+      "message": "invalid syntax (<unknown>, line 1)",
+      "file": "broken.py",
+      "line": 1,
+      "column": 1
+    }
+  ]
+}

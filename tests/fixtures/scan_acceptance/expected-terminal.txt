@@ -1,0 +1,52 @@
+GraphQL Desk scan (experimental)
+Operations: 5  Fragments: 4  Modules: 12
+Operations by kind: query 5, mutation 0, subscription 0
+Schema coverage: admin 2/3 fields (67%); default 6/6 fields (100%)
+
+field-usage (8)
+  default: name [features/profile/queries.py:5:6, features/shared/fragments.py:3:23, features/users/queries.py:6:5, features/users/queries.py:20:19, features/users/queries.py:21:22]: User.name is selected by 4 definitions
+  default: user [features/profile/queries.py:5:6, features/users/queries.py:21:22]: Query.user is selected by 2 definitions
+  default: users [features/users/queries.py:6:5, features/users/queries.py:20:19]: Query.users is selected by 2 definitions
+  default: id [features/shared/fragments.py:4:25, features/users/queries.py:6:5]: User.id is selected by 2 definitions
+  admin: users [features/admin/queries.py:3:22]: Query.users is selected by 1 definitions
+  admin: id [features/admin/queries.py:3:22]: User.id is selected by 1 definitions
+  default: deprecatedOnly [features/users/queries.py:22:25]: User.deprecatedOnly is selected by 1 definitions
+  default: legacy [features/users/queries.py:6:5]: User.legacy is selected by 1 definitions
+
+input-usage (3)
+  default: limit [features/users/queries.py:6:5]: Filter.limit appears 1 times
+  default: sort [features/users/queries.py:6:5]: Filter.sort appears 1 times
+  default: NEWEST [features/users/queries.py:6:5]: Sort.NEWEST appears 1 times
+
+deprecated-usage (2)
+  default: legacy [features/users/queries.py:6:5]: User.legacy is deprecated and selected by 1 operations
+  default: deprecatedOnly: User.deprecatedOnly is deprecated and selected by 0 operations
+
+orphan-fragments (1)
+  default: OrphanParent [features/users/queries.py:24:6]: Fragment OrphanParent is never a resolved spread target
+
+cross-feature-fragments (2)
+  default: UserFields [features/shared/fragments.py:3:23]: Fragment UserFields is spread from 2 external areas
+  default: UserIdentity [features/shared/fragments.py:4:25]: Fragment UserIdentity is spread from 1 external areas
+
+operation-complexity (5)
+  default: Users [features/users/queries.py:6:5]: Users has static complexity score 11; this is not a server execution-cost estimate
+  admin: AdminDashboard [features/admin/queries.py:3:22]: AdminDashboard has static complexity score 9; this is not a server execution-cost estimate
+  default: Simple [features/users/queries.py:20:19]: Simple has static complexity score 9; this is not a server execution-cost estimate
+  default: Profile [features/profile/queries.py:5:6]: Profile has static complexity score 6; this is not a server execution-cost estimate
+  default: UserCard [features/users/queries.py:21:22]: UserCard has static complexity score 6; this is not a server execution-cost estimate
+
+fetch-depth (5)
+  default: Simple [features/users/queries.py:20:19]: Query Simple has import depth 2
+  default: UserCard [features/users/queries.py:21:22]: Query UserCard has import depth 2
+  default: Users [features/users/queries.py:6:5]: Query Users has import depth 2
+  admin: AdminDashboard [features/admin/queries.py:3:22]: Query AdminDashboard has import depth 1
+  default: Profile [features/profile/queries.py:5:6]: Query Profile has import depth 1
+
+directive-usage (3)
+  default: audit [features/users/queries.py:6:5]: @audit is applied 1 times
+  default: include [features/users/queries.py:6:5]: @include is applied 1 times
+  default: skip [features/users/queries.py:6:5]: @skip is applied 1 times
+
+Analysis warnings: 1
+  broken.py:1:1: invalid-python: invalid syntax (<unknown>, line 1)
