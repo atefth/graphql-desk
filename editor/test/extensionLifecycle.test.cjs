@@ -136,8 +136,8 @@ test("a stubPath conflict retires only its workspace and reconfigures the remain
   const secondPath = path.resolve("workspace-two");
   const firstFolder = { uri: { fsPath: firstPath } };
   const secondFolder = { uri: { fsPath: secondPath } };
-  const firstManaged = { root: path.join(firstPath, "typings"), cleanup() {} };
-  const secondManaged = { root: path.join(secondPath, "typings"), cleanup() {} };
+  const firstManaged = { root: path.join(firstPath, "typings"), checkSettingOwnership: async () => false, cleanup() {} };
+  const secondManaged = { root: path.join(secondPath, "typings"), checkSettingOwnership: async () => false, cleanup() {} };
   const nextSecond = { root: path.join(secondPath, "custom"), cleanup() {} };
   const roots = new Map([[firstPath, Promise.resolve(firstManaged)], [secondPath, Promise.resolve(secondManaged)]]);
   const retired = [];
@@ -160,7 +160,7 @@ test("reconfiguration reuses a root that still owns its setting", async () => {
   const folder = { uri: { fsPath: root } };
   let created = false;
   let retired = false;
-  const managed = { root: path.join(root, "typings"), stillOwnsSetting: () => true, cleanup() {} };
+  const managed = { root: path.join(root, "typings"), checkSettingOwnership: async () => true, cleanup() {} };
   const roots = new Map([[root, Promise.resolve(managed)]]);
 
   await reconfigureWorkspaceRoots({
@@ -180,8 +180,8 @@ test("same-root reconfiguration retains the fresh manager without releasing shar
   const folder = { uri: { fsPath: root } };
   const directory = path.join(root, ".graphql-desk", "live-typings");
   const abandoned = [];
-  const current = { root: directory, stillOwnsSetting: () => false, release: () => assert.fail("stale manager must not release shared settings"), cleanup() {} };
-  const replacement = { root: directory, stillOwnsSetting: () => true, cleanup() {} };
+  const current = { root: directory, checkSettingOwnership: async () => false, release: () => assert.fail("stale manager must not release shared settings"), cleanup() {} };
+  const replacement = { root: directory, checkSettingOwnership: async () => true, cleanup() {} };
   const roots = new Map([[root, Promise.resolve(current)]]);
 
   await reconfigureWorkspaceRoots({ roots, folders: [folder], create: async () => replacement,
@@ -201,8 +201,7 @@ test("root reconfiguration waits for in-flight generation selection before repla
   const started = new Promise(resolve => { selectionStarted = resolve; });
   let created = false;
   const current = { root: path.join(root, ".graphql-desk", "live-typings"),
-    waitForGenerationSelection() { selectionStarted(); return selection; },
-    stillOwnsSetting() { assert.equal(selectionFinished, true); return false; }, cleanup() {} };
+    async checkSettingOwnership() { selectionStarted(); await selection; assert.equal(selectionFinished, true); return false; }, cleanup() {} };
   const replacement = { root: path.join(root, "custom"), cleanup() {} };
   const roots = new Map([[root, Promise.resolve(current)]]);
   let selectionFinished = false;
@@ -242,8 +241,8 @@ test("overlapping stubPath changes reconcile in order", async () => {
 test("concurrent root reconfigurations create and retire a replacement only once", async () => {
   const root = path.resolve("concurrent-workspace");
   const folder = { uri: { fsPath: root } };
-  const current = { root: path.join(root, "old"), stillOwnsSetting: () => false, cleanup() {} };
-  const replacement = { root: path.join(root, "new"), stillOwnsSetting: () => true, cleanup() {} };
+  const current = { root: path.join(root, "old"), checkSettingOwnership: async () => false, cleanup() {} };
+  const replacement = { root: path.join(root, "new"), checkSettingOwnership: async () => true, cleanup() {} };
   const roots = new Map([[root, Promise.resolve(current)]]);
   const retired = [];
   let releaseCreate;
@@ -266,8 +265,8 @@ test("concurrent root reconfigurations create and retire a replacement only once
 test("queued root reconfiguration uses the latest workspace list and shutdown can drain it", async () => {
   const root = path.resolve("removed-during-reconfiguration");
   const folder = { uri: { fsPath: root } };
-  const current = { root: path.join(root, "old"), stillOwnsSetting: () => false, cleanup() {} };
-  const replacement = { root: path.join(root, "new"), cleanup() {} };
+  const current = { root: path.join(root, "old"), checkSettingOwnership: async () => false, cleanup() {} };
+  const replacement = { root: path.join(root, "new"), checkSettingOwnership: async () => false, cleanup() {} };
   const roots = new Map([[root, Promise.resolve(current)]]);
   const folders = [folder];
   const retired = [];
@@ -296,8 +295,8 @@ test("queued root reconfiguration uses the latest workspace list and shutdown ca
 test("removing a workspace retires its managed root and leaves other roots active", async () => {
   const removedPath = path.resolve("removed-workspace");
   const activePath = path.resolve("active-workspace");
-  const removed = { root: path.join(removedPath, "typings"), cleanup() {} };
-  const active = { root: path.join(activePath, "typings"), cleanup() {} };
+  const removed = { root: path.join(removedPath, "typings"), checkSettingOwnership: async () => false, cleanup() {} };
+  const active = { root: path.join(activePath, "typings"), checkSettingOwnership: async () => false, cleanup() {} };
   const replacement = { root: path.join(activePath, "custom"), cleanup() {} };
   const roots = new Map([[removedPath, Promise.resolve(removed)], [activePath, Promise.resolve(active)]]);
   const retired = [];
@@ -312,4 +311,28 @@ test("removing a workspace retires its managed root and leaves other roots activ
   assert.deepEqual(retired, [[removedPath, removed], [activePath, active]]);
   assert.equal(roots.has(removedPath), false);
   assert.equal(await roots.get(activePath), replacement);
+});
+
+test("workspace removal waits for an in-flight generation selection before retiring its root", async () => {
+  const root = path.resolve("removed-during-generation-selection");
+  let finishSelection;
+  let selectionStarted;
+  const selection = new Promise(resolve => { finishSelection = resolve; });
+  const started = new Promise(resolve => { selectionStarted = resolve; });
+  let retired = false;
+  const managed = { root: path.join(root, "typings"), async checkSettingOwnership() {
+    selectionStarted();
+    await selection;
+    return false;
+  }, cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(managed)]]);
+  const reconfiguration = reconfigureWorkspaceRoots({ roots, folders: [], create: async () => assert.fail("removed workspace is not recreated"),
+    retire: async () => { retired = true; } });
+
+  const first = await Promise.race([started.then(() => "selection"), reconfiguration.then(() => "retired")]);
+  assert.equal(first, "selection", "ownership check must drain selection before removed-root cleanup");
+  assert.equal(retired, false);
+  finishSelection();
+  await reconfiguration;
+  assert.equal(retired, true);
 });

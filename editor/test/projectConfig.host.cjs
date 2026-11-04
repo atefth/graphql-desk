@@ -60,6 +60,7 @@ async function run() {
       if (property === "appendLine") return value => {
         if (typeof value === "string" && value.startsWith("Managed stub root unavailable: ") && managedErrors.length < 20) managedErrors.push(value);
         if (typeof value === "string" && value.startsWith("Managed stub publication failed: ") && publicationErrors.length < 20) publicationErrors.push(value);
+        if (typeof value === "string" && value.startsWith("Typing quarantine failed: ") && publicationErrors.length < 20) publicationErrors.push(value);
         if (typeof value === "string" && value.startsWith("Live typing skipped: ") && skipReasons.length < 40) skipReasons.push(value);
         if (typeof value === "string" && value.startsWith("GraphQL Desk trace:") && skipReasons.length < 40) skipReasons.push(value);
         return target.appendLine(value);

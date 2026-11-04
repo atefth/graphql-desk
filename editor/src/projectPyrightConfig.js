@@ -769,15 +769,17 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       const latest = await assertEffectiveOwner();
       const restoring = saved.originalStubPathPresent ? value === saved.originalStubPath : value === undefined;
       const target = typeof value === "string" ? value : MANAGED_PATH;
+      const restoringManagedBase = target === MANAGED_PATH;
       const ownership = { expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath,
-        ...(restoring ? { restoreStubPathPresent: saved.originalStubPathPresent, restoreStubPath: saved.originalStubPath } : {}) };
+        ...(restoringManagedBase ? { restoreStubPathPresent: true, restoreStubPath: MANAGED_PATH } : {}) };
       if (restoring) throw new Error("Project Pyright stubPath restoration is handled by GraphQL Desk cleanup; preserved");
       if (pythonSettings.dirty()) throw new Error("Dirty workspace settings; preserved");
       validatePythonStubPath(pythonSettings, pythonOwner.current || "");
       saved = { ...saved, phase: "rotate", pythonStubPath: { ...pythonOwner, pending: target } };
       await persistOwner(saved);
       const previousSetting = currentSetting;
-      const updated = await updateProjectConfig(vscode, folder, "set_stub_path", worker, ownership, target, onOwnedWrite);
+      const updated = await updateProjectConfig(vscode, folder, restoringManagedBase ? "restore_stub_path" : "set_stub_path",
+        worker, ownership, target, onOwnedWrite);
       currentSetting = updated.hasStubPath ? updated.stubPath : "";
       currentPresent = updated.hasStubPath;
       activeConfigHash = updated.hash;
@@ -825,6 +827,11 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   return {
     ...managed,
     get ownsSetting() { return managed.ownsSetting; },
+    get selectedSetting() { return managed.selectedSetting; },
+    checkSettingOwnership() {
+      return managed.checkSettingOwnership(() => configStillEffective() &&
+        (pythonSettings.effective() || "") === (pythonOwner.current || ""));
+    },
     stillOwnsSetting() {
       return configStillEffective() && managed.stillOwnsSetting() &&
         (pythonSettings.effective() || "") === (pythonOwner.current || "");

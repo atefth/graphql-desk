@@ -412,29 +412,32 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const texts = new Map(documents.map(document => [document.uri.toString(), { path: localPath(document), version: document.version, text: document.getText(), is_dirty: document.isDirty }]));
     return { request, texts };
   }
-  // Keep at most one pending action per operation kind; edit storms never build a promise queue.
-  function enqueue(state, action, kind = "analyze", ticket = epoch) {
+  // Coalesce analysis work; config transactions need each captured text's reply.
+  function enqueue(state, action, kind = "analyze", ticket = epoch, configRequest = false) {
+    const key = configRequest ? Symbol(kind) : kind;
     if (state.running) {
-      if (state.pending.has("refresh") && kind !== "refresh") return Promise.resolve(null);
-      const existing = state.pending.get(kind);
+      if (!configRequest && state.pending.has("refresh") && kind !== "refresh") return Promise.resolve(null);
+      const existing = !configRequest && state.pending.get(kind);
       if (existing) { existing.action = action; existing.ticket = ticket; return existing.promise; }
       if (kind === "refresh") {
-        for (const pending of state.pending.values()) pending.resolve(null);
-        state.pending.clear();
+        for (const [pendingKey, pending] of state.pending) if (!pending.configRequest) {
+          pending.resolve(null);
+          state.pending.delete(pendingKey);
+        }
       }
       let resolve;
       let reject;
       const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-      state.pending.set(kind, { action, kind, ticket, promise, resolve, reject });
+      state.pending.set(key, { key, action, kind, ticket, configRequest, promise, resolve, reject });
       return promise;
     }
     state.running = true;
-    return Promise.resolve().then(() => ticket === epoch && trusted() && states.get(state.root) === state ? action() : null).finally(() => {
+    return Promise.resolve().then(() => (configRequest || ticket === epoch) && trusted() && states.get(state.root) === state ? action() : null).finally(() => {
       state.running = false;
       const pending = state.pending.values().next().value;
       if (pending) {
-        state.pending.delete(pending.kind);
-        enqueue(state, pending.action, pending.kind, pending.ticket).then(pending.resolve, pending.reject);
+        state.pending.delete(pending.key);
+        enqueue(state, pending.action, pending.kind, pending.ticket, pending.configRequest).then(pending.resolve, pending.reject);
       }
       schedulePolling(state);
     });
@@ -684,9 +687,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         remove_managed_paths: ownership.removeManagedPaths,
         legacy_top_level: ownership.legacyTopLevel,
         legacy_execution_environment_roots: ownership.legacyExecutionEnvironmentRoots } }),
-    `pyright_config:${action}`); }
+    `pyright_config:${action}`, epoch, true); }
     catch (error) { throw new Error(`Pyright config worker action '${action}' failed: ${String(error)}`); }
-    if (!reply || reply.ok !== true) throw new Error("Pyproject Pyright config could not be edited safely");
+    if (!trusted() || states.get(state.root) !== state || !reply || reply.ok !== true) throw new Error("Pyproject Pyright config could not be edited safely");
     return reply;
   }
   async function quarantine({ workspace, projects, invalidated_owners, preserve_current = false } = {}) {
