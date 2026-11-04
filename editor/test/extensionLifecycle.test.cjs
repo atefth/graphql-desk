@@ -166,6 +166,23 @@ test("reconfiguration reuses a root that still owns its setting", async () => {
   assert.equal(await roots.get(root), managed);
 });
 
+test("same-root reconfiguration retains the fresh manager without releasing shared settings", async () => {
+  const root = path.resolve("same-root-workspace");
+  const folder = { uri: { fsPath: root } };
+  const directory = path.join(root, ".graphql-desk", "live-typings");
+  const abandoned = [];
+  const current = { root: directory, stillOwnsSetting: () => false, release: () => assert.fail("stale manager must not release shared settings"), cleanup() {} };
+  const replacement = { root: directory, stillOwnsSetting: () => true, cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(current)]]);
+
+  await reconfigureWorkspaceRoots({ roots, folders: [folder], create: async () => replacement,
+    retire: async () => assert.fail("same-root replacement must not release settings"),
+    abandon: managed => abandoned.push(managed) });
+
+  assert.equal(await roots.get(root), replacement);
+  assert.deepEqual(abandoned, [current], "stale cleanup is deferred until active outputs are retired");
+});
+
 test("concurrent root reconfigurations create and retire a replacement only once", async () => {
   const root = path.resolve("concurrent-workspace");
   const folder = { uri: { fsPath: root } };

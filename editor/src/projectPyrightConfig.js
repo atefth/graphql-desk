@@ -824,6 +824,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   };
   return {
     ...managed,
+    get ownsSetting() { return managed.ownsSetting; },
     stillOwnsSetting() {
       return configStillEffective() && managed.stillOwnsSetting() &&
         (pythonSettings.effective() || "") === (pythonOwner.current || "");

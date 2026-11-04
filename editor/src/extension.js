@@ -136,7 +136,7 @@ function waitForRootReconfigurations(roots) {
   return (rootReconfigurationQueues.get(roots) ?? Promise.resolve()).catch(() => {});
 }
 
-async function reconfigureWorkspaceRootsNow({ roots, folders, create, retire }) {
+async function reconfigureWorkspaceRootsNow({ roots, folders, create, retire, abandon = () => {} }) {
   const errors = [];
   for (const [folderRoot, promise] of [...roots]) {
     let current;
@@ -157,7 +157,14 @@ async function reconfigureWorkspaceRootsNow({ roots, folders, create, retire }) 
       errors.push(error);
       continue;
     }
-    if (next.root === current.root) { next.cleanup(); continue; }
+    if (next.root === current.root) {
+      const replacement = Promise.resolve(next);
+      if (roots.get(folderRoot) === promise) {
+        roots.set(folderRoot, replacement);
+        abandon(current);
+      } else next.cleanup();
+      continue;
+    }
     const replacement = Promise.resolve(next);
     if (roots.get(folderRoot) === promise) roots.set(folderRoot, replacement);
     try { await retire(folderRoot, current); }
@@ -192,6 +199,7 @@ function activate(context) {
   const outputs = new Map();
   const generations = new Map();
   const roots = new Map();
+  const supersededRoots = [];
   const latestArtifacts = new Map();
   const invalidatedDiagnostics = vscode.languages.createDiagnosticCollection("graphql-desk-typing");
   const invalidatedDiagnosticUris = new Map();
@@ -268,7 +276,7 @@ function activate(context) {
   }
   async function reconfigureRoots() {
     await reconfigureWorkspaceRoots({ roots, folders: () => vscode.workspace.workspaceFolders ?? [],
-      create: createManagedRoot, retire: retireRoot });
+      create: createManagedRoot, retire: retireRoot, abandon: managed => supersededRoots.push(managed) });
   }
   async function managedStubPathsAreCurrent() {
     if (!roots.size) return false;
@@ -277,6 +285,7 @@ function activate(context) {
       if (!folder) return false;
       try {
         const managed = await promise;
+        await managed.waitForGenerationSelection?.();
         if (!managed.stillOwnsSetting()) return false;
       } catch { return false; }
     }
@@ -484,7 +493,13 @@ function activate(context) {
     }
     return broad && !previousOverride ? [{ folderRoot, previous }] : [];
   }
-  async function publishTypes(editor, ticket, token, quarantineContext) {
+  function retryStaleAnalysis(ticket, token, recoveryAttempt, reason) {
+    traceSkip(reason);
+    if (!disposed && ticket === generation && !token?.isCancellationRequested && recoveryAttempt === 0) {
+      refreshVisible(null, true, null, 1);
+    }
+  }
+  async function publishTypes(editor, ticket, token, quarantineContext, recoveryAttempt = 0) {
     const document = editor.document;
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
     if (!folder) { traceSkip("document-outside-workspace"); return; }
@@ -507,7 +522,9 @@ function activate(context) {
     output.appendLine(`GraphQL Desk trace: artifacts projects=${result.projects.length} files=${result.projects.reduce((sum, item) => sum + item.files.length, 0)} operations=${result.projects.reduce((sum, item) => sum + item.provenance.length, 0)} input=${result.input_fingerprint} saved=${result.saved_source_fingerprint}`);
     const analysisCurrent = result.isCurrent();
     if (disposed || ticket !== generation || !analysisCurrent) {
-      traceSkip("analysis-snapshot-stale-before-managed-root"); return;
+      if (ticket === generation && !disposed && !analysisCurrent) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-before-managed-root");
+      else traceSkip("analysis-snapshot-stale-before-managed-root");
+      return;
     }
     if (quarantineContext?.previousByFolder.has(folderRoot) && !quarantineContext.refined.has(folderRoot)) {
       quarantineContext.refined.add(folderRoot);
@@ -532,7 +549,9 @@ function activate(context) {
     }
     const analysisStillCurrent = result.isCurrent();
     if (disposed || ticket !== generation || !analysisStillCurrent) {
-      traceSkip("analysis-snapshot-stale-after-managed-root"); return;
+      if (ticket === generation && !disposed && !analysisStillCurrent) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-after-managed-root");
+      else traceSkip("analysis-snapshot-stale-after-managed-root");
+      return;
     }
     try {
       const groups = new Map();
@@ -554,7 +573,11 @@ function activate(context) {
         if (!publisher) { publisher = createAnalysisGenerations(vscode, folderRoot, managed.root); generations.set(key, publisher); }
         changedArtifacts = await publisher.recover(managed, result.isCurrent,
           result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
-        if (disposed || ticket !== generation || !result.isCurrent()) { traceSkip("analysis-snapshot-stale-after-recovery"); return; }
+        if (disposed || ticket !== generation || !result.isCurrent()) {
+          if (ticket === generation && !disposed && !result.isCurrent()) retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-after-recovery");
+          else traceSkip("analysis-snapshot-stale-after-recovery");
+          return;
+        }
         const published = await publisher.publish(groups, result.id, result.isCurrent, managed,
           result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
         output.appendLine(`GraphQL Desk trace: publish changed=${published} selected=${managed.selectedSetting} files=${[...groups.values()].reduce((sum, files) => sum + files.length, 0)} operations=${operationManifest.reduce((sum, item) => sum + item.operations.length, 0)}`);
@@ -598,7 +621,7 @@ function activate(context) {
       status.show();
     }
   }
-  const refreshVisible = (sourceUri, invalidateTypes = Boolean(sourceUri), sourceRanges = null) => {
+  const refreshVisible = (sourceUri, invalidateTypes = Boolean(sourceUri), sourceRanges = null, recoveryAttempt = 0) => {
     const ticket = invalidateTypes ? ++generation : generation;
     const parsed = sourceUri ? vscode.Uri.parse(sourceUri) : null;
     const targetedSource = parsed?.scheme === "file" && path.extname(parsed.fsPath).toLowerCase() === ".py";
@@ -630,7 +653,7 @@ function activate(context) {
       for (const editor of editors) {
         void Promise.allSettled([language.refresh(editor.document), highlighting.refresh(editor)]).then(() => {
           if (!publishers.has(editor) || disposed || ticket !== generation) return;
-          return quarantine.then(() => publishTypes(editor, ticket, token, quarantineContext));
+          return quarantine.then(() => publishTypes(editor, ticket, token, quarantineContext, recoveryAttempt));
         });
       }
     }, 100);
@@ -694,6 +717,7 @@ function activate(context) {
     await waitForRootReconfigurations(roots);
     await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
     outputs.clear();
+    for (const managed of supersededRoots.splice(0)) managed.cleanup();
     const managedRoots = await Promise.all([...roots.values()].map(promise => promise.catch(() => null)));
     for (const managed of managedRoots) {
       try { await managed?.release?.(); } catch (error) { output.appendLine(`Pyright config cleanup failed: ${String(error)}`); }
