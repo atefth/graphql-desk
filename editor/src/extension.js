@@ -4,6 +4,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { createHash } = require("node:crypto");
 const { fileURLToPath } = require("node:url");
+const { TextDocument } = require("vscode-languageserver-textdocument");
 require("./minimatchCompatibility");
 const { createAnalysisController } = require("./analysisController");
 const { registerLanguageFeatures } = require("./languageFeatures");
@@ -227,6 +228,8 @@ function activate(context) {
   const roots = new Map();
   const supersededRoots = [];
   const latestArtifacts = new Map();
+  const factoryDiagnosticCollection = vscode.languages.createDiagnosticCollection("graphql-desk-factory");
+  const factoryDiagnosticsByWorkspace = new Map();
   const invalidatedDiagnostics = vscode.languages.createDiagnosticCollection("graphql-desk-typing");
   const invalidatedDiagnosticUris = new Map();
   const configDiagnosticCollection = vscode.languages.createDiagnosticCollection("graphql-desk-config");
@@ -251,6 +254,50 @@ function activate(context) {
       if (merged.length) configDiagnosticCollection.set(vscode.Uri.parse(uri), merged);
       else configDiagnosticCollection.delete(vscode.Uri.parse(uri));
     }
+  }
+  function updateFactoryDiagnostics(folderRoot, items) {
+    const previous = factoryDiagnosticsByWorkspace.get(folderRoot) ?? new Map();
+    const current = new Map();
+    const sourceCache = new Map();
+    for (const item of items) {
+      const uri = controller.resolveUri(item.module.uri);
+      const range = item.range.utf16;
+      const key = uri.toString();
+      let text = sourceCache.get(key);
+      const document = vscode.workspace.textDocuments.find(value => value.uri.toString() === key);
+      if (text === undefined) {
+        if (document) text = document.getText();
+        else if (uri.scheme === "file") {
+          try { text = fs.readFileSync(uri.fsPath, "utf8").replace(/^\uFEFF/, ""); }
+          catch { text = null; }
+        } else text = null;
+        sourceCache.set(key, text);
+      }
+      if (typeof text !== "string") continue;
+      const textDocument = document ?? TextDocument.create(key, "python", 0, text);
+      const diagnostic = new vscode.Diagnostic(
+        new vscode.Range(textDocument.positionAt(range.start), textDocument.positionAt(range.end)),
+        item.message, item.code === "factory-precision" || item.code === "source-not-static"
+          ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Error);
+      diagnostic.source = "GraphQL Desk";
+      diagnostic.code = item.code;
+      const diagnostics = current.get(key) ?? [];
+      if (!diagnostics.some(value => value.code === diagnostic.code && value.message === diagnostic.message &&
+        value.range.isEqual(diagnostic.range))) diagnostics.push(diagnostic);
+      current.set(key, diagnostics);
+    }
+    factoryDiagnosticsByWorkspace.set(folderRoot, current);
+    for (const key of new Set([...previous.keys(), ...current.keys()])) {
+      const merged = [...factoryDiagnosticsByWorkspace.values()].flatMap(byUri => byUri.get(key) ?? []);
+      const uri = vscode.Uri.parse(key);
+      if (merged.length) factoryDiagnosticCollection.set(uri, merged);
+      else factoryDiagnosticCollection.delete(uri);
+    }
+    if (!current.size) factoryDiagnosticsByWorkspace.delete(folderRoot);
+  }
+  function clearFactoryDiagnostics(folderRoot) { updateFactoryDiagnostics(folderRoot, []); }
+  function clearAllFactoryDiagnostics() {
+    for (const folderRoot of factoryDiagnosticsByWorkspace.keys()) clearFactoryDiagnostics(folderRoot);
   }
   const output = vscode.window.createOutputChannel("GraphQL Desk");
   // This command returns before Pylance finishes restarting, so coalesce adjacent writes.
@@ -645,11 +692,12 @@ function activate(context) {
         managed.needsInitialRestart = false;
       } else if (changedArtifacts && !managed.ownsSetting && !managed.projectConfig && typingChanged) schedulePylanceRestart();
       latestArtifacts.set(folderRoot, { managedRoot: managed.root, selectedSetting: managed.selectedSetting,
-        operationManifest, projects: result.projects.map(({ project, generated_package, provenance, files }) =>
-          ({ project, generated_package, provenance, files })),
+        operationManifest, projects: result.projects.map(({ project, generated_package, provenance, files, diagnostics }) =>
+          ({ project, generated_package, provenance, files, diagnostics })),
         parserOverlay: result.parser_overlay,
         ...(artifactTypingFingerprint === undefined ? {} : { typingFingerprint: artifactTypingFingerprint }),
         inputFingerprint: result.input_fingerprint, savedSourceFingerprint: result.saved_source_fingerprint, analysisId: result.id });
+      updateFactoryDiagnostics(folderRoot, result.projects.flatMap(project => project.diagnostics));
       if (![...groups.values()].some(files => files.length)) traceSkip("no-generated-stub-files");
       else lastSkipReason = undefined;
       const unavailable = operationManifest.flatMap(group => group.operations)
@@ -665,6 +713,10 @@ function activate(context) {
   }
   const refreshVisible = (sourceUri, invalidateTypes = Boolean(sourceUri), sourceRanges = null, recoveryAttempt = 0) => {
     if (disposing || disposed) return;
+    if (sourceUri) {
+      const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(sourceUri));
+      if (folder) clearFactoryDiagnostics(path.resolve(folder.uri.fsPath));
+    } else if (invalidateTypes) clearAllFactoryDiagnostics();
     const ticket = invalidateTypes ? ++generation : generation;
     const parsed = sourceUri ? vscode.Uri.parse(sourceUri) : null;
     const targetedSource = parsed?.scheme === "file" && path.extname(parsed.fsPath).toLowerCase() === ".py";
@@ -746,6 +798,10 @@ function activate(context) {
   const foldersChanged = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     generation += 1;
     const activeWorkspaces = new Set((vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.toString()));
+    const activeRoots = new Set((vscode.workspace.workspaceFolders ?? []).map(folder => path.resolve(folder.uri.fsPath)));
+    for (const folderRoot of factoryDiagnosticsByWorkspace.keys()) {
+      if (!activeRoots.has(folderRoot)) clearFactoryDiagnostics(folderRoot);
+    }
     for (const workspace of configDiagnosticsByWorkspace.keys()) {
       if (!activeWorkspaces.has(workspace)) updateConfigDiagnostics(workspace, []);
     }
@@ -768,7 +824,8 @@ function activate(context) {
         refreshCancellation?.cancel(); refreshCancellation?.dispose();
         disposed = true; generation += 1;
       });
-      language.dispose(); highlighting.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
+      language.dispose(); highlighting.dispose(); factoryDiagnosticCollection.dispose(); invalidatedDiagnostics.dispose(); configDiagnosticCollection.dispose();
+      factoryDiagnosticsByWorkspace.clear();
       await waitForRootReconfigurations(roots);
       await Promise.all([...outputs.values()].map(handle => handle.cleanup().catch(() => {})));
       outputs.clear();

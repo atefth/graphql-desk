@@ -12,9 +12,16 @@
 ## Worktrees
 
 - Use worktrees only when they enable independent tasks to run in parallel. Otherwise, work in the primary checkout. Follow any more specific user instruction.
+- Keep every temporary worktree under the primary checkout's `.agent-worktrees` directory, never in system temp, sibling projects, or another drive.
 - Keep at most **five active worktrees for this repository at a time**, including the primary checkout. Count existing worktrees before creating one. If the limit is reached, reuse an existing checkout or sequence the work.
 - Remove a temporary worktree when its task is complete. After its changes are safely committed or preserved, remove the checkout and prune stale registrations from the primary checkout.
 - Before cleanup, check tracked, untracked, and ignored files. Never discard uncommitted work or user data: preserve it and verify the backup before removing the checkout. Remove only worktrees created for the task.
+
+## Local storage
+
+- Keep task temp files, caches, and editor profiles inside the primary repository directory, including when working in a linked worktree. Redirect `TEMP`/`TMP` and tool-specific caches such as npm, uv, and pip for the current process where supported; do not change global user settings.
+- Reuse shared pinned tool caches when possible to avoid duplicate downloads. After success or failure, remove only task-created artifacts and worktree-specific caches after verifying their resolved paths. Preserve tracked, untracked, and ignored user data, and do not follow or delete junction targets.
+- These repository instructions cannot prevent operating-system or application components from making writes outside the repository; inspect configured paths and report any such limitation honestly.
 
 ## Changes and pull requests
 

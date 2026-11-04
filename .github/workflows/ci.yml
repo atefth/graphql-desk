@@ -234,6 +234,10 @@ jobs:
             suite: mixedLists
           - version: "1.142.0"
             suite: fragmentTyping
+          - version: "1.141.0"
+            suite: factoryPrecision
+          - version: "1.142.0"
+            suite: factoryPrecision
           - version: "1.142.0"
             suite: externalMappings
           - version: "1.141.0"

@@ -108,6 +108,33 @@ async function installMappingStub(python) {
   return fixture;
 }
 
+async function preparePinnedPythonExtensions(cache, destination) {
+  const pinned = [
+    ["ms-python.python", "2026.10.0", "ms-python.python-2026.10.0-win32-x64"],
+    ["ms-python.vscode-pylance", "2026.4.1", "ms-python.vscode-pylance-2026.4.1"],
+    ["ms-python.debugpy", "2026.6.0", "ms-python.debugpy-2026.6.0-win32-x64"],
+    ["ms-python.vscode-python-envs", "1.40.0", "ms-python.vscode-python-envs-1.40.0-win32-x64"],
+  ];
+  const installed = new Map();
+  for (const [expectedId, expectedVersion, directory] of pinned) {
+    const source = path.join(cache, directory);
+    const manifestPath = path.join(source, "package.json");
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    const actualId = `${manifest.publisher}.${manifest.name}`;
+    assert.equal(actualId, expectedId, `Pinned VS Code extension ID at ${source}`);
+    assert.equal(manifest.version, expectedVersion, `Pinned VS Code extension version at ${source}`);
+    installed.set(expectedId, { manifest, source, directory });
+  }
+  const python = installed.get("ms-python.python").manifest;
+  for (const dependency of python.extensionPack ?? []) {
+    assert.ok(installed.has(dependency), `Pinned test extension cache must include declared Python extension pack dependency ${dependency}`);
+  }
+  for (const [extensionId, { source, directory }] of installed) {
+    await fs.cp(source, path.join(destination, directory), { recursive: true, errorOnExist: true });
+  }
+  return [...installed.keys()];
+}
+
 async function crashDuringPublication(workspace, stubRoot, temporary) {
   const marker = path.join(temporary, "interrupted-publication.json");
   const child = spawn(process.execPath, [path.join(__dirname, "crashDuringGeneration.cjs"), workspace, stubRoot, marker], {
@@ -150,11 +177,11 @@ async function main() {
   const version = process.argv[2];
   assert.ok(["1.141.0", "1.142.0"].includes(version), "Choose a pinned host version");
   const suite = process.argv[3] || "features";
-  assert.ok(["features", "renameProtocol", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle", "projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite), "Choose a known isolated suite");
-  const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle", "projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite);
+  assert.ok(["features", "renameProtocol", "discovery", "activation", "symbols", "ownedAnalysis", "factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "factoryPrecision", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle", "projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite), "Choose a known isolated suite");
+  const factorySuite = ["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "factoryPrecision", "externalMappings", "parserOverlay", "malformedRecovery", "workspaceRemoval", "restartRecovery", "restartRecoveryChangedInputs", "lifecycle", "projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite);
   // Keep host fixtures under the project directory instead of the system temp folder.
   const temporaryRoot = path.resolve(__dirname, "../../.tmp/host");
-  const cachePath = path.resolve(__dirname, "../.cache/vscode-test");
+  const cachePath = path.resolve(process.env.GRAPHQL_DESK_VSCODE_CACHE || path.join(__dirname, "../.cache/vscode-test"));
   await fs.mkdir(cachePath, { recursive: true });
   await fs.mkdir(temporaryRoot, { recursive: true });
   const temporary = await fs.mkdtemp(path.join(temporaryRoot, "graphql-desk-features-"));
@@ -220,7 +247,60 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     await fs.mkdir(path.join(workspace, ".graphql-desk"));
     await fs.writeFile(path.join(workspace, ".graphql-desk", "keep.txt"), "preserve this user file");
     const sourcePath = path.join(workspace, "consumer.py");
-    const source = [
+    const source = suite === "factoryPrecision" ? [
+      "from typing import Final, Literal, TypeVar",
+      "from graphql_desk import TypedDocument",
+      "from graphql_desk_generated.default import graphql",
+      "from fragments import card",
+      "R = TypeVar('R')",
+      "V = TypeVar('V')",
+      "def execute(document: TypedDocument[R, V], variables: V) -> R: ...",
+      "# café 😀 keeps operand mapping honest after a non-BMP character",
+      'SOURCE_LOOSE = "query SourceLoose { selected }"',
+      'SOURCE_FINAL: Final = "query SourceFinal { selected }"',
+      'SOURCE_LITERAL: Literal["query SourceLiteral { selected }"] = "query SourceLiteral { selected }"',
+      'SELECTOR_LOOSE = "Second"',
+      "loose_source_doc = graphql(SOURCE_LOOSE)",
+      "final_source_doc = graphql(SOURCE_FINAL)",
+      "literal_source_doc = graphql(SOURCE_LITERAL)",
+      "loose_source_operation = loose_source_doc.operation_name",
+      "final_source_operation = final_source_doc.operation_name",
+      "literal_source_operation = literal_source_doc.operation_name",
+      'loose_operation_doc = graphql("query First { selected } query Second($limit: Int!) { count(limit: $limit) }", operation=SELECTOR_LOOSE)',
+      'precise_operation_doc = graphql("query First { selected } query Second($limit: Int!) { count(limit: $limit) }", operation="Second")',
+      "loose_operation_name = loose_operation_doc.operation_name",
+      'loose_fragment_doc = graphql("query FragmentList { user { id ...Card } }", [card])',
+      'tuple_fragment_doc = graphql("query FragmentTuple { user { id ...Card } }", (card,))',
+      "loose_source_result = execute(loose_source_doc, {})",
+      "final_source_result = execute(final_source_doc, {})",
+      "final_source_value = final_source_result['selected']",
+      "final_source_ok: str = final_source_value",
+      "final_source_bad: int = final_source_value",
+      "literal_source_result = execute(literal_source_doc, {})",
+      "literal_source_value = literal_source_result['selected']",
+      "literal_source_ok: str = literal_source_value",
+      "literal_source_bad: int = literal_source_value",
+      "loose_operation_result = execute(loose_operation_doc, {'limit': 1})",
+      "precise_operation_result = execute(precise_operation_doc, {'limit': 1})",
+      "precise_operation_name = precise_operation_doc.operation_name",
+      "precise_operation_value = precise_operation_result['count']",
+      "precise_operation_ok: int = precise_operation_value",
+      "precise_operation_bad: str = precise_operation_value",
+      "precise_operation_bad_variables = execute(precise_operation_doc, {'limit': 'bad'})",
+      "loose_fragment_result = execute(loose_fragment_doc, {})",
+      "loose_operation_value = loose_operation_result['count']",
+      "tuple_fragment_result = execute(tuple_fragment_doc, {})",
+      "tuple_fragment_id = tuple_fragment_result['user']['id']",
+      "loose_fragment_id = loose_fragment_result['user']['id']",
+      "tuple_fragment_id_ok: str = tuple_fragment_id",
+      "tuple_fragment_id_bad: int = tuple_fragment_id",
+      "from graphql_desk_generated.sources.fragments import read_card",
+      "loose_fragment_name = read_card(loose_fragment_result['user'])['name']",
+      "tuple_fragment_name = read_card(tuple_fragment_result['user'])['name']",
+      "tuple_fragment_name_ok: str = tuple_fragment_name",
+      "tuple_fragment_name_bad: int = tuple_fragment_name",
+      "",
+    ].join("\n") : [
       "from graphql_desk import TypedDocument",
       "from graphql_desk_generated.default import graphql",
       ...(suite === "fragmentTyping" ? ["from fragments import card, inner, outer", "from graphql_desk.testing import read_result", "from graphql_desk.typed_document import TypedDocument as CarrierDocument", "from graphql_desk.fragment_refs import FixtureDocument as CarrierBase", "from graphql import parse as graphql_parse", "from graphql_desk_generated.sources.consumer import FragmentDocResult, FragmentDocVariables"] : []),
@@ -334,7 +414,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
         "type Query { selected: String! count(limit: Int!): Int! user: User! " +
         "externalDate(value: ExternalDate!): ExternalDate! " +
         "externalColor(value: ExternalColor!): ExternalColor! }\n") ] : []),
-      fs.writeFile(sourcePath, source),
+      fs.writeFile(sourcePath, suite === "factoryPrecision" ? source.replace(/\n/g, "\r\n") : source),
       ...(suite === "typingMatrix" ? [fs.writeFile(path.join(workspace, "operation_semantics.py"),
         "from graphql_desk_generated.default import graphql\nseed = graphql('query Seed { selected }')\n")] : []),
       ...(["typingMatrix", "parserOverlay"].includes(suite) ? [fs.writeFile(path.join(workspace, "parser_consumer.py"),
@@ -368,12 +448,22 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     ]);
     const generated = generatedFactoryFiles(python, workspace, sourcePath,
       ["typingMatrix", "mixedLists", "fragmentTyping"].includes(suite), suite === "externalMappings", suite === "mixedLists",
-      suite === "fragmentTyping" ? path.join(workspace, "fragments.py") : null);
+      ["fragmentTyping", "factoryPrecision"].includes(suite) ? path.join(workspace, "fragments.py") : null);
     await fs.writeFile(artifacts, JSON.stringify(generated));
     console.log(`Captured ${generated.initial.length} initial and ${generated.nullable.length} nullable factory stub files.`);
   }
   const isolation = [`--user-data-dir=${profile}`, `--extensions-dir=${extensions}`];
   let launchTarget = workspace;
+  let precisionRemovedWorkspace;
+  if (suite === "factoryPrecision" && version === "1.142.0") {
+    precisionRemovedWorkspace = path.join(temporary, "factory-precision-removed");
+    await fs.mkdir(precisionRemovedWorkspace);
+    launchTarget = path.join(temporary, "factory-precision.code-workspace");
+    await fs.writeFile(launchTarget, JSON.stringify({
+      folders: [{ path: workspace }, { path: precisionRemovedWorkspace }],
+      settings: JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8")),
+    }));
+  }
   if (suite === "workspaceRemoval") {
     const removedWorkspace = path.join(temporary, "removed-workspace");
     await fs.mkdir(removedWorkspace);
@@ -384,8 +474,12 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     }));
   }
   if (!["discovery", "renameProtocol"].includes(suite)) {
-    for (const extension of ["ms-python.python@2026.10.0", "ms-python.vscode-pylance@2026.4.1"]) {
-      await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], { version, cachePath });
+    if (process.env.GRAPHQL_DESK_VSCODE_EXTENSION_CACHE) {
+      await preparePinnedPythonExtensions(process.env.GRAPHQL_DESK_VSCODE_EXTENSION_CACHE, extensions);
+    } else {
+      for (const extension of ["ms-python.python@2026.10.0", "ms-python.vscode-pylance@2026.4.1"]) {
+        await runVSCodeCommand([...isolation, "--install-extension", extension, "--force"], { version, cachePath });
+      }
     }
   }
   const options = {
@@ -395,6 +489,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     extensionTestsPath: path.join(__dirname, `${suite === "symbols" ? "activation" : suite === "restartRecoveryChangedInputs" ? "restartRecovery" : ["projectConfigToml", "projectConfigEnvironment"].includes(suite) ? "projectConfig" : ["parserOverlay", "externalMappings", "mixedLists", "fragmentTyping"].includes(suite) ? "typingMatrix" : suite}.host.cjs`),
     extensionTestsEnv: {
       GRAPHQL_DESK_TEST_WORKSPACE: workspace,
+      GRAPHQL_DESK_TEST_REMOVED_WORKSPACE: precisionRemovedWorkspace || "",
       GRAPHQL_DESK_TEST_PROFILE: profile,
       GRAPHQL_DESK_RESULT_PATH: result,
       GRAPHQL_DESK_PYTHON: python,
@@ -404,6 +499,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
       GRAPHQL_DESK_STUB_ROOT: stubRoot,
       GRAPHQL_DESK_ARTIFACTS_PATH: artifacts,
       GRAPHQL_DESK_SYMBOLS_ONLY: suite === "symbols" ? "1" : "",
+      GRAPHQL_DESK_TEST_NODE_PATH: process.env.NODE_PATH || "",
     },
     launchArgs: [launchTarget, ...isolation, "--disable-updates", "--disable-telemetry", "--skip-welcome", "--skip-release-notes", "--disable-workspace-trust"],
   };
@@ -430,7 +526,8 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
             if (entry.isDirectory()) await readPylanceLogs(file);
             else if (entry.isFile() && /\.log$/i.test(entry.name)) {
               const text = await fs.readFile(file, "utf8").catch(() => "");
-              for (const line of text.split(/\r?\n/)) if (/stub.?path|graphql_desk|pyrightconfig|pyproject\.toml/i.test(line)) {
+              const pythonServerLog = /python language server/i.test(entry.name);
+              for (const line of text.split(/\r?\n/)) if (pythonServerLog || /stub.?path|graphql_desk|pyrightconfig|pyproject\.toml/i.test(line)) {
                 pylanceLogLines.push(`${entry.name}: ${line}`);
               }
             }
@@ -588,7 +685,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
       initialPylanceType: observed.initialPylanceType, refreshedPylanceType: observed.refreshedPylanceType };
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   } else if (factorySuite) {
-    if (["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "externalMappings", "malformedRecovery"].includes(suite)) {
+    if (["factoryArtifacts", "typingMatrix", "mixedLists", "fragmentTyping", "factoryPrecision", "externalMappings", "malformedRecovery"].includes(suite)) {
       const selectedStubRoot = path.resolve(workspace, JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"))["python.analysis.stubPath"]);
       await fs.access(path.join(selectedStubRoot, "complete.json"));
       await fs.access(path.join(selectedStubRoot, "graphql_desk_generated", "default.pyi"));
@@ -630,7 +727,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
       if (persistedStubPath !== observed.lifecycle.configuredStubPath) {
         observed.lifecycle.persistedStubPath = persistedStubPath;
       }
-    } else if ((suite === "factoryArtifacts" || suite === "typingMatrix" || suite === "externalMappings" || suite === "malformedRecovery") && persistedStubPath !== observed.lifecycle.configuredStubPath) {
+    } else if ((suite === "factoryArtifacts" || suite === "typingMatrix" || suite === "factoryPrecision" || suite === "externalMappings" || suite === "malformedRecovery") && persistedStubPath !== observed.lifecycle.configuredStubPath) {
       assert.ok(persistedStubPath.replaceAll("\\", "/").startsWith(`.graphql-desk/${managedBase}/generations/g-`),
         "A later typing refresh may select another managed generation before shutdown");
       const persistedRoot = path.resolve(workspace, persistedStubPath);
@@ -652,7 +749,7 @@ async function runHost(version, suite, factorySuite, temporary, cachePath) {
     observed.lifecycle.userConfigurationPreserved = true;
     await fs.writeFile(result, JSON.stringify(observed, null, 2));
   }
-  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "mixedLists" ? "mixed-list-nullability-observed" : suite === "fragmentTyping" ? "fragment-masking-live-typing-observed" : suite === "externalMappings" ? "external-mappings-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : ["projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite) ? "project-config-live-typing-observed" : suite === "renameProtocol" ? "fragment-rename-lsp-observed" : `read-only-${suite}-observed`);
+  assert.equal(observed.outcome, suite === "ownedAnalysis" ? "bounded-owned-analysis-observed" : suite === "factoryArtifacts" ? "generated-factory-artifacts-observed" : suite === "typingMatrix" ? "live-typing-matrix-observed" : suite === "mixedLists" ? "mixed-list-nullability-observed" : suite === "fragmentTyping" ? "fragment-masking-live-typing-observed" : suite === "factoryPrecision" ? "factory-precision-diagnostics-observed" : suite === "externalMappings" ? "external-mappings-observed" : suite === "parserOverlay" ? "parser-overlay-observed" : suite === "malformedRecovery" ? "malformed-graphql-recovery-observed" : suite === "workspaceRemoval" ? "managed-workspace-removal-observed" : suite === "restartRecovery" || suite === "restartRecoveryChangedInputs" ? "owned-output-restart-observed" : suite === "lifecycle" ? "managed-output-lifecycle-observed" : ["projectConfig", "projectConfigEnvironment", "projectConfigToml"].includes(suite) ? "project-config-live-typing-observed" : suite === "renameProtocol" ? "fragment-rename-lsp-observed" : `read-only-${suite}-observed`);
   console.log(`${suite} evidence: ${result}`);
 }
 

@@ -106,6 +106,18 @@ The generated callable protocol also includes the [scalar member](scalar-helpers
 using the same schema declarations and configured input aliases once. The runtime
 factory remains the ordinary schema-name binding.
 
+The editor publishes artifact diagnostics in a GraphQL Desk collection, merged by
+source URI across workspace roots. Current analysis replaces each root's warnings;
+source/config invalidation, root removal and disposal clear the relevant entries.
+View-only editor changes retain published warnings. The focused factory-precision
+host verifies warning code, severity, message and operand range, repair clearing,
+and the resulting Pylance hovers and type errors on VS Code 1.141.0 and 1.142.0
+with Python 2026.10.0 and Pylance 2026.4.1. Multi-root dirty-buffer and root-removal
+behavior was verified on 1.142.0; the 1.141.0 multi-root host remains required
+follow-up #351 after Pylance's `python/inExperiment` protocol failure in that
+local multi-root run. This focused acceptance does not claim the full TYPE-01 gate
+or broad API/live-typing parity.
+
 Valid primary fragments also emit a bound `read_<binding>` function in their
 source companion. The generated document view carries a separate recursive,
 read-only input projection and a checker-only reader property. Result types stay
