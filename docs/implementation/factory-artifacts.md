@@ -106,6 +106,57 @@ The generated callable protocol also includes the [scalar member](scalar-helpers
 using the same schema declarations and configured input aliases once. The runtime
 factory remains the ordinary schema-name binding.
 
+The editor publishes artifact diagnostics in a GraphQL Desk collection, merged by
+source URI across workspace roots. Current analysis replaces each root's warnings;
+source/config invalidation, root removal and disposal clear the relevant entries.
+View-only editor changes retain published warnings. The focused factory-precision
+host verifies warning code, severity, message and operand range, repair clearing,
+and the resulting Pylance hovers and type errors on VS Code 1.141.0 and 1.142.0
+with Python 2026.10.0 and Pylance 2026.4.1. The 1.142.0 host also runs two-root
+checks for exact warning ranges, precise controls, repair and warning
+restoration, dirty-buffer preservation, and removal of one root while preserving
+the other. The host records the loaded Python, Pylance, debugpy, and python-envs
+versions and verifies their extension paths stay inside that run's isolated
+extensions directory.
+
+A prior local VS Code 1.141.0 multi-root pass used a temporary replay harness
+guard change at source revision `475e808`, before this two-root check was
+included in the committed runner. Its log is `.tmp/issue351-host-141-full.log`,
+with sanitized versions and assertions in `.tmp/issue351-local-observation.json`.
+The run used copied pinned extensions Python 2026.10.0, Pylance 2026.4.1,
+debugpy 2026.6.0, and python-envs 1.40.0; it was local replay evidence, not
+hosted CI.
+
+Fresh isolated replays with the pinned dependency cache remain mixed: that
+1.141.0 replay passed the full two-root fixture, but a subsequent 1.141.0 run
+and an un-intercepted 1.142.0 run failed with Pylance's unhandled
+`python/inExperiment` request before hovers became available. One controlled
+1.142.0 probe used a temporary copy of the extension to intercept and suppress
+the first GraphQL Desk `python.analysis.restartLanguageServer` dispatch during
+startup. It recorded one dispatch at `2026-11-04T18:55:19.098Z`; the full
+two-root fixture passed, including warning ranges, inference, repair,
+restoration, dirty-buffer preservation and root removal. The host also passed
+the post-repair assertion that no quarantine protocol failure was logged. The
+probe log and dispatch record are `.tmp/issue351-restart-ab-effective/host-output.log`
+and `.tmp/issue351-restart-ab-effective/restart-intercepts.jsonl`. This single
+suppressed run is consistent with a startup-restart race, but does not establish
+causation.
+
+The current candidate removes that initial explicit restart for managed
+project-config publishing; the project-config and Python stubPath updates still
+select the completed generation, while unowned fixed-path and shutdown restart
+paths remain. One isolated candidate host run on each VS Code 1.141.0 and
+1.142.0 passed the full two-root checks with the same pinned extension versions.
+Both runs recorded three warnings, no quarantine protocol failures, and isolated
+extension paths. Their logs are `.tmp/issue351-candidate-host/host-141.log` and
+`.tmp/issue351-candidate-host/host-142.log`. The 1.141.0 candidate run used a
+temporary runner with the same two-root guard now in the committed harness.
+These local runs support the candidate but are not hosted CI, and the earlier
+protocol failures remain unexplained. CI must run the two-root host on both
+versions at the exact candidate head; compatibility follow-up #351 stays open
+until that matrix passes. This focused acceptance does not claim the full
+TYPE-01 gate or broad API/live-typing parity.
+
 Valid primary fragments also emit a bound `read_<binding>` function in their
 source companion. The generated document view carries a separate recursive,
 read-only input projection and a checker-only reader property. Result types stay

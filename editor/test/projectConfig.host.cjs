@@ -13,6 +13,14 @@ async function until(action, accept, description, timeout = 45000) {
     if (accept(value)) return value;
     await new Promise(resolve => setTimeout(resolve, 100));
   } while (Date.now() < deadline);
+  try {
+    await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify({
+      outcome: "project-config-host-failed",
+      error: description,
+      progress: { phase: process.env.GRAPHQL_DESK_RESTART_PHASE, suite: process.env.GRAPHQL_DESK_TEST_SUITE,
+        lastGeneration: value },
+    }, null, 2));
+  } catch (error) { console.error(`Project-config failure evidence could not be saved: ${String(error)}`); }
   assert.fail(`${description}: ${JSON.stringify(value)?.slice(0, 5000)}`);
 }
 
@@ -58,11 +66,15 @@ async function run() {
     if (name !== "GraphQL Desk") return channel;
     return new Proxy(channel, { get(target, property) {
       if (property === "appendLine") return value => {
-        if (typeof value === "string" && value.startsWith("Managed stub root unavailable: ") && managedErrors.length < 20) managedErrors.push(value);
-        if (typeof value === "string" && value.startsWith("Managed stub publication failed: ") && publicationErrors.length < 20) publicationErrors.push(value);
-        if (typeof value === "string" && value.startsWith("Typing quarantine failed: ") && publicationErrors.length < 20) publicationErrors.push(value);
-        if (typeof value === "string" && value.startsWith("Live typing skipped: ") && skipReasons.length < 40) skipReasons.push(value);
-        if (typeof value === "string" && value.startsWith("GraphQL Desk trace:") && skipReasons.length < 40) skipReasons.push(value);
+        if (typeof value === "string" && value.startsWith("Managed stub root unavailable: ")) {
+          managedErrors.push(value); if (managedErrors.length > 20) managedErrors.shift();
+        }
+        if (typeof value === "string" && (value.startsWith("Managed stub publication failed: ") || value.startsWith("Typing quarantine failed: "))) {
+          publicationErrors.push(value); if (publicationErrors.length > 20) publicationErrors.shift();
+        }
+        if (typeof value === "string" && (value.startsWith("Live typing skipped: ") || value.startsWith("GraphQL Desk trace:"))) {
+          skipReasons.push(value); if (skipReasons.length > 40) skipReasons.shift();
+        }
         return target.appendLine(value);
       };
       const value = Reflect.get(target, property, target);
@@ -100,10 +112,13 @@ async function run() {
       const definitions = graphqlOffset < 0 ? [] : await vscode.commands.executeCommand("vscode.executeDefinitionProvider", document.uri,
         document.positionAt(graphqlOffset));
       const generatedStub = await fs.readFile(stubFile, "utf8").catch(() => "");
-      return { setting, pythonSetting: await pythonStubPath(), text,
+      return { setting, current, pythonSetting: await pythonStubPath(), text,
         generatedStubExists: await fs.access(stubFile).then(() => true, () => false),
         generatedStub: generatedStub.split(/\r?\n/).filter(line => /selected/.test(line)).join("\n"),
         generatedFiles: manifest.files.map(item => item.path),
+        generationAnalysisId: manifest.analysisId,
+        operationStatuses: manifest.operationManifest?.flatMap(group => group.operations.map(operation =>
+          ({ binding: operation.binding, operation: operation.operation_name, status: operation.status }))),
         operationCount: manifest.operationManifest?.reduce((sum, group) => sum + group.operations.length, 0) ?? 0,
         consumerImport: importLine,
         diagnostics: vscode.languages.getDiagnostics(document.uri).map(item => ({ message: item.message, code: item.code, severity: item.severity })),
@@ -151,13 +166,13 @@ async function run() {
   if (!projectToml) {
     assert.deepEqual(config().extraPaths, ["vendor", "custom-stubs"]);
     if (process.env.GRAPHQL_DESK_TEST_SUITE === "projectConfigEnvironment") {
-      assert.deepEqual(config().executionEnvironments[0].extraPaths, ["environment-vendor"]);
+      assert.deepEqual(config().executionEnvironments[0].extraPaths, ["environment-vendor", "custom-stubs"]);
     }
     const toml = await fs.readFile(path.join(workspace, "pyproject.toml"), "utf8");
     assert.match(toml, /stubPath = "toml-ignored"/, "pyrightconfig.json takes precedence over pyproject.toml");
   } else {
     assert.deepEqual(config().extraPaths, ["vendor", "custom-stubs"]);
-    assert.deepEqual(config().executionEnvironments[0].extraPaths, ["environment-vendor"]);
+    assert.deepEqual(config().executionEnvironments[0].extraPaths, ["environment-vendor", "custom-stubs"]);
   }
   await fs.access(path.join(path.resolve(workspace, current.setting), "complete.json"));
   const evidence = { outcome: "project-config-live-typing-observed", vscode: vscode.version,
@@ -172,6 +187,10 @@ async function run() {
   await until(async () => config(), value => value.stubPath === "custom-stubs" && value.extraPaths?.join("\0") === "vendor",
     "Deactivation restores the user's project config");
   await until(pythonStubPath, value => value === "python-custom-stubs", "Deactivation restores the user's Pylance setting");
+  if (projectToml || process.env.GRAPHQL_DESK_TEST_SUITE === "projectConfigEnvironment") {
+    assert.deepEqual(config().executionEnvironments[0].extraPaths, ["environment-vendor"],
+      "Deactivation removes only the custom-stub search path owned by GraphQL Desk");
+  }
   evidence.restoredProjectStubPath = config().stubPath;
   evidence.projectConfigBeforeCleanup = beforeCleanupConfig;
   evidence.projectConfigAfterCleanup = config();

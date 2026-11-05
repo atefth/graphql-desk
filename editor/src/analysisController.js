@@ -77,7 +77,7 @@ function artifactRootFor(filename, selectedStubRoot) {
 }
 
 /** Captures are finite capabilities; watchers only request earlier invalidation. */
-function createAnalysisController(vscode, { workerFactory = createAnalysisWorker, environment = () => process.env, changed = () => {}, report = () => {}, status = () => {}, configurationDiagnostics = () => {} } = {}) {
+function createAnalysisController(vscode, { workerFactory = createAnalysisWorker, environment = () => process.env, changed = () => {}, report = () => {}, status = () => {}, configurationDiagnostics = () => {}, trace = () => {} } = {}) {
   let disposed = false;
   let epoch = 0;
   const states = new Map();
@@ -108,7 +108,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       reconcileSchemaWatches(state, new Set()); states.delete(root);
     }
   }
-  function clearCache(state) {
+  function clearCache(state, reason) {
+    if (state.cached) {
+      try { trace(`analysis cache cleared: ${reason}`); } catch { /* Logging must not affect freshness. */ }
+    }
     state.cached = null;
   }
   const selectedKey = selected => selected && typeof selected.id === "string" && selected.id && typeof selected.path === "string" && selected.path ? JSON.stringify([selected.id, selected.path]) : null;
@@ -247,6 +250,39 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     return state;
   }
+  function rememberDiskFingerprint(filename, fingerprint, ownedDeletion = false) {
+    const previous = recentDiskInvalidations.get(filename);
+    if (fingerprint === undefined) { recentDiskInvalidations.delete(filename); return false; }
+    if (previous?.fingerprint === fingerprint) return true;
+    recentDiskInvalidations.set(filename, { fingerprint, ownedDeletion });
+    if (recentDiskInvalidations.size > 512) {
+      const oldest = [...recentDiskInvalidations.keys()].slice(0, 128);
+      for (const key of oldest) recentDiskInvalidations.delete(key);
+    }
+    return false;
+  }
+  function ignoreOwnedDeletion(filename, ownedPaths) {
+    if (!ownedPaths.delete(filename)) return false;
+    // Keep duplicate cleanup reports in the same bounded cache as other disk events.
+    rememberDiskFingerprint(filename, "missing", true);
+    return true;
+  }
+  function finishOwnedConfigWrite(key, fingerprint) {
+    const pending = pendingOwnedProjectConfigWrites.get(key);
+    pendingOwnedProjectConfigWrites.delete(key);
+    if (!pending) return;
+    const temporary = ownedProjectConfigTemporaryPaths.get(pending.temporaryPath);
+    if (temporary && (temporary.owner !== key || temporary.hash !== pending.nextHash)) return;
+    if (temporary) {
+      clearTimeout(temporary.timer);
+      ownedProjectConfigTemporaryPaths.delete(pending.temporaryPath);
+    }
+    if (fingerprint !== undefined && fingerprint !== pending.nextHash) return;
+    try { fs.lstatSync(pending.temporaryPath); }
+    catch (error) {
+      if (error.code === "ENOENT") rememberDiskFingerprint(pending.temporaryPath, "missing");
+    }
+  }
   function invalidate(source, ranges, diskEvent = false) {
     if (disposed) return;
     if (diskEvent && ranges == null && source?.scheme === "file") {
@@ -258,16 +294,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           fingerprint = createHash("sha256").update(fs.readFileSync(source.fsPath)).digest("hex");
         }
       } catch (error) { if (error.code === "ENOENT") fingerprint = "missing"; }
-      if (fingerprint !== undefined) {
-        const now = Date.now();
-        const previous = recentDiskInvalidations.get(filename);
-        if (previous?.fingerprint === fingerprint) return;
-        recentDiskInvalidations.set(filename, { fingerprint, at: now });
-        if (recentDiskInvalidations.size > 512) {
-          const oldest = [...recentDiskInvalidations.keys()].slice(0, 128);
-          for (const key of oldest) recentDiskInvalidations.delete(key);
-        }
-      }
+      if (rememberDiskFingerprint(filename, fingerprint)) return;
     }
     epoch += 1;
     for (const state of states.values()) { stopPolling(state); state.artifactsAbort?.abort(); clearCache(state, "invalidate"); if (!trusted()) state.worker.invalidate(); }
@@ -741,7 +768,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const lower = parts.map(part => part.toLowerCase());
     const marker = lower.lastIndexOf(".graphql-desk");
     if (marker < 0 || !["typings", "live-typings"].includes(lower[marker + 1])) return false;
-    if (lower[marker + 1] === "live-typings" && marker + 3 === lower.length && lower[marker + 2] === "project-config-owner.json") return true;
+    if (lower[marker + 1] === "live-typings" && marker + 3 === lower.length) {
+      return lower[marker + 2] === "project-config-owner.json" ||
+        /^\.graphql-desk-owner-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(parts[marker + 2]);
+    }
     if (lower[marker + 2] !== "generations") return false;
     const relative = parts.slice(marker + 3);
     const generationId = /^g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -820,11 +850,13 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
               const stat = fs.lstatSync(resource.fsPath);
               if (stat.isDirectory() && !stat.isSymbolicLink() && (managedRoot || generationDirectory || marker + 4 === parts.length)) {
                 ownedAnalysisDirectories.add(filename);
+                recentDiskInvalidations.delete(filename);
                 return;
               }
             } catch (error) {
-              if (error.code === "ENOENT" && ownedAnalysisDirectories.delete(filename)) return;
+              if (error.code === "ENOENT" && ignoreOwnedDeletion(filename, ownedAnalysisDirectories)) return;
             }
+            ownedAnalysisDirectories.delete(filename);
             const name = path.basename(resource.fsPath).toLowerCase();
             if (generation && (name === "complete.json" || /^\.graphql-desk-[0-9a-f-]+\.tmp$/i.test(name))) {
               let descriptor;
@@ -836,10 +868,12 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
                 const size = fs.readSync(descriptor, bytes, 0, bytes.length, 0);
                 if (size === stat.size && JSON.parse(bytes.toString("utf8")).owner === "graphql-desk-analysis-generation") {
                   ownedAnalysisPaths.add(filename);
+                  recentDiskInvalidations.delete(filename);
                   return;
                 }
-              } catch (error) { if (error.code === "ENOENT" && ownedAnalysisPaths.delete(filename)) return; }
+              } catch (error) { if (error.code === "ENOENT" && ignoreOwnedDeletion(filename, ownedAnalysisPaths)) return; }
               finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
+              ownedAnalysisPaths.delete(filename);
             }
           }
         }
@@ -871,11 +905,12 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
                   isVerifiedGenerationFile(filename, artifactRoot) || extension === ".typed" &&
                   marker === "partial\n" && ownedAnalysisDirectories.has(canonical(artifactRoot)))) {
               ownedAnalysisPaths.add(filename);
+              recentDiskInvalidations.delete(filename);
               return;
             }
           } catch (error) { missing = error.code === "ENOENT"; /* Deleted or inaccessible user stubs remain source changes. */ }
           finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
-          if (missing && filename && ownedAnalysisPaths.delete(filename)) return;
+          if (missing && filename && ignoreOwnedDeletion(filename, ownedAnalysisPaths)) return;
           if (filename) ownedAnalysisPaths.delete(filename);
         }
         invalidate(resource?.scheme === "file" ? resource : null, null, true);
@@ -898,10 +933,19 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (filename && analysisGenerationStagingFile(filename)) return;
       if (filename && document?.uri?.scheme === "file" &&
           [".py", ".pyi", ".typed"].includes(path.extname(filename).toLowerCase())) {
+        // Pylance can close a clean generated document after its owned file was removed.
+        if (!document.isDirty && recentDiskInvalidations.get(filename)?.ownedDeletion) {
+          try { fs.lstatSync(filename); }
+          catch (error) {
+            if (error.code === "ENOENT") return;
+          }
+          recentDiskInvalidations.delete(filename);
+        }
         const folder = (vscode.workspace.workspaceFolders ?? []).find(item => item.uri.scheme === "file" &&
           inside(canonical(item.uri.fsPath), filename));
         if (verifiedManagedArtifactDocument(folder, filename)) {
           ownedAnalysisPaths.add(filename);
+          recentDiskInvalidations.delete(filename);
           if (!(event === "onDidChangeTextDocument" && document.isDirty)) return;
         }
       }
@@ -939,7 +983,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (typeof filename !== "string" || !path.isAbsolute(filename) || typeof fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(fingerprint)) return false;
       const key = canonical(filename);
       ownedProjectConfigHashes.set(key, fingerprint);
-      pendingOwnedProjectConfigWrites.delete(key);
+      finishOwnedConfigWrite(key, fingerprint);
       return true;
     },
     trackOwnedProjectConfigWrite(filename, fingerprint, { phase, previousHash, temporaryPath } = {}) {
@@ -961,7 +1005,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         return true;
       }
       if (phase === "cancel") {
-        pendingOwnedProjectConfigWrites.delete(key);
+        finishOwnedConfigWrite(key);
         return true;
       }
       if (phase === "commit") return this.markOwnedProjectConfig(filename, fingerprint);

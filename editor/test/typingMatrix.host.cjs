@@ -38,18 +38,27 @@ function pythonVersion(python) {
 
 exports.run = async () => {
   const suite = process.env.GRAPHQL_DESK_TEST_SUITE;
-  const results = { host: vscode.version, pylance: {}, lifecycle: { invalidationAndRepair: {}, skipTraces: [], stubPathSelections: [] } };
+  const results = { host: vscode.version, extensions: {}, pylance: {}, lifecycle: { invalidationAndRepair: {}, skipTraces: [], coldTrace: [], stubPathSelections: [] } };
   let settingChanges;
   let diagnosticChanges;
   let selectionChanges;
   let originalCreateOutputChannel;
   try {
-    for (const id of ["ms-python.python", "ms-python.vscode-pylance"]) {
+    const extensionsRoot = path.resolve(process.env.GRAPHQL_DESK_TEST_EXTENSIONS || "");
+    assert.ok(process.env.GRAPHQL_DESK_TEST_EXTENSIONS, "The host runner must provide its isolated extensions directory");
+    const pinned = new Map([["ms-python.python", "2026.10.0"], ["ms-python.vscode-pylance", "2026.4.1"]]);
+    for (const id of [...pinned.keys(), "ms-python.debugpy", "ms-python.vscode-python-envs"]) {
       const extension = vscode.extensions.getExtension(id);
       assert.ok(extension, `${id} must be installed in the isolated host`);
-      await extension.activate();
+      if (pinned.has(id)) {
+        await extension.activate();
+        assert.equal(extension.packageJSON.version, pinned.get(id));
+      }
       const version = extension.packageJSON.version;
-      assert.equal(version, id === "ms-python.python" ? "2026.10.0" : "2026.4.1");
+      const relativePath = path.relative(extensionsRoot, path.resolve(extension.extensionPath));
+      assert.ok(relativePath && !path.isAbsolute(relativePath) && relativePath !== ".." && !relativePath.startsWith(`..${path.sep}`),
+        `${id} must load from this host run's isolated extensions directory`);
+      results.extensions[id] = { version, path: relativePath.replaceAll("\\", "/"), active: extension.isActive };
       results.pylance[id] = version;
     }
 
@@ -63,6 +72,10 @@ exports.run = async () => {
         if (property === "appendLine") return value => {
           if (typeof value === "string" && value.startsWith("Live typing skipped: ") &&
               results.lifecycle.skipTraces.length < 80) results.lifecycle.skipTraces.push(value);
+          if (typeof value === "string" && value.startsWith("GraphQL Desk trace: ")) {
+            results.lifecycle.coldTrace.push(value);
+            if (results.lifecycle.coldTrace.length > 80) results.lifecycle.coldTrace.shift();
+          }
           return target.appendLine(value);
         };
         const value = Reflect.get(target, property, target);

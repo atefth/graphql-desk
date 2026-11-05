@@ -8,17 +8,23 @@ those artifacts under the Pylance stub root in a namespaced package. If no
 is ready; then it points the setting at that immutable generation. This is the
 user-approved ownership policy. An explicit blank value is preserved and uses
 Pylance's `./typings` default; a workspace-local custom root is reused, including
-changes made while the extension is running. External roots are refused.
+changes made while the extension is running. Workspace-setting-only management
+refuses an external root; project-config management preserves access to a prior
+external custom root while publishing inside the owning workspace.
 Existing settings and files outside GraphQL Desk's owned package are preserved.
 
 When a project has `pyrightconfig.json`, GraphQL Desk uses it ahead of
 `[tool.pyright]` in `pyproject.toml`, matching Pyright's configuration
-precedence. It leaves the project's `stubPath` unchanged and adds the stable
-workspace path `.graphql-desk/live-typings` to top-level `extraPaths` and each
-execution environment's own `extraPaths`, so environment overrides still see
-the generated package. JSONC comments and unrelated settings are retained;
-TOML is edited with `tomlkit`. GraphQL Desk records which path entries and
-`extraPaths` keys it created, then removes only those on workspace shutdown.
+precedence. Under the approved managed-config policy, it selects completed
+generations through the effective project's `stubPath`, preserves the prior
+value for restoration, and retains access to the prior custom stub root and
+existing `extraPaths`, including execution-environment overrides. This supersedes
+the earlier extraPaths-only implementation in #330. JSONC comments and unrelated
+settings are retained; TOML is edited with `tomlkit`. Ownership records distinguish
+the entries GraphQL Desk created from existing configuration, so cleanup restores
+the user's prior values without removing unrelated entries. Native configuration
+reload consumes the completed selection; managed project-config publication does
+not request an extra initial language-server restart.
 Malformed, dirty, symbolic-link, ambiguous or concurrently changed configs are
 left untouched and live typing fails closed. Generated `.pyi` updates use a
 clean VS Code document edit and save; a dirty or racing document is preserved.
@@ -29,10 +35,12 @@ foreign collisions, symbolic links and dirty aliases, and verifies ownership,
 freshness and bytes before each replacement. Updates are serialized and staged;
 failed replacement rolls back only bytes still owned by this process. Removed
 outputs and shutdown cleanup remove only matching owned files and empty owned
-directories. An unavailable schema or stale result is a no-publish event, so the
-last known generated files remain available. Existing custom settings with a
-path outside the workspace are left untouched and surfaced as managed typing
-unavailable.
+directories. Source invalidation and analysis failures quarantine affected
+operation types until current analysis succeeds; unrelated valid declarations
+are retained where their provenance permits. A retained generation is recovery
+material, not evidence that stale precise types are safe to expose. In the
+workspace-setting-only path, an existing custom root outside the workspace is
+left untouched and surfaced as managed typing unavailable.
 
 Each generated `.py` and `.pyi` has a deterministic content fingerprint in its
 header, based on its package-relative path, body and writer format. Initial
@@ -198,7 +206,12 @@ On activation, the extension scans for complete, unmodified generations and
 selects the newest valid one. Incomplete, dirty, changed, extra-file, or
 symlink-containing generations are left untouched. It retains the newest two
 verified generations and removes an older generation only when every byte,
-file identity, directory, and buffer still proves GraphQL Desk owns it. A crash
+file identity, directory, and buffer still proves GraphQL Desk owns it. These
+ownership checks do not establish that Pylance has finished reading the old
+directory. Hosted evidence of Pylance indexing a deleted generation is tracked
+by [#355](https://github.com/atefth/graphql-desk/issues/355); safe reader lifetime
+and bounded storage remain required, unresolved acceptance. The selection and
+restart follow-ups remain under #329 and #351. A crash
 before manifest commit leaves the previously selected generation usable; activation
 can recover it. Pylance-visible settings writes are excluded from the broad source
 watcher, and GraphQL Desk's own `settings.json` text-document events are ignored;
@@ -215,8 +228,9 @@ verified by the completion manifest before selection. The implementation
 acceptance for #37 is complete through #212 and linked #207/#210. This does not
 pass broad live typing TYPE-01: broader invalid-edit recovery,
 cancellation races, forced-crash recovery, and the full editor lifecycle matrix
-remain open under #38 and broader TYPE-01 acceptance. This change does not adopt pre-existing packages or authorize
-deletion of user files.
+remain part of broader TYPE-01 acceptance and the open #329/#355 follow-ups.
+The bounded #38 story is closed; it is not a broad gate pass. This change does
+not adopt pre-existing packages or authorize deletion of user files.
 
 The `restartRecovery` host suite now launches two separate VS Code processes
 against the same isolated workspace and profile. After the first process
@@ -229,7 +243,8 @@ on Windows VS Code 1.141.0 and 1.142.0 with Python 2026.10.0 and Pylance
 and [`restart-recovery-1.142.0.json`](../../editor/test/observations/restart-recovery-1.142.0.json).
 This verifies a normal application restart with a valid completed generation.
 It does not simulate a forced process crash during a write, and it does not
-close #24 or pass the broader live-typing lifecycle gate.
+establish the broader live-typing lifecycle gate on its own. The bounded #24
+story is closed; its completion is separate from full TYPE-01 acceptance.
 
 ### Issue #38 cancellation and invalid-operation recovery
 
@@ -263,7 +278,8 @@ field from `String` to `Int` while the sibling `ID` hover stays intact. The
 last-known `String` hover remains visible during the failed refresh, so this
 does not prove a no-stale interval or cancellation/supersession safety. See
 [`issue-38-worker-crash-recovery-1.142.0.json`](../../editor/test/observations/issue-38-worker-crash-recovery-1.142.0.json).
-This bounded recovery result does not close #38 or broader TYPE-01 acceptance; hosted Stage 1 gate #42 has passed.
+This bounded recovery result alone does not establish broad TYPE-01 acceptance;
+the #38 story and hosted Stage 1 gate #42 have passed their separate acceptance.
 
 ### Issue #42 lifecycle host coverage on VS Code 1.141
 
@@ -277,5 +293,6 @@ and unrelated workspace settings. A sanitized assertion summary is in
 [`issue-42-lifecycle-1.141.0.json`](../../editor/test/observations/issue-42-lifecycle-1.141.0.json).
 The Windows editor CI job now repeats this scenario alongside the existing
 1.142 host run. This remains one bounded host proof: restart, crash, editor
-cancellation, interpreter/schema/config combinations, and the full #42 matrix
-remain open.
+cancellation, interpreter/schema/config combinations, and broad TYPE-01
+acceptance require their complete evidence. The scoped #42 milestone is closed;
+later regressions and additional lifecycle work remain under #329 and #355.

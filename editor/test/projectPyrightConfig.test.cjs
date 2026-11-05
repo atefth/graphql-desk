@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const test = require("node:test");
+const { spawnSync } = require("node:child_process");
 const { createAnalysisWorker } = require("../src/analysisWorker");
 const { parseJsonConfig, modifyJsonConfig, updateProjectConfig, createManagedProjectConfig, MANAGED_PATH, stateKey } = require("../src/projectPyrightConfig");
 const { managedStateKeys } = require("../src/managedStubPath");
@@ -13,6 +14,157 @@ function stateStore() {
   const values = new Map();
   return { get: key => values.get(key), update: async (key, value) => value === undefined ? values.delete(key) : values.set(key, value) };
 }
+
+test("custom stubs survive explicit execution environment paths and owned release", () => {
+  const original = '{\n// user comment\n"stubPath":"custom-stubs","extraPaths":["vendor"],"executionEnvironments":[' +
+    '{"root":"src","extraPaths":["environment-vendor"]},' +
+    '{"root":"existing","extraPaths":["custom-stubs","keep"]},' +
+    '{"root":"empty","extraPaths":[]},{"root":"inherited"}]}';
+  const ownership = { expectedStubPathPresent: true, expectedStubPath: "custom-stubs",
+    customStubPath: "custom-stubs", customStubPathAdded: true, executionEnvironmentRoots: ["src", "empty"],
+    removeExtraPathsKey: false, originalStubPathPresent: true, originalStubPath: "custom-stubs" };
+  const prepared = modifyJsonConfig(original, "prepare_stub_path", MANAGED_PATH, ownership);
+  assert.deepEqual(prepared.executionEnvironments.map(item => item.extraPaths),
+    [["environment-vendor", "custom-stubs"], ["custom-stubs", "keep"], ["custom-stubs"], []]);
+  assert.equal(prepared.executionEnvironments[3].hasExtraPaths, false);
+  assert.match(prepared.text, /\/\/ user comment/);
+  const released = modifyJsonConfig(prepared.text, "release_stub_path", MANAGED_PATH,
+    { ...ownership, expectedStubPath: MANAGED_PATH });
+  assert.deepEqual(parseJsonConfig(released.text), parseJsonConfig(original));
+  assert.match(released.text, /\/\/ user comment/);
+  for (const executionEnvironmentRoots of [["src", "src"], ["missing"], ["existing"]]) {
+    assert.throws(() => modifyJsonConfig(original, "prepare_stub_path", MANAGED_PATH,
+      { ...ownership, executionEnvironmentRoots }), /environment|ownership/i);
+  }
+});
+
+test("ownership metadata writes use a distinct temporary file purpose", async t => {
+  const f = fixture(t, { json: "{}\n" });
+  const ownerFile = path.join(f.root, MANAGED_PATH, "project-config-owner.json");
+  const names = [];
+  const rename = fs.renameSync;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (destination === ownerFile) names.push(path.basename(source));
+    return rename(source, destination);
+  });
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker);
+  await managed.release();
+  managed.cleanup();
+  assert.ok(names.length > 0, "Exercise real ownership-file publication");
+  for (const name of names) assert.match(name,
+    /^\.graphql-desk-owner-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i);
+});
+
+test("managed config records only added environment roots across restart and release", async t => {
+  const f = fixture(t, { json: JSON.stringify({ stubPath: "custom-stubs", extraPaths: ["vendor"], executionEnvironments: [
+    { root: "src", extraPaths: ["environment-vendor"] }, { root: "existing", extraPaths: ["./custom-stubs", "keep"] },
+    { root: "empty", extraPaths: [] }, { root: "inherited" },
+  ] }) });
+  const state = stateStore();
+  const first = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  assert.deepEqual(state.get(stateKey(f.root)).customStubPathEnvironmentRoots, ["src", "empty"]);
+  const file = path.join(f.root, "pyrightconfig.json");
+  const changed = JSON.parse(fs.readFileSync(file, "utf8"));
+  changed.executionEnvironments[0].extraPaths.push("user-added");
+  fs.writeFileSync(file, JSON.stringify(changed));
+  const restarted = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker);
+  await restarted.release();
+  restarted.cleanup();
+  first.cleanup();
+  const restored = parseJsonConfig(fs.readFileSync(file, "utf8"));
+  assert.deepEqual(restored.extraPaths, ["vendor"]);
+  assert.deepEqual(restored.executionEnvironments.map(item => item.extraPaths),
+    [["environment-vendor", "user-added"], ["./custom-stubs", "keep"], [], []]);
+  assert.equal(restored.executionEnvironments[2].hasExtraPaths, true);
+  assert.equal(restored.executionEnvironments[3].hasExtraPaths, false);
+});
+
+test("legacy owner without environment provenance preserves config and state", async t => {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs","executionEnvironments":[{"root":"src","extraPaths":["vendor"]}]}' });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const file = path.join(f.root, "pyrightconfig.json");
+  const original = JSON.parse(fs.readFileSync(file, "utf8"));
+  original.executionEnvironments[0].extraPaths = ["vendor"];
+  fs.writeFileSync(file, JSON.stringify(original));
+  const legacy = { ...state.get(stateKey(f.root)) };
+  delete legacy.customStubPathEnvironmentRoots;
+  await state.update(stateKey(f.root), legacy);
+  const before = fs.readFileSync(file, "utf8");
+  const ownerFile = path.join(managed.root, "project-config-owner.json");
+  const ownerBefore = fs.readFileSync(ownerFile, "utf8");
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker),
+    /Legacy.*restore the original config and clear GraphQL Desk ownership/);
+  assert.equal(fs.readFileSync(file, "utf8"), before);
+  assert.equal(fs.readFileSync(ownerFile, "utf8"), ownerBefore);
+  assert.deepEqual(state.get(stateKey(f.root)), legacy);
+  managed.cleanup();
+});
+
+test("v2 migration records custom roots after removing only its owned environment paths", async t => {
+  const f = fixture(t, { json: JSON.stringify({ stubPath: "custom-stubs", extraPaths: ["vendor", MANAGED_PATH], executionEnvironments: [
+    { root: "src", extraPaths: ["environment-vendor", MANAGED_PATH] }, { root: "inherited", extraPaths: [MANAGED_PATH] },
+  ] }) });
+  const state = stateStore();
+  await state.update(stateKey(f.root), { version: 2, file: "pyrightconfig.json", format: "jsonc", path: MANAGED_PATH,
+    ownership: { topLevel: false, executionEnvironmentRoots: ["inherited"] } });
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  assert.deepEqual(state.get(stateKey(f.root)).customStubPathEnvironmentRoots, ["src"]);
+  const file = path.join(f.root, "pyrightconfig.json");
+  const active = parseJsonConfig(fs.readFileSync(file, "utf8"));
+  assert.deepEqual(active.executionEnvironments[0].extraPaths, ["environment-vendor", "custom-stubs"]);
+  assert.equal(active.executionEnvironments[1].hasExtraPaths, false);
+  await managed.release();
+  managed.cleanup();
+  const restored = parseJsonConfig(fs.readFileSync(file, "utf8"));
+  assert.deepEqual(restored.extraPaths, ["vendor"]);
+  assert.deepEqual(restored.executionEnvironments[0].extraPaths, ["environment-vendor"]);
+  assert.equal(restored.executionEnvironments[1].hasExtraPaths, false);
+});
+
+test("release preserves config and owner state when an added environment path changes", async t => {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs","executionEnvironments":[{"root":"src","extraPaths":["vendor"]}]}' });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const file = path.join(f.root, "pyrightconfig.json");
+  const changed = JSON.parse(fs.readFileSync(file, "utf8"));
+  changed.executionEnvironments[0].extraPaths = ["vendor", "user-path"];
+  fs.writeFileSync(file, JSON.stringify(changed));
+  const before = fs.readFileSync(file, "utf8");
+  const owner = state.get(stateKey(f.root));
+  await assert.rejects(managed.release(), /ownership changed/);
+  assert.equal(fs.readFileSync(file, "utf8"), before);
+  assert.deepEqual(state.get(stateKey(f.root)), owner);
+  managed.cleanup();
+});
+
+test("real Pyright retains custom stub typing through an explicit environment", async t => {
+  const f = fixture(t, { json: JSON.stringify({ stubPath: "custom-stubs", extraPaths: ["vendor"],
+    executionEnvironments: [{ root: ".", extraPaths: ["environment-vendor"] }], typeCheckingMode: "strict" }) });
+  fs.mkdirSync(path.join(f.root, "custom-stubs"));
+  fs.mkdirSync(path.join(f.root, "environment-vendor"));
+  fs.writeFileSync(path.join(f.root, "custom-stubs", "legacy.pyi"), "def existing() -> str: ...\n");
+  fs.writeFileSync(path.join(f.root, "environment-vendor", "legacy.py"), 'def existing() -> object:\n    return "runtime"\n');
+  fs.writeFileSync(path.join(f.root, "consumer.py"), "from legacy import existing\nvalue: str = existing()\n");
+  const python = process.env.GRAPHQL_DESK_PYTHON ?? path.join(path.resolve(__dirname, "../.."), ".venv",
+    process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
+  const check = () => {
+    const result = spawnSync(python, ["-m", "pyright", "--pythonpath", python, "--outputjson", path.join(f.root, "consumer.py")],
+      { cwd: f.root, encoding: "utf8" });
+    assert.equal(result.error, undefined);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.summary.errorCount, 0, JSON.stringify(parsed.generalDiagnostics));
+    assert.equal(result.status, 0);
+  };
+  check();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker);
+  assert.deepEqual(parseJsonConfig(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")).executionEnvironments[0].extraPaths,
+    ["environment-vendor", "custom-stubs"]);
+  check();
+  await managed.release();
+  managed.cleanup();
+  check();
+});
 
 function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonStubPath, inheritedPythonStubPath } = {}) {
   const localTemp = path.join(__dirname, "..", ".cache", "issue-329-unit");
@@ -220,6 +372,73 @@ test("an in-place TOML edit during the async worker call is preserved", async t 
   assert.equal(after.ino, before.ino, "the test mutates the same config inode");
   assert.equal(fs.readFileSync(file, "utf8"), `${original}# concurrent user edit\n`);
 });
+
+test("config replacement retries a transient Windows lock without changing write ownership", async t => {
+  const original = '{"extraPaths":["vendor"],"stubPath":"stubs"}\n';
+  const f = fixture(t, { json: original });
+  const file = path.join(f.root, "pyrightconfig.json");
+  const rename = fs.renameSync;
+  let attempts = 0;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (destination === file && attempts++ === 0) throw Object.assign(new Error("locked"), { code: "EPERM" });
+    return rename(source, destination);
+  });
+  const phases = [];
+  const result = await updateProjectConfig(f.vscode, f.folder, "add", f.worker, {}, MANAGED_PATH,
+    (_file, _hash, detail) => { phases.push(detail.phase); });
+  assert.deepEqual(result.extraPaths, ["vendor", MANAGED_PATH]);
+  assert.equal(attempts, 2);
+  assert.deepEqual(phases, ["begin", "commit"]);
+  assert.deepEqual(fs.readdirSync(f.root), ["pyrightconfig.json"]);
+});
+
+test("config replacement stops after the bounded Windows-lock retries", async t => {
+  const original = '{"extraPaths":["vendor"]}\n';
+  const f = fixture(t, { json: original });
+  const file = path.join(f.root, "pyrightconfig.json");
+  const rename = fs.renameSync;
+  let attempts = 0;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (destination !== file) return rename(source, destination);
+    attempts += 1;
+    throw Object.assign(new Error("locked"), { code: "EPERM" });
+  });
+  await assert.rejects(updateProjectConfig(f.vscode, f.folder, "add", f.worker), { code: "EPERM" });
+  assert.equal(attempts, 4);
+  assert.equal(fs.readFileSync(file, "utf8"), original);
+  assert.deepEqual(fs.readdirSync(f.root), ["pyrightconfig.json"]);
+});
+
+for (const race of ["config edit", "dirty buffer", "trust revoked", "workspace removed", "staged edit"]) {
+  test(`config replacement preserves ${race} during a Windows-lock retry`, async t => {
+    const original = '{"extraPaths":["vendor"],"stubPath":"stubs"}\n';
+    const userText = "// concurrent user edit\n" + original;
+    const f = fixture(t, { json: original });
+    const file = path.join(f.root, "pyrightconfig.json");
+    const rename = fs.renameSync;
+    let attempts = 0;
+    let staged;
+    t.mock.method(fs, "renameSync", (source, destination) => {
+      if (destination !== file) return rename(source, destination);
+      attempts += 1;
+      staged = source;
+      queueMicrotask(() => {
+        if (race === "config edit") fs.writeFileSync(file, userText);
+        else if (race === "dirty buffer") f.vscode.workspace.textDocuments.push({ isDirty: true, uri: f.vscode.Uri.file(file) });
+        else if (race === "trust revoked") f.vscode.workspace.isTrusted = false;
+        else if (race === "workspace removed") f.vscode.workspace.getWorkspaceFolder = () => undefined;
+        else fs.writeFileSync(source, userText);
+      });
+      throw Object.assign(new Error("locked"), { code: "EPERM" });
+    });
+    await assert.rejects(updateProjectConfig(f.vscode, f.folder, "add", f.worker),
+      /changed|Dirty|trusted/i);
+    assert.equal(attempts, 1, "ownership must be rechecked before another rename attempt");
+    assert.equal(fs.readFileSync(file, "utf8"), race === "config edit" ? userText : original);
+    assert.equal(fs.existsSync(staged), race === "staged edit");
+    if (race === "staged edit") assert.equal(fs.readFileSync(staged, "utf8"), userText);
+  });
+}
 
 test("pending ownership recovers before and after the atomic config edit", async t => {
   for (const statePoint of ["before-edit", "after-edit"]) {

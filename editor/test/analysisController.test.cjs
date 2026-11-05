@@ -48,7 +48,7 @@ function event() {
 }
 async function setup(t, config = 'schema="schema.graphql"\n', { deferCleanup = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-controller-"));
-  const cleanup = () => fs.rm(root, { recursive: true, force: true });
+  const cleanup = () => fs.rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
   if (!deferCleanup) t.after(cleanup);
   await fs.writeFile(path.join(root, "schema.graphql"), "type Query { title: String }");
   await fs.writeFile(path.join(root, "pyproject.toml"), `[tool.graphql-desk]\n${config}schema_output="graphql_desk_generated/default.pyi"\n`);
@@ -584,6 +584,92 @@ test("only exact owned config replacement temp paths and hashes are ignored by t
   assert.equal(invalidations, 5, "An unregistered GraphQL Desk-shaped temp path remains a visible source change");
 });
 
+test("delayed owned config temp deletion preserves fresh artifacts after an interpreter reset", async t => {
+  for (const phase of ["commit", "cancel"]) await t.test(phase, async t => {
+    const fixture = await setup(t);
+    let invalidations = 0;
+    const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+    t.after(() => controller.dispose());
+    const snapshot = controller.snapshot(fixture.main);
+    const previous = await controller.artifacts(snapshot);
+    assert.ok(previous);
+    pythonApi(fixture);
+    fixture.interpreter("");
+    fixture.events.onDidChangeConfiguration.fire({ affectsConfiguration: name => name === "graphqlDesk" });
+    const fresh = await controller.artifacts(snapshot);
+    assert.ok(fresh);
+    assert.equal(previous.isCurrent(), false);
+    assert.equal(fresh.isCurrent(), true);
+    const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+    const file = path.join(fixture.root, "pyrightconfig.json");
+    const original = '{"stubPath":"typings"}\n';
+    const updated = '{"stubPath":".graphql-desk/live-typings"}\n';
+    await fs.writeFile(file, original);
+    const previousHash = createHash("sha256").update(original).digest("hex");
+    const nextHash = createHash("sha256").update(updated).digest("hex");
+    const temporaryPath = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+    controller.markOwnedProjectConfig(file, previousHash);
+    t.mock.timers.enable({ apis: ["setTimeout"], now: 1000 });
+    assert.equal(controller.trackOwnedProjectConfigWrite(file, nextHash, { phase: "begin", previousHash, temporaryPath }), true);
+    await fs.writeFile(temporaryPath, updated);
+    watcher.fire(Uri.file(temporaryPath));
+    if (phase === "commit") await fs.rename(temporaryPath, file);
+    else await fs.unlink(temporaryPath);
+    assert.equal(controller.trackOwnedProjectConfigWrite(file, phase === "commit" ? nextHash : null, { phase }), true);
+    t.mock.timers.tick(5001);
+    const beforeDelete = invalidations;
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeDelete, "A delayed delete from the exact finished transaction must not restart analysis");
+    assert.equal(fresh.isCurrent(), true, "The new interpreter's artifacts remain eligible for selection");
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeDelete, "Duplicate delayed deletes remain deduplicated");
+    await fs.writeFile(temporaryPath, "foreign replacement\n");
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeDelete + 1, "Recreated foreign bytes remain source changes");
+    await fs.unlink(temporaryPath);
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeDelete + 2, "Deleting the foreign replacement is observed");
+    if (phase === "cancel") {
+      for (let index = 0; index < 520; index += 1) watcher.fire(Uri.file(path.join(fixture.root, `foreign-${index}.tmp`)));
+      const afterEviction = invalidations;
+      watcher.fire(Uri.file(temporaryPath));
+      assert.equal(invalidations, afterEviction + 1, "Evicted cleanup fingerprints revert to conservative invalidation");
+    }
+  });
+});
+
+test("finished config transactions do not exempt existing, unreadable or unregistered temp paths", async t => {
+  for (const kind of ["foreign bytes", "matching bytes", "unreadable", "unregistered"]) await t.test(kind, async t => {
+    const fixture = await setup(t);
+    let invalidations = 0;
+    const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+    t.after(() => controller.dispose());
+    const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+    const file = path.join(fixture.root, "pyrightconfig.json");
+    const temporaryPath = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+    const previousHash = createHash("sha256").update("previous").digest("hex");
+    const nextHash = createHash("sha256").update("owned bytes").digest("hex");
+    if (kind !== "unregistered") {
+      assert.equal(controller.trackOwnedProjectConfigWrite(file, nextHash, { phase: "begin", previousHash, temporaryPath }), true);
+      await fs.writeFile(temporaryPath, kind === "foreign bytes" ? "foreign bytes" : "owned bytes");
+    }
+    if (kind === "unreadable") {
+      const fsSync = require("node:fs");
+      const lstat = fsSync.lstatSync;
+      const blocked = t.mock.method(fsSync, "lstatSync", filename => {
+        if (path.resolve(filename) === path.resolve(temporaryPath)) throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+        return lstat(filename);
+      });
+      controller.trackOwnedProjectConfigWrite(file, null, { phase: "cancel" });
+      blocked.mock.restore();
+      await fs.unlink(temporaryPath);
+    } else controller.trackOwnedProjectConfigWrite(file, null, { phase: "cancel" });
+    const beforeEvent = invalidations;
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeEvent + 1, `${kind} must remain a source change after cancellation`);
+  });
+});
+
 test("only the active workspace TOML stubPath ownership is forwarded to Python analysis", async t => {
   const fixture = await setup(t);
   const requests = [];
@@ -721,6 +807,161 @@ test("duplicate watcher reports for identical schema bytes cause one refresh, ch
   workspaceWatcher.fire(schemaUri);
   schemaWatcher.fire(schemaUri);
   assert.equal(invalidations, 2, "A different schema fingerprint remains a new refresh");
+});
+
+for (const kind of ["artifact", "generation manifest", "generation directory"]) {
+  test(`repeated owned ${kind} deletions preserve analysis without hiding foreign replacements`, async t => {
+    const fixture = await setup(t);
+    let invalidations = 0;
+    const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+    t.after(() => controller.dispose());
+    const snapshot = controller.snapshot(fixture.main);
+    const bundle = await controller.analyze(snapshot);
+    assert.ok(bundle);
+    const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+    const generation = path.join(fixture.root, ".graphql-desk", "typings", "generations", "g-1-00000000-0000-0000-0000-000000000001");
+    const filename = kind === "generation directory" ? generation : kind === "generation manifest"
+      ? path.join(generation, "complete.json")
+      : path.join(fixture.root, ".graphql-desk", "typings", "graphql_desk_generated", "default.pyi");
+    const resource = Uri.file(filename);
+    const writeOwned = async () => {
+      await fs.mkdir(path.dirname(filename), { recursive: true });
+      if (kind === "generation directory") await fs.mkdir(filename);
+      else await fs.writeFile(filename, kind === "artifact"
+        ? renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "class Generated: ...\n")
+        : JSON.stringify({ owner: "graphql-desk-analysis-generation" }));
+    };
+    const removeOwned = () => kind === "generation directory" ? fs.rmdir(filename) : fs.unlink(filename);
+    // A foreign artifact directory exercises the unreadable/unfingerprintable file case too.
+    const writeForeign = () => kind === "artifact" ? fs.mkdir(filename) : fs.writeFile(filename, "user bytes\n");
+    const removeForeign = () => kind === "artifact" ? fs.rmdir(filename) : fs.unlink(filename);
+    const reportMissing = () => { for (let repeat = 0; repeat < 3; repeat += 1) watcher.fire(resource); };
+
+    await writeOwned(); watcher.fire(resource);
+    await removeOwned(); reportMissing();
+    assert.equal(invalidations, 0, "All repeated missing reports for a verified owned output are ignored");
+    assert.equal(await controller.isCurrent(bundle, snapshot), true, "Cleanup must not stale the publication's capture");
+
+    await writeForeign(); watcher.fire(resource);
+    assert.equal(invalidations, 1, "A foreign recreation must invalidate despite the cached missing fingerprint");
+    await removeForeign(); reportMissing();
+    assert.equal(invalidations, 2, "Deleting the foreign recreation is a new change, not an old owned deletion");
+
+    await writeOwned(); watcher.fire(resource);
+    assert.equal(invalidations, 2, "A verified owned recreation remains an output");
+    await removeOwned(); reportMissing();
+    assert.equal(invalidations, 2, "The recreated owned output can be cleaned up repeatedly again");
+
+    await writeOwned(); watcher.fire(resource);
+    await removeOwned(); await writeForeign(); watcher.fire(resource);
+    assert.equal(invalidations, 3, "A coalesced foreign replacement revokes the previous ownership");
+    await removeForeign(); reportMissing();
+    assert.equal(invalidations, 4, "The foreign replacement's deletion must not consume stale ownership");
+  });
+}
+
+test("clean generated document notifications after owned cleanup preserve fresh analysis", async t => {
+  const fixture = await setup(t);
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+  t.after(() => controller.dispose());
+  const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+  const filename = path.join(fixture.root, ".graphql-desk", "typings", "graphql_desk_generated", "default.pyi");
+  const bytes = renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "class Generated: ...\n");
+  await fs.mkdir(path.dirname(filename), { recursive: true });
+  await fs.writeFile(filename, bytes);
+  watcher.fire(Uri.file(filename));
+  const document = fixture.document(path.relative(fixture.root, filename), bytes.toString("utf8"));
+  await fs.unlink(filename);
+  watcher.fire(document.uri);
+  for (const name of ["onDidOpenTextDocument", "onDidSaveTextDocument", "onDidCloseTextDocument"]) {
+    fixture.events[name].fire(document);
+  }
+  fixture.events.onDidChangeTextDocument.fire({ document, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
+  assert.equal(invalidations, 0, "Delayed clean editor events must not turn owned cleanup into a source edit");
+  document.isDirty = true;
+  fixture.events.onDidChangeTextDocument.fire({ document, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
+  assert.equal(invalidations, 1, "Unsaved edits to a deleted generated document still invalidate analysis");
+  document.isDirty = false;
+  await fs.writeFile(filename, "class UserOwned: ...\n");
+  fixture.events.onDidOpenTextDocument.fire(document);
+  assert.equal(invalidations, 2, "A foreign recreation is observed even before its watcher event arrives");
+  await fs.unlink(filename);
+  watcher.fire(document.uri);
+  fixture.events.onDidCloseTextDocument.fire(document);
+  assert.equal(invalidations, 4, "Foreign deletion must not inherit the former generated document exemption");
+  await fs.writeFile(filename, bytes);
+  fixture.events.onDidOpenTextDocument.fire(document);
+  await fs.unlink(filename);
+  watcher.fire(document.uri);
+  fixture.events.onDidCloseTextDocument.fire(document);
+  assert.equal(invalidations, 4, "A verified document recreation resets an earlier generic missing fingerprint");
+});
+
+test("unobserved output deletion still invalidates and owned-delete bookkeeping stays bounded", async t => {
+  const fixture = await setup(t);
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+  t.after(() => controller.dispose());
+  const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+  const filename = path.join(fixture.root, ".graphql-desk", "typings", "graphql_desk_generated", "default.pyi");
+  const resource = Uri.file(filename);
+  await fs.mkdir(path.dirname(filename), { recursive: true });
+  const ownedBytes = renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "class Generated: ...\n");
+  await fs.writeFile(filename, ownedBytes);
+  await fs.unlink(filename);
+  watcher.fire(resource); watcher.fire(resource);
+  assert.equal(invalidations, 1, "Missing files whose creation was never observed cannot be assumed owned");
+
+  await fs.writeFile(filename, ownedBytes); watcher.fire(resource);
+  await fs.unlink(filename); watcher.fire(resource); watcher.fire(resource);
+  assert.equal(invalidations, 1, "An observed owned recreation can be deleted without invalidating");
+  await fs.writeFile(filename, "class UserOwned: ...\n"); watcher.fire(resource);
+  assert.equal(invalidations, 2, "Recreated unowned bytes replace the cached missing fingerprint");
+  await fs.writeFile(filename, "class UserChanged: ...\n"); watcher.fire(resource);
+  assert.equal(invalidations, 3, "Further foreign-byte changes remain observed");
+  await fs.unlink(filename); watcher.fire(resource); watcher.fire(resource);
+  assert.equal(invalidations, 4, "Foreign deletion remains a new change after an owned path was reused");
+  await fs.writeFile(filename, ownedBytes); watcher.fire(resource);
+  await fs.unlink(filename); watcher.fire(resource); watcher.fire(resource);
+  assert.equal(invalidations, 4);
+  for (let index = 0; index < 513; index += 1) watcher.fire(Uri.file(path.join(fixture.root, `missing-${index}.txt`)));
+  assert.equal(invalidations, 517);
+  watcher.fire(resource);
+  assert.equal(invalidations, 518, "Eviction conservatively invalidates rather than retaining owned-delete tombstones forever");
+  watcher.fire(resource);
+  assert.equal(invalidations, 518, "The evicted path is deduplicated again after its conservative invalidation");
+});
+
+test("ownership metadata staging does not invalidate analysis after generation selection", async t => {
+  const fixture = await setup(t);
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+  t.after(() => controller.dispose());
+  const root = path.join(fixture.root, ".graphql-desk", "live-typings");
+  await fs.mkdir(root, { recursive: true });
+  fixture.stubPath(path.relative(fixture.root, path.join(root, "generations", "g-3-123e4567-e89b-12d3-a456-426614174000")));
+  const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+  const filename = path.join(root, ".graphql-desk-owner-123e4567-e89b-12d3-a456-426614174000.tmp");
+  const resource = Uri.file(filename);
+  for (const text of ["", '{"phase":"rotate"}\n']) {
+    await fs.writeFile(filename, text);
+    watcher.fire(resource);
+    fixture.events.onDidOpenTextDocument.fire({ uri: resource });
+  }
+  await fs.unlink(filename);
+  watcher.fire(resource);
+  watcher.fire(resource);
+  fixture.events.onDidCloseTextDocument.fire({ uri: resource });
+  assert.equal(invalidations, 0, "Ownership-file staging is control metadata outside the selected generation");
+  for (const foreign of [path.join(root, ".graphql-desk-123e4567-e89b-12d3-a456-426614174000.tmp"),
+    path.join(root, ".graphql-desk-owner-not-a-uuid.tmp"),
+    path.join(fixture.root, path.basename(filename))]) {
+    const before = invalidations;
+    await fs.writeFile(foreign, "user temporary content\n");
+    watcher.fire(Uri.file(foreign));
+    assert.equal(invalidations, before + 1, "Unrelated, malformed and out-of-root temporary files remain observable");
+  }
 });
 
 test("workspace folder watchers follow additions and removals and refresh closed source/config changes", async t => {
@@ -1237,7 +1478,18 @@ test("opt-in polling reuses authenticated refresh, retains source-edit deadlines
   let environment = { TOKEN: "FIRST_PRIVATE" };
   let changes = 0;
   const reports = [];
-  const controller = createAnalysisController(fixture.vscode, { environment: () => environment, changed: () => { changes += 1; }, report: value => reports.push(value) });
+  const pollReplies = [];
+  const controller = createAnalysisController(fixture.vscode, { environment: () => environment, changed: () => { changes += 1; }, report: value => reports.push(value),
+    workerFactory: options => {
+      const worker = createAnalysisWorker(options);
+      return { ...worker, async request(message, settings) {
+        const reply = await worker.request(message, settings);
+        if (message.op === "refresh" || message.op === "analyze") pollReplies.push({ op: message.op,
+          status: reply.status, schemas: reply.request?.schemas?.length,
+          unavailable: reply.unavailable_schemas?.length });
+        return reply;
+      } };
+    } });
   t.after(() => controller.dispose());
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
   const snapshot = () => controller.snapshot(fixture.main);
@@ -1251,7 +1503,8 @@ test("opt-in polling reuses authenticated refresh, retains source-edit deadlines
   await eventually(() => changes === 2);
   assert.ok(headers.length > 0);
   assert.ok(headers.every(value => value === "FIRST_PRIVATE"));
-  assert.equal((await controller.analyze(snapshot())).request.schemas.length, 1);
+  const firstPolled = await controller.analyze(snapshot());
+  assert.equal(firstPolled.request.schemas.length, 1, JSON.stringify(pollReplies));
   assert.deepEqual(reports, [], "Automatic refreshes do not display periodic notifications");
   const first = headers.length;
   environment = { TOKEN: "SECOND_PRIVATE" };

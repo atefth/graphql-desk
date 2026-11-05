@@ -242,6 +242,126 @@ class EditorWorkerTests(unittest.TestCase):
         self.assertEqual(released["extra_paths"], ["vendor"])
         self.assertIn("# keep this comment", cast(str, released["text"]))
 
+    def test_pyproject_custom_stubs_preserve_explicit_environment_search_paths(
+        self,
+    ) -> None:
+        text = (
+            "# user comment\n[tool.pyright]\n"
+            'stubPath="custom-stubs"\nextraPaths=["vendor"]\n'
+            '[[tool.pyright.executionEnvironments]]\nroot="src"\n'
+            'extraPaths=["environment-vendor"] # keep\n'
+            '[[tool.pyright.executionEnvironments]]\nroot="existing"\n'
+            'extraPaths=["custom-stubs","keep"]\n'
+            '[[tool.pyright.executionEnvironments]]\nroot="empty"\nextraPaths=[]\n'
+            '[[tool.pyright.executionEnvironments]]\nroot="inherited"\n'
+        )
+        base = {
+            "op": "pyright_config",
+            "workspace": str(Path.cwd().resolve()),
+            "managed_path": ".graphql-desk/live-typings",
+        }
+        ownership = {
+            "top_level": False,
+            "execution_environment_roots": ["src", "empty"],
+            "expected_stub_path_present": True,
+            "expected_stub_path": "custom-stubs",
+            "custom_stub_path": "custom-stubs",
+            "custom_stub_path_added": True,
+            "remove_extra_paths_key": False,
+        }
+        prepare = {
+            **ownership,
+            "remove_managed_paths": False,
+            "legacy_top_level": False,
+            "legacy_execution_environment_roots": [],
+        }
+        prepared = EditorWorker().handle(
+            {
+                **base,
+                "action": "prepare_stub_path",
+                "text": text,
+                "ownership": prepare,
+            }
+        )
+        self.assertTrue(prepared["ok"], prepared)
+        environments = cast(list[dict[str, object]], prepared["execution_environments"])
+        self.assertEqual(
+            [environment["extra_paths"] for environment in environments],
+            [
+                ["environment-vendor", "custom-stubs"],
+                ["custom-stubs", "keep"],
+                ["custom-stubs"],
+                [],
+            ],
+        )
+        self.assertFalse(environments[-1]["has_extra_paths"])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for directory in ("src", "custom-stubs", "environment-vendor"):
+                (root / directory).mkdir()
+            (root / "custom-stubs" / "legacy.pyi").write_text(
+                "def existing() -> str: ...\n", encoding="utf-8"
+            )
+            (root / "environment-vendor" / "legacy.py").write_text(
+                'def existing() -> object:\n    return "runtime"\n', encoding="utf-8"
+            )
+            consumer = root / "src" / "consumer.py"
+            consumer.write_text(
+                "from legacy import existing\nvalue: str = existing()\n",
+                encoding="utf-8",
+            )
+            for configuration in (text, cast(str, prepared["text"])):
+                (root / "pyproject.toml").write_text(configuration, encoding="utf-8")
+                checked = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "pyright",
+                        "--pythonpath",
+                        sys.executable,
+                        str(consumer),
+                    ],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        released = EditorWorker().handle(
+            {
+                **base,
+                "action": "release_stub_path",
+                "text": prepared["text"],
+                "ownership": {
+                    **ownership,
+                    "expected_stub_path": ".graphql-desk/live-typings",
+                    "original_stub_path_present": True,
+                    "original_stub_path": "custom-stubs",
+                },
+            }
+        )
+        self.assertTrue(released["ok"], released)
+        restored = cast(list[dict[str, object]], released["execution_environments"])
+        self.assertEqual(
+            [environment["extra_paths"] for environment in restored],
+            [["environment-vendor"], ["custom-stubs", "keep"], [], []],
+        )
+        self.assertTrue(restored[2]["has_extra_paths"])
+        self.assertFalse(restored[3]["has_extra_paths"])
+        self.assertIn("# user comment", cast(str, released["text"]))
+        self.assertIn("# keep", cast(str, released["text"]))
+        for roots in (["src", "src"], ["missing"], ["existing"]):
+            with self.subTest(roots=roots):
+                invalid = EditorWorker().handle(
+                    {
+                        **base,
+                        "action": "prepare_stub_path",
+                        "text": text,
+                        "ownership": {**prepare, "execution_environment_roots": roots},
+                    }
+                )
+                self.assertFalse(invalid["ok"], invalid)
+
     def test_worker_accepts_exact_owned_pyproject_stub_rotation(
         self,
     ) -> None:
