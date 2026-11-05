@@ -1237,7 +1237,18 @@ test("opt-in polling reuses authenticated refresh, retains source-edit deadlines
   let environment = { TOKEN: "FIRST_PRIVATE" };
   let changes = 0;
   const reports = [];
-  const controller = createAnalysisController(fixture.vscode, { environment: () => environment, changed: () => { changes += 1; }, report: value => reports.push(value) });
+  const pollReplies = [];
+  const controller = createAnalysisController(fixture.vscode, { environment: () => environment, changed: () => { changes += 1; }, report: value => reports.push(value),
+    workerFactory: options => {
+      const worker = createAnalysisWorker(options);
+      return { ...worker, async request(message, settings) {
+        const reply = await worker.request(message, settings);
+        if (message.op === "refresh" || message.op === "analyze") pollReplies.push({ op: message.op,
+          status: reply.status, schemas: reply.request?.schemas?.length,
+          unavailable: reply.unavailable_schemas?.length });
+        return reply;
+      } };
+    } });
   t.after(() => controller.dispose());
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
   const snapshot = () => controller.snapshot(fixture.main);
@@ -1251,7 +1262,8 @@ test("opt-in polling reuses authenticated refresh, retains source-edit deadlines
   await eventually(() => changes === 2);
   assert.ok(headers.length > 0);
   assert.ok(headers.every(value => value === "FIRST_PRIVATE"));
-  assert.equal((await controller.analyze(snapshot())).request.schemas.length, 1);
+  const firstPolled = await controller.analyze(snapshot());
+  assert.equal(firstPolled.request.schemas.length, 1, JSON.stringify(pollReplies));
   assert.deepEqual(reports, [], "Automatic refreshes do not display periodic notifications");
   const first = headers.length;
   environment = { TOKEN: "SECOND_PRIVATE" };
