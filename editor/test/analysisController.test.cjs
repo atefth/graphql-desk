@@ -1120,10 +1120,11 @@ test("source polling handles initial disappearance, refuses redirection and clea
   reject = false;
   assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
   const filename = fixture.main.uri.fsPath.toLowerCase();
+  const inputUri = process.platform === "win32" ? Uri.file(filename).toString() : fixture.main.uri.toString();
   const listener = active.get(filename);
   await fs.unlink(fixture.main.uri.fsPath);
   listener({ nlink: 0n }, { nlink: 0n });
-  assert.deepEqual(changes, [Uri.file(filename).toString()], "A discovered disk source disappearing before the first stat still invalidates");
+  assert.deepEqual(changes, [inputUri], "A discovered disk source disappearing before the first stat still invalidates");
   const realpath = disk.realpathSync.native;
   t.mock.method(disk.realpathSync, "native", value => value.toLowerCase() === filename
     ? path.resolve(fixture.root, "..", "redirected.py") : realpath(value));
@@ -1131,7 +1132,7 @@ test("source polling handles initial disappearance, refuses redirection and clea
   const readFile = disk.readFileSync;
   t.mock.method(disk, "readFileSync", (...args) => { reads.push(args[0]); return readFile(...args); });
   listener({ nlink: 0n }, { nlink: 0n });
-  assert.deepEqual(changes, [Uri.file(filename).toString(), null], "Redirected input requests a new capture without trusting its contents");
+  assert.deepEqual(changes, [inputUri, null], "Redirected input requests a new capture without trusting its contents");
   assert.deepEqual(reads, [], "The disk-event fingerprint must not read a redirected file");
   assert.equal(active.size, 0);
   listener();
