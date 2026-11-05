@@ -860,6 +860,38 @@ for (const kind of ["artifact", "generation manifest", "generation directory"]) 
   });
 }
 
+test("clean generated document notifications after owned cleanup preserve fresh analysis", async t => {
+  const fixture = await setup(t);
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+  t.after(() => controller.dispose());
+  const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+  const filename = path.join(fixture.root, ".graphql-desk", "typings", "graphql_desk_generated", "default.pyi");
+  const bytes = renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "class Generated: ...\n");
+  await fs.mkdir(path.dirname(filename), { recursive: true });
+  await fs.writeFile(filename, bytes);
+  watcher.fire(Uri.file(filename));
+  const document = fixture.document(path.relative(fixture.root, filename), bytes.toString("utf8"));
+  await fs.unlink(filename);
+  watcher.fire(document.uri);
+  for (const name of ["onDidOpenTextDocument", "onDidSaveTextDocument", "onDidCloseTextDocument"]) {
+    fixture.events[name].fire(document);
+  }
+  fixture.events.onDidChangeTextDocument.fire({ document, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
+  assert.equal(invalidations, 0, "Delayed clean editor events must not turn owned cleanup into a source edit");
+  document.isDirty = true;
+  fixture.events.onDidChangeTextDocument.fire({ document, contentChanges: [{ rangeOffset: 0, rangeLength: 1 }] });
+  assert.equal(invalidations, 1, "Unsaved edits to a deleted generated document still invalidate analysis");
+  document.isDirty = false;
+  await fs.writeFile(filename, "class UserOwned: ...\n");
+  fixture.events.onDidOpenTextDocument.fire(document);
+  assert.equal(invalidations, 2, "A foreign recreation is observed even before its watcher event arrives");
+  await fs.unlink(filename);
+  watcher.fire(document.uri);
+  fixture.events.onDidCloseTextDocument.fire(document);
+  assert.equal(invalidations, 4, "Foreign deletion must not inherit the former generated document exemption");
+});
+
 test("unobserved output deletion still invalidates and owned-delete bookkeeping stays bounded", async t => {
   const fixture = await setup(t);
   let invalidations = 0;

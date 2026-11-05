@@ -247,11 +247,11 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     return state;
   }
-  function rememberDiskFingerprint(filename, fingerprint) {
+  function rememberDiskFingerprint(filename, fingerprint, ownedDeletion = false) {
     const previous = recentDiskInvalidations.get(filename);
     if (fingerprint === undefined) { recentDiskInvalidations.delete(filename); return false; }
     if (previous?.fingerprint === fingerprint) return true;
-    recentDiskInvalidations.set(filename, { fingerprint });
+    recentDiskInvalidations.set(filename, { fingerprint, ownedDeletion });
     if (recentDiskInvalidations.size > 512) {
       const oldest = [...recentDiskInvalidations.keys()].slice(0, 128);
       for (const key of oldest) recentDiskInvalidations.delete(key);
@@ -261,7 +261,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   function ignoreOwnedDeletion(filename, ownedPaths) {
     if (!ownedPaths.delete(filename)) return false;
     // Keep duplicate cleanup reports in the same bounded cache as other disk events.
-    rememberDiskFingerprint(filename, "missing");
+    rememberDiskFingerprint(filename, "missing", true);
     return true;
   }
   function finishOwnedConfigWrite(key, fingerprint) {
@@ -927,6 +927,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (filename && analysisGenerationStagingFile(filename)) return;
       if (filename && document?.uri?.scheme === "file" &&
           [".py", ".pyi", ".typed"].includes(path.extname(filename).toLowerCase())) {
+        // Pylance can close a clean generated document after its owned file was removed.
+        if (!document.isDirty && recentDiskInvalidations.get(filename)?.ownedDeletion) {
+          try { fs.lstatSync(filename); }
+          catch (error) {
+            if (error.code === "ENOENT") return;
+          }
+          recentDiskInvalidations.delete(filename);
+        }
         const folder = (vscode.workspace.workspaceFolders ?? []).find(item => item.uri.scheme === "file" &&
           inside(canonical(item.uri.fsPath), filename));
         if (verifiedManagedArtifactDocument(folder, filename)) {
