@@ -399,7 +399,11 @@ function readFileSafe(vscode, workspace, file) {
   }
 }
 
-function atomicReplace(vscode, workspace, file, text, expected, expectedHash, temporaryPath) {
+async function atomicReplace(vscode, workspace, file, text, expected, expectedHash, temporaryPath) {
+  const initialOwner = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file));
+  if (!vscode.workspace.isTrusted || !initialOwner || normalized(initialOwner.uri.fsPath) !== normalized(workspace)) {
+    throw new Error("Trusted file workspace required; preserved");
+  }
   const targetStat = safeIdentity(file);
   if (!same(targetStat, expected) || targetStat.size > MAX_CONFIG_BYTES ||
       createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== expectedHash) {
@@ -408,23 +412,36 @@ function atomicReplace(vscode, workspace, file, text, expected, expectedHash, te
   if (vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.scheme === "file" &&
       normalized(document.uri.fsPath) === normalized(file))) throw new Error("Dirty Pyright config buffer; preserved");
   const temporary = temporaryPath ?? path.join(path.dirname(file), `.graphql-desk-${randomUUID()}.tmp`);
+  const workspaceIdentity = safeIdentity(workspace, true);
+  const bytes = Buffer.from(text, "utf8");
+  const nextHash = createHash("sha256").update(bytes).digest("hex");
   let created;
   try {
     const descriptor = fs.openSync(temporary, "wx");
-    try { created = fs.fstatSync(descriptor); fs.writeFileSync(descriptor, Buffer.from(text, "utf8")); fs.fsyncSync(descriptor); }
+    try { created = fs.fstatSync(descriptor); fs.writeFileSync(descriptor, bytes); fs.fsyncSync(descriptor); }
     finally { fs.closeSync(descriptor); }
-    const current = safeIdentity(file);
-    if (!same(expected, current) || createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== expectedHash ||
-        !same(created, fs.lstatSync(temporary))) throw new Error("Pyright config changed concurrently; preserved");
-    const owner = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file));
-    if (!owner || normalized(owner.uri.fsPath) !== normalized(workspace)) throw new Error("Pyright config workspace changed; preserved");
-    fs.renameSync(temporary, file);
+    for (let attempt = 0; ; attempt += 1) {
+      if (!vscode.workspace.isTrusted) throw new Error("Trusted file workspace required; preserved");
+      const owner = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file));
+      if (!owner || normalized(owner.uri.fsPath) !== normalized(workspace) ||
+          !same(workspaceIdentity, safeIdentity(workspace, true))) throw new Error("Pyright config workspace changed; preserved");
+      const current = readFileSafe(vscode, workspace, file);
+      const staged = readFileSafe(vscode, workspace, temporary);
+      if (!same(expected, current.identity) || current.hash !== expectedHash ||
+          !same(created, staged.identity) || staged.hash !== nextHash) throw new Error("Pyright config changed concurrently; preserved");
+      try { fs.renameSync(temporary, file); break; }
+      catch (error) {
+        if (attempt === 3 || !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+        await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
     const updated = safeIdentity(file);
     if (updated.size > MAX_CONFIG_BYTES || fs.readFileSync(file, "utf8") !== text) throw new Error("Pyright config update could not be verified");
   } catch (error) {
     try {
       const current = fs.lstatSync(temporary);
-      if (created && !current.isSymbolicLink() && same(created, current)) fs.unlinkSync(temporary);
+      if (created && !current.isSymbolicLink() && same(created, current) && current.size === bytes.length &&
+          same(workspaceIdentity, safeIdentity(workspace, true)) && fs.readFileSync(temporary).equals(bytes)) fs.unlinkSync(temporary);
     } catch { /* Preserve any temporary path that is no longer verified as ours. */ }
     throw error;
   }
@@ -438,7 +455,7 @@ async function atomicReplaceOwnedConfig(vscode, workspace, file, text, snapshot,
     throw new Error("GraphQL Desk could not establish Pyright config write ownership; preserved");
   }
   try {
-    atomicReplace(vscode, workspace, file, text, snapshot.identity, snapshot.hash, temporaryPath);
+    await atomicReplace(vscode, workspace, file, text, snapshot.identity, snapshot.hash, temporaryPath);
   } catch (error) {
     onOwnedWrite(file, null, { phase: "cancel" });
     throw error;

@@ -221,6 +221,73 @@ test("an in-place TOML edit during the async worker call is preserved", async t 
   assert.equal(fs.readFileSync(file, "utf8"), `${original}# concurrent user edit\n`);
 });
 
+test("config replacement retries a transient Windows lock without changing write ownership", async t => {
+  const original = '{"extraPaths":["vendor"],"stubPath":"stubs"}\n';
+  const f = fixture(t, { json: original });
+  const file = path.join(f.root, "pyrightconfig.json");
+  const rename = fs.renameSync;
+  let attempts = 0;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (destination === file && attempts++ === 0) throw Object.assign(new Error("locked"), { code: "EPERM" });
+    return rename(source, destination);
+  });
+  const phases = [];
+  const result = await updateProjectConfig(f.vscode, f.folder, "add", f.worker, {}, MANAGED_PATH,
+    (_file, _hash, detail) => { phases.push(detail.phase); });
+  assert.deepEqual(result.extraPaths, ["vendor", MANAGED_PATH]);
+  assert.equal(attempts, 2);
+  assert.deepEqual(phases, ["begin", "commit"]);
+  assert.deepEqual(fs.readdirSync(f.root), ["pyrightconfig.json"]);
+});
+
+test("config replacement stops after the bounded Windows-lock retries", async t => {
+  const original = '{"extraPaths":["vendor"]}\n';
+  const f = fixture(t, { json: original });
+  const file = path.join(f.root, "pyrightconfig.json");
+  const rename = fs.renameSync;
+  let attempts = 0;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (destination !== file) return rename(source, destination);
+    attempts += 1;
+    throw Object.assign(new Error("locked"), { code: "EPERM" });
+  });
+  await assert.rejects(updateProjectConfig(f.vscode, f.folder, "add", f.worker), { code: "EPERM" });
+  assert.equal(attempts, 4);
+  assert.equal(fs.readFileSync(file, "utf8"), original);
+  assert.deepEqual(fs.readdirSync(f.root), ["pyrightconfig.json"]);
+});
+
+for (const race of ["config edit", "dirty buffer", "trust revoked", "workspace removed", "staged edit"]) {
+  test(`config replacement preserves ${race} during a Windows-lock retry`, async t => {
+    const original = '{"extraPaths":["vendor"],"stubPath":"stubs"}\n';
+    const userText = "// concurrent user edit\n" + original;
+    const f = fixture(t, { json: original });
+    const file = path.join(f.root, "pyrightconfig.json");
+    const rename = fs.renameSync;
+    let attempts = 0;
+    let staged;
+    t.mock.method(fs, "renameSync", (source, destination) => {
+      if (destination !== file) return rename(source, destination);
+      attempts += 1;
+      staged = source;
+      queueMicrotask(() => {
+        if (race === "config edit") fs.writeFileSync(file, userText);
+        else if (race === "dirty buffer") f.vscode.workspace.textDocuments.push({ isDirty: true, uri: f.vscode.Uri.file(file) });
+        else if (race === "trust revoked") f.vscode.workspace.isTrusted = false;
+        else if (race === "workspace removed") f.vscode.workspace.getWorkspaceFolder = () => undefined;
+        else fs.writeFileSync(source, userText);
+      });
+      throw Object.assign(new Error("locked"), { code: "EPERM" });
+    });
+    await assert.rejects(updateProjectConfig(f.vscode, f.folder, "add", f.worker),
+      /changed|Dirty|trusted/i);
+    assert.equal(attempts, 1, "ownership must be rechecked before another rename attempt");
+    assert.equal(fs.readFileSync(file, "utf8"), race === "config edit" ? userText : original);
+    assert.equal(fs.existsSync(staged), race === "staged edit");
+    if (race === "staged edit") assert.equal(fs.readFileSync(staged, "utf8"), userText);
+  });
+}
+
 test("pending ownership recovers before and after the atomic config edit", async t => {
   for (const statePoint of ["before-edit", "after-edit"]) {
     const original = '{"extraPaths":["vendor"],"executionEnvironments":[{"root":"src"}]}';
