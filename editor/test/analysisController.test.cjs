@@ -980,6 +980,7 @@ test("stat fallback refreshes closed sources when every VS Code watcher event is
     return unwatchFile(filename, listener);
   });
   const fixture = await setup(t);
+  const pollKey = name => path.join(disk.realpathSync.native(fixture.root), name).toLowerCase();
   const source = 'from graphql_desk import gql\nclosed = gql("{title}")\n';
   let filename = path.join(fixture.root, "closed.py");
   await fs.writeFile(filename, source);
@@ -1001,7 +1002,8 @@ test("stat fallback refreshes closed sources when every VS Code watcher event is
     await fs.rename(filename, next);
     fixture.candidates(["main.py", name]);
     await eventually(() => latest?.request.modules.some(module => module.module === path.parse(name).name));
-    assert.equal(active.has(previous.toLowerCase()), false, "Obsolete poll listeners are retired");
+    assert.equal(active.has(pollKey(path.basename(previous))), false, "Obsolete poll listeners are retired");
+    assert.ok(active.has(pollKey(name)), "The renamed source has a replacement poll");
     assert.equal(active.size, 2);
     const count = changes.length;
     broad.fire(Uri.file(previous));
@@ -1032,6 +1034,7 @@ test("source polls stay filtered through invalid config and ignore retired or un
     active.delete(filename.toLowerCase());
   });
   const fixture = await setup(t);
+  const pollKey = name => path.join(disk.realpathSync.native(fixture.root), name).toLowerCase();
   const config = path.join(fixture.root, "pyproject.toml");
   const original = await fs.readFile(config, "utf8");
   const filename = path.join(fixture.root, "closed.py");
@@ -1045,7 +1048,7 @@ test("source polls stay filtered through invalid config and ignore retired or un
   } });
   t.after(() => controller.dispose());
   assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
-  const retired = active.get(filename.toLowerCase());
+  const retired = active.get(pollKey("closed.py"));
   const schema = fixture.watchers.find(watcher => watcher.pattern.pattern === "schema.graphql");
   const broad = fixture.watchers.find(watcher => watcher.pattern.pattern === "**/*");
   await fs.writeFile(config, '[tool.graphql-desk]\nschema =\n');
@@ -1055,8 +1058,8 @@ test("source polls stay filtered through invalid config and ignore retired or un
   await fs.rename(filename, next);
   fixture.candidates(["main.py", "renamed.py"]);
   retired(); await refresh;
-  assert.equal(active.has(filename.toLowerCase()), false);
-  assert.equal(active.has(next.toLowerCase()), false, "Invalid config does not adopt new raw candidates");
+  assert.equal(active.has(pollKey("closed.py")), false);
+  assert.equal(active.has(pollKey("renamed.py")), false, "Invalid config does not adopt new raw candidates");
   assert.equal(active.size, 1);
   assert.equal(schema.disposed, false, "Existing schema repair watch is preserved");
   let count = changes;
@@ -1068,14 +1071,14 @@ test("source polls stay filtered through invalid config and ignore retired or un
   const unsaved = fixture.document("unsaved.py", 'from graphql_desk import gql\nunsaved = gql("{title}")\n');
   unsaved.isDirty = true;
   assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
-  const initiallyAbsent = active.get(unsaved.uri.fsPath.toLowerCase());
+  const initiallyAbsent = active.get(pollKey("unsaved.py"));
   count = changes;
   initiallyAbsent({ nlink: 0n }, { nlink: 0n });
   assert.equal(changes, count, "A never-saved input's initial absence is already captured");
   await fs.writeFile(unsaved.uri.fsPath, unsaved.text);
   fixture.candidates(["main.py", "renamed.py", "unsaved.py"]);
   assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
-  assert.equal(active.get(unsaved.uri.fsPath.toLowerCase()), initiallyAbsent, "Reconciliation reuses the exact listener");
+  assert.equal(active.get(pollKey("unsaved.py")), initiallyAbsent, "Reconciliation reuses the exact listener");
   await fs.unlink(unsaved.uri.fsPath);
   fixture.candidates(["main.py", "renamed.py"]);
   initiallyAbsent({ nlink: 0n }, { nlink: 0n }); await refresh;
@@ -1119,8 +1122,9 @@ test("source polling handles initial disappearance, refuses redirection and clea
   assert.equal(active.size, 0, "A failed registration cannot retain its listener");
   reject = false;
   assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
-  const filename = fixture.main.uri.fsPath.toLowerCase();
-  const inputUri = process.platform === "win32" ? Uri.file(filename).toString() : fixture.main.uri.toString();
+  const realFilename = path.join(disk.realpathSync.native(fixture.root), "main.py");
+  const filename = realFilename.toLowerCase();
+  const inputUri = Uri.file(process.platform === "win32" ? filename : realFilename).toString();
   const listener = active.get(filename);
   await fs.unlink(fixture.main.uri.fsPath);
   listener({ nlink: 0n }, { nlink: 0n });
