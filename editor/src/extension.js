@@ -758,8 +758,10 @@ function activate(context) {
   status.command = "graphqlDesk.refreshSchema";
   status.tooltip = "GraphQL Desk: refresh a remote schema; positive schema_refresh_interval enables trusted background polling. Check configuration and interpreter settings if unavailable.";
   const controller = createAnalysisController(vscode, { changed: (sourceUri, ranges) => {
+      output.appendLine(`GraphQL Desk trace: input invalidated ${sourceUri ?? "configuration"}`);
       return refreshVisible(sourceUri, true, ranges);
     },
+    trace: message => output.appendLine(`GraphQL Desk trace: ${message}`),
     configurationDiagnostics: updateConfigDiagnostics,
     status: message => {
       if (message) { status.text = `GraphQL Desk: ${message}`; status.show(); }

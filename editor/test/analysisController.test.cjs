@@ -890,6 +890,12 @@ test("clean generated document notifications after owned cleanup preserve fresh 
   watcher.fire(document.uri);
   fixture.events.onDidCloseTextDocument.fire(document);
   assert.equal(invalidations, 4, "Foreign deletion must not inherit the former generated document exemption");
+  await fs.writeFile(filename, bytes);
+  fixture.events.onDidOpenTextDocument.fire(document);
+  await fs.unlink(filename);
+  watcher.fire(document.uri);
+  fixture.events.onDidCloseTextDocument.fire(document);
+  assert.equal(invalidations, 4, "A verified document recreation resets an earlier generic missing fingerprint");
 });
 
 test("unobserved output deletion still invalidates and owned-delete bookkeeping stays bounded", async t => {

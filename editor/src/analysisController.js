@@ -77,7 +77,7 @@ function artifactRootFor(filename, selectedStubRoot) {
 }
 
 /** Captures are finite capabilities; watchers only request earlier invalidation. */
-function createAnalysisController(vscode, { workerFactory = createAnalysisWorker, environment = () => process.env, changed = () => {}, report = () => {}, status = () => {}, configurationDiagnostics = () => {} } = {}) {
+function createAnalysisController(vscode, { workerFactory = createAnalysisWorker, environment = () => process.env, changed = () => {}, report = () => {}, status = () => {}, configurationDiagnostics = () => {}, trace = () => {} } = {}) {
   let disposed = false;
   let epoch = 0;
   const states = new Map();
@@ -108,7 +108,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       reconcileSchemaWatches(state, new Set()); states.delete(root);
     }
   }
-  function clearCache(state) {
+  function clearCache(state, reason) {
+    if (state.cached) {
+      try { trace(`analysis cache cleared: ${reason}`); } catch { /* Logging must not affect freshness. */ }
+    }
     state.cached = null;
   }
   const selectedKey = selected => selected && typeof selected.id === "string" && selected.id && typeof selected.path === "string" && selected.path ? JSON.stringify([selected.id, selected.path]) : null;
@@ -939,6 +942,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           inside(canonical(item.uri.fsPath), filename));
         if (verifiedManagedArtifactDocument(folder, filename)) {
           ownedAnalysisPaths.add(filename);
+          recentDiskInvalidations.delete(filename);
           if (!(event === "onDidChangeTextDocument" && document.isDirty)) return;
         }
       }
