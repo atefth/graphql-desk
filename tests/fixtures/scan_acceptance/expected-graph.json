@@ -1,0 +1,406 @@
+{
+  "nodes": [
+    {
+      "id": "fragment:project:default:fragment:OrphanChild",
+      "kind": "fragment",
+      "label": "OrphanChild"
+    },
+    {
+      "id": "fragment:project:default:fragment:OrphanParent",
+      "kind": "fragment",
+      "label": "OrphanParent"
+    },
+    {
+      "id": "fragment:project:default:fragment:UserFields",
+      "kind": "fragment",
+      "label": "UserFields"
+    },
+    {
+      "id": "fragment:project:default:fragment:UserIdentity",
+      "kind": "fragment",
+      "label": "UserIdentity"
+    },
+    {
+      "id": "module:app",
+      "kind": "module",
+      "label": "app.py"
+    },
+    {
+      "id": "module:broken",
+      "kind": "module",
+      "label": "broken.py"
+    },
+    {
+      "id": "module:features",
+      "kind": "module",
+      "label": "features/__init__.py"
+    },
+    {
+      "id": "module:features.admin",
+      "kind": "module",
+      "label": "features/admin/__init__.py"
+    },
+    {
+      "id": "module:features.admin.queries",
+      "kind": "module",
+      "label": "features/admin/queries.py"
+    },
+    {
+      "id": "module:features.profile",
+      "kind": "module",
+      "label": "features/profile/__init__.py"
+    },
+    {
+      "id": "module:features.profile.queries",
+      "kind": "module",
+      "label": "features/profile/queries.py"
+    },
+    {
+      "id": "module:features.shared",
+      "kind": "module",
+      "label": "features/shared/__init__.py"
+    },
+    {
+      "id": "module:features.shared.fragments",
+      "kind": "module",
+      "label": "features/shared/fragments.py"
+    },
+    {
+      "id": "module:features.users",
+      "kind": "module",
+      "label": "features/users/__init__.py"
+    },
+    {
+      "id": "module:features.users.queries",
+      "kind": "module",
+      "label": "features/users/queries.py"
+    },
+    {
+      "id": "module:features.users.routes",
+      "kind": "module",
+      "label": "features/users/routes.py"
+    },
+    {
+      "id": "operation:project:admin:query:AdminDashboard",
+      "kind": "operation",
+      "label": "AdminDashboard"
+    },
+    {
+      "id": "operation:project:default:query:Profile",
+      "kind": "operation",
+      "label": "Profile"
+    },
+    {
+      "id": "operation:project:default:query:Simple",
+      "kind": "operation",
+      "label": "Simple"
+    },
+    {
+      "id": "operation:project:default:query:UserCard",
+      "kind": "operation",
+      "label": "UserCard"
+    },
+    {
+      "id": "operation:project:default:query:Users",
+      "kind": "operation",
+      "label": "Users"
+    },
+    {
+      "id": "schemaField:admin:Query.users",
+      "kind": "schemaField",
+      "label": "Query.users: [User!]!"
+    },
+    {
+      "id": "schemaField:admin:User.id",
+      "kind": "schemaField",
+      "label": "User.id: ID!"
+    },
+    {
+      "id": "schemaField:default:Query.user",
+      "kind": "schemaField",
+      "label": "Query.user: User!"
+    },
+    {
+      "id": "schemaField:default:Query.users",
+      "kind": "schemaField",
+      "label": "Query.users: [User!]!"
+    },
+    {
+      "id": "schemaField:default:User.deprecatedOnly",
+      "kind": "schemaField",
+      "label": "User.deprecatedOnly: String"
+    },
+    {
+      "id": "schemaField:default:User.id",
+      "kind": "schemaField",
+      "label": "User.id: ID!"
+    },
+    {
+      "id": "schemaField:default:User.legacy",
+      "kind": "schemaField",
+      "label": "User.legacy: String"
+    },
+    {
+      "id": "schemaField:default:User.name",
+      "kind": "schemaField",
+      "label": "User.name: String!"
+    },
+    {
+      "id": "schemaType:admin:Query",
+      "kind": "schemaType",
+      "label": "Query"
+    },
+    {
+      "id": "schemaType:admin:User",
+      "kind": "schemaType",
+      "label": "User"
+    },
+    {
+      "id": "schemaType:default:Query",
+      "kind": "schemaType",
+      "label": "Query"
+    },
+    {
+      "id": "schemaType:default:User",
+      "kind": "schemaType",
+      "label": "User"
+    }
+  ],
+  "edges": [
+    {
+      "from": "fragment:project:default:fragment:OrphanChild",
+      "to": "schemaField:default:User.deprecatedOnly",
+      "kind": "selects"
+    },
+    {
+      "from": "fragment:project:default:fragment:OrphanChild",
+      "to": "schemaType:default:User",
+      "kind": "onType"
+    },
+    {
+      "from": "fragment:project:default:fragment:OrphanParent",
+      "to": "fragment:project:default:fragment:OrphanChild",
+      "kind": "spreads"
+    },
+    {
+      "from": "fragment:project:default:fragment:OrphanParent",
+      "to": "schemaType:default:User",
+      "kind": "onType"
+    },
+    {
+      "from": "fragment:project:default:fragment:UserFields",
+      "to": "schemaField:default:User.name",
+      "kind": "selects"
+    },
+    {
+      "from": "fragment:project:default:fragment:UserFields",
+      "to": "schemaType:default:User",
+      "kind": "onType"
+    },
+    {
+      "from": "fragment:project:default:fragment:UserIdentity",
+      "to": "schemaField:default:User.id",
+      "kind": "selects"
+    },
+    {
+      "from": "fragment:project:default:fragment:UserIdentity",
+      "to": "schemaType:default:User",
+      "kind": "onType"
+    },
+    {
+      "from": "module:app",
+      "to": "module:features",
+      "kind": "imports"
+    },
+    {
+      "from": "module:app",
+      "to": "module:features.admin",
+      "kind": "imports"
+    },
+    {
+      "from": "module:app",
+      "to": "module:features.admin.queries",
+      "kind": "imports"
+    },
+    {
+      "from": "module:app",
+      "to": "module:features.profile",
+      "kind": "imports"
+    },
+    {
+      "from": "module:app",
+      "to": "module:features.profile.queries",
+      "kind": "imports"
+    },
+    {
+      "from": "module:app",
+      "to": "module:features.users",
+      "kind": "imports"
+    },
+    {
+      "from": "module:app",
+      "to": "module:features.users.routes",
+      "kind": "imports"
+    },
+    {
+      "from": "module:features.admin.queries",
+      "to": "operation:project:admin:query:AdminDashboard",
+      "kind": "defines"
+    },
+    {
+      "from": "module:features.profile.queries",
+      "to": "module:features",
+      "kind": "imports"
+    },
+    {
+      "from": "module:features.profile.queries",
+      "to": "module:features.shared",
+      "kind": "imports"
+    },
+    {
+      "from": "module:features.profile.queries",
+      "to": "module:features.shared.fragments",
+      "kind": "imports"
+    },
+    {
+      "from": "module:features.profile.queries",
+      "to": "operation:project:default:query:Profile",
+      "kind": "defines"
+    },
+    {
+      "from": "module:features.shared.fragments",
+      "to": "fragment:project:default:fragment:UserFields",
+      "kind": "defines"
+    },
+    {
+      "from": "module:features.shared.fragments",
+      "to": "fragment:project:default:fragment:UserIdentity",
+      "kind": "defines"
+    },
+    {
+      "from": "module:features.users.queries",
+      "to": "fragment:project:default:fragment:OrphanChild",
+      "kind": "defines"
+    },
+    {
+      "from": "module:features.users.queries",
+      "to": "fragment:project:default:fragment:OrphanParent",
+      "kind": "defines"
+    },
+    {
+      "from": "module:features.users.queries",
+      "to": "module:features",
+      "kind": "imports"
+    },
+    {
+      "from": "module:features.users.queries",
+      "to": "module:features.shared",
+      "kind": "imports"
+    },
+    {
+      "from": "module:features.users.queries",
+      "to": "module:features.shared.fragments",
+      "kind": "imports"
+    },
+    {
+      "from": "module:features.users.queries",
+      "to": "operation:project:default:query:Simple",
+      "kind": "defines"
+    },
+    {
+      "from": "module:features.users.queries",
+      "to": "operation:project:default:query:UserCard",
+      "kind": "defines"
+    },
+    {
+      "from": "module:features.users.queries",
+      "to": "operation:project:default:query:Users",
+      "kind": "defines"
+    },
+    {
+      "from": "module:features.users.routes",
+      "to": "module:features",
+      "kind": "imports"
+    },
+    {
+      "from": "module:features.users.routes",
+      "to": "module:features.users",
+      "kind": "imports"
+    },
+    {
+      "from": "module:features.users.routes",
+      "to": "module:features.users.queries",
+      "kind": "imports"
+    },
+    {
+      "from": "operation:project:admin:query:AdminDashboard",
+      "to": "schemaField:admin:Query.users",
+      "kind": "selects"
+    },
+    {
+      "from": "operation:project:admin:query:AdminDashboard",
+      "to": "schemaField:admin:User.id",
+      "kind": "selects"
+    },
+    {
+      "from": "operation:project:default:query:Profile",
+      "to": "fragment:project:default:fragment:UserFields",
+      "kind": "spreads"
+    },
+    {
+      "from": "operation:project:default:query:Profile",
+      "to": "schemaField:default:Query.user",
+      "kind": "selects"
+    },
+    {
+      "from": "operation:project:default:query:Simple",
+      "to": "schemaField:default:Query.users",
+      "kind": "selects"
+    },
+    {
+      "from": "operation:project:default:query:Simple",
+      "to": "schemaField:default:User.name",
+      "kind": "selects"
+    },
+    {
+      "from": "operation:project:default:query:UserCard",
+      "to": "schemaField:default:Query.user",
+      "kind": "selects"
+    },
+    {
+      "from": "operation:project:default:query:UserCard",
+      "to": "schemaField:default:User.name",
+      "kind": "selects"
+    },
+    {
+      "from": "operation:project:default:query:Users",
+      "to": "fragment:project:default:fragment:UserFields",
+      "kind": "spreads"
+    },
+    {
+      "from": "operation:project:default:query:Users",
+      "to": "fragment:project:default:fragment:UserIdentity",
+      "kind": "spreads"
+    },
+    {
+      "from": "operation:project:default:query:Users",
+      "to": "schemaField:default:Query.users",
+      "kind": "selects"
+    },
+    {
+      "from": "operation:project:default:query:Users",
+      "to": "schemaField:default:User.id",
+      "kind": "selects"
+    },
+    {
+      "from": "operation:project:default:query:Users",
+      "to": "schemaField:default:User.legacy",
+      "kind": "selects"
+    },
+    {
+      "from": "operation:project:default:query:Users",
+      "to": "schemaField:default:User.name",
+      "kind": "selects"
+    }
+  ]
+}

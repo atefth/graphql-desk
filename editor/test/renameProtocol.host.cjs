@@ -357,6 +357,53 @@ async function run() {
     observed.extractCapturedLocalFragmentRoundtripUndo = true;
     await capturedLocalClient.stop();
 
+    observed.step = "extract-three-level-mixed-async-captured-local-fragment-roundtrip-undo";
+    const deepCapturedSource = "from graphql_desk import gql\ndef build():\n    card = gql('fragment Card on User { id }')\n    async def outer():\n        def middle():\n            async def read():\n                query = gql('query Read { user { friend { ...Card } name } }', fragments=[card])\n                return query\n            return read\n        return middle\n    return outer\n";
+    const deepCapturedSchema = "type User { id: ID! name: String! friend: User } type Query { user: User }";
+    const deepCaptured = await pythonExtractionDocument("extract-deep-captured-local", deepCapturedSource, {
+      schema: deepCapturedSchema,
+    });
+    const deepCapturedClient = createRenameLanguageClient(vscode, deepCaptured.language, { isTrusted: () => true });
+    clients.push(deepCapturedClient);
+    await deepCapturedClient.start();
+    await vscode.window.showTextDocument(deepCaptured.document);
+    assert.equal(await requestExtract(deepCapturedClient.client, deepCaptured.document, undefined,
+      "friend { ...Card }"), true);
+    assert.match(deepCaptured.document.getText(), /fragment UserFields on User .*fragments=\[card\]/);
+    const deepCapturedUpdated = bundle(deepCaptured.document.getText(), {
+      uri: deepCaptured.document.uri.toString(), version: deepCaptured.document.version,
+      schema: deepCapturedSchema,
+    });
+    assert.deepEqual(deepCapturedUpdated.response.diagnostics, []);
+    assert.equal(deepCapturedUpdated.response.calls.length, 3);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(deepCaptured.document.getText(), deepCapturedSource);
+    observed.extractDeepCapturedLocalFragmentRoundtripUndo = true;
+    await deepCapturedClient.stop();
+
+    observed.step = "extract-deep-capture-with-unrelated-inner-declaration-roundtrip-undo";
+    const unrelatedDeclarationSource = "from graphql_desk import gql\ndef build():\n    card = gql('fragment Card on User { id }')\n    def scope():\n        def unrelated():\n            global cache\n        def read():\n            query = gql('query Read { user { friend { ...Card } name } }', fragments=[card])\n            return query\n        return read\n    return scope\n";
+    const unrelatedDeclaration = await pythonExtractionDocument("extract-unrelated-inner-declaration", unrelatedDeclarationSource, {
+      schema: deepCapturedSchema,
+    });
+    const unrelatedDeclarationClient = createRenameLanguageClient(vscode, unrelatedDeclaration.language, { isTrusted: () => true });
+    clients.push(unrelatedDeclarationClient);
+    await unrelatedDeclarationClient.start();
+    await vscode.window.showTextDocument(unrelatedDeclaration.document);
+    assert.equal(await requestExtract(unrelatedDeclarationClient.client, unrelatedDeclaration.document, undefined,
+      "friend { ...Card }"), true);
+    assert.match(unrelatedDeclaration.document.getText(), /fragment UserFields on User .*fragments=\[card\]/);
+    const unrelatedDeclarationUpdated = bundle(unrelatedDeclaration.document.getText(), {
+      uri: unrelatedDeclaration.document.uri.toString(), version: unrelatedDeclaration.document.version,
+      schema: deepCapturedSchema,
+    });
+    assert.deepEqual(unrelatedDeclarationUpdated.response.diagnostics, []);
+    assert.equal(unrelatedDeclarationUpdated.response.calls.length, 3);
+    await vscode.commands.executeCommand("undo");
+    assert.equal(unrelatedDeclaration.document.getText(), unrelatedDeclarationSource);
+    observed.extractCapturedLocalWithUnrelatedDeclarationRoundtripUndo = true;
+    await unrelatedDeclarationClient.stop();
+
     observed.step = "extract-module-conditional-roundtrip-undo";
     const conditionalSource = "# 😀\r\nfrom graphql_desk import gql\r\nif ENABLED:\r\n    # conditional query\r\n    query = gql('query Read { user { id name } }')\r\n";
     const conditionalExtraction = await pythonExtractionDocument("extract-module-conditional", conditionalSource);

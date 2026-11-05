@@ -3215,6 +3215,140 @@ alias('{ id }')
                 ),
             )
 
+        two_level_capture = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def build():\n"
+                    "    card = gql('fragment Card on User { id }')\n"
+                    "    def scope():\n"
+                    "        def read():\n"
+                    "            return gql('query R{user{...Card}}', "
+                    "fragments=[card])\n"
+                    "        return read\n"
+                    "    return scope\n",
+                ),
+            )
+        )
+        self.assertEqual(two_level_capture.diagnostics, ())
+        self.assertEqual(len(two_level_capture.calls), 2)
+        self.assertEqual(len(two_level_capture.calls[-1].fragments), 1)
+        self.assertEqual(
+            two_level_capture.calls[-1].fragments[0].target,
+            DocumentIdentity(
+                two_level_capture.calls[0].module,
+                two_level_capture.calls[0].range,
+            ),
+        )
+
+        three_level_capture = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def build():\n"
+                    "    card = gql('fragment Card on User { id }')\n"
+                    "    def outer():\n"
+                    "        def middle():\n"
+                    "            def read():\n"
+                    "                return gql('query R{user{...Card}}', "
+                    "fragments=[card])\n"
+                    "            return read\n"
+                    "        return middle\n"
+                    "    return outer\n",
+                ),
+            )
+        )
+        self.assertEqual(three_level_capture.diagnostics, ())
+        self.assertEqual(len(three_level_capture.calls), 2)
+        self.assertEqual(len(three_level_capture.calls[-1].fragments), 1)
+        self.assertEqual(
+            three_level_capture.calls[-1].fragments[0].target,
+            DocumentIdentity(
+                three_level_capture.calls[0].module,
+                three_level_capture.calls[0].range,
+            ),
+        )
+
+        mixed_async_capture = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def build():\n"
+                    "    card = gql('fragment Card on User { id }')\n"
+                    "    async def outer():\n"
+                    "        def middle():\n"
+                    "            async def read():\n"
+                    "                return gql('query R{user{...Card}}', "
+                    "fragments=[card])\n"
+                    "            return read\n"
+                    "        return middle\n"
+                    "    return outer\n",
+                ),
+            )
+        )
+        self.assertEqual(mixed_async_capture.diagnostics, ())
+        self.assertEqual(len(mixed_async_capture.calls), 2)
+        self.assertEqual(len(mixed_async_capture.calls[-1].fragments), 1)
+        self.assertEqual(
+            mixed_async_capture.calls[-1].fragments[0].target,
+            DocumentIdentity(
+                mixed_async_capture.calls[0].module,
+                mixed_async_capture.calls[0].range,
+            ),
+        )
+
+        unrelated_inner_declaration = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def build():\n"
+                    "    card = gql('fragment Card on User { id }')\n"
+                    "    def scope():\n"
+                    "        def unrelated():\n"
+                    "            global cache\n"
+                    "        def read():\n"
+                    "            return gql('query R{user{...Card}}', "
+                    "fragments=[card])\n"
+                    "        return read\n"
+                    "    return scope\n",
+                ),
+            )
+        )
+        self.assertEqual(unrelated_inner_declaration.diagnostics, ())
+        self.assertEqual(len(unrelated_inner_declaration.calls), 2)
+        self.assertEqual(len(unrelated_inner_declaration.calls[-1].fragments), 1)
+
+        sibling_shadow = resolve_project(
+            (
+                module(
+                    "main",
+                    "from graphql_desk import gql\n"
+                    "def build():\n"
+                    "    card = gql('fragment Card on User { id }')\n"
+                    "    def read():\n"
+                    "        return gql('query Read{user{...Card}}', "
+                    "fragments=[card])\n"
+                    "    def other(card):\n"
+                    "        return gql('query Other{user{...Card}}', "
+                    "fragments=[card])\n"
+                    "    return read, other\n",
+                ),
+            )
+        )
+        read_operation = next(
+            call
+            for call in sibling_shadow.calls
+            if call.source.startswith("query Read")
+        )
+        self.assertEqual(len(read_operation.fragments), 1)
+        self.assertFalse(
+            any(call.source.startswith("query Other") for call in sibling_shadow.calls)
+        )
+
         rejected = (
             "def read(flag):\n"
             "    if flag:\n"
@@ -3260,17 +3394,52 @@ alias('{ id }')
             "def build():\n"
             "    card = gql('fragment Card on User { id }')\n"
             "    def read():\n"
-            "        return gql('query { user { ...Card } }', fragments=[card])\n"
-            "    def other(card):\n"
-            "        return gql('query { user { ...Card } }', fragments=[card])\n"
-            "    return read, other\n",
-            "def build():\n"
-            "    card = gql('fragment Card on User { id }')\n"
-            "    def read():\n"
             "        nonlocal card\n"
             "        card = gql('fragment Card on User { name }')\n"
             "        return gql('query { user { ...Card } }', fragments=[card])\n"
             "    return read\n",
+            "def build():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    def scope():\n"
+            "        def read(card):\n"
+            "            return gql('query { user { ...Card } }', fragments=[card])\n"
+            "        return read\n"
+            "    return scope\n",
+            "def build():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    def scope():\n"
+            "        card = make_fragment()\n"
+            "        def read():\n"
+            "            return gql('query { user { ...Card } }', fragments=[card])\n"
+            "        return read\n"
+            "    return scope\n",
+            "def build():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    def scope():\n"
+            "        def outer():\n"
+            "            def middle():\n"
+            "                card = make_fragment()\n"
+            "                def read():\n"
+            "                    return gql('query { user { ...Card } }', "
+            "fragments=[card])\n"
+            "                return read\n"
+            "            return middle\n"
+            "        return outer\n"
+            "    return scope\n",
+            "def build():\n"
+            "    card = gql('fragment Card on User { id }')\n"
+            "    def scope():\n"
+            "        def outer():\n"
+            "            def middle():\n"
+            "                nonlocal card\n"
+            "                card = gql('fragment Card on User { name }')\n"
+            "                def read():\n"
+            "                    return gql('query { user { ...Card } }', "
+            "fragments=[card])\n"
+            "                return read\n"
+            "            return middle\n"
+            "        return outer\n"
+            "    return scope\n",
             "def read():\n"
             "    card = gql('query Wrong { user { id } }')\n"
             "    return gql('query { user { ...Wrong } }', fragments=[card])\n",

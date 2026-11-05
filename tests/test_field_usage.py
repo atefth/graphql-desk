@@ -65,6 +65,27 @@ class FieldUsageTests(unittest.TestCase):
                 self.assertEqual([field for field, _ in found], ["user"])
                 self.assertIn("user.email", found[0][1])
 
+    def test_static_mapping_get_tracks_graphql_field_reads(self) -> None:
+        for read in (
+            'print(result.get("user").get("name"))',
+            'user = result.get("user")\nprint(user["name"])',
+            'print(result["user"].get("name"))',
+        ):
+            with self.subTest(read=read):
+                found = warnings(PREFIX + "result = execute(query, {})\n" + read)
+                self.assertEqual([field for field, _ in found], ["user"])
+                self.assertIn("user.email", found[0][1])
+
+        for read in (
+            'print(result.get(key).get("name"))',
+            'print(result.get("user", fallback)["name"])',
+            'print(ordinary.get("user")["name"])',
+        ):
+            with self.subTest(read=read):
+                self.assertEqual(
+                    warnings(PREFIX + "result = execute(query, {})\n" + read), []
+                )
+
     def test_no_result_consumption_and_unknown_provenance_stay_silent(self) -> None:
         for use in (
             "result = execute(query, {})",
@@ -1391,6 +1412,25 @@ send(second)
             + 'result=execute(query, {})\nprint(result["user"]["name"])'
         )
         self.assertEqual(warnings(source), [])
+
+    def test_field_line_suppression_only_hides_that_field_warning(self) -> None:
+        source = PREFIX.replace(
+            'query = gql("{ user { id name email } }")',
+            "query = gql(\n"
+            '    "{\\n"\n'
+            '    "  user { id name email }\\n" # graphql-desk: ignore[52005]\n'
+            '    "\\n"\n'
+            '    "  other { id name email }\\n"\n'
+            '    "}"\n'
+            ")",
+        ) + (
+            "result=execute(query, {})\n"
+            'print(result["user"]["name"])\n'
+            'print(result["other"]["name"])'
+        )
+        found = warnings(source)
+        self.assertEqual([field for field, _ in found], ["other"])
+        self.assertIn("other.email", found[0][1])
 
     def test_same_shape_documents_keep_distinct_consumption_identity(self) -> None:
         source = (
