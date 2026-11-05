@@ -247,6 +247,23 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     return state;
   }
+  function rememberDiskFingerprint(filename, fingerprint) {
+    const previous = recentDiskInvalidations.get(filename);
+    if (fingerprint === undefined) { recentDiskInvalidations.delete(filename); return false; }
+    if (previous?.fingerprint === fingerprint) return true;
+    recentDiskInvalidations.set(filename, { fingerprint });
+    if (recentDiskInvalidations.size > 512) {
+      const oldest = [...recentDiskInvalidations.keys()].slice(0, 128);
+      for (const key of oldest) recentDiskInvalidations.delete(key);
+    }
+    return false;
+  }
+  function ignoreOwnedDeletion(filename, ownedPaths) {
+    if (!ownedPaths.delete(filename)) return false;
+    // Keep duplicate cleanup reports in the same bounded cache as other disk events.
+    rememberDiskFingerprint(filename, "missing");
+    return true;
+  }
   function invalidate(source, ranges, diskEvent = false) {
     if (disposed) return;
     if (diskEvent && ranges == null && source?.scheme === "file") {
@@ -258,16 +275,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           fingerprint = createHash("sha256").update(fs.readFileSync(source.fsPath)).digest("hex");
         }
       } catch (error) { if (error.code === "ENOENT") fingerprint = "missing"; }
-      if (fingerprint !== undefined) {
-        const now = Date.now();
-        const previous = recentDiskInvalidations.get(filename);
-        if (previous?.fingerprint === fingerprint) return;
-        recentDiskInvalidations.set(filename, { fingerprint, at: now });
-        if (recentDiskInvalidations.size > 512) {
-          const oldest = [...recentDiskInvalidations.keys()].slice(0, 128);
-          for (const key of oldest) recentDiskInvalidations.delete(key);
-        }
-      }
+      if (rememberDiskFingerprint(filename, fingerprint)) return;
     }
     epoch += 1;
     for (const state of states.values()) { stopPolling(state); state.artifactsAbort?.abort(); clearCache(state, "invalidate"); if (!trusted()) state.worker.invalidate(); }
@@ -820,11 +828,13 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
               const stat = fs.lstatSync(resource.fsPath);
               if (stat.isDirectory() && !stat.isSymbolicLink() && (managedRoot || generationDirectory || marker + 4 === parts.length)) {
                 ownedAnalysisDirectories.add(filename);
+                recentDiskInvalidations.delete(filename);
                 return;
               }
             } catch (error) {
-              if (error.code === "ENOENT" && ownedAnalysisDirectories.delete(filename)) return;
+              if (error.code === "ENOENT" && ignoreOwnedDeletion(filename, ownedAnalysisDirectories)) return;
             }
+            ownedAnalysisDirectories.delete(filename);
             const name = path.basename(resource.fsPath).toLowerCase();
             if (generation && (name === "complete.json" || /^\.graphql-desk-[0-9a-f-]+\.tmp$/i.test(name))) {
               let descriptor;
@@ -836,10 +846,12 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
                 const size = fs.readSync(descriptor, bytes, 0, bytes.length, 0);
                 if (size === stat.size && JSON.parse(bytes.toString("utf8")).owner === "graphql-desk-analysis-generation") {
                   ownedAnalysisPaths.add(filename);
+                  recentDiskInvalidations.delete(filename);
                   return;
                 }
-              } catch (error) { if (error.code === "ENOENT" && ownedAnalysisPaths.delete(filename)) return; }
+              } catch (error) { if (error.code === "ENOENT" && ignoreOwnedDeletion(filename, ownedAnalysisPaths)) return; }
               finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
+              ownedAnalysisPaths.delete(filename);
             }
           }
         }
@@ -871,11 +883,12 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
                   isVerifiedGenerationFile(filename, artifactRoot) || extension === ".typed" &&
                   marker === "partial\n" && ownedAnalysisDirectories.has(canonical(artifactRoot)))) {
               ownedAnalysisPaths.add(filename);
+              recentDiskInvalidations.delete(filename);
               return;
             }
           } catch (error) { missing = error.code === "ENOENT"; /* Deleted or inaccessible user stubs remain source changes. */ }
           finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
-          if (missing && filename && ownedAnalysisPaths.delete(filename)) return;
+          if (missing && filename && ignoreOwnedDeletion(filename, ownedAnalysisPaths)) return;
           if (filename) ownedAnalysisPaths.delete(filename);
         }
         invalidate(resource?.scheme === "file" ? resource : null, null, true);

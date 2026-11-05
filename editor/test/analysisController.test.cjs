@@ -723,6 +723,92 @@ test("duplicate watcher reports for identical schema bytes cause one refresh, ch
   assert.equal(invalidations, 2, "A different schema fingerprint remains a new refresh");
 });
 
+for (const kind of ["artifact", "generation manifest", "generation directory"]) {
+  test(`repeated owned ${kind} deletions preserve analysis without hiding foreign replacements`, async t => {
+    const fixture = await setup(t);
+    let invalidations = 0;
+    const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+    t.after(() => controller.dispose());
+    const snapshot = controller.snapshot(fixture.main);
+    const bundle = await controller.analyze(snapshot);
+    assert.ok(bundle);
+    const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+    const generation = path.join(fixture.root, ".graphql-desk", "typings", "generations", "g-1-00000000-0000-0000-0000-000000000001");
+    const filename = kind === "generation directory" ? generation : kind === "generation manifest"
+      ? path.join(generation, "complete.json")
+      : path.join(fixture.root, ".graphql-desk", "typings", "graphql_desk_generated", "default.pyi");
+    const resource = Uri.file(filename);
+    const writeOwned = async () => {
+      await fs.mkdir(path.dirname(filename), { recursive: true });
+      if (kind === "generation directory") await fs.mkdir(filename);
+      else await fs.writeFile(filename, kind === "artifact"
+        ? renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "class Generated: ...\n")
+        : JSON.stringify({ owner: "graphql-desk-analysis-generation" }));
+    };
+    const removeOwned = () => kind === "generation directory" ? fs.rmdir(filename) : fs.unlink(filename);
+    // A foreign artifact directory exercises the unreadable/unfingerprintable file case too.
+    const writeForeign = () => kind === "artifact" ? fs.mkdir(filename) : fs.writeFile(filename, "user bytes\n");
+    const removeForeign = () => kind === "artifact" ? fs.rmdir(filename) : fs.unlink(filename);
+    const reportMissing = () => { for (let repeat = 0; repeat < 3; repeat += 1) watcher.fire(resource); };
+
+    await writeOwned(); watcher.fire(resource);
+    await removeOwned(); reportMissing();
+    assert.equal(invalidations, 0, "All repeated missing reports for a verified owned output are ignored");
+    assert.equal(await controller.isCurrent(bundle, snapshot), true, "Cleanup must not stale the publication's capture");
+
+    await writeForeign(); watcher.fire(resource);
+    assert.equal(invalidations, 1, "A foreign recreation must invalidate despite the cached missing fingerprint");
+    await removeForeign(); reportMissing();
+    assert.equal(invalidations, 2, "Deleting the foreign recreation is a new change, not an old owned deletion");
+
+    await writeOwned(); watcher.fire(resource);
+    assert.equal(invalidations, 2, "A verified owned recreation remains an output");
+    await removeOwned(); reportMissing();
+    assert.equal(invalidations, 2, "The recreated owned output can be cleaned up repeatedly again");
+
+    await writeOwned(); watcher.fire(resource);
+    await removeOwned(); await writeForeign(); watcher.fire(resource);
+    assert.equal(invalidations, 3, "A coalesced foreign replacement revokes the previous ownership");
+    await removeForeign(); reportMissing();
+    assert.equal(invalidations, 4, "The foreign replacement's deletion must not consume stale ownership");
+  });
+}
+
+test("unobserved output deletion still invalidates and owned-delete bookkeeping stays bounded", async t => {
+  const fixture = await setup(t);
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+  t.after(() => controller.dispose());
+  const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+  const filename = path.join(fixture.root, ".graphql-desk", "typings", "graphql_desk_generated", "default.pyi");
+  const resource = Uri.file(filename);
+  await fs.mkdir(path.dirname(filename), { recursive: true });
+  const ownedBytes = renderOwnedAnalysisArtifact("graphql_desk_generated", "default.pyi", "class Generated: ...\n");
+  await fs.writeFile(filename, ownedBytes);
+  await fs.unlink(filename);
+  watcher.fire(resource); watcher.fire(resource);
+  assert.equal(invalidations, 1, "Missing files whose creation was never observed cannot be assumed owned");
+
+  await fs.writeFile(filename, ownedBytes); watcher.fire(resource);
+  await fs.unlink(filename); watcher.fire(resource); watcher.fire(resource);
+  assert.equal(invalidations, 1, "An observed owned recreation can be deleted without invalidating");
+  await fs.writeFile(filename, "class UserOwned: ...\n"); watcher.fire(resource);
+  assert.equal(invalidations, 2, "Recreated unowned bytes replace the cached missing fingerprint");
+  await fs.writeFile(filename, "class UserChanged: ...\n"); watcher.fire(resource);
+  assert.equal(invalidations, 3, "Further foreign-byte changes remain observed");
+  await fs.unlink(filename); watcher.fire(resource); watcher.fire(resource);
+  assert.equal(invalidations, 4, "Foreign deletion remains a new change after an owned path was reused");
+  await fs.writeFile(filename, ownedBytes); watcher.fire(resource);
+  await fs.unlink(filename); watcher.fire(resource); watcher.fire(resource);
+  assert.equal(invalidations, 4);
+  for (let index = 0; index < 513; index += 1) watcher.fire(Uri.file(path.join(fixture.root, `missing-${index}.txt`)));
+  assert.equal(invalidations, 517);
+  watcher.fire(resource);
+  assert.equal(invalidations, 518, "Eviction conservatively invalidates rather than retaining owned-delete tombstones forever");
+  watcher.fire(resource);
+  assert.equal(invalidations, 518, "The evicted path is deduplicated again after its conservative invalidation");
+});
+
 test("workspace folder watchers follow additions and removals and refresh closed source/config changes", async t => {
   const fixture = await setup(t);
   const added = await setup(t);
