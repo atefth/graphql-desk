@@ -2,12 +2,14 @@
 
 import argparse
 import ast
+import errno
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from contextlib import redirect_stderr
 from dataclasses import dataclass, replace
 from importlib import metadata
@@ -15,9 +17,17 @@ from io import StringIO
 from pathlib import Path
 from typing import Literal, NoReturn, cast
 
+import tomlkit
 from graphql import GraphQLError, print_schema
 
-from .config import ProjectConfig, SchemaConfig, SchemaOrigin, generated_output_paths
+from .config import (
+    ProjectConfig,
+    SchemaConfig,
+    SchemaOrigin,
+    generated_output_paths,
+    parse_project_config,
+    parse_project_settings,
+)
 from .document_validation import validate_indexed_document
 from .external_type_sources import (
     capture_external_type_sources,
@@ -36,6 +46,7 @@ from .persisted_bindings import generated_header, render_persisted_bindings
 from .persisted_manifest import collect_persisted_manifests
 from .project import (
     effective_project,
+    find_project,
     project_bindings,
     select_schema,
     validate_project_ownership,
@@ -111,6 +122,13 @@ class CheckDiagnostic:
     end_line: int | None = None
     end_column: int | None = None
     workflow_file: str | None = None
+
+
+@dataclass(frozen=True)
+class _ConfigSnapshot:
+    data: bytes
+    identity: os.stat_result
+    dacl: bytes | None
 
 
 _WARNING_CODES = frozenset(
@@ -349,6 +367,10 @@ def _parser() -> argparse.ArgumentParser:
         "--schema", default=argparse.SUPPRESS, help="Select one configured schema"
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    initialize = commands.add_parser("init", help="Set up a project (work in progress)")
+    initialize.add_argument(
+        "directory", nargs="?", default=".", help="Project directory"
+    )
     doctor = commands.add_parser(
         "doctor", help="Report project readiness without writes"
     )
@@ -741,15 +763,365 @@ def _persisted_outputs(
     raise ValueError("Select --output, configure persisted_output, or redirect stdout")
 
 
-def _stage_outputs(outputs: Mapping[Path, str]) -> None:
+def _check_config_acl(descriptor: int) -> None:
+    if sys.platform == "win32":
+        return
+    if sys.platform == "linux":
+        try:
+            os.getxattr(descriptor, "system.posix_acl_access")
+        except OSError as error:
+            if error.errno == errno.ENODATA:
+                return
+            raise
+        raise OSError("Extended configuration ACLs are not supported")
+    if sys.platform == "darwin":
+        import ctypes
+
+        native = ctypes.CDLL(None, use_errno=True)
+        native.fpathconf.argtypes = [ctypes.c_int, ctypes.c_int]
+        native.fpathconf.restype = ctypes.c_long
+        # Opaque remote authorization cannot be established from the local ACL.
+        ctypes.set_errno(0)
+        opaque = native.fpathconf(descriptor, 14)
+        if opaque != 0:
+            raise OSError("Configuration authorization is opaque or unverified")
+        ctypes.set_errno(0)
+        capability = native.fpathconf(descriptor, 13)
+        if capability == 0:
+            return
+        if capability != 1:
+            raise OSError("Configuration ACL capability is unverified")
+        native.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        native.acl_get_fd_np.restype = ctypes.c_void_p
+        native.acl_get_entry.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        native.acl_get_entry.restype = ctypes.c_int
+        native.acl_free.argtypes = [ctypes.c_void_p]
+        native.acl_free.restype = ctypes.c_int
+        ctypes.set_errno(0)
+        acl = native.acl_get_fd_np(descriptor, 0x100)
+        if not acl:
+            if ctypes.get_errno() == errno.ENOENT:
+                return
+            raise OSError("Configuration ACL could not be read")
+        try:
+            entry = ctypes.c_void_p()
+            ctypes.set_errno(0)
+            result = native.acl_get_entry(acl, 0, ctypes.byref(entry))
+            if result == -1 and ctypes.get_errno() == errno.EINVAL:
+                return
+            raise OSError("Extended or unverified configuration ACL is unsupported")
+        finally:
+            ctypes.set_errno(0)
+            if native.acl_free(acl) != 0:
+                raise OSError("Configuration ACL handle could not be freed")
+    raise OSError("Configuration ACL absence could not be verified")
+
+
+def _config_dacl(descriptor: int) -> bytes | None:
+    """Capture owner and DACL in one self-relative security descriptor."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    pointer = ctypes.POINTER(ctypes.c_void_p)
+    security.GetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        pointer,
+        pointer,
+        pointer,
+        pointer,
+        pointer,
+    ]
+    security.GetSecurityInfo.restype = wintypes.DWORD
+    security.GetSecurityDescriptorLength.argtypes = [ctypes.c_void_p]
+    security.GetSecurityDescriptorLength.restype = wintypes.DWORD
+    security.GetSecurityDescriptorControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    security.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    result = ctypes.c_void_p()
+    error = security.GetSecurityInfo(
+        msvcrt.get_osfhandle(descriptor),
+        1,
+        5,
+        None,
+        None,
+        None,
+        None,
+        ctypes.byref(result),
+    )
+    if error:
+        raise ctypes.WinError(error)
+    try:
+        control, revision = wintypes.WORD(), wintypes.DWORD()
+        if not security.GetSecurityDescriptorControl(
+            result, ctypes.byref(control), ctypes.byref(revision)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not control.value & 0x8000:
+            raise OSError("Configuration security is not self-relative")
+        return ctypes.string_at(result, security.GetSecurityDescriptorLength(result))
+    finally:
+        kernel.LocalFree(result)
+
+
+def _same_config_owner(original: bytes | None, staged: bytes | None) -> bool:
+    if sys.platform != "win32":
+        return True
+    if original is None or staged is None:
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    security.GetSecurityDescriptorOwner.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    security.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+    security.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    security.EqualSid.restype = wintypes.BOOL
+    source, destination = ctypes.c_void_p(), ctypes.c_void_p()
+    defaulted = wintypes.BOOL()
+    original_buffer = ctypes.create_string_buffer(original)
+    staged_buffer = ctypes.create_string_buffer(staged)
+    for descriptor, owner in (
+        (original_buffer, source),
+        (staged_buffer, destination),
+    ):
+        if not security.GetSecurityDescriptorOwner(
+            descriptor, ctypes.byref(owner), ctypes.byref(defaulted)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    return bool(
+        source.value and destination.value and security.EqualSid(source, destination)
+    )
+
+
+def _apply_config_dacl(descriptor: int, dacl: bytes | None) -> None:
+    if sys.platform != "win32":
+        return
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    if dacl is None:
+        raise OSError("Original configuration security was not captured")
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.ReOpenFile.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    kernel.ReOpenFile.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    security.GetSecurityDescriptorControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    security.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    security.GetSecurityDescriptorDacl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    security.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    security.SetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    security.SetSecurityInfo.restype = wintypes.DWORD
+    original = ctypes.create_string_buffer(dacl)
+    control, revision = wintypes.WORD(), wintypes.DWORD()
+    present, defaulted, acl = wintypes.BOOL(), wintypes.BOOL(), ctypes.c_void_p()
+    if not security.GetSecurityDescriptorControl(
+        original, ctypes.byref(control), ctypes.byref(revision)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not security.GetSecurityDescriptorDacl(
+        original, ctypes.byref(present), ctypes.byref(acl), ctypes.byref(defaulted)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not present.value:
+        raise OSError("Absent configuration DACL cannot be preserved")
+    # Reopen the same file object with WRITE_DAC; Python's ordinary fd lacks it.
+    handle = kernel.ReOpenFile(msvcrt.get_osfhandle(descriptor), 0x60000, 7, 0)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        protection = 0x80000000 if control.value & 0x1000 else 0x20000000
+        error = security.SetSecurityInfo(
+            handle, 1, 4 | protection, None, None, acl, None
+        )
+        if error:
+            raise ctypes.WinError(error)
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _same_output(path: Path, expected: _ConfigSnapshot) -> bool:
+    try:
+        current = path.lstat()
+        previous = expected.identity
+        metadata_matches = stat.S_ISREG(current.st_mode) and (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+            current.st_mode,
+            current.st_uid,
+            current.st_gid,
+        ) == (
+            previous.st_dev,
+            previous.st_ino,
+            previous.st_size,
+            previous.st_mtime_ns,
+            previous.st_mode,
+            previous.st_uid,
+            previous.st_gid,
+        )
+        if not metadata_matches:
+            return False
+        with path.open("rb") as stream:
+            _check_config_acl(stream.fileno())
+            return (
+                stream.read() == expected.data
+                and _config_dacl(stream.fileno()) == expected.dacl
+            )
+    except OSError:
+        return False
+
+
+def _check_init_directory(directory: Path, expected: os.stat_result) -> None:
+    current = directory.lstat()
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino)
+        or any(parent.is_symlink() for parent in directory.parents)
+    ):
+        raise OutputGenerationConflict("Project directory changed; rerun init.")
+
+
+def _commit_init_output(
+    temporary: Path,
+    target: Path,
+    expected: _ConfigSnapshot | None,
+    staged: _ConfigSnapshot,
+    directory_identity: os.stat_result,
+) -> None:
+    recovery: Path | None = None
+    moved = committed = False
+    try:
+        _check_init_directory(target.parent, directory_identity)
+        if not _same_output(temporary, staged):
+            raise OutputGenerationConflict("Staged configuration changed; rerun init.")
+        if expected is not None:
+            if not _same_output(target, expected):
+                raise OutputGenerationConflict(
+                    "Project configuration changed; rerun init."
+                )
+            with tempfile.NamedTemporaryFile(
+                dir=target.parent,
+                prefix=".pyproject.",
+                suffix=".recovery",
+                delete=False,
+            ) as stream:
+                recovery = Path(stream.name)
+            _check_init_directory(target.parent, directory_identity)
+            os.replace(target, recovery)
+            moved = True
+            if not _same_output(recovery, expected):
+                raise OutputGenerationConflict(
+                    "Project configuration changed; rerun init."
+                )
+        _check_init_directory(target.parent, directory_identity)
+        if not _same_output(temporary, staged):
+            raise OutputGenerationConflict("Staged configuration changed; rerun init.")
+        os.link(temporary, target)
+        committed = True
+        _check_init_directory(target.parent, directory_identity)
+        if not _same_output(target, staged):
+            raise OutputGenerationConflict(
+                "Published configuration changed; review retained files."
+            )
+        if recovery is not None:
+            assert expected is not None
+            if not _same_output(recovery, expected):
+                raise OutputGenerationConflict(
+                    "Configuration changed during init; review the recovery copy."
+                )
+            recovery.unlink()
+            recovery = None
+    finally:
+        if recovery is not None:
+            if not moved:
+                recovery.unlink(missing_ok=True)
+            elif not committed:
+                try:
+                    _check_init_directory(target.parent, directory_identity)
+                    os.link(recovery, target)
+                    recovery.unlink()
+                except (OSError, OutputGenerationConflict):
+                    print(
+                        f"Original configuration retained at: {recovery}",
+                        file=sys.stderr,
+                    )
+            else:
+                print(
+                    f"Original configuration retained at: {recovery}", file=sys.stderr
+                )
+
+
+def _stage_outputs(
+    outputs: Mapping[Path, str],
+    *,
+    expected: Mapping[Path, _ConfigSnapshot | None] | None = None,
+    directory_identity: os.stat_result | None = None,
+) -> None:
+    if expected is not None and (
+        len(outputs) != 1
+        or outputs.keys() != expected.keys()
+        or directory_identity is None
+    ):
+        raise ValueError("Configuration staging requires one matching snapshot")
     staged: list[tuple[Path, Path]] = []
+    stage_snapshots: dict[Path, _ConfigSnapshot] = {}
     backups: dict[Path, Path | None] = {}
     committed: list[Path] = []
     recovery_paths: list[Path] = []
     rollback_failed = False
     try:
         for target, text in outputs.items():
-            target.parent.mkdir(parents=True, exist_ok=True)
+            if expected is not None:
+                assert directory_identity is not None
+                _check_init_directory(target.parent, directory_identity)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
@@ -759,10 +1131,58 @@ def _stage_outputs(outputs: Mapping[Path, str]) -> None:
                 suffix=".tmp",
                 delete=False,
             ) as stream:
+                staged.append((Path(stream.name), target))
+                if expected is not None:
+                    stage_snapshots[Path(stream.name)] = _ConfigSnapshot(
+                        b"", os.fstat(stream.fileno()), _config_dacl(stream.fileno())
+                    )
+                    _check_config_acl(stream.fileno())
+                snapshot = expected.get(target) if expected is not None else None
+                if snapshot is not None:
+                    if not _same_config_owner(
+                        snapshot.dacl, stage_snapshots[Path(stream.name)].dacl
+                    ):
+                        raise OSError("Configuration owner cannot be preserved")
+                    if sys.platform != "win32":
+                        identity = snapshot.identity
+                        os.fchown(stream.fileno(), identity.st_uid, identity.st_gid)
+                        owner = os.fstat(stream.fileno())
+                        if (owner.st_uid, owner.st_gid) != (
+                            identity.st_uid,
+                            identity.st_gid,
+                        ):
+                            raise OSError("Configuration ownership was not preserved")
+                        os.fchmod(
+                            stream.fileno(), stat.S_IMODE(snapshot.identity.st_mode)
+                        )
+                    stage_snapshots[Path(stream.name)] = _ConfigSnapshot(
+                        b"", os.fstat(stream.fileno()), _config_dacl(stream.fileno())
+                    )
+                    _apply_config_dacl(stream.fileno(), snapshot.dacl)
+                if expected is not None:
+                    assert directory_identity is not None
+                    _check_init_directory(target.parent, directory_identity)
+                    _check_config_acl(stream.fileno())
                 stream.write(text)
                 stream.flush()
+                if expected is not None:
+                    stage_snapshots[Path(stream.name)] = _ConfigSnapshot(
+                        text.encode("utf-8"),
+                        os.fstat(stream.fileno()),
+                        _config_dacl(stream.fileno()),
+                    )
                 os.fsync(stream.fileno())
-                staged.append((Path(stream.name), target))
+        if expected is not None:
+            temporary, target = staged[0]
+            assert directory_identity is not None
+            _commit_init_output(
+                temporary,
+                target,
+                expected[target],
+                stage_snapshots[temporary],
+                directory_identity,
+            )
+            return
         for _, target in staged:
             if target.exists():
                 with tempfile.NamedTemporaryFile(
@@ -799,6 +1219,16 @@ def _stage_outputs(outputs: Mapping[Path, str]) -> None:
     finally:
         for temporary, _ in staged:
             try:
+                staged_snapshot = stage_snapshots.get(temporary)
+                if expected is not None and (
+                    staged_snapshot is None
+                    or not _same_output(temporary, staged_snapshot)
+                ):
+                    print(
+                        f"Changed temporary configuration retained at: {temporary}",
+                        file=sys.stderr,
+                    )
+                    continue
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
@@ -1774,6 +2204,189 @@ def _doctor(
     return 1
 
 
+def _init(directory: Path) -> int:
+    """Set up one project without executing it or installing dependencies."""
+    print("GraphQL Desk init (work in progress)", file=sys.stderr)
+    proposal = {
+        "schema": "<schema path or HTTP(S) URL>",
+        "schema_output": "graphql_desk_generated/default.pyi",
+    }
+    try:
+        target = directory if directory.is_absolute() else Path.cwd() / directory
+        if target.is_symlink() or any(parent.is_symlink() for parent in target.parents):
+            raise ValueError("Init directory cannot pass through a symlink")
+        target = target.resolve()
+        directory_identity = target.lstat()
+        if not stat.S_ISDIR(directory_identity.st_mode):
+            raise ValueError("Init requires an existing project directory")
+        config_path = target / "pyproject.toml"
+        expected = None
+        if config_path.exists() or config_path.is_symlink():
+            identity = config_path.lstat()
+            if not stat.S_ISREG(identity.st_mode):
+                raise ValueError("Project configuration must be a regular file")
+            if not identity.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+                raise ValueError("Project configuration is read-only")
+            with config_path.open("r+b") as stream:
+                identity = os.fstat(stream.fileno())
+                _check_config_acl(stream.fileno())
+                original = stream.read()
+                expected = _ConfigSnapshot(
+                    original, identity, _config_dacl(stream.fileno())
+                )
+            if not _same_output(config_path, expected):
+                raise ValueError("Project configuration changed")
+            document = tomlkit.parse(original.decode("utf-8"))
+        else:
+            document = tomlkit.document()
+        values = cast(dict[str, object], document.unwrap())
+        tool = values.get("tool", {})
+        if not isinstance(tool, dict):
+            raise ValueError("Project tools must be a table")
+        settings_value = cast(dict[str, object], tool).get("graphql-desk", {})
+        if not isinstance(settings_value, dict):
+            raise ValueError("GraphQL Desk settings must be a table")
+        settings = cast(dict[str, object], settings_value)
+        ancestor = find_project(target.parent) if target.parent != target else None
+        try:
+            configured = parse_project_config(
+                tomlkit.dumps(document), config_path=config_path
+            )
+        except ValueError:
+            configured = None
+        if configured is not None:
+            validate_project_ownership(
+                (configured,) if ancestor is None else (ancestor, configured)
+            )
+            print("Project is already configured; no files changed.", file=sys.stderr)
+            print("Next: graphql-desk generate-output", file=sys.stderr)
+            return 0
+        if "schemas" in settings:
+            raise ValueError("Incomplete named schemas require an explicit edit")
+        validation = dict(settings)
+        validation.setdefault("schema", "https://example.invalid/graphql")
+        existing_package = settings.get("generated_package", "graphql_desk_generated")
+        if not isinstance(existing_package, str):
+            raise ValueError("Generated package must be a name")
+        validation.setdefault(
+            "schema_output", existing_package.replace(".", "/") + "/default.pyi"
+        )
+        parse_project_settings(validation, config_path=config_path)
+        additions: dict[str, object] = {}
+        if "schema" not in settings:
+            print(
+                "Schema SDL/JSON path or HTTP(S) URL: ",
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
+            source = input().strip()
+            checked = parse_project_settings(
+                {
+                    "schema": source,
+                    "schema_output": "graphql_desk_generated/default.pyi",
+                },
+                config_path=config_path,
+            )
+            if checked.schemas[0].origin.local_path is not None:
+                load_local_schema(checked.schemas[0].origin.local_path)
+            additions["schema"] = source
+        if "generated_package" not in settings:
+            print(
+                "Generated package directory [graphql_desk_generated]: ",
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
+            selected = input().strip() or "graphql_desk_generated"
+            output = target / selected.replace("\\", "/")
+            if output.is_symlink() or any(
+                parent.is_symlink() for parent in output.parents
+            ):
+                raise ValueError("Generated package cannot pass through a symlink")
+            parts = output.resolve().relative_to(target).parts
+            if not parts:
+                raise ValueError("Generated package must be below the project root")
+            package = ".".join(parts)
+            if target.joinpath(*package.split(".")) != output.resolve():
+                raise ValueError("Generated directories must be Python package names")
+            if package != "graphql_desk_generated":
+                additions["generated_package"] = package
+        else:
+            existing_package = settings["generated_package"]
+            if not isinstance(existing_package, str):
+                raise ValueError("Generated package must be a name")
+            package = existing_package
+        if "schema_output" not in settings:
+            additions["schema_output"] = package.replace(".", "/") + "/default.pyi"
+        merged = {**settings, **additions}
+        configured = parse_project_settings(merged, config_path=config_path)
+        validate_project_ownership(
+            (configured,) if ancestor is None else (ancestor, configured)
+        )
+        if "tool" not in document:
+            document["tool"] = tomlkit.table()
+        tool_document = cast(MutableMapping[str, object], document["tool"])
+        if "graphql-desk" not in tool_document:
+            tool_document["graphql-desk"] = tomlkit.table()
+        settings_document = cast(
+            MutableMapping[str, object], tool_document["graphql-desk"]
+        )
+        for key, value in additions.items():
+            settings_document[key] = value
+        text = tomlkit.dumps(document)
+        parse_project_config(text, config_path=config_path)
+        preview = dict(additions)
+        origin = configured.schemas[0].origin
+        if "schema" in preview and origin.url is not None:
+            preview["schema"] = "<selected HTTP(S) URL; redacted>"
+        print("Proposed keys for [tool.graphql-desk]:", file=sys.stderr)
+        print(tomlkit.dumps(preview), end="", file=sys.stderr)
+        print(
+            "Apply this edit to pyproject.toml? [y/N]: ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
+        if input().strip().lower() not in {"y", "yes"}:
+            print("Init cancelled; no files changed.", file=sys.stderr)
+            return 130
+        _stage_outputs(
+            {config_path: text},
+            expected={config_path: expected},
+            directory_identity=directory_identity,
+        )
+        print(
+            "Configured pyproject.toml. No dependencies were installed.",
+            file=sys.stderr,
+        )
+        print(
+            "Next: graphql-desk generate-output; "
+            "then enable the GraphQL Desk VS Code extension. "
+            "For URL schemas, generation fetches the schema using configured headers.",
+            file=sys.stderr,
+        )
+        return 0
+    except EOFError:
+        print("Init cancelled; no files changed.", file=sys.stderr)
+        return 130
+    except OutputGenerationConflict:
+        raise
+    except (ValueError, UnicodeError):
+        print(
+            "Init could not safely merge configuration; no files changed.",
+            file=sys.stderr,
+        )
+        print(
+            "Review this minimal edit against the existing configuration:",
+            file=sys.stderr,
+        )
+        print(
+            tomlkit.dumps({"tool": {"graphql-desk": proposal}}), end="", file=sys.stderr
+        )
+        return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Return an exit code; only the module/console entrypoint exits the process."""
     try:
@@ -1806,6 +2419,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config_path = Path(arguments.config) if hasattr(arguments, "config") else None
         schema_name = arguments.schema if hasattr(arguments, "schema") else None
+        if arguments.command == "init":
+            if config_path is not None or schema_name is not None:
+                raise ValueError("Init selects its project by directory")
+            return _init(Path(arguments.directory))
         if arguments.command == "generate-schema":
             return _generate_schema(
                 arguments.input,
