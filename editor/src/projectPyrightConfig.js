@@ -154,7 +154,7 @@ function writePersistentOwner(workspace, value, expectedHash, createdDirectories
     currentHash = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
   } catch (error) { if (error.code !== "ENOENT") throw error; }
   if (currentHash !== expectedHash) throw new Error("GraphQL Desk Pyright ownership record changed concurrently; preserved");
-  const temporary = path.join(root, `.graphql-desk-${randomUUID()}.tmp`);
+  const temporary = path.join(root, `.graphql-desk-owner-${randomUUID()}.tmp`);
   let created;
   try {
     const descriptor = fs.openSync(temporary, "wx");

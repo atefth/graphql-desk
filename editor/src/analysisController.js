@@ -768,7 +768,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const lower = parts.map(part => part.toLowerCase());
     const marker = lower.lastIndexOf(".graphql-desk");
     if (marker < 0 || !["typings", "live-typings"].includes(lower[marker + 1])) return false;
-    if (lower[marker + 1] === "live-typings" && marker + 3 === lower.length && lower[marker + 2] === "project-config-owner.json") return true;
+    if (lower[marker + 1] === "live-typings" && marker + 3 === lower.length) {
+      return lower[marker + 2] === "project-config-owner.json" ||
+        /^\.graphql-desk-owner-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(parts[marker + 2]);
+    }
     if (lower[marker + 2] !== "generations") return false;
     const relative = parts.slice(marker + 3);
     const generationId = /^g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;

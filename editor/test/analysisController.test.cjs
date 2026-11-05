@@ -933,6 +933,37 @@ test("unobserved output deletion still invalidates and owned-delete bookkeeping 
   assert.equal(invalidations, 518, "The evicted path is deduplicated again after its conservative invalidation");
 });
 
+test("ownership metadata staging does not invalidate analysis after generation selection", async t => {
+  const fixture = await setup(t);
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+  t.after(() => controller.dispose());
+  const root = path.join(fixture.root, ".graphql-desk", "live-typings");
+  await fs.mkdir(root, { recursive: true });
+  fixture.stubPath(path.relative(fixture.root, path.join(root, "generations", "g-3-123e4567-e89b-12d3-a456-426614174000")));
+  const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+  const filename = path.join(root, ".graphql-desk-owner-123e4567-e89b-12d3-a456-426614174000.tmp");
+  const resource = Uri.file(filename);
+  for (const text of ["", '{"phase":"rotate"}\n']) {
+    await fs.writeFile(filename, text);
+    watcher.fire(resource);
+    fixture.events.onDidOpenTextDocument.fire({ uri: resource });
+  }
+  await fs.unlink(filename);
+  watcher.fire(resource);
+  watcher.fire(resource);
+  fixture.events.onDidCloseTextDocument.fire({ uri: resource });
+  assert.equal(invalidations, 0, "Ownership-file staging is control metadata outside the selected generation");
+  for (const foreign of [path.join(root, ".graphql-desk-123e4567-e89b-12d3-a456-426614174000.tmp"),
+    path.join(root, ".graphql-desk-owner-not-a-uuid.tmp"),
+    path.join(fixture.root, path.basename(filename))]) {
+    const before = invalidations;
+    await fs.writeFile(foreign, "user temporary content\n");
+    watcher.fire(Uri.file(foreign));
+    assert.equal(invalidations, before + 1, "Unrelated, malformed and out-of-root temporary files remain observable");
+  }
+});
+
 test("workspace folder watchers follow additions and removals and refresh closed source/config changes", async t => {
   const fixture = await setup(t);
   const added = await setup(t);

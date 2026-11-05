@@ -38,6 +38,23 @@ test("custom stubs survive explicit execution environment paths and owned releas
   }
 });
 
+test("ownership metadata writes use a distinct temporary file purpose", async t => {
+  const f = fixture(t, { json: "{}\n" });
+  const ownerFile = path.join(f.root, MANAGED_PATH, "project-config-owner.json");
+  const names = [];
+  const rename = fs.renameSync;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (destination === ownerFile) names.push(path.basename(source));
+    return rename(source, destination);
+  });
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker);
+  await managed.release();
+  managed.cleanup();
+  assert.ok(names.length > 0, "Exercise real ownership-file publication");
+  for (const name of names) assert.match(name,
+    /^\.graphql-desk-owner-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i);
+});
+
 test("managed config records only added environment roots across restart and release", async t => {
   const f = fixture(t, { json: JSON.stringify({ stubPath: "custom-stubs", extraPaths: ["vendor"], executionEnvironments: [
     { root: "src", extraPaths: ["environment-vendor"] }, { root: "existing", extraPaths: ["./custom-stubs", "keep"] },
