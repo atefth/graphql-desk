@@ -208,6 +208,10 @@ def _pyright_config_request(value: dict[str, object]) -> dict[str, object]:
         raise ValueError("Invalid Pyright config request")
     ownership = ownership_record
     owned_environment_roots = cast(list[str], ownership["execution_environment_roots"])
+    if action in {"prepare_stub_path", "release_stub_path"} and len(
+        set(owned_environment_roots)
+    ) != len(owned_environment_roots):
+        raise ValueError("Duplicate custom stub execution environment ownership")
     document = cast(MutableMapping[str, object], tomlkit.parse(text))
     tool_value = document.get("tool")
     if tool_value is None:
@@ -368,6 +372,16 @@ def _pyright_config_request(value: dict[str, object]) -> dict[str, object]:
                 )
             extra_paths.append(custom_path)
             pyright["extraPaths"] = extra_paths
+        for root in owned_environment_roots:
+            custom_environment: MutableMapping[str, object] | None = next(
+                (item for item in environments if item["root"] == root), None
+            )
+            if custom_environment is None or "extraPaths" not in custom_environment:
+                raise ValueError("Custom stub execution environment ownership changed")
+            paths = cast(MutableSequence[object], custom_environment["extraPaths"])
+            if custom_path in paths:
+                raise ValueError("Custom stub execution environment ownership changed")
+            paths.append(custom_path)
         stub_path = managed_path
         has_stub_path = True
         pyright["stubPath"] = managed_path
@@ -399,6 +413,17 @@ def _pyright_config_request(value: dict[str, object]) -> dict[str, object]:
                 pyright.pop("extraPaths", None)
             else:
                 pyright["extraPaths"] = extra_paths
+        for root in owned_environment_roots:
+            custom_environment = next(
+                (item for item in environments if item["root"] == root), None
+            )
+            if custom_environment is None or "extraPaths" not in custom_environment:
+                raise ValueError("Custom stub execution environment ownership changed")
+            paths = cast(MutableSequence[object], custom_environment["extraPaths"])
+            matches = [index for index, item in enumerate(paths) if item == custom_path]
+            if len(matches) != 1:
+                raise ValueError("Custom stub execution environment ownership changed")
+            del paths[matches[0]]
         if original_present:
             pyright["stubPath"] = original_path
             stub_path = original_path

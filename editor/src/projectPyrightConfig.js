@@ -264,6 +264,12 @@ function modifyJsonConfig(text, action, managedPath = MANAGED_PATH, ownership = 
       throw new Error("Pyright stubPath changed before GraphQL Desk could update it; preserved");
     }
   };
+  const customEnvironmentRoots = ownership.executionEnvironmentRoots ?? [];
+  if (["prepare_stub_path", "release_stub_path"].includes(action) &&
+      (!Array.isArray(customEnvironmentRoots) || new Set(customEnvironmentRoots).size !== customEnvironmentRoots.length ||
+        !customEnvironmentRoots.every(root => typeof root === "string" && root))) {
+    throw new Error("Invalid custom stub execution environment ownership; preserved");
+  }
   if (action === "prepare_stub_path") {
     assertExpectedStubPath();
     let updated = text;
@@ -279,6 +285,16 @@ function modifyJsonConfig(text, action, managedPath = MANAGED_PATH, ownership = 
         { formattingOptions: { insertSpaces: true, tabSize: 2, eol: updated.includes("\r\n") ? "\r\n" : "\n" } }));
       current = parseJsonConfig(updated);
     }
+    for (const root of customEnvironmentRoots) {
+      current = parseJsonConfig(updated);
+      const index = current.executionEnvironments.findIndex(item => item.root === root);
+      const environment = current.executionEnvironments[index];
+      if (!environment?.hasExtraPaths || environment.extraPaths.includes(ownership.customStubPath)) {
+        throw new Error("Custom stub execution environment ownership changed; preserved");
+      }
+      updated = applyEdits(updated, modify(updated, ["executionEnvironments", index, "extraPaths", environment.extraPaths.length],
+        ownership.customStubPath, { formattingOptions: { insertSpaces: true, tabSize: 2, eol: updated.includes("\r\n") ? "\r\n" : "\n" } }));
+    }
     updated = applyEdits(updated, modify(updated, ["stubPath"], managedPath,
       { formattingOptions: { insertSpaces: true, tabSize: 2, eol: updated.includes("\r\n") ? "\r\n" : "\n" } }));
     return { ...parseJsonConfig(updated), text: updated };
@@ -293,6 +309,14 @@ function modifyJsonConfig(text, action, managedPath = MANAGED_PATH, ownership = 
       if (ownership.removeExtraPathsKey === true && current.extraPaths.length === 1) updated = applyEdits(updated, modify(updated, ["extraPaths"], undefined,
         { formattingOptions: { insertSpaces: true, tabSize: 2, eol: updated.includes("\r\n") ? "\r\n" : "\n" } }));
       else updated = removeJsonArrayItem(updated, ["extraPaths"], indexes[0]);
+    }
+    for (const root of customEnvironmentRoots) {
+      const current = parseJsonConfig(updated);
+      const index = current.executionEnvironments.findIndex(item => item.root === root);
+      const environment = current.executionEnvironments[index];
+      const indexes = environment?.extraPaths.flatMap((value, index) => value === ownership.customStubPath ? [index] : []) ?? [];
+      if (!environment?.hasExtraPaths || indexes.length !== 1) throw new Error("Custom stub execution environment ownership changed; preserved");
+      updated = removeJsonArrayItem(updated, ["executionEnvironments", index, "extraPaths"], indexes[0]);
     }
     const restore = ownership.originalStubPathPresent === true ? ownership.originalStubPath : undefined;
     updated = applyEdits(updated, modify(updated, ["stubPath"], restore,
@@ -507,6 +531,11 @@ async function updateProjectConfig(vscode, folder, action, worker, ownership = {
   }
     const update = format === "jsonc" ? modifyJsonConfig(snapshot.text, action, managedPath, ownership) :
     await invokeToml(folder, snapshot.text, action, worker, ownership, managedPath);
+  if (action === "prepare_stub_path" && update.executionEnvironments.some(environment => environment.hasExtraPaths &&
+      !environment.extraPaths.some(value => normalized(path.resolve(path.dirname(file), value)) ===
+        normalized(path.resolve(path.dirname(file), ownership.customStubPath))))) {
+    throw new Error("Custom stub execution environment coverage changed during setup; preserved");
+  }
   if (update.text !== snapshot.text) {
     await atomicReplaceOwnedConfig(vscode, workspace, file, update.text, snapshot, onOwnedWrite);
   }
@@ -563,6 +592,9 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     value.path === MANAGED_PATH && value.format === inspected.format && typeof value.originalStubPathPresent === "boolean" &&
     (value.originalStubPath === null || typeof value.originalStubPath === "string") && typeof value.customStubPath === "string" &&
     typeof value.customStubPathAdded === "boolean" && typeof value.removeExtraPathsKey === "boolean" &&
+    (value.customStubPathEnvironmentRoots === undefined || Array.isArray(value.customStubPathEnvironmentRoots) &&
+      value.customStubPathEnvironmentRoots.every(root => typeof root === "string" && root) &&
+      new Set(value.customStubPathEnvironmentRoots).size === value.customStubPathEnvironmentRoots.length) &&
     typeof value.currentStubPath === "string" && ["prepare", "active", "release", "rotate"].includes(value.phase) &&
     (value.pythonStubPath === undefined || value.pythonStubPath && typeof value.pythonStubPath.current === "string" &&
       value.pythonStubPath.snapshot && typeof value.pythonStubPath.snapshot === "object") &&
@@ -589,9 +621,21 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     ? saved.ownership.topLevel : !inspected.hasExtraPaths;
   const originalStubPathPresent = saved?.version === 3 ? saved.originalStubPathPresent : inspected.hasStubPath;
   const originalStubPath = saved?.version === 3 ? saved.originalStubPath : inspected.stubPath;
-  if (saved?.version === 3 && !saved.pythonStubPath) {
+  const hasCustomPath = values => values.some(value => normalized(path.resolve(configDirectory, value)) ===
+    normalized(path.resolve(configDirectory, customStubPath)));
+  const legacyEnvironmentRoots = saved?.version === 2 ? saved.ownership.executionEnvironmentRoots : [];
+  const customStubPathEnvironmentRoots = saved?.version === 3 ? saved.customStubPathEnvironmentRoots ?? [] :
+    inspected.executionEnvironments.filter(environment => environment.hasExtraPaths && !hasCustomPath(environment.extraPaths) &&
+      !(legacyEnvironmentRoots.includes(environment.root) && environment.extraPaths.length === 1 && environment.extraPaths[0] === MANAGED_PATH))
+      .map(environment => environment.root);
+  if (saved?.version === 3 && saved.customStubPathEnvironmentRoots === undefined && saved.phase !== "release" &&
+      inspected.executionEnvironments.some(environment => environment.hasExtraPaths && !hasCustomPath(environment.extraPaths))) {
+    throw new Error("Legacy GraphQL Desk execution-environment ownership is missing; restore the original config and clear GraphQL Desk ownership before enabling again");
+  }
+  if (saved?.version === 3 && (!saved.pythonStubPath || saved.customStubPathEnvironmentRoots === undefined)) {
     const current = pythonSettings.effective();
-    saved = { ...saved, pythonStubPath: { snapshot: pythonSettings.snapshot(), current: current || "" } };
+    saved = { ...saved, customStubPathEnvironmentRoots,
+      pythonStubPath: saved.pythonStubPath ?? { snapshot: pythonSettings.snapshot(), current: current || "" } };
     await persistOwner(saved);
   }
   let pythonOwner = saved?.pythonStubPath ?? { snapshot: pythonSettings.snapshot(), current: pythonSettings.effective() || "" };
@@ -623,7 +667,8 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   };
   const legacyOwnership = saved?.version === 2 ? saved.ownership : saved?.version === 3 ? saved.legacyOwnership : null;
   const restoreOwnership = { customStubPath, customStubPathAdded, removeExtraPathsKey,
-    originalStubPathPresent, originalStubPath };
+    originalStubPathPresent, originalStubPath,
+    ...(customStubPathEnvironmentRoots.length ? { executionEnvironmentRoots: customStubPathEnvironmentRoots } : {}) };
   const managedAliases = config => configPaths(config).some(value => resolvesToManagedRoot(value));
   const managedSearchAliases = config => [...config.extraPaths, ...config.executionEnvironments.flatMap(item => item.extraPaths)]
     .some(value => value !== MANAGED_PATH && (resolvesToManagedRoot(value) || typeof value === "string" &&
@@ -637,6 +682,13 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     return latest;
   };
   const customPathPresent = config => config.extraPaths.includes(customStubPath);
+  const customEnvironmentPathsPresent = (config, requireCoverage = true) => (!requireCoverage || config.executionEnvironments.every(environment =>
+    !environment.hasExtraPaths || hasCustomPath(environment.extraPaths))) && customStubPathEnvironmentRoots.every(root => {
+    const environment = config.executionEnvironments.find(item => item.root === root);
+    return environment?.hasExtraPaths && environment.extraPaths.filter(value => value === customStubPath).length === 1;
+  });
+  const customEnvironmentPathsRemain = config => customStubPathEnvironmentRoots.some(root =>
+    config.executionEnvironments.find(item => item.root === root)?.extraPaths.includes(customStubPath));
   const isManagedSelection = value => value === MANAGED_PATH || typeof value === "string" &&
     normalized(path.resolve(configDirectory, value)).startsWith(`${managedRoot}${path.sep}`);
   const genericOwner = workspaceState?.get?.(generationKeys.stateKey);
@@ -645,7 +697,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     const latest = await inspectLatest();
     const restored = latest.hasStubPath === saved.originalStubPathPresent &&
       (!saved.originalStubPathPresent || latest.stubPath === saved.originalStubPath);
-    if (restored && saved.customStubPathAdded && customPathPresent(latest)) {
+    if (restored && (saved.customStubPathAdded && customPathPresent(latest) || customEnvironmentPathsRemain(latest))) {
       throw new Error("Pyright config changed during GraphQL Desk cleanup; preserved");
     }
     if (!restored && (!latest.hasStubPath || latest.stubPath !== saved.currentStubPath)) {
@@ -657,7 +709,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       }, MANAGED_PATH, onOwnedWrite);
       if (released.hasStubPath !== saved.originalStubPathPresent ||
           saved.originalStubPathPresent && released.stubPath !== saved.originalStubPath ||
-          saved.customStubPathAdded && customPathPresent(released)) {
+          saved.customStubPathAdded && customPathPresent(released) || customEnvironmentPathsRemain(released)) {
         throw new Error("GraphQL Desk Pyright config cleanup could not be verified; preserved");
       }
     }
@@ -698,7 +750,8 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       latest = await updateProjectConfig(vscode, folder, "remove_stale_generations", worker, {}, MANAGED_PATH, onOwnedWrite);
     }
     if (latest.stubPath !== saved.currentStubPath || !latest.hasStubPath ||
-        saved.customStubPathAdded && !customPathPresent(latest) || managedAliases(latest) && !isManagedSelection(latest.stubPath) || managedSearchAliases(latest)) {
+        saved.customStubPathAdded && !customPathPresent(latest) || !customEnvironmentPathsPresent(latest) ||
+        managedAliases(latest) && !isManagedSelection(latest.stubPath) || managedSearchAliases(latest)) {
       const pending = workspaceState?.get?.(generationKeys.stateKey);
       if (pending?.pending === true && pending.current === latest.stubPath && pending.previous === saved.currentStubPath && isManagedSelection(latest.stubPath)) {
         saved = { ...saved, currentStubPath: latest.stubPath };
@@ -716,7 +769,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   if (!saved || saved.version === 2 || saved.phase === "prepare") {
     if (saved?.version === 3) {
       const latest = await inspectLatest();
-      if (latest.stubPath === MANAGED_PATH && (!saved.customStubPathAdded || customPathPresent(latest))) {
+      if (latest.stubPath === MANAGED_PATH && (!saved.customStubPathAdded || customPathPresent(latest)) && customEnvironmentPathsPresent(latest)) {
         saved = { ...saved, phase: "active", currentStubPath: MANAGED_PATH };
         await persistOwner(saved);
       } else if ((latest.hasStubPath === saved.originalStubPathPresent) &&
@@ -733,7 +786,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       const owner = saved?.version === 3 ? saved : {
         version: 3, file: fileKey, format: inspected.format, path: MANAGED_PATH,
         originalStubPathPresent, originalStubPath: originalStubPath ?? null,
-        customStubPath, customStubPathAdded, removeExtraPathsKey,
+        customStubPath, customStubPathAdded, customStubPathEnvironmentRoots, removeExtraPathsKey,
         currentStubPath: current.hasStubPath ? current.stubPath : "", phase: "prepare",
         pythonStubPath: { snapshot: pythonSettings.snapshot(), current: pythonSettings.effective() || "" },
         legacyOwnership: legacy,
@@ -744,12 +797,13 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
         : await updateProjectConfig(vscode, folder, "prepare_stub_path", worker, {
           expectedStubPathPresent: current.hasStubPath, expectedStubPath: current.stubPath,
           customStubPath, customStubPathAdded, removeExtraPathsKey,
+          ...(customStubPathEnvironmentRoots.length ? { executionEnvironmentRoots: customStubPathEnvironmentRoots } : {}),
           removeManagedPaths: saved?.version === 2 || Boolean(saved?.version === 3 && legacy),
           legacyTopLevel: legacy?.topLevel === true,
           legacyExecutionEnvironmentRoots: Array.isArray(legacy?.executionEnvironmentRoots) ? legacy.executionEnvironmentRoots : [],
         }, MANAGED_PATH, onOwnedWrite);
       if (prepared.stubPath !== MANAGED_PATH || !prepared.hasStubPath ||
-          customStubPathAdded && !prepared.extraPaths.includes(customStubPath)) {
+          customStubPathAdded && !prepared.extraPaths.includes(customStubPath) || !customEnvironmentPathsPresent(prepared)) {
         throw new Error("GraphQL Desk managed Pyright stubPath could not be verified; preserved");
       }
       const pythonCurrent = pythonSettings.effective() || "";
@@ -770,11 +824,12 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   // check an in-flight snapshot while the root is being initialized.
   onOwnership(inspected.format === "toml" ? inspected.file : null, currentSetting,
     saved.originalStubPath, saved.originalStubPathPresent);
-  const assertEffectiveOwner = async () => {
+  const assertEffectiveOwner = async (requireCustomCoverage = true) => {
     const latest = await inspectLatest();
     if (managedSearchAliases(latest)) throw new Error("Pyright search paths alias the reserved GraphQL Desk path; ownership preserved");
     if (!latest.hasStubPath || latest.stubPath !== currentSetting ||
-        saved.customStubPathAdded && !customPathPresent(latest) || managedAliases(latest) && !isManagedSelection(latest.stubPath)) {
+        saved.customStubPathAdded && !customPathPresent(latest) || !customEnvironmentPathsPresent(latest, requireCustomCoverage) ||
+        managedAliases(latest) && !isManagedSelection(latest.stubPath)) {
       throw new Error("GraphQL Desk Pyright stubPath ownership changed; preserved");
     }
     return latest;
@@ -875,7 +930,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     },
     async release() {
       if (!managed.ownsSetting) return;
-      await assertEffectiveOwner();
+      await assertEffectiveOwner(false);
       saved = { ...saved, phase: "release" };
       await persistOwner(saved);
       await managed.release();
@@ -885,7 +940,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
         expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath, ...restoreOwnership,
       }, MANAGED_PATH, onOwnedWrite);
       if (released.hasStubPath !== originalStubPathPresent || originalStubPathPresent && released.stubPath !== originalStubPath ||
-          customStubPathAdded && released.extraPaths.includes(customStubPath)) {
+          customStubPathAdded && released.extraPaths.includes(customStubPath) || customEnvironmentPathsRemain(released)) {
         throw new Error("GraphQL Desk Pyright config cleanup could not be verified; preserved");
       }
       await restorePythonStubPath();

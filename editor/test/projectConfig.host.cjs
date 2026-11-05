@@ -166,13 +166,13 @@ async function run() {
   if (!projectToml) {
     assert.deepEqual(config().extraPaths, ["vendor", "custom-stubs"]);
     if (process.env.GRAPHQL_DESK_TEST_SUITE === "projectConfigEnvironment") {
-      assert.deepEqual(config().executionEnvironments[0].extraPaths, ["environment-vendor"]);
+      assert.deepEqual(config().executionEnvironments[0].extraPaths, ["environment-vendor", "custom-stubs"]);
     }
     const toml = await fs.readFile(path.join(workspace, "pyproject.toml"), "utf8");
     assert.match(toml, /stubPath = "toml-ignored"/, "pyrightconfig.json takes precedence over pyproject.toml");
   } else {
     assert.deepEqual(config().extraPaths, ["vendor", "custom-stubs"]);
-    assert.deepEqual(config().executionEnvironments[0].extraPaths, ["environment-vendor"]);
+    assert.deepEqual(config().executionEnvironments[0].extraPaths, ["environment-vendor", "custom-stubs"]);
   }
   await fs.access(path.join(path.resolve(workspace, current.setting), "complete.json"));
   const evidence = { outcome: "project-config-live-typing-observed", vscode: vscode.version,
@@ -187,6 +187,10 @@ async function run() {
   await until(async () => config(), value => value.stubPath === "custom-stubs" && value.extraPaths?.join("\0") === "vendor",
     "Deactivation restores the user's project config");
   await until(pythonStubPath, value => value === "python-custom-stubs", "Deactivation restores the user's Pylance setting");
+  if (projectToml || process.env.GRAPHQL_DESK_TEST_SUITE === "projectConfigEnvironment") {
+    assert.deepEqual(config().executionEnvironments[0].extraPaths, ["environment-vendor"],
+      "Deactivation removes only the custom-stub search path owned by GraphQL Desk");
+  }
   evidence.restoredProjectStubPath = config().stubPath;
   evidence.projectConfigBeforeCleanup = beforeCleanupConfig;
   evidence.projectConfigAfterCleanup = config();
