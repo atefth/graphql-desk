@@ -584,6 +584,92 @@ test("only exact owned config replacement temp paths and hashes are ignored by t
   assert.equal(invalidations, 5, "An unregistered GraphQL Desk-shaped temp path remains a visible source change");
 });
 
+test("delayed owned config temp deletion preserves fresh artifacts after an interpreter reset", async t => {
+  for (const phase of ["commit", "cancel"]) await t.test(phase, async t => {
+    const fixture = await setup(t);
+    let invalidations = 0;
+    const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+    t.after(() => controller.dispose());
+    const snapshot = controller.snapshot(fixture.main);
+    const previous = await controller.artifacts(snapshot);
+    assert.ok(previous);
+    pythonApi(fixture);
+    fixture.interpreter("");
+    fixture.events.onDidChangeConfiguration.fire({ affectsConfiguration: name => name === "graphqlDesk" });
+    const fresh = await controller.artifacts(snapshot);
+    assert.ok(fresh);
+    assert.equal(previous.isCurrent(), false);
+    assert.equal(fresh.isCurrent(), true);
+    const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+    const file = path.join(fixture.root, "pyrightconfig.json");
+    const original = '{"stubPath":"typings"}\n';
+    const updated = '{"stubPath":".graphql-desk/live-typings"}\n';
+    await fs.writeFile(file, original);
+    const previousHash = createHash("sha256").update(original).digest("hex");
+    const nextHash = createHash("sha256").update(updated).digest("hex");
+    const temporaryPath = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+    controller.markOwnedProjectConfig(file, previousHash);
+    t.mock.timers.enable({ apis: ["setTimeout"], now: 1000 });
+    assert.equal(controller.trackOwnedProjectConfigWrite(file, nextHash, { phase: "begin", previousHash, temporaryPath }), true);
+    await fs.writeFile(temporaryPath, updated);
+    watcher.fire(Uri.file(temporaryPath));
+    if (phase === "commit") await fs.rename(temporaryPath, file);
+    else await fs.unlink(temporaryPath);
+    assert.equal(controller.trackOwnedProjectConfigWrite(file, phase === "commit" ? nextHash : null, { phase }), true);
+    t.mock.timers.tick(5001);
+    const beforeDelete = invalidations;
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeDelete, "A delayed delete from the exact finished transaction must not restart analysis");
+    assert.equal(fresh.isCurrent(), true, "The new interpreter's artifacts remain eligible for selection");
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeDelete, "Duplicate delayed deletes remain deduplicated");
+    await fs.writeFile(temporaryPath, "foreign replacement\n");
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeDelete + 1, "Recreated foreign bytes remain source changes");
+    await fs.unlink(temporaryPath);
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeDelete + 2, "Deleting the foreign replacement is observed");
+    if (phase === "cancel") {
+      for (let index = 0; index < 520; index += 1) watcher.fire(Uri.file(path.join(fixture.root, `foreign-${index}.tmp`)));
+      const afterEviction = invalidations;
+      watcher.fire(Uri.file(temporaryPath));
+      assert.equal(invalidations, afterEviction + 1, "Evicted cleanup fingerprints revert to conservative invalidation");
+    }
+  });
+});
+
+test("finished config transactions do not exempt existing, unreadable or unregistered temp paths", async t => {
+  for (const kind of ["foreign bytes", "matching bytes", "unreadable", "unregistered"]) await t.test(kind, async t => {
+    const fixture = await setup(t);
+    let invalidations = 0;
+    const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+    t.after(() => controller.dispose());
+    const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+    const file = path.join(fixture.root, "pyrightconfig.json");
+    const temporaryPath = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+    const previousHash = createHash("sha256").update("previous").digest("hex");
+    const nextHash = createHash("sha256").update("owned bytes").digest("hex");
+    if (kind !== "unregistered") {
+      assert.equal(controller.trackOwnedProjectConfigWrite(file, nextHash, { phase: "begin", previousHash, temporaryPath }), true);
+      await fs.writeFile(temporaryPath, kind === "foreign bytes" ? "foreign bytes" : "owned bytes");
+    }
+    if (kind === "unreadable") {
+      const fsSync = require("node:fs");
+      const lstat = fsSync.lstatSync;
+      const blocked = t.mock.method(fsSync, "lstatSync", filename => {
+        if (path.resolve(filename) === path.resolve(temporaryPath)) throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+        return lstat(filename);
+      });
+      controller.trackOwnedProjectConfigWrite(file, null, { phase: "cancel" });
+      blocked.mock.restore();
+      await fs.unlink(temporaryPath);
+    } else controller.trackOwnedProjectConfigWrite(file, null, { phase: "cancel" });
+    const beforeEvent = invalidations;
+    watcher.fire(Uri.file(temporaryPath));
+    assert.equal(invalidations, beforeEvent + 1, `${kind} must remain a source change after cancellation`);
+  });
+});
+
 test("only the active workspace TOML stubPath ownership is forwarded to Python analysis", async t => {
   const fixture = await setup(t);
   const requests = [];

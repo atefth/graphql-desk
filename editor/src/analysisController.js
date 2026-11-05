@@ -264,6 +264,22 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     rememberDiskFingerprint(filename, "missing");
     return true;
   }
+  function finishOwnedConfigWrite(key, fingerprint) {
+    const pending = pendingOwnedProjectConfigWrites.get(key);
+    pendingOwnedProjectConfigWrites.delete(key);
+    if (!pending) return;
+    const temporary = ownedProjectConfigTemporaryPaths.get(pending.temporaryPath);
+    if (temporary && (temporary.owner !== key || temporary.hash !== pending.nextHash)) return;
+    if (temporary) {
+      clearTimeout(temporary.timer);
+      ownedProjectConfigTemporaryPaths.delete(pending.temporaryPath);
+    }
+    if (fingerprint !== undefined && fingerprint !== pending.nextHash) return;
+    try { fs.lstatSync(pending.temporaryPath); }
+    catch (error) {
+      if (error.code === "ENOENT") rememberDiskFingerprint(pending.temporaryPath, "missing");
+    }
+  }
   function invalidate(source, ranges, diskEvent = false) {
     if (disposed) return;
     if (diskEvent && ranges == null && source?.scheme === "file") {
@@ -952,7 +968,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (typeof filename !== "string" || !path.isAbsolute(filename) || typeof fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(fingerprint)) return false;
       const key = canonical(filename);
       ownedProjectConfigHashes.set(key, fingerprint);
-      pendingOwnedProjectConfigWrites.delete(key);
+      finishOwnedConfigWrite(key, fingerprint);
       return true;
     },
     trackOwnedProjectConfigWrite(filename, fingerprint, { phase, previousHash, temporaryPath } = {}) {
@@ -974,7 +990,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         return true;
       }
       if (phase === "cancel") {
-        pendingOwnedProjectConfigWrites.delete(key);
+        finishOwnedConfigWrite(key);
         return true;
       }
       if (phase === "commit") return this.markOwnedProjectConfig(filename, fingerprint);
