@@ -964,6 +964,180 @@ test("ownership metadata staging does not invalidate analysis after generation s
   }
 });
 
+test("stat fallback refreshes closed sources when every VS Code watcher event is lost", async t => {
+  const disk = require("node:fs");
+  const watchFile = disk.watchFile;
+  const unwatchFile = disk.unwatchFile;
+  const active = new Map();
+  t.mock.method(disk, "watchFile", (filename, options, listener) => {
+    assert.deepEqual(options, { persistent: false, bigint: true });
+    active.set(filename.toLowerCase(), listener);
+    return watchFile(filename, { ...options, interval: 25 }, listener);
+  });
+  t.mock.method(disk, "unwatchFile", (filename, listener) => {
+    assert.equal(active.get(filename.toLowerCase()), listener);
+    active.delete(filename.toLowerCase());
+    return unwatchFile(filename, listener);
+  });
+  const fixture = await setup(t);
+  const source = 'from graphql_desk import gql\nclosed = gql("{title}")\n';
+  let filename = path.join(fixture.root, "closed.py");
+  await fs.writeFile(filename, source);
+  fixture.candidates(["main.py", "closed.py"]);
+  const changes = [];
+  let latest;
+  let refresh;
+  const controller = createAnalysisController(fixture.vscode, { changed(uri) {
+    changes.push(uri);
+    refresh = controller.analyze(controller.snapshot(fixture.main)).then(bundle => { latest = bundle; });
+  } });
+  t.after(() => controller.dispose());
+  assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
+  assert.equal(active.size, 2, "Only analyzed source paths are stat-polled");
+  const broad = fixture.watchers.find(watcher => watcher.pattern.pattern === "**/*");
+  for (const name of ["renamed.py", "final.py"]) {
+    const previous = filename;
+    const next = path.join(fixture.root, name);
+    await fs.rename(filename, next);
+    fixture.candidates(["main.py", name]);
+    await eventually(() => latest?.request.modules.some(module => module.module === path.parse(name).name));
+    assert.equal(active.has(previous.toLowerCase()), false, "Obsolete poll listeners are retired");
+    assert.equal(active.size, 2);
+    const count = changes.length;
+    broad.fire(Uri.file(previous));
+    assert.equal(changes.length, count, "Late native duplicate shares the missing-file fingerprint");
+    filename = next;
+  }
+  const edited = source.replace("{title}", "{title title}");
+  await fs.writeFile(filename, edited);
+  await eventually(() => latest?.request.modules.find(module => module.module === "final")?.source === edited);
+  const count = changes.length;
+  await new Promise(resolve => realTimeout(resolve, 100));
+  assert.equal(changes.length, count, "Unchanged stat scans do not republish");
+  await fs.unlink(filename);
+  fixture.candidates(["main.py"]);
+  await eventually(() => latest && !latest.request.modules.some(module => module.module === "final"));
+  await refresh;
+  assert.equal(active.size, 1);
+  controller.dispose();
+  assert.equal(active.size, 0, "Every exact polling listener is removed on dispose");
+});
+
+test("source polls stay filtered through invalid config and ignore retired or untrusted callbacks", async t => {
+  const disk = require("node:fs");
+  const active = new Map();
+  t.mock.method(disk, "watchFile", (filename, _options, listener) => active.set(filename.toLowerCase(), listener));
+  t.mock.method(disk, "unwatchFile", (filename, listener) => {
+    assert.equal(active.get(filename.toLowerCase()), listener);
+    active.delete(filename.toLowerCase());
+  });
+  const fixture = await setup(t);
+  const config = path.join(fixture.root, "pyproject.toml");
+  const original = await fs.readFile(config, "utf8");
+  const filename = path.join(fixture.root, "closed.py");
+  await fs.writeFile(filename, 'from graphql_desk import gql\nclosed = gql("{title}")\n');
+  fixture.candidates(["main.py", "closed.py"]);
+  let refresh;
+  let changes = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() {
+    changes += 1;
+    refresh = controller.analyze(controller.snapshot(fixture.main));
+  } });
+  t.after(() => controller.dispose());
+  assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
+  const retired = active.get(filename.toLowerCase());
+  const schema = fixture.watchers.find(watcher => watcher.pattern.pattern === "schema.graphql");
+  const broad = fixture.watchers.find(watcher => watcher.pattern.pattern === "**/*");
+  await fs.writeFile(config, '[tool.graphql-desk]\nschema =\n');
+  broad.fire(Uri.file(config)); await refresh;
+  assert.equal(active.size, 2, "Previously analyzed inputs remain available during config repair");
+  const next = path.join(fixture.root, "renamed.py");
+  await fs.rename(filename, next);
+  fixture.candidates(["main.py", "renamed.py"]);
+  retired(); await refresh;
+  assert.equal(active.has(filename.toLowerCase()), false);
+  assert.equal(active.has(next.toLowerCase()), false, "Invalid config does not adopt new raw candidates");
+  assert.equal(active.size, 1);
+  assert.equal(schema.disposed, false, "Existing schema repair watch is preserved");
+  let count = changes;
+  retired();
+  assert.equal(changes, count, "A queued obsolete callback cannot invalidate its replacement");
+  await fs.writeFile(config, original);
+  broad.fire(Uri.file(config)); await refresh;
+  assert.equal(active.size, 2);
+  const unsaved = fixture.document("unsaved.py", 'from graphql_desk import gql\nunsaved = gql("{title}")\n');
+  unsaved.isDirty = true;
+  assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
+  const initiallyAbsent = active.get(unsaved.uri.fsPath.toLowerCase());
+  count = changes;
+  initiallyAbsent({ nlink: 0n }, { nlink: 0n });
+  assert.equal(changes, count, "A never-saved input's initial absence is already captured");
+  await fs.writeFile(unsaved.uri.fsPath, unsaved.text);
+  fixture.candidates(["main.py", "renamed.py", "unsaved.py"]);
+  assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
+  assert.equal(active.get(unsaved.uri.fsPath.toLowerCase()), initiallyAbsent, "Reconciliation reuses the exact listener");
+  await fs.unlink(unsaved.uri.fsPath);
+  fixture.candidates(["main.py", "renamed.py"]);
+  initiallyAbsent({ nlink: 0n }, { nlink: 0n }); await refresh;
+  assert.equal(changes, count + 1, "A retained listener uses the latest disk-discovery facts");
+  initiallyAbsent({ nlink: 0n }, { nlink: 0n });
+  assert.equal(changes, count + 1, "Stable missing dirty buffers do not loop");
+  const callbacks = [...active.values()];
+  fixture.vscode.workspace.isTrusted = false;
+  count = changes;
+  callbacks.forEach(listener => listener());
+  assert.equal(changes, count);
+  assert.equal(active.size, 0, "Revoked trust removes every source polling listener");
+  fixture.vscode.workspace.isTrusted = true;
+  assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
+  assert.equal(active.size, 3);
+  controller.dispose();
+  count = changes;
+  callbacks.forEach(listener => listener());
+  assert.equal(changes, count);
+  assert.equal(active.size, 0);
+});
+
+test("source polling handles initial disappearance, refuses redirection and cleans failed registrations", async t => {
+  const disk = require("node:fs");
+  const active = new Map();
+  let reject = false;
+  t.mock.method(disk, "watchFile", (filename, _options, listener) => {
+    active.set(filename.toLowerCase(), listener);
+    if (reject) throw new Error("Polling unavailable");
+  });
+  t.mock.method(disk, "unwatchFile", (filename, listener) => {
+    assert.equal(active.get(filename.toLowerCase()), listener);
+    active.delete(filename.toLowerCase());
+  });
+  const fixture = await setup(t);
+  const changes = [];
+  const controller = createAnalysisController(fixture.vscode, { changed: uri => changes.push(uri) });
+  t.after(() => controller.dispose());
+  reject = true;
+  assert.equal(await controller.analyze(controller.snapshot(fixture.main)), null);
+  assert.equal(active.size, 0, "A failed registration cannot retain its listener");
+  reject = false;
+  assert.ok(await controller.analyze(controller.snapshot(fixture.main)));
+  const filename = fixture.main.uri.fsPath.toLowerCase();
+  const listener = active.get(filename);
+  await fs.unlink(fixture.main.uri.fsPath);
+  listener({ nlink: 0n }, { nlink: 0n });
+  assert.deepEqual(changes, [Uri.file(filename).toString()], "A discovered disk source disappearing before the first stat still invalidates");
+  const realpath = disk.realpathSync.native;
+  t.mock.method(disk.realpathSync, "native", value => value.toLowerCase() === filename
+    ? path.resolve(fixture.root, "..", "redirected.py") : realpath(value));
+  const reads = [];
+  const readFile = disk.readFileSync;
+  t.mock.method(disk, "readFileSync", (...args) => { reads.push(args[0]); return readFile(...args); });
+  listener({ nlink: 0n }, { nlink: 0n });
+  assert.deepEqual(changes, [Uri.file(filename).toString(), null], "Redirected input requests a new capture without trusting its contents");
+  assert.deepEqual(reads, [], "The disk-event fingerprint must not read a redirected file");
+  assert.equal(active.size, 0);
+  listener();
+  assert.equal(changes.length, 2);
+});
+
 test("workspace folder watchers follow additions and removals and refresh closed source/config changes", async t => {
   const fixture = await setup(t);
   const added = await setup(t);
