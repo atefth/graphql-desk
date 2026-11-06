@@ -1,0 +1,90 @@
+{
+  "backend": "turms",
+  "checks": {
+    "alias_round_trip_requires_by_alias": true,
+    "core_distribution_absent": true,
+    "datetime_parsed_and_json_serialized": true,
+    "deterministic_generated_bytes": true,
+    "enum_to_json_string": true,
+    "input_dict_unmodified": true,
+    "integer_string_coercion": true,
+    "invalid_graphql_rejected_without_output": true,
+    "matches_checked_in_output": true,
+    "missing_required_rejected": true,
+    "models_wrap_and_copy_data": true,
+    "omitted_vs_null_preserved_with_exclude_unset": true,
+    "shallow_vs_deep_model_copy": true,
+    "valid_response": true,
+    "wrong_type_rejected": true
+  },
+  "environment_check": "installed versions match the lock; provision separately with --require-hashes",
+  "generated_imports": [
+    "datetime",
+    "enum",
+    "pydantic",
+    "typing"
+  ],
+  "generated_normalized_sha256": "04f469fd2b302fc5b36cff04e0c3ef1daa00977dc335571bd36a2a3d588711e4",
+  "licenses": {
+    "annotated-types": "MIT",
+    "anyio": "MIT",
+    "certifi": "MPL-2.0",
+    "charset-normalizer": "MIT",
+    "click": "BSD-3-Clause",
+    "colorama": [
+      "License :: OSI Approved :: BSD License"
+    ],
+    "graphql-core": "MIT",
+    "idna": "BSD-3-Clause",
+    "markdown-it-py": [
+      "License :: OSI Approved :: MIT License"
+    ],
+    "mdurl": [
+      "License :: OSI Approved :: MIT License"
+    ],
+    "pydantic": "MIT",
+    "pydantic-core": "MIT",
+    "pydantic-settings": "MIT",
+    "pygments": "BSD-2-Clause",
+    "python-dotenv": "BSD-3-Clause",
+    "pyyaml": "MIT",
+    "requests": "Apache-2.0",
+    "rich": "MIT",
+    "rich-click": "MIT License\n\nCopyright (c) 2022 Phil Ewels\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n",
+    "turms": "MIT",
+    "typing-extensions": "PSF-2.0",
+    "typing-inspection": "MIT",
+    "urllib3": "MIT",
+    "watchfiles": "MIT"
+  },
+  "lock_sha256": "75b5dc6c68056557ca4df46a3b73b588d70a07e38a553a5d3d0c87122a4f585e",
+  "locked_backend_wheel_sha256": "d2269c099522e12612bf825c8dfc63bce603349874bed3506a630a0fcd513bd9",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "python": "3.13.7",
+  "versions": {
+    "annotated-types": "0.8.0",
+    "anyio": "4.16.0",
+    "certifi": "2026.10.23",
+    "charset-normalizer": "3.5.2",
+    "click": "8.5.0",
+    "colorama": "0.4.6",
+    "graphql-core": "3.3.1",
+    "idna": "3.20",
+    "markdown-it-py": "4.2.0",
+    "mdurl": "0.1.2",
+    "pydantic": "2.14.3",
+    "pydantic-core": "2.50.4",
+    "pydantic-settings": "2.16.2",
+    "pygments": "2.21.0",
+    "python-dotenv": "1.2.4",
+    "pyyaml": "6.0.3",
+    "requests": "2.34.2",
+    "rich": "15.0.0",
+    "rich-click": "1.9.9",
+    "turms": "2.3.0",
+    "typing-extensions": "4.16.0",
+    "typing-inspection": "0.4.5",
+    "urllib3": "2.8.0",
+    "watchfiles": "1.3.0"
+  }
+}

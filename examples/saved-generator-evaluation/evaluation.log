@@ -1,0 +1,20 @@
+{
+  "evidence": "E:\\code\\gql.py\\graphql-desk\\.tmp\\issue85-eval\\results-final\\evidence.json",
+  "checks": {
+    "alias_round_trip_requires_by_alias": true,
+    "datetime_parsed_and_json_serialized": true,
+    "enum_to_json_string": true,
+    "input_dict_unmodified": true,
+    "integer_string_coercion": true,
+    "missing_required_rejected": true,
+    "models_wrap_and_copy_data": true,
+    "omitted_vs_null_preserved_with_exclude_unset": true,
+    "shallow_vs_deep_model_copy": true,
+    "valid_response": true,
+    "wrong_type_rejected": true,
+    "deterministic_generated_bytes": true,
+    "matches_checked_in_output": true,
+    "invalid_graphql_rejected_without_output": true,
+    "core_distribution_absent": true
+  }
+}

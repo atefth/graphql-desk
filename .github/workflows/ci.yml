@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       code_changed: ${{ steps.paths.outputs.code_changed }}
+      saved_generator_changed: ${{ steps.paths.outputs.saved_generator_changed }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -32,7 +33,7 @@ jobs:
               changed = [b"unknown"]
           else:
               result = subprocess.run(
-                  ["git", "diff", "--name-only", "-z", f"{base}...{head}"],
+                  ["git", "diff", "--no-renames", "--name-only", "-z", f"{base}...{head}"],
                   check=True,
                   capture_output=True,
               )
@@ -44,8 +45,21 @@ jobs:
           assert not markdown_only([b".github/workflows/ci.yml"])
           assert not markdown_only([])
           docs_only = markdown_only(changed)
+          def saved_generator_changed(paths):
+              return any(
+                  path == b"unknown"
+                  or path == b".github/workflows/ci.yml"
+                  or path.startswith(b"examples/saved-generator-evaluation/")
+                  for path in paths
+              )
+
+          assert saved_generator_changed([b"examples/saved-generator-evaluation/requirements.lock"])
+          assert saved_generator_changed([b".github/workflows/ci.yml"])
+          assert saved_generator_changed([b"examples/saved-generator-evaluation/expected_schema.txt", b"docs/expected_schema.txt"])
+          assert not saved_generator_changed([b"src/graphql_desk/cli.py"])
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"code_changed={str(not docs_only).lower()}\n")
+              output.write(f"saved_generator_changed={str(saved_generator_changed(changed)).lower()}\n")
           PY
 
   quality:
@@ -127,6 +141,23 @@ jobs:
       - run: uv build --no-sources --no-build-isolation
       - run: uv export --locked --no-dev --no-emit-project --output-file runtime-requirements.txt
       - run: uv run python scripts/check_distributions.py
+      - name: Evaluate the isolated optional saved-model generator
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && needs.changes.outputs.saved_generator_changed == 'true'
+        env:
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          uv run python -B examples/saved-generator-evaluation/test_guards.py
+          .venv/bin/python -B -c "import runpy; from pathlib import Path; runpy.run_path('examples/saved-generator-evaluation/evaluate.py')['checked_task_root'](Path.cwd())"
+          if test -e .tmp/issue85-eval || test -L .tmp/issue85-eval; then
+            echo 'Task data already exists; refusing provisioning' >&2
+            exit 1
+          fi
+          mkdir -p .tmp/issue85-eval
+          export UV_CACHE_DIR="$GITHUB_WORKSPACE/.tmp/issue85-eval/uv-cache"
+          uv venv --python .venv/bin/python .tmp/issue85-eval/environment
+          uv pip install --python .tmp/issue85-eval/environment/bin/python --only-binary :all: --require-hashes -r examples/saved-generator-evaluation/requirements.lock
+          .tmp/issue85-eval/environment/bin/python -I -B -X utf8 examples/saved-generator-evaluation/evaluate.py --output hosted-results
+          uv run python -c "import importlib.util; assert all(importlib.util.find_spec(name) is None for name in ('turms', 'pydantic'))"
 
   editor:
     needs: changes

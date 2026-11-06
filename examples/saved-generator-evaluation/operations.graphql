@@ -1,0 +1,10 @@
+query GetUser($id: ID!, $filter: UserFilter) {
+  viewer: user(id: $id, filter: $filter) {
+    __typename
+    id
+    displayName: fullName
+    status
+    createdAt
+    note
+  }
+}

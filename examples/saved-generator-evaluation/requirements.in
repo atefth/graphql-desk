@@ -1,0 +1,3 @@
+# Isolated saved-model evaluation only; never install into GraphQL Desk's environment.
+turms==2.3.0
+graphql-core==3.3.1
