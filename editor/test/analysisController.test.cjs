@@ -1335,8 +1335,9 @@ test("stat fallback refreshes closed sources when every VS Code watcher event is
   for (const name of ["renamed.py", "final.py"]) {
     const previous = filename;
     const next = path.join(fixture.root, name);
-    await fs.rename(filename, next);
+    // Keep fake glob discovery current before a real stat callback can run.
     fixture.candidates(["main.py", name]);
+    await fs.rename(filename, next);
     await eventually(() => latest?.request.modules.some(module => module.module === path.parse(name).name));
     assert.equal(active.has(pollKey(path.basename(previous))), false, "Obsolete poll listeners are retired");
     assert.ok(active.has(pollKey(name)), "The renamed source has a replacement poll");
@@ -1352,8 +1353,18 @@ test("stat fallback refreshes closed sources when every VS Code watcher event is
   const count = changes.length;
   await new Promise(resolve => realTimeout(resolve, 100));
   assert.equal(changes.length, count, "Unchanged stat scans do not republish");
-  await fs.unlink(filename);
+  const removedPoll = active.get(pollKey("final.py"));
+  assert.equal(typeof removedPoll, "function");
+  const nativeUnlink = fs.unlink;
+  t.mock.method(fs, "unlink", async target => {
+    await nativeUnlink(target);
+    if (target === filename) {
+      removedPoll({ nlink: 0n }, { nlink: 1n });
+      await refresh;
+    }
+  });
   fixture.candidates(["main.py"]);
+  await fs.unlink(filename);
   await eventually(() => latest && !latest.request.modules.some(module => module.module === "final"));
   await refresh;
   assert.equal(active.size, 1);

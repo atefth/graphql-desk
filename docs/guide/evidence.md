@@ -25,6 +25,140 @@ The verifier's success message is a scoped result. It is not a new measurement
 for all Python minors or host operating systems. The wheel is built and imported
 as an archive, not installed into a clean consumer environment by this example.
 
+## Config routing and owner-record replacement
+
+For [#329](https://github.com/atefth/graphql-desk/issues/329), the initial independent
+editor suite passed **472 tests** on 2026-11-06. After the standalone-folder
+correction below and deterministic polling-fixture correction, the combined
+independent suite passed **479 tests**, with no failures, skips or cancellations.
+The connected [project-config](../../editor/test/projectPyrightConfig.test.cjs),
+[managed-setting](../../editor/test/managedStubPath.test.cjs) and
+[lifecycle](../../editor/test/extensionLifecycle.test.cjs) fixtures cover routing
+and interrupted owner writes.
+
+One local Windows development-host run passed all seven phases in VS Code
+1.142.0: config-empty startup, late JSON creation, permanent folder choice,
+hidden Workspace choice, JSON precedence over TOML, JSON removal selecting TOML,
+and JSON recreation restoring precedence. It checked precise nullable and
+non-null typing, deliberate type errors and the exact native config path.
+Python's public API selected the same CPython **3.10.18** before and after the
+run. The isolated profile used copied Python **2026.10.0**, Pylance **2026.4.1**,
+debugpy **2026.6.0** and Python Environments **1.40.0**, with application extension
+updates disabled and Pylance Trace enabled; final versions and paths matched.
+Real deactivation restored user settings/configs while preserving unsaved text,
+source bytes and user files.
+
+That seven-phase run used a workspace file. A standalone folder exposes one
+physical setting through both Workspace and WorkspaceFolder views. The owned
+write advances both only when their observed values equal its exact target and
+there is currently one folder with no workspace file, including no untitled
+workspace. Global and independent workspace choices remain separate. Actual
+manager/dispatcher regressions cover this distinction; final hosted folder-mode
+checks are required rather than inferred from the workspace-file run.
+
+Owner replacement uses one exclusively created stage and at most four async
+attempts, waiting 50/100/150 ms between retries. Each attempt rechecks phase,
+trust, dirty buffers, settings/config/state, native identity, bytes and ancestry.
+Cold scanning stops at a 4,096-entry budget; unknown or unverifiable stages are
+preserved and block further allocation. The earlier Windows failure's
+lock-versus-permission cause remains unproved.
+
+The physically verified config-empty fixture stayed within the explicitly
+approved `E:/code/gql.py` boundary and was removed, along with its isolated host
+profile. This local-only harness is not a published general runner. This proves
+a source extension in an installed editor's **development host**, not an
+installed VSIX or all-platform acceptance. Final exact-head hosted checks remain
+required; [#355](https://github.com/atefth/graphql-desk/issues/355) retention and
+the broader parity/release gates remain open.
+
+The next exact-head hosted run at `c048ce8` completed with **22 successes and
+7 failures**, including the aggregate check. Four editor failures exercised
+unsaved GraphQL-only TOML changes; two factory hosts failed after a lower-priority
+Python setting was changed and quickly restored. These failures are retained in
+[run 42199145008](https://github.com/atefth/graphql-desk/actions/runs/42199145008);
+they are not waived or counted as parity passes.
+
+Actual manager regressions reproduced dirty unrelated TOML blocking both a JSON
+route and a fallback route. Read-only route detection now follows physical config
+precedence, with Native snapshot and trust checks after awaited inspection.
+Absence of a Pyright table permits fallback acquisition even if the GraphQL-only
+buffer is dirty; effective Pyright writers and all other write/cleanup paths
+still require clean buffers. Fourteen focused cases passed independently and all
+**492 editor tests** passed locally, without skips or cancellations. Fresh hosted
+acceptance is still required.
+
+Actual manager and generation-publisher replays also reproduced the interrupted
+routing-release case: a Python setting restored during native verification or
+finish left an outdated saved choice and prevented a fresh manager from
+recovering. Routing-release recovery now captures and guards the latest user
+choice after validating the owned/original project config. It preserves every
+Python layer through release; only fresh authorized setup can mirror its own
+setting again. A string naming a former generation is treated as the user's
+choice, not proof of ownership. The old manager loses its publication capability
+as soon as release intent is durable; retained generation and staging proof is
+not discarded. Fifteen focused recovery and safety cases passed independently;
+the combined configured editor suite passed **507 tests**, with zero failures,
+skips or cancellations. This does not relax active/setup/rotation checks or prove
+reader lifetime safety. Hosted acceptance of those corrections remains required.
+
+At `75e08fa`, the next hosted run passed **27 jobs**; the TOML restart host and
+aggregate failed. After restart the config selected g-4 while its Python mirror
+selected g-5, and cleanup rejected the mismatch. There was no missing-file or
+watcher-crash evidence. Actual manager/generation replays reproduced a consistent
+defect: normal cleanup could save the old selection while rollback had already
+changed the config but was still updating Python. The precise hosted interleaving
+was not recorded and remains unproved.
+
+Normal cleanup now waits on the existing selection queue, journals the verified
+current config/Python pair, and revokes the old capability after release intent
+is durable. It clears only its matching generic selection record, checked inside
+the existing state-update queue. Cold cleanup also guards the owner/phase record
+through native verification and preserves generation/staging provenance instead
+of orphaning retained reader files. All **523 configured editor tests** passed,
+with zero failures/skips/cancellations; 16 new regressions passed independently.
+Fresh exact-head hosted checks remain required before merge. Stable default
+activation, cold stable selection and reader retirement remain separate gates.
+
+At `eb9da9f`, hosted checks again passed **27 jobs**; the VS Code 1.142 factory
+host and aggregate failed. Its trace reported an owner-phase/Python-settings guard rejection followed by
+a pending owner-write block. Real manager replays reproduced source freshness
+expiring after an owned record was renamed or while its Memento write awaited.
+That stranded the published record and prevented later edits or cold acquisition.
+This is a demonstrated defect consistent with the trace, not proof of the exact
+hosted interleaving.
+
+Semantic freshness still gates initial intent admission and the existing guarded
+selector path; journal completion alone authorizes no config, Python or type
+selection. Once the exact owned rename has committed, only that record's Native and
+Memento pairing may complete under unchanged phase, lifecycle, config, Python,
+trust, dirty-buffer and Native proofs. Target proof exceptions remain fatal.
+A proven unselected stale intent is restored to its known prior active owner;
+the exact paired Memento and descriptor-derived owner identity protect that
+handoff and every replacement retry. Failed reconciliation revokes management
+and preserves uncertain records. This reuses the existing writer and selection queue, with no new
+journal, prefix-based adoption or general compare-and-swap claim.
+
+All **541 configured editor tests** passed, with zero failures/skips/cancellations.
+The 18 new regressions cover five cancellation boundaries and thirteen foreign,
+dirty, lifecycle, Native and state changes. Four published-stage cases and two
+handoff negatives failed before their corrections. Original-instance recovery,
+immediate cold acquisition, a later valid edit and subsequent cold acquisition
+are checked together, preserving prior reader records and rejecting stale
+config/Python/type selection. Root independently passed all 18 new cases; the
+peer passed those plus the existing Native-verification case. Exact-head hosted
+acceptance remains required; no timeout or assertion is waived.
+
+At `105857a`, 27 hosted jobs passed, including both factory hosts. The TOML host
+stopped before its schema edit because the initial non-null polling predicate
+called `includes` on a missing observation's `text`. Its generation reader can
+return a no-text record while no generation is selected or an owned file is
+temporarily absent; the trace does not identify which branch occurred. The
+predicate now guards optional text, matching the existing nullable predicate.
+Replaying the actual predicate reproduces the old exception for both pending
+shapes and verifies that they now keep polling, while String succeeds and
+nullable/Unknown observations do not. All type, stub, setting-mirror and timeout
+checks remain unchanged. This fixture correction does not prove reader safety.
+
 ## Requirement-to-example/evidence map
 
 | #81 area | Documentation and runnable evidence | Boundary |

@@ -8,13 +8,17 @@ const test = require("node:test");
 const { spawnSync } = require("node:child_process");
 const { createAnalysisWorker } = require("../src/analysisWorker");
 const { parseJsonConfig, modifyJsonConfig, updateProjectConfig: rawUpdateProjectConfig,
-  createManagedProjectConfig: rawCreateManagedProjectConfig, acknowledgePendingConfigWrite, MANAGED_PATH, stateKey } = require("../src/projectPyrightConfig");
-const { managedStateKeys } = require("../src/managedStubPath");
+  createManagedProjectConfig: rawCreateManagedProjectConfig, inspectProjectConfigRoute, acknowledgePendingConfigWrite, MANAGED_PATH, stateKey } = require("../src/projectPyrightConfig");
+const { createManagedStubPath, managedStateKeys } = require("../src/managedStubPath");
+const { reconfigureWorkspaceRoots } = require("../src/extension");
+const { createAnalysisGenerations } = require("../src/analysisGenerations");
 const fixtures = new WeakMap();
 
 function createManagedProjectConfig(vscode, folder, state, worker, options = {}) {
   return rawCreateManagedProjectConfig(vscode, folder, state, worker,
-    { configFile: fixtures.get(vscode)?.configFile, ...options });
+    { configFile: fixtures.get(vscode)?.configFile,
+      ownerCurrent: () => vscode.workspace.isTrusted === true && vscode.workspace.workspaceFolders.includes(folder) &&
+        vscode.workspace.getWorkspaceFolder(folder.uri) === folder, ...options });
 }
 
 function updateProjectConfig(vscode, folder, action, worker, ownership = {}, managedPath = MANAGED_PATH, onOwnedWrite, isCurrent = () => true) {
@@ -115,7 +119,8 @@ function configFileFixture(vscode, folder, root) {
 
 function stateStore() {
   const values = new Map();
-  return { get: key => values.get(key), update: async (key, value) => value === undefined ? values.delete(key) : values.set(key, value) };
+  return { get: key => values.get(key), snapshot: () => structuredClone([...values]),
+    update: async (key, value) => value === undefined ? values.delete(key) : values.set(key, value) };
 }
 
 test("discard preserves a staging file opened dirty during the native cleanup request", async t => {
@@ -485,7 +490,8 @@ test("real Pyright retains custom stub typing through an explicit environment", 
   check();
 });
 
-function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonStubPath, inheritedPythonStubPath } = {}) {
+function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonStubPath, inheritedPythonStubPath, globalPythonStubPath,
+  workspaceSerialized = false, standaloneAliases = false } = {}) {
   const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "pyright-config-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const folder = { uri: { scheme: "file", fsPath: root, toString: () => `file://${root.replaceAll("\\", "/")}` } };
@@ -495,8 +501,9 @@ function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonSt
   const configurationListeners = new Set();
   let onPythonSettingChange;
   const pythonConfiguration = {
-    get: (_name, fallback) => pythonStubPath ?? inheritedPythonStubPath ?? fallback,
-    inspect: () => ({ workspaceFolderValue: pythonStubPath, workspaceValue: inheritedPythonStubPath }),
+    get: (_name, fallback) => pythonStubPath ?? inheritedPythonStubPath ?? globalPythonStubPath ?? fallback,
+    inspect: () => workspaceSerialized ? { workspaceValue: pythonStubPath ?? inheritedPythonStubPath, globalValue: globalPythonStubPath } :
+      { workspaceFolderValue: pythonStubPath, workspaceValue: standaloneAliases ? pythonStubPath : inheritedPythonStubPath, globalValue: globalPythonStubPath },
     update: async (_name, value) => {
       pythonStubPath = value;
       if (onPythonSettingChange) await onPythonSettingChange(value);
@@ -591,7 +598,44 @@ function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonSt
   const configFile = configFileFixture(vscode, folder, root);
   const journal = [];
   fixtures.set(vscode, { configFile, journal });
-  return { root, folder, vscode, worker, configFile, journal, get pythonStubPath() { return pythonStubPath; }, onPythonSettingChange(callback) { onPythonSettingChange = callback; } };
+  return { root, folder, vscode, worker, configFile, journal, get pythonStubPath() { return pythonStubPath; },
+    setInheritedPythonStubPath(value) { inheritedPythonStubPath = value; },
+    setGlobalPythonStubPath(value) { globalPythonStubPath = value; },
+    onPythonSettingChange(callback) { onPythonSettingChange = callback; } };
+}
+
+test("project owner advances both standalone aliases through setup, rotation and restoration", async t => {
+  const original = '{"stubPath":"project-user-stubs"}';
+  const f = fixture(t, { json: original, standaloneAliases: true, globalPythonStubPath: "global-user-stubs" });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  assert.equal(managed.routingSettingsCurrent(), true, "Both native views of the same standalone setting are owned");
+  const generation = path.join(managed.root, "generations", `g-1-${randomUUID()}`);
+  fs.mkdirSync(generation, { recursive: true });
+  const verification = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+    id: path.basename(generation), artifactFingerprint: "a" }, manifestFingerprint: "b".repeat(64), verify() { return this; } };
+  assert.equal(await managed.recordGeneration(generation, verification.manifestFingerprint), true);
+  assert.equal(await managed.selectGeneration(generation, () => true, verification), true);
+  assert.equal(managed.routingSettingsCurrent(), true);
+  assert.equal(f.vscode.workspace.getConfiguration().inspect().globalValue, "global-user-stubs");
+  await managed.release();
+  assert.equal(f.pythonStubPath, undefined);
+  assert.equal(f.vscode.workspace.getConfiguration().get("analysis.stubPath"), "global-user-stubs");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")), JSON.parse(original));
+});
+
+for (const scheme of ["file", "untitled"]) {
+  test(`project owner does not merge independent same-target layers in a ${scheme} workspace`, async t => {
+    const f = fixture(t, { json: "{}" });
+    f.vscode.workspace.workspaceFile = { scheme, fsPath: path.join(f.root, "project.code-workspace") };
+    f.onPythonSettingChange(value => f.setInheritedPythonStubPath(value));
+    const state = stateStore();
+    const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    assert.equal(managed.routingSettingsCurrent(), false, "An independent concurrent Workspace choice must still require routing");
+    const prior = state.get(stateKey(f.root)).pythonStubPath.snapshot;
+    assert.equal(prior.singleFolderDirectory, false, "An untitled workspace file also gives Workspace its own settings layer");
+    assert.equal(prior.workspacePresent, false, "The owned update cannot adopt the concurrent Workspace choice as its prior");
+  });
 }
 
 test("JSONC edit preserves comments, trailing commas, and unrelated settings", () => {
@@ -691,6 +735,400 @@ test("an in-place TOML edit during the async worker call is preserved", async t 
   const after = fs.statSync(file);
   assert.equal(after.ino, before.ino, "the test mutates the same config inode");
   assert.equal(fs.readFileSync(file, "utf8"), `${original}# concurrent user edit\n`);
+});
+
+test("owner record replacement retries the same verified stage after transient locks", async t => {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs"}' });
+  const rename = fs.renameSync;
+  let first;
+  let attempts = 0;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (path.basename(destination) === "project-config-owner.json") {
+      first ??= source;
+      if (source === first && ++attempts <= 2) throw Object.assign(new Error("locked"), { code: "EPERM" });
+    }
+    return rename(source, destination);
+  });
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker);
+  assert.equal(attempts, 3);
+  assert.equal(managed.stillOwnsSetting(), true);
+  assert.equal(fs.readdirSync(managed.root).some(name => name.endsWith(".tmp")), false);
+});
+
+for (const code of ["EPERM", "EACCES", "EBUSY", "ENOSPC"]) {
+  test(`owner record replacement bounds ${code} failures without leaving a verified temporary`, async t => {
+    const original = '{"stubPath":"custom-stubs"}';
+    const f = fixture(t, { json: original });
+    const rename = fs.renameSync;
+    const stages = new Set();
+    let attempts = 0;
+    t.mock.method(fs, "renameSync", (source, destination) => {
+      if (path.basename(destination) !== "project-config-owner.json") return rename(source, destination);
+      stages.add(source);
+      attempts += 1;
+      throw Object.assign(new Error("replacement failed"), { code });
+    });
+    await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker), { code });
+    assert.equal(attempts, code === "ENOSPC" ? 1 : 4);
+    assert.equal(stages.size, 1);
+    assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), original);
+    assert.deepEqual(fs.readdirSync(path.join(f.root, MANAGED_PATH)), []);
+  });
+}
+
+for (const change of ["lifecycle", "trust", "folder", "config", "python", "hidden-python", "dirty-config", "dirty-settings", "dirty-owner", "dirty-stage"]) {
+  test(`owner replacement rechecks ${change} after a lock wait`, async t => {
+    const original = '{"stubPath":"custom-stubs"}';
+    const f = fixture(t, { json: original });
+    const file = path.join(f.root, "pyrightconfig.json");
+    const rename = fs.renameSync;
+    let current = true;
+    let attempts = 0;
+    let stage;
+    t.mock.method(fs, "renameSync", (source, destination) => {
+      if (path.basename(destination) !== "project-config-owner.json") return rename(source, destination);
+      attempts += 1;
+      stage = source;
+      setTimeout(() => {
+        if (change === "lifecycle") current = false;
+        else if (change === "trust") f.vscode.workspace.isTrusted = false;
+        else if (change === "folder") f.vscode.workspace.getWorkspaceFolder = () => undefined;
+        else if (change === "config") fs.appendFileSync(file, "\n// user edit\n");
+        else if (change === "python") void f.vscode.workspace.getConfiguration().update("analysis.stubPath", "user-stubs");
+        else if (change === "hidden-python") f.setGlobalPythonStubPath("new-global-stubs");
+        else f.vscode.workspace.textDocuments.push({ isDirty: true, uri: { scheme: "file", fsPath:
+          change === "dirty-config" ? file : change === "dirty-settings" ? path.join(f.root, ".vscode", "settings.json") :
+            change === "dirty-owner" ? destination : source } });
+      }, 0);
+      throw Object.assign(new Error("locked"), { code: "EPERM" });
+    });
+    await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker, { ownerCurrent: () => current }),
+      /changed|Dirty|dirty/);
+    assert.equal(attempts, 1, "a rejected guard cannot make a second replacement attempt");
+    assert.equal(fs.existsSync(path.join(f.root, MANAGED_PATH, "project-config-owner.json")), false);
+    assert.equal(fs.existsSync(stage), ["trust", "folder", "dirty-stage"].includes(change),
+      "only a still-verifiable clean temporary may be removed");
+    assert.equal(fs.readFileSync(file, "utf8"), change === "config" ? `${original}\n// user edit\n` : original);
+  });
+}
+
+test("owner replacement preserves a same-byte foreign stage and refuses another allocation on restart", async t => {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs"}' });
+  const rename = fs.renameSync;
+  let attempts = 0;
+  let stage;
+  let foreignIdentity;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (path.basename(destination) !== "project-config-owner.json") return rename(source, destination);
+    stage = source;
+    attempts += 1;
+    const bytes = fs.readFileSync(source);
+    rename(source, `${source}.held`);
+    fs.writeFileSync(source, bytes, { flag: "wx" });
+    foreignIdentity = fs.statSync(source, { bigint: true });
+    throw Object.assign(new Error("locked"), { code: "EPERM" });
+  });
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker), /staging file changed.*staging preserved/);
+  assert.equal(attempts, 1);
+  assert.equal(fs.statSync(stage, { bigint: true }).ino, foreignIdentity.ino);
+  const before = fs.readdirSync(path.dirname(stage));
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker), /Unverified.*temporary/);
+  assert.deepEqual(fs.readdirSync(path.dirname(stage)), before);
+  assert.equal(attempts, 1);
+});
+
+test("cold owner preflight bounds directory enumeration before allocating a stage", async t => {
+  const f = fixture(t, { json: "{}" });
+  const root = path.join(f.root, MANAGED_PATH);
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, "user.txt"), "preserve me");
+  const opendir = fs.opendirSync;
+  const open = fs.openSync;
+  let reads = 0, closes = 0, allocations = 0;
+  t.mock.method(fs, "opendirSync", (directory, ...args) => directory === root ? {
+    readSync() { return ++reads <= 5000 ? { name: `foreign-${reads}.txt` } : null; },
+    closeSync() { closes += 1; },
+  } : opendir(directory, ...args));
+  t.mock.method(fs, "openSync", (file, flags, ...args) => {
+    if (flags === "wx" && path.basename(file).startsWith(".graphql-desk-owner-")) allocations += 1;
+    return open(file, flags, ...args);
+  });
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker), /owner directory exceeds 4096 entries/);
+  assert.equal(reads, 4097, "one lookahead establishes overflow without enumerating the remaining entries");
+  assert.equal(closes, 1);
+  assert.equal(allocations, 0);
+  assert.deepEqual(fs.readdirSync(root), ["user.txt"]);
+  assert.equal(fs.readFileSync(path.join(root, "user.txt"), "utf8"), "preserve me");
+});
+
+test("owner replacement rechecks the original native identity during a wait", async t => {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs"}' });
+  const rename = fs.renameSync;
+  let attempts = 0;
+  let foreign;
+  let stage;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (path.basename(destination) !== "project-config-owner.json" || !fs.existsSync(destination)) return rename(source, destination);
+    stage = source;
+    attempts += 1;
+    const bytes = fs.readFileSync(destination);
+    rename(destination, `${destination}.held`);
+    fs.writeFileSync(destination, bytes, { flag: "wx" });
+    foreign = fs.statSync(destination, { bigint: true });
+    throw Object.assign(new Error("locked"), { code: "EBUSY" });
+  });
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker), /owner record changed/);
+  assert.equal(attempts, 1);
+  assert.equal(fs.statSync(path.join(f.root, MANAGED_PATH, "project-config-owner.json"), { bigint: true }).ino, foreign.ino);
+  assert.equal(fs.existsSync(stage), false, "an unchanged clean stage can still be removed after the original changes");
+});
+
+test("owner replacement preserves a changed durable ownership record during backoff", async t => {
+  const f = fixture(t, { json: "{}" });
+  const state = stateStore();
+  const foreign = { owner: "another operation" };
+  const rename = fs.renameSync;
+  let attempts = 0;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (path.basename(destination) !== "project-config-owner.json") return rename(source, destination);
+    if (++attempts === 1) {
+      setTimeout(() => { void state.update(stateKey(f.root), foreign); }, 0);
+      throw Object.assign(new Error("locked"), { code: "EPERM" });
+    }
+    return rename(source, destination);
+  });
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker), /owner state changed/);
+  assert.equal(attempts, 1);
+  assert.deepEqual(state.get(stateKey(f.root)), foreign);
+  assert.equal(fs.existsSync(path.join(f.root, MANAGED_PATH, "project-config-owner.json")), false);
+  assert.deepEqual(fs.readdirSync(path.join(f.root, MANAGED_PATH)), []);
+});
+
+test("owner replacement refuses a changed directory while preserving both namespaces", async t => {
+  const f = fixture(t, { json: "{}" });
+  const root = path.join(f.root, MANAGED_PATH);
+  const rename = fs.renameSync;
+  let attempts = 0;
+  let stage;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (path.basename(destination) !== "project-config-owner.json") return rename(source, destination);
+    stage = path.basename(source);
+    attempts += 1;
+    rename(root, `${root}.held`);
+    fs.mkdirSync(root);
+    fs.writeFileSync(path.join(root, "foreign.txt"), "user data");
+    throw Object.assign(new Error("locked"), { code: "EACCES" });
+  });
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker), /owner directory changed.*staging preserved/);
+  assert.equal(attempts, 1);
+  assert.deepEqual(fs.readdirSync(root), ["foreign.txt"]);
+  assert.equal(fs.existsSync(path.join(`${root}.held`, stage)), true);
+});
+
+test("owner staging distinguishes adjacent native IDs above JavaScript number precision", async t => {
+  const f = fixture(t, { json: "{}" });
+  const huge = 2n ** 100n;
+  const open = fs.openSync, close = fs.closeSync, fstat = fs.fstatSync, lstat = fs.lstatSync, rename = fs.renameSync;
+  let stage, descriptor;
+  let replaced = false;
+  t.mock.method(fs, "openSync", (file, ...args) => {
+    const result = open(file, ...args);
+    if (path.basename(file).startsWith(".graphql-desk-owner-")) { stage = file; descriptor = result; }
+    return result;
+  });
+  t.mock.method(fs, "fstatSync", (fd, options) => {
+    const stat = fstat(fd, options);
+    if (fd === descriptor && options?.bigint) stat.ino = huge;
+    return stat;
+  });
+  t.mock.method(fs, "closeSync", fd => { if (fd === descriptor) descriptor = undefined; return close(fd); });
+  t.mock.method(fs, "lstatSync", (file, options) => {
+    const stat = lstat(file, options);
+    if (file === stage && options?.bigint) stat.ino = huge + (replaced ? 1n : 0n);
+    return stat;
+  });
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (path.basename(destination) !== "project-config-owner.json") return rename(source, destination);
+    replaced = true;
+    throw Object.assign(new Error("locked"), { code: "EPERM" });
+  });
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker), /staging file changed.*staging preserved/);
+  assert.equal(Number(huge), Number(huge + 1n), "the fixture really exceeds number precision");
+  assert.equal(fs.existsSync(stage), true);
+});
+
+test("superseded generation cannot replace an owner record after a backoff", async t => {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs"}' });
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker);
+  const original = fs.readFileSync(path.join(f.root, "pyrightconfig.json"));
+  const owner = fs.readFileSync(path.join(managed.root, "project-config-owner.json"));
+  const generation = path.join(managed.root, "generations", `g-1-${randomUUID()}`);
+  fs.mkdirSync(generation, { recursive: true });
+  const verification = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+    id: path.basename(generation), artifactFingerprint: "a" }, manifestFingerprint: "b".repeat(64), verify() { return this; } };
+  assert.equal(await managed.recordGeneration(generation, verification.manifestFingerprint), true);
+  const rename = fs.renameSync;
+  let current = true;
+  let attempts = 0;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (path.basename(destination) !== "project-config-owner.json") return rename(source, destination);
+    attempts += 1;
+    setTimeout(() => { current = false; }, 0);
+    throw Object.assign(new Error("locked"), { code: "EBUSY" });
+  });
+  await assert.rejects(managed.selectGeneration(generation, () => current, verification), /phase or Python settings changed/);
+  assert.equal(attempts, 1);
+  assert.deepEqual(fs.readFileSync(path.join(f.root, "pyrightconfig.json")), original);
+  assert.deepEqual(fs.readFileSync(path.join(managed.root, "project-config-owner.json")), owner);
+  assert.equal(f.pythonStubPath, MANAGED_PATH);
+  assert.equal(fs.readdirSync(managed.root).some(name => name.endsWith(".tmp")), false);
+});
+
+test("uncertain owner cleanup blocks new stages until its exact file is clean again", async t => {
+  const original = '{"stubPath":"custom-stubs"}';
+  const f = fixture(t, { json: original });
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker);
+  const rename = fs.renameSync;
+  const open = fs.openSync;
+  let stage;
+  let allocations = 0;
+  t.mock.method(fs, "openSync", (file, flags, ...args) => {
+    if (flags === "wx" && path.basename(file).startsWith(".graphql-desk-owner-")) allocations += 1;
+    return open(file, flags, ...args);
+  });
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (!stage && path.basename(destination) === "project-config-owner.json") {
+      stage = source;
+      f.vscode.workspace.textDocuments.push({ isDirty: true, uri: { scheme: "file", fsPath: source } });
+      throw Object.assign(new Error("locked"), { code: "EBUSY" });
+    }
+    return rename(source, destination);
+  });
+  await assert.rejects(managed.release(), /Dirty.*staging preserved/);
+  const identity = fs.statSync(stage, { bigint: true });
+  await assert.rejects(managed.release(), /Dirty/);
+  assert.equal(allocations, 1, "retrying an unresolved stage cannot allocate another one");
+  assert.equal(fs.statSync(stage, { bigint: true }).ino, identity.ino);
+  f.vscode.workspace.textDocuments.length = 0;
+  await managed.release();
+  assert.equal(allocations, 2, "the exact old stage is safely removed before one new attempt");
+  assert.equal(fs.existsSync(stage), false);
+  assert.equal(fs.readdirSync(managed.root).some(name => name.endsWith(".tmp")), false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")), JSON.parse(original));
+});
+
+test("owner replacement requires an explicit lifecycle guard before setup", async t => {
+  const f = fixture(t, { json: "{}" });
+  await assert.rejects(rawCreateManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker, { configFile: f.configFile }),
+    /freshness guard/);
+  assert.deepEqual(fs.readdirSync(f.root), ["pyrightconfig.json"]);
+});
+
+function activateConfigExtension(t, f, state) {
+  const Module = require("node:module");
+  const filename = require.resolve("../src/extension");
+  const cached = require.cache[filename];
+  delete require.cache[filename];
+  const lines = [];
+  let controllerDisposed = false;
+  let reachedArtifacts;
+  const ready = new Promise(resolve => { reachedArtifacts = resolve; });
+  const disposable = () => ({ dispose() {} });
+  const uri = fsPath => ({ scheme: "file", fsPath, toString: () => require("node:url").pathToFileURL(fsPath).href });
+  f.vscode.Uri = { file: uri, parse: value => uri(require("node:url").fileURLToPath(value)) };
+  f.folder.uri = uri(f.root);
+  f.vscode.workspace.onDidChangeWorkspaceFolders = disposable;
+  f.vscode.languages = { createDiagnosticCollection: () => ({ ...disposable(), delete() {}, clear() {}, set() {} }) };
+  f.vscode.commands = { registerCommand: disposable, executeCommand: async () => {} };
+  f.vscode.StatusBarAlignment = { Right: 1 };
+  f.vscode.CancellationTokenSource = class { token = {}; cancel() { this.token.isCancellationRequested = true; } dispose() {} };
+  const document = { uri: uri(path.join(f.root, "example.py")), languageId: "python", getText: () => "" };
+  f.vscode.window = { visibleTextEditors: [{ document }],
+    createOutputChannel: () => ({ appendLine: line => lines.push(line), dispose() {} }),
+    createStatusBarItem: () => ({ ...disposable(), show() {}, hide() {} }), onDidChangeVisibleTextEditors: disposable };
+  const controller = {
+    isTrusted: () => f.vscode.workspace.isTrusted,
+    editPyrightConfig: f.worker, configFile: f.configFile,
+    trackOwnedProjectConfigWrite: () => true, markOwnedProjectConfig() {}, setManagedProjectStubPath() {},
+    snapshot: () => ({}), artifacts: async () => { reachedArtifacts(); return null; },
+    dispose() { controllerDisposed = true; },
+  };
+  const provider = () => ({ ...disposable(), close() {}, refresh: async () => {} });
+  const load = Module._load;
+  const mocked = t.mock.method(Module, "_load", function(request, ...args) {
+    if (request === "vscode") return f.vscode;
+    if (args[0]?.filename === filename) {
+      if (request === "./analysisController") return { createAnalysisController: () => controller };
+      if (request === "./languageFeatures") return { registerLanguageFeatures: provider };
+      if (request === "./highlighting") return { registerHighlighting: provider };
+      if (request === "./renameLanguageClient") return { createRenameLanguageClient: () => ({ start: async () => {}, stop: async () => {} }) };
+      if (request === "./analysisGenerations") return { createAnalysisGenerations: () => ({ current: () => [], publish: async () => false }) };
+    }
+    return load.call(this, request, ...args);
+  });
+  const extension = require(filename);
+  extension.activate({ subscriptions: [], workspaceState: state });
+  mocked.mock.restore();
+  t.after(async () => {
+    await extension.deactivate();
+    require.cache[filename] = cached;
+  });
+  return { ...extension, ready, lines, get controllerDisposed() { return controllerDisposed; } };
+}
+
+test("actual extension deactivation restores project settings through an owner retry", async t => {
+  const original = '{"stubPath":"custom-stubs"}';
+  const f = fixture(t, { json: original });
+  const state = stateStore();
+  const extension = activateConfigExtension(t, f, state);
+  await extension.ready;
+  const rename = fs.renameSync;
+  let attempts = 0;
+  let stage;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (path.basename(destination) === "project-config-owner.json" && JSON.parse(fs.readFileSync(source)).phase === "release") {
+      assert.equal(extension.controllerDisposed, false, "the native config backend stays alive through restoration");
+      stage ??= source;
+      assert.equal(source, stage);
+      if (++attempts === 1) throw Object.assign(new Error("locked during teardown"), { code: "EPERM" });
+    }
+    return rename(source, destination);
+  });
+  await extension.deactivate();
+  assert.equal(attempts, 2);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")), JSON.parse(original));
+  assert.equal(f.pythonStubPath, undefined);
+  assert.equal(state.get(stateKey(f.root)), undefined);
+  assert.equal(extension.controllerDisposed, true);
+  assert.equal(extension.lines.some(line => line.includes("cleanup failed")), false);
+  assert.equal(fs.existsSync(stage), false);
+});
+
+test("actual extension disposal during an owner wait rejects unfinished setup", async t => {
+  const original = '{"stubPath":"custom-stubs"}';
+  const f = fixture(t, { json: original });
+  const rename = fs.renameSync;
+  let entered;
+  const waiting = new Promise(resolve => { entered = resolve; });
+  let attempts = 0;
+  let stage;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (path.basename(destination) !== "project-config-owner.json") return rename(source, destination);
+    stage = source;
+    attempts += 1;
+    entered();
+    throw Object.assign(new Error("locked during setup"), { code: "EPERM" });
+  });
+  const state = stateStore();
+  const extension = activateConfigExtension(t, f, state);
+  await waiting;
+  await extension.deactivate();
+  assert.equal(attempts, 1);
+  assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), original);
+  assert.equal(f.pythonStubPath, undefined);
+  assert.equal(state.get(stateKey(f.root)), undefined);
+  assert.equal(fs.existsSync(stage), false);
+  assert.equal(extension.lines.some(line => line.includes("phase or Python settings changed")), true);
 });
 
 test("config replacement retries a transient Windows lock without changing write ownership", async t => {
@@ -1035,6 +1473,7 @@ test("a generation becoming stale during native verification cannot change proje
   assert.equal(f.pythonStubPath, MANAGED_PATH);
   assert.equal(state.get(`${stateKey(f.root)}:pending-config-write`), undefined);
   assert.equal(state.get(keys.stateKey).current, MANAGED_PATH);
+  assert.equal(state.get(stateKey(f.root)).phase, "active", "an unselected stale intent cannot strand cold rotation recovery");
   f.configFile.onRequest(() => {});
   await managed.release();
   managed.cleanup();
@@ -1246,6 +1685,539 @@ test("a JSON config appearing after TOML ownership changes precedence and is lef
   assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), json);
   assert.match(fs.readFileSync(path.join(f.root, "pyproject.toml"), "utf8"), /stubPath = "\.graphql-desk\/live-typings"/);
   managed.cleanup();
+});
+
+test("routing releases the exact shadowed TOML config before acquiring JSON", async t => {
+  const toml = '[tool.pyright]\nstubPath = "custom-stubs"\n';
+  const f = fixture(t, { toml });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const json = '{"stubPath":"json-user-stubs","extraPaths":["json-vendor"]}';
+  fs.writeFileSync(path.join(f.root, "pyrightconfig.json"), json);
+  await managed.releaseForRouting();
+  assert.equal(fs.readFileSync(path.join(f.root, "pyproject.toml"), "utf8"), toml);
+  assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), json);
+  assert.equal(state.get(stateKey(f.root)), undefined);
+  const replacement = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  await replacement.release();
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")), JSON.parse(json));
+});
+
+test("routing preserves a permanent external Python stub choice without transiently restoring the old choice", async t => {
+  const original = '{"stubPath":"custom-stubs","extraPaths":["vendor"]}';
+  const f = fixture(t, { json: original });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const generation = path.join(managed.root, "generations", "g-1-00000000-0000-0000-0000-000000000000");
+  fs.mkdirSync(generation, { recursive: true });
+  const verification = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+    id: path.basename(generation), artifactFingerprint: "a" }, manifestFingerprint: "b".repeat(64), verify() { return this; } };
+  assert.equal(await managed.recordGeneration(generation, verification.manifestFingerprint), true);
+  assert.equal(await managed.selectGeneration(generation, () => true, verification), true);
+  await f.vscode.workspace.getConfiguration().update("analysis.stubPath", "new-user-stubs", 2);
+  const updates = [];
+  f.onPythonSettingChange(value => updates.push(value));
+  await managed.releaseForRouting();
+  assert.equal(f.pythonStubPath, "new-user-stubs");
+  assert.deepEqual(updates, [], "the new user choice must never be overwritten during handoff");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")), JSON.parse(original));
+  const protectedState = state.snapshot();
+  const protectedGenerations = fs.readdirSync(path.join(managed.root, "generations")).sort();
+  assert.equal(managed.ownsSetting, false, "the released inner manager must lose its publication capability");
+  assert.equal(managed.stillOwnsSetting(), false);
+  assert.equal(await managed.checkSettingOwnership(), false);
+  assert.equal(await managed.recordGeneration(generation, verification.manifestFingerprint), false);
+  assert.equal(await managed.selectGeneration(generation, () => true, verification), false);
+  const stagedName = `.graphql-desk-${randomUUID()}-marker-${randomUUID()}.tmp`;
+  await assert.rejects(managed.recordStaging(generation, "c".repeat(64), stagedName), /not owned/);
+  const publisher = createAnalysisGenerations(f.vscode, f.root, managed.root);
+  const packages = new Map([["example_generated", [{ relative_path: "example_generated/default.pyi", text: "value: str\n" }]]]);
+  assert.equal(await publisher.publish(packages, "retired-publisher", () => true, managed, "a".repeat(64), "b".repeat(64), []), false);
+  assert.deepEqual(state.snapshot(), protectedState, "retired capabilities cannot change any workspace-state record");
+  assert.deepEqual(fs.readdirSync(path.join(managed.root, "generations")).sort(), protectedGenerations);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")), JSON.parse(original));
+  assert.deepEqual(updates, []);
+  const replacement = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  await replacement.release();
+  assert.equal(f.pythonStubPath, "new-user-stubs", "the replacement restores the newly captured user choice");
+});
+
+test("an already managed empty folder reroutes when JSON or a Pyright TOML table is created", async t => {
+  for (const kind of ["json", "toml"]) {
+    const f = fixture(t);
+    const state = stateStore();
+    const current = await createManagedStubPath(f.vscode, f.folder, state);
+    const generation = path.join(current.root, "generations", "g-1-00000000-0000-0000-0000-000000000000");
+    fs.mkdirSync(generation, { recursive: true });
+    const verification = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+      id: path.basename(generation), artifactFingerprint: "a" }, manifestFingerprint: "b".repeat(64), verify() { return this; } };
+    assert.equal(await current.recordGeneration(generation, verification.manifestFingerprint), true);
+    assert.equal(await current.selectGeneration(generation, () => true, verification), true);
+    const roots = new Map([[f.root, Promise.resolve(current)]]);
+    const filename = path.join(f.root, kind === "json" ? "pyrightconfig.json" : "pyproject.toml");
+    const original = kind === "json" ? '{"stubPath":"user-stubs"}' : '[tool.pyright]\nstubPath = "user-stubs"\n';
+    fs.writeFileSync(filename, original);
+    await reconfigureWorkspaceRoots({ roots, folders: [f.folder],
+      routeCurrent: async (_folder, managed) => {
+        const route = await inspectProjectConfigRoute(f.vscode, f.folder, f.worker);
+        assert.equal(route.isCurrent(), true);
+        return route.file === (managed.configurationFile ?? null);
+      },
+      retire: async (_root, managed, reroute) => { assert.equal(reroute, true); await managed.releaseForRouting(); },
+      create: async () => createManagedProjectConfig(f.vscode, f.folder, state, f.worker) });
+    const next = await roots.get(f.root);
+    assert.equal(next.projectConfig, true);
+    assert.equal(state.get(stateKey(f.root)).pythonStubPath.snapshot.folderPresent, false);
+    await next.release();
+    assert.equal(f.pythonStubPath, undefined);
+  }
+});
+
+test("routing does not recreate a deleted config or a valid removed TOML table", async t => {
+  for (const kind of ["json", "toml"]) {
+    const f = fixture(t, kind === "json" ? { json: '{"stubPath":"user-stubs"}' } : { toml: '[tool.pyright]\nstubPath = "user-stubs"\n' });
+    const state = stateStore();
+    const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    const filename = path.join(f.root, kind === "json" ? "pyrightconfig.json" : "pyproject.toml");
+    if (kind === "json") fs.unlinkSync(filename);
+    else fs.writeFileSync(filename, '[project]\nname = "kept"\n');
+    await managed.releaseForRouting();
+    assert.equal(f.pythonStubPath, undefined);
+    assert.equal(state.get(stateKey(f.root)), undefined);
+    if (kind === "json") assert.equal(fs.existsSync(filename), false);
+    else assert.equal(fs.readFileSync(filename, "utf8"), '[project]\nname = "kept"\n');
+  }
+});
+
+test("routing keeps a new lower-priority Python choice while removing only the owned override", async t => {
+  const f = fixture(t, { json: '{"stubPath":"project-user-stubs"}', inheritedPythonStubPath: "old-inherited-stubs" });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  f.setInheritedPythonStubPath("new-inherited-stubs");
+  assert.equal(managed.routingSettingsCurrent(), false, "effective equality cannot hide a changed lower-priority layer");
+  const updates = [];
+  f.onPythonSettingChange(value => updates.push(value));
+  await managed.releaseForRouting();
+  assert.equal(f.vscode.workspace.getConfiguration().get("analysis.stubPath"), "new-inherited-stubs");
+  assert.equal(updates.includes("old-inherited-stubs"), false);
+  assert.equal(updates.includes(".graphql-desk/live-typings"), false);
+  const replacement = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  await replacement.release();
+  assert.equal(f.vscode.workspace.getConfiguration().get("analysis.stubPath"), "new-inherited-stubs");
+});
+
+for (const layer of ["workspace", "global"]) for (const startup of [true, false]) for (const workspaceSerialized of layer === "global" ? [false, true] : [false]) {
+  test(`project routing keeps hidden ${layer} changes during owned Python ${startup ? "startup" : "rotation"}${workspaceSerialized ? " serialized at workspace scope" : ""}`, async t => {
+    const original = '{"stubPath":"project-user-stubs"}';
+    const f = fixture(t, { json: original, workspaceSerialized });
+    const state = stateStore();
+    let managed = startup ? null : await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    let release, entered;
+    const gate = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { entered = resolve; });
+    let holding = true;
+    f.onPythonSettingChange(async () => { if (holding) { holding = false; entered(); await gate; } });
+    let pending;
+    if (startup) pending = createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    else {
+      const generation = path.join(managed.root, "generations", `g-1-${randomUUID()}`);
+      fs.mkdirSync(generation, { recursive: true });
+      const verification = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+        id: path.basename(generation), artifactFingerprint: "a" }, manifestFingerprint: "b".repeat(64), verify() { return this; } };
+      assert.equal(await managed.recordGeneration(generation, verification.manifestFingerprint), true);
+      pending = managed.selectGeneration(generation, () => true, verification);
+    }
+    await Promise.race([started, pending.then(() => assert.fail("the actual Python update must be held"))]);
+    const selected = f.pythonStubPath;
+    const choice = `new-${layer}-stubs`;
+    if (layer === "workspace") f.setInheritedPythonStubPath(choice);
+    else f.setGlobalPythonStubPath(choice);
+    assert.equal(f.vscode.workspace.getConfiguration().get("analysis.stubPath"), selected, "the new user choice is hidden");
+    release();
+    if (startup) managed = await pending;
+    else assert.equal(await pending, true);
+    assert.equal(managed.routingSettingsCurrent(), false, "the owned update must not absorb a hidden user choice");
+    assert.equal(state.get(stateKey(f.root)).pythonStubPath.snapshot[`${layer}Present`], false, "the saved prior stays unchanged until routing");
+    await managed.releaseForRouting();
+    assert.equal(f.vscode.workspace.getConfiguration().get("analysis.stubPath"), choice);
+    const replacement = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    await replacement.release();
+    assert.equal(f.vscode.workspace.getConfiguration().get("analysis.stubPath"), choice);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")), JSON.parse(original));
+  });
+}
+
+test("routing waits for the current native generation transaction before capturing release inputs", async t => {
+  const f = fixture(t, { json: '{"stubPath":"project-user-stubs"}' });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const generation = path.join(managed.root, "generations", "g-1-00000000-0000-0000-0000-000000000000");
+  fs.mkdirSync(generation, { recursive: true });
+  const verification = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+    id: path.basename(generation), artifactFingerprint: "a" }, manifestFingerprint: "b".repeat(64), verify() { return this; } };
+  assert.equal(await managed.recordGeneration(generation, verification.manifestFingerprint), true);
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  let holding = true;
+  f.configFile.onRequest(async action => { if (action === "verify" && holding) { holding = false; entered(); await gate; } });
+  const selecting = managed.selectGeneration(generation, () => true, verification);
+  await Promise.race([started, selecting.then(() => assert.fail("the native verify must be held"))]);
+  let finished = false;
+  const releasing = managed.releaseForRouting().then(() => { finished = true; });
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(finished, false);
+  } finally { release(); }
+  assert.equal(await selecting, true);
+  await releasing;
+  assert.equal(f.pythonStubPath, undefined);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")).stubPath, "project-user-stubs");
+});
+
+async function interruptedPythonRouting(t, boundary, choice = "restored") {
+  const original = '{"stubPath":"project-user-stubs","extraPaths":["vendor"]}';
+  const f = fixture(t, { json: original, standaloneAliases: true, globalPythonStubPath: "global-user-stubs" });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const publisher = createAnalysisGenerations(f.vscode, f.root, managed.root);
+  const groups = new Map([["example_generated", [
+    { relative_path: "example_generated/default.py", text: 'value = "safe"\n' },
+    { relative_path: "example_generated/default.pyi", text: "value: str\n" },
+  ]]]);
+  assert.equal(await publisher.publish(groups, "before-transient-routing", () => true, managed,
+    "a".repeat(64), "b".repeat(64), []), true);
+  const complete = publisher.current(managed)[0];
+  assert.ok(complete);
+  const protectedFiles = [...complete.files.keys(), "complete.json"]
+    .map(name => [path.join(complete.directory, name), fs.readFileSync(path.join(complete.directory, name))]);
+  const selected = f.pythonStubPath;
+  const latest = choice === "restored" ? selected : choice === "later" ? "later-user-stubs" : "custom_stubs";
+  await f.vscode.workspace.getConfiguration().update("analysis.stubPath", "custom_stubs", 2);
+  let interrupted = false;
+  f.configFile.onRequest(async action => {
+    if (action !== boundary || interrupted) return;
+    interrupted = true;
+    if (choice === "unchanged") throw new Error("interrupted routing release");
+    await f.vscode.workspace.getConfiguration().update("analysis.stubPath", latest, 2);
+  });
+  await assert.rejects(managed.releaseForRouting(), /routing inputs changed|interrupted routing release/);
+  assert.equal(interrupted, true);
+  assert.equal(state.get(stateKey(f.root)).routing, true);
+  assert.equal(managed.ownsSetting, false, "The durable release intent revokes the old handle even when later I/O fails");
+  const protectedState = state.snapshot();
+  assert.equal(await managed.recordGeneration(complete.directory, complete.manifestFingerprint), false);
+  assert.equal(await managed.forgetGeneration(complete.directory, complete.manifestFingerprint), false);
+  assert.equal(await managed.selectGeneration(complete.directory, () => true, complete), false);
+  await assert.rejects(managed.recordStaging(path.join(managed.root, "generations", `g-2-${randomUUID()}`), "c".repeat(64),
+    `.graphql-desk-${randomUUID()}-marker-${randomUUID()}.tmp`), /not owned/);
+  assert.deepEqual(state.snapshot(), protectedState, "Interrupted old capabilities cannot change retained cleanup/reader proof");
+  f.configFile.restart();
+  f.configFile.onRequest(() => {});
+  return { f, state, managed, selected, latest, original, complete, protectedFiles };
+}
+
+for (const boundary of ["verify", "finish"]) for (const choice of ["restored", "later", "unchanged"]) {
+  test(`routing recovery preserves the ${choice} Python choice after interruption at ${boundary}`, async t => {
+    const { f, state, managed, latest, original, complete, protectedFiles } = await interruptedPythonRouting(t, boundary, choice);
+    const before = structuredClone(f.vscode.workspace.getConfiguration().inspect("analysis.stubPath"));
+    const updates = [];
+    f.onPythonSettingChange(value => updates.push(value));
+    let releaseBoundary;
+    const update = state.update;
+    state.update = async (key, value) => {
+      await update(key, value);
+      if (key === stateKey(f.root) && value === undefined && !releaseBoundary) {
+        releaseBoundary = { settings: structuredClone(f.vscode.workspace.getConfiguration().inspect("analysis.stubPath")),
+          updates: [...updates], config: JSON.parse(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")) };
+      }
+    };
+    const next = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    assert.ok(releaseBoundary, "Observe release completion before fresh authorized setup writes anything");
+    assert.deepEqual(releaseBoundary.settings, before, "Old config release preserves the latest Python choice across every layer");
+    assert.deepEqual(releaseBoundary.updates, []);
+    assert.deepEqual(releaseBoundary.config, JSON.parse(original));
+    for (const [file, bytes] of protectedFiles) assert.deepEqual(fs.readFileSync(file), bytes);
+    assert.equal(managed.ownsSetting, false, "The interrupted old handle is permanently revoked");
+    assert.equal(await managed.recordGeneration(complete.directory, complete.manifestFingerprint), false);
+    assert.equal(await managed.selectGeneration(complete.directory, () => true, complete), false);
+    const protectedState = state.snapshot();
+    await assert.rejects(managed.recordStaging(path.join(managed.root, "generations", `g-2-${randomUUID()}`), "c".repeat(64),
+      `.graphql-desk-${randomUUID()}-marker-${randomUUID()}.tmp`), /not owned/);
+    assert.deepEqual(state.snapshot(), protectedState);
+    assert.deepEqual(state.get(stateKey(f.root)).pythonStubPath.snapshot, {
+      folderPresent: true, folderValue: latest, workspacePresent: true, workspaceValue: latest,
+      globalPresent: true, globalValue: "global-user-stubs", singleFolderDirectory: true,
+    }, "Only the fresh manager may capture the preserved choice as its prior value");
+    assert.equal(next.routingSettingsCurrent(), true);
+    await next.release();
+    assert.equal(f.pythonStubPath, latest);
+    assert.deepEqual(f.vscode.workspace.getConfiguration().inspect("analysis.stubPath"), before);
+  });
+}
+
+for (const boundary of ["settings-dirty", "config-dirty", "malformed", "invalid-python", "python", "hidden-python", "owner-state-python", "config-identity", "currentness"]) {
+  test(`routing recovery keeps user data and durable evidence when ${boundary} changes`, async t => {
+    const { f, state, managed, latest, protectedFiles } = await interruptedPythonRouting(t, "verify");
+    const file = path.join(f.root, "pyrightconfig.json");
+    const before = fs.readFileSync(file, "utf8");
+    let current = true;
+    let changed = false;
+    let replacementIdentity;
+    if (boundary === "settings-dirty" || boundary === "config-dirty") f.vscode.workspace.textDocuments.push({ isDirty: true,
+      uri: { scheme: "file", fsPath: boundary === "config-dirty" ? file : path.join(f.root, ".vscode", "settings.json") } });
+    if (boundary === "malformed") fs.writeFileSync(file, "{");
+    if (boundary === "invalid-python") await f.vscode.workspace.getConfiguration().update("analysis.stubPath", 7, 2);
+    if (boundary === "owner-state-python") {
+      const update = state.update;
+      state.update = async (key, value) => {
+        await update(key, value);
+        if (!changed && key === stateKey(f.root) && value?.pythonStubPath?.current === latest) {
+          changed = true;
+          await f.vscode.workspace.getConfiguration().update("analysis.stubPath", "third-user-choice", 2);
+        }
+      };
+    }
+    f.configFile.onRequest(async action => {
+      if (action !== "verify" || changed) return;
+      changed = true;
+      if (boundary === "python") await f.vscode.workspace.getConfiguration().update("analysis.stubPath", "third-user-choice", 2);
+      if (boundary === "hidden-python") f.setGlobalPythonStubPath("third-hidden-choice");
+      if (boundary === "currentness") current = false;
+      if (boundary === "config-identity") {
+        fs.renameSync(file, path.join(f.root, "preserved-original-config.json"));
+        fs.writeFileSync(file, before);
+        replacementIdentity = fs.lstatSync(file, { bigint: true });
+      }
+    });
+    await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker, {
+      ownerCurrent: () => current && f.vscode.workspace.isTrusted && f.vscode.workspace.workspaceFolders.includes(f.folder),
+    }), /dirty|changed|malformed|invalid|expected|preserved|JSON/i);
+    assert.equal(fs.readFileSync(file, "utf8"), boundary === "malformed" ? "{" : before);
+    assert.equal(f.pythonStubPath, ["python", "owner-state-python"].includes(boundary) ? "third-user-choice" : boundary === "invalid-python" ? 7 : latest);
+    if (boundary === "hidden-python") assert.equal(f.vscode.workspace.getConfiguration().inspect("analysis.stubPath").globalValue, "third-hidden-choice");
+    if (replacementIdentity) assert.equal(fs.lstatSync(file, { bigint: true }).ino, replacementIdentity.ino);
+    assert.equal(state.get(stateKey(f.root)).routing, true, "A failed recovery cannot erase its durable release evidence");
+    assert.equal(managed.ownsSetting, false);
+    for (const [filename, bytes] of protectedFiles) assert.deepEqual(fs.readFileSync(filename), bytes);
+  });
+}
+
+test("interrupted routing release recovers the old shadowed config before adopting the new config", async t => {
+  const original = '[tool.pyright]\nstubPath = "old-user-stubs"\n';
+  const f = fixture(t, { toml: original });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const publisher = createAnalysisGenerations(f.vscode, f.root, managed.root);
+  const groups = new Map([["example_generated", [
+    { relative_path: "example_generated/default.py", text: 'value = "old"\n' },
+    { relative_path: "example_generated/default.pyi", text: "value: str\n" },
+  ]]]);
+  assert.equal(await publisher.publish(groups, "routing-before-interruption", () => true, managed,
+    "a".repeat(64), "b".repeat(64), []), true);
+  const complete = publisher.current(managed)[0];
+  assert.ok(complete, "the retained generation must have a real verified complete manifest");
+  const stagingId = `g-2-${randomUUID()}`;
+  const staging = path.join(managed.root, "generations", stagingId);
+  fs.mkdirSync(staging);
+  const stagedFile = path.join(staging, "pending.pyi");
+  fs.writeFileSync(stagedFile, "value: object\n");
+  const markerFile = path.join(managed.root, "generations", `${stagingId}.staging.json`);
+  fs.writeFileSync(markerFile, JSON.stringify({ owner: "graphql-desk-analysis-staging", format: 1,
+    id: stagingId, sequence: 2, token: randomUUID(), files: [] }));
+  assert.equal(await managed.recordStaging(staging, createHash("sha256").update(fs.readFileSync(markerFile)).digest("hex"),
+    `.graphql-desk-${randomUUID()}-marker-${randomUUID()}.tmp`), true);
+  const keys = managedStateKeys(f.root, `:project-${createHash("sha256").update("pyproject.toml").digest("hex").slice(0, 16)}`);
+  const generationRecords = structuredClone(state.get(keys.generationStateKey));
+  const stagingRecords = structuredClone(state.get(keys.stagingStateKey));
+  const protectedFiles = [...complete.files.keys()].map(relative => path.join(complete.directory, relative))
+    .concat(path.join(complete.directory, "complete.json"), stagedFile, markerFile)
+    .map(file => [file, fs.readFileSync(file)]);
+  const json = '{"stubPath":"new-user-stubs"}';
+  fs.writeFileSync(path.join(f.root, "pyrightconfig.json"), json);
+  f.configFile.onRequest(action => { if (action === "verify") throw new Error("interrupted release"); });
+  await assert.rejects(managed.releaseForRouting(), /interrupted release/);
+  assert.equal(state.get(stateKey(f.root)).routing, true);
+  f.configFile.restart();
+  f.configFile.onRequest(() => {});
+  const replacement = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  assert.deepEqual(state.get(keys.generationStateKey), generationRecords);
+  assert.deepEqual(state.get(keys.stagingStateKey), stagingRecords);
+  for (const [file, bytes] of protectedFiles) assert.deepEqual(fs.readFileSync(file), bytes, "routing recovery cannot discard reader/cleanup ownership proof or bytes");
+  assert.equal(fs.readFileSync(path.join(f.root, "pyproject.toml"), "utf8"), original);
+  assert.equal(replacement.configurationFile, path.join(f.root, "pyrightconfig.json"));
+  await replacement.release();
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")).stubPath, "new-user-stubs");
+});
+
+test("interrupted routing release after physical deletion or table removal never recreates the old config", async t => {
+  for (const kind of ["deleted", "table"]) {
+    const f = fixture(t, { toml: '[tool.pyright]\nstubPath = "old-user-stubs"\n' });
+    const state = stateStore();
+    const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    const file = path.join(f.root, "pyproject.toml");
+    if (kind === "deleted") fs.unlinkSync(file);
+    else fs.writeFileSync(file, '[project]\nname = "kept"\n');
+    f.onPythonSettingChange(() => { throw new Error("interrupted settings restore"); });
+    await assert.rejects(managed.releaseForRouting(), /interrupted settings restore/);
+    f.onPythonSettingChange(undefined);
+    assert.equal(await createManagedProjectConfig(f.vscode, f.folder, state, f.worker), null);
+    assert.equal(state.get(stateKey(f.root)), undefined);
+    if (kind === "deleted") assert.equal(fs.existsSync(file), false);
+    else assert.equal(fs.readFileSync(file, "utf8"), '[project]\nname = "kept"\n');
+  }
+});
+
+test("routing refuses dirty old config, malformed new config, or a changed Python choice during native verification", async t => {
+  for (const boundary of ["dirty", "settings-dirty", "malformed", "python", "hidden-python", "source"]) {
+    const f = fixture(t, { json: '{"stubPath":"user-stubs"}' });
+    const state = stateStore();
+    const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    const filename = path.join(f.root, "pyrightconfig.json");
+    const before = fs.readFileSync(filename, "utf8");
+    let current = true;
+    if (boundary === "dirty") f.vscode.workspace.textDocuments.push({ isDirty: true, uri: { scheme: "file", fsPath: filename } });
+    if (boundary === "settings-dirty") f.vscode.workspace.textDocuments.push({ isDirty: true, uri: { scheme: "file", fsPath: path.join(f.root, ".vscode", "settings.json") } });
+    if (boundary === "malformed") fs.writeFileSync(filename, "{");
+    if (["python", "hidden-python", "source"].includes(boundary)) f.configFile.onRequest(async action => {
+      if (action === "verify") {
+        if (boundary === "python") await f.vscode.workspace.getConfiguration().update("analysis.stubPath", "later-user-choice", 2);
+        else if (boundary === "hidden-python") f.setInheritedPythonStubPath("later-inherited-choice");
+        else current = false;
+      }
+    });
+    await assert.rejects(managed.releaseForRouting(() => current), /Dirty|Malformed|invalid|changed|stale/i);
+    assert.equal(fs.readFileSync(filename, "utf8"), boundary === "malformed" ? "{" : before);
+    assert.ok(state.get(stateKey(f.root)), "the recoverable owner cannot be discarded on a failed handoff");
+    if (boundary === "python") assert.equal(f.pythonStubPath, "later-user-choice");
+  }
+});
+
+test("a new higher-priority config during routing verification preserves both configs and recovery state", async t => {
+  const f = fixture(t, { toml: '[tool.pyright]\nstubPath = "user-stubs"\n' });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const toml = path.join(f.root, "pyproject.toml");
+  const before = fs.readFileSync(toml, "utf8");
+  const json = '{"stubPath":"new-choice"}';
+  f.configFile.onRequest(action => { if (action === "verify") fs.writeFileSync(path.join(f.root, "pyrightconfig.json"), json); });
+  await assert.rejects(managed.releaseForRouting(), /changed/);
+  assert.equal(fs.readFileSync(toml, "utf8"), before);
+  assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), json);
+  assert.equal(state.get(stateKey(f.root)).routing, true);
+});
+
+test("routing inspection rejects a dangling or redirected config candidate rather than treating it as missing", async t => {
+  const f = fixture(t, { json: '{}', toml: '[tool.pyright]\n' });
+  const file = path.join(f.root, "pyrightconfig.json");
+  const lstat = fs.lstatSync;
+  t.mock.method(fs, "lstatSync", (target, ...options) => {
+    const stat = lstat(target, ...options);
+    if (target === file) stat.isSymbolicLink = () => true;
+    return stat;
+  });
+  await assert.rejects(inspectProjectConfigRoute(f.vscode, f.folder, f.worker), /safe file/);
+});
+
+for (const jsonWins of [false, true]) {
+  test(`read-only routing preserves a dirty GraphQL-only TOML ${jsonWins ? "below JSON" : "with the fallback manager"}`, async t => {
+    const toml = '[tool.graphql-desk]\nschema="schema.graphql"\n';
+    const f = fixture(t, { ...(jsonWins ? { json: '{"stubPath":"user-stubs"}' } : {}), toml });
+    const file = path.join(f.root, "pyproject.toml");
+    const dirty = { uri: f.vscode.Uri.file(file), isDirty: true, getText: () => `${toml}# unsaved GraphQL change\n` };
+    f.vscode.workspace.textDocuments.push(dirty);
+    const state = stateStore();
+    const project = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    if (!jsonWins) assert.equal(project, null, "Read-only absence detection permits initial fallback acquisition too");
+    const managed = project ?? await createManagedStubPath(f.vscode, f.folder, state);
+    const roots = new Map([[f.root, Promise.resolve(managed)]]);
+    await reconfigureWorkspaceRoots({ roots, folders: [f.folder],
+      create: () => assert.fail("An unchanged route cannot allocate another manager"),
+      retire: () => assert.fail("A dirty unrelated GraphQL buffer cannot retire this manager"),
+      routeCurrent: async (folder, owner) => {
+        const route = await inspectProjectConfigRoute(f.vscode, folder, f.worker);
+        assert.equal(route.isCurrent(), true);
+        return route.file === (owner.configurationFile ?? null);
+      } });
+    assert.equal(await roots.get(f.root), managed);
+    assert.equal(managed.stillOwnsSetting(), true);
+    assert.equal(fs.readFileSync(file, "utf8"), toml);
+    assert.equal(dirty.isDirty, true);
+    assert.match(dirty.getText(), /unsaved GraphQL change/);
+  });
+}
+
+for (const format of ["json", "toml"]) {
+  test(`read-only routing still refuses a dirty effective ${format} writer`, async t => {
+    const original = format === "json" ? '{"stubPath":"user-stubs"}' : '[tool.pyright]\nstubPath="user-stubs"\n';
+    const f = fixture(t, { [format]: original });
+    const file = path.join(f.root, format === "json" ? "pyrightconfig.json" : "pyproject.toml");
+    f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(file), isDirty: true });
+    await assert.rejects(inspectProjectConfigRoute(f.vscode, f.folder, f.worker), /Dirty/);
+    await assert.rejects(updateProjectConfig(f.vscode, f.folder, "add", f.worker), /Dirty/);
+    assert.equal(fs.readFileSync(file, "utf8"), original);
+    assert.deepEqual(fs.readdirSync(f.root), [path.basename(file)]);
+  });
+}
+
+for (const boundary of ["bytes", "file-identity", "workspace-identity", "precedence", "trust", "folder", "dirty-effective"]) {
+  test(`read-only routing rechecks ${boundary} after TOML inspection`, async t => {
+    const original = boundary === "dirty-effective" ? '[tool.pyright]\nstubPath="user-stubs"\n' : '[tool.graphql-desk]\nschema="schema.graphql"\n';
+    const f = fixture(t, { toml: original });
+    const file = path.join(f.root, "pyproject.toml");
+    const lstat = fs.lstatSync;
+    let changed = false;
+    if (boundary === "workspace-identity") t.mock.method(fs, "lstatSync", (target, ...args) => {
+      const stat = lstat(target, ...args);
+      if (target === f.root && changed && typeof stat.ino === "bigint") stat.ino += 1n;
+      return stat;
+    });
+    const worker = async (...args) => {
+      const result = await f.worker(...args);
+      changed = true;
+      if (boundary === "bytes") fs.appendFileSync(file, "# concurrent edit\n");
+      if (boundary === "file-identity") { fs.renameSync(file, `${file}.held`); fs.writeFileSync(file, original, { flag: "wx" }); }
+      if (boundary === "precedence") fs.writeFileSync(path.join(f.root, "pyrightconfig.json"), "{}", { flag: "wx" });
+      if (boundary === "trust") f.vscode.workspace.isTrusted = false;
+      if (boundary === "folder") f.vscode.workspace.getWorkspaceFolder = () => undefined;
+      if (boundary === "dirty-effective") f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(file), isDirty: true });
+      return result;
+    };
+    await assert.rejects(inspectProjectConfigRoute(f.vscode, f.folder, worker), /changed|Dirty/);
+    assert.equal(fs.readFileSync(file, "utf8"), boundary === "bytes" ? `${original}# concurrent edit\n` : original);
+    assert.equal(fs.readdirSync(f.root).some(name => name.endsWith(".tmp")), false);
+  });
+}
+
+test("initial fallback acquisition rejects a higher-priority config appearing during inspection", async t => {
+  const f = fixture(t, { toml: '[tool.graphql-desk]\nschema="schema.graphql"\n' });
+  const worker = async (...args) => {
+    const result = await f.worker(...args);
+    fs.writeFileSync(path.join(f.root, "pyrightconfig.json"), "{}", { flag: "wx" });
+    return result;
+  };
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), worker), /routing inputs changed/);
+  assert.equal(fs.existsSync(path.join(f.root, ".graphql-desk")), false);
+});
+
+test("real TOML inspection permits dirty GraphQL-only absence and refuses malformed disk input", async t => {
+  const original = '[tool.graphql-desk]\nschema="schema.graphql"\n';
+  const f = fixture(t, { toml: original });
+  const file = path.join(f.root, "pyproject.toml");
+  f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(file), isDirty: true, getText: () => `${original}# unsaved\n` });
+  const python = process.env.GRAPHQL_DESK_PYTHON ?? path.join(path.resolve(__dirname, "../.."), ".venv",
+    process.platform === "win32" ? "Scripts/python.exe" : "bin/python");
+  const realWorker = createAnalysisWorker({ python, workspace: f.root, isTrusted: () => true });
+  t.after(() => realWorker.dispose());
+  const worker = (folder, text, action, managedPath) => realWorker.request({ op: "pyright_config", workspace: folder.uri.fsPath,
+    text, action, managed_path: managedPath, ownership: { topLevel: false, executionEnvironmentRoots: [] } });
+  assert.equal(await createManagedProjectConfig(f.vscode, f.folder, stateStore(), worker), null);
+  assert.equal((await inspectProjectConfigRoute(f.vscode, f.folder, worker)).isCurrent(), true);
+  const malformed = '[tool.graphql-desk]\nschema=\n';
+  fs.writeFileSync(file, malformed);
+  await assert.rejects(inspectProjectConfigRoute(f.vscode, f.folder, worker));
+  assert.equal(fs.readFileSync(file, "utf8"), malformed);
+  assert.deepEqual(fs.readdirSync(f.root), ["pyproject.toml"]);
 });
 
 test("release recovery removes only the recorded custom stub root after a restart", async t => {
@@ -1517,3 +2489,329 @@ test("a user-owned execution-environment path is not adopted", async t => {
   await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker), /reserved GraphQL Desk path/);
   assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), config);
 });
+
+async function normalReleaseGeneration(t, partialRollback = false) {
+  const original = '[tool.pyright]\nstubPath = "custom-stubs"\nextraPaths = ["vendor"]\n';
+  const f = fixture(t, { toml: original, pythonStubPath: "python-custom-stubs", standaloneAliases: true });
+  const state = stateStore();
+  let disposing = false;
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker, { ownerCurrent: () => !disposing });
+  const publisher = createAnalysisGenerations(f.vscode, f.root, managed.root);
+  const groups = type => new Map([["example_generated", [
+    { relative_path: "example_generated/default.py", text: 'value = "runtime"\n' },
+    { relative_path: "example_generated/default.pyi", text: `value: ${type}\n` },
+  ]]]);
+  assert.equal(await publisher.publish(groups("str"), "normal-release-first", () => true, managed,
+    "a".repeat(64), "b".repeat(64), []), true);
+  const keys = managedStateKeys(f.root, `:project-${createHash("sha256").update("pyproject.toml").digest("hex").slice(0, 16)}`);
+  const proofRecords = () => [state.get(keys.generationStateKey), state.get(keys.stagingStateKey)].map(value => JSON.stringify(value));
+  if (!partialRollback) return { f, state, managed, keys, original, proofRecords };
+  const previous = f.pythonStubPath;
+  const config = f.vscode.workspace.getConfiguration();
+  const update = config.update;
+  let entered, rejectUpdate;
+  const started = new Promise(resolve => { entered = resolve; });
+  const held = new Promise((resolve, reject) => { rejectUpdate = reject; });
+  config.update = async (...args) => {
+    if (args[1] === previous) { entered(); await held; }
+    return update(...args);
+  };
+  t.after(() => { rejectUpdate(new Error("test cleanup")); config.update = update; });
+  let current = true;
+  const updateState = state.update;
+  state.update = async (key, value) => {
+    await updateState(key, value);
+    if (key === keys.stateKey && value?.current?.includes("/g-2-") && value.pending !== true) current = false;
+  };
+  const publishing = publisher.publish(groups("str | None"), "normal-release-second", () => current, managed,
+    "c".repeat(64), "d".repeat(64), []).then(value => ({ value }), error => ({ error }));
+  await started;
+  assert.notEqual(state.get(stateKey(f.root)).currentStubPath,
+    /^stubPath\s*=\s*"([^"]*)"/m.exec(fs.readFileSync(path.join(f.root, "pyproject.toml"), "utf8"))[1]);
+  disposing = true;
+  return { f, state, managed, keys, original, proofRecords, publishing,
+    interrupt() { rejectUpdate(new Error("interrupted pending Python rollback")); },
+    resume() { disposing = false; config.update = update; } };
+}
+
+test("normal release drains a real rollback before journaling and survives interrupted Python mirroring", async t => {
+  const h = await normalReleaseGeneration(t, true);
+  const records = h.proofRecords();
+  let settled = false;
+  const releasing = h.managed.release().then(() => { settled = true; }, error => { settled = true; return error; });
+  await new Promise(resolve => setImmediate(resolve));
+  try {
+    assert.equal(settled, false);
+    assert.equal(h.state.get(stateKey(h.f.root)).phase, "rotate", "release cannot replace the in-flight rotation's durable intent");
+  } finally { h.interrupt(); }
+  assert.match((await h.publishing).error.message, /interrupted pending Python rollback/);
+  assert.equal(await releasing, undefined);
+  assert.equal(fs.readFileSync(path.join(h.f.root, "pyproject.toml"), "utf8"), h.original);
+  assert.equal(h.f.pythonStubPath, "python-custom-stubs");
+  assert.equal(h.managed.ownsSetting, false);
+  assert.equal(h.state.get(h.keys.stateKey), undefined);
+  assert.deepEqual(h.proofRecords(), records, "teardown cannot discard generations or staging reader provenance");
+  h.resume();
+  const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker);
+  await reopened.release();
+});
+
+for (const boundary of ["verify", "finish"]) test(`normal release recovers a settled partial rollback interrupted at ${boundary}`, async t => {
+  const h = await normalReleaseGeneration(t, true);
+  h.interrupt();
+  assert.match((await h.publishing).error.message, /interrupted pending Python rollback/);
+  const records = h.proofRecords();
+  let interrupted = false;
+  h.f.configFile.onRequest(action => {
+    if (action === boundary && !interrupted) { interrupted = true; throw new Error("interrupted normal release"); }
+  });
+  await assert.rejects(h.managed.release(), /interrupted normal release/);
+  assert.equal(interrupted, true);
+  const release = h.state.get(stateKey(h.f.root));
+  assert.equal(release.phase, "release");
+  assert.match(release.currentStubPath, /\/g-1-/);
+  assert.match(release.pythonStubPath.current, /\/g-2-/);
+  assert.equal(h.managed.ownsSetting, false);
+  const snapshot = h.state.snapshot();
+  const generation = path.join(h.managed.root, "generations", `g-3-${randomUUID()}`);
+  assert.equal(await h.managed.recordGeneration(generation, "a".repeat(64)), false);
+  assert.equal(await h.managed.forgetGeneration(generation, "a".repeat(64)), false);
+  assert.equal(await h.managed.selectGeneration(generation), false);
+  await assert.rejects(h.managed.recordStaging(generation, "b".repeat(64), `.graphql-desk-${randomUUID()}-marker-${randomUUID()}.tmp`), /not owned/);
+  assert.deepEqual(h.state.snapshot(), snapshot);
+  h.resume(); h.f.configFile.restart(); h.f.configFile.onRequest(() => {});
+  const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker);
+  assert.deepEqual(h.proofRecords(), records, "cold release recovery retains reader provenance");
+  await reopened.release();
+  assert.equal(h.f.pythonStubPath, "python-custom-stubs");
+  assert.equal(fs.readFileSync(path.join(h.f.root, "pyproject.toml"), "utf8"), h.original);
+});
+
+test("normal release revokes its generation capability and permits fresh acquisition", async t => {
+  const h = await normalReleaseGeneration(t);
+  const records = h.proofRecords();
+  await h.managed.release();
+  assert.equal(h.managed.ownsSetting, false);
+  assert.equal(h.state.get(h.keys.stateKey), undefined);
+  assert.deepEqual(h.proofRecords(), records);
+  const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker);
+  assert.equal(reopened.ownsSetting, true);
+  await reopened.release();
+});
+
+for (const boundary of ["python-choice", "hidden-python", "dirty-config", "dirty-settings", "native-file", "selection-record", "owner-record", "trust", "folder"]) {
+  test(`normal release preserves changed ${boundary} after its durable intent`, async t => {
+    const h = await normalReleaseGeneration(t);
+    const file = path.join(h.f.root, "pyproject.toml");
+    const original = fs.readFileSync(file);
+    const records = h.proofRecords();
+    let changed = false;
+    let replacement;
+    h.f.configFile.onRequest(async action => {
+      if (action !== "verify" || changed) return;
+      changed = true;
+      assert.equal(h.managed.ownsSetting, false, "the durable intent revokes the old capability before native cleanup");
+      if (boundary === "python-choice") await h.f.vscode.workspace.getConfiguration().update("analysis.stubPath", "later-user-stubs", 2);
+      if (boundary === "hidden-python") h.f.setGlobalPythonStubPath("hidden-user-stubs");
+      if (boundary.startsWith("dirty-")) h.f.vscode.workspace.textDocuments.push({ isDirty: true,
+        uri: h.f.vscode.Uri.file(boundary === "dirty-config" ? file : path.join(h.f.root, ".vscode", "settings.json")) });
+      if (boundary === "native-file") {
+        fs.renameSync(file, `${file}.preserved`);
+        fs.writeFileSync(file, original, { flag: "wx" });
+        replacement = fs.lstatSync(file, { bigint: true });
+      }
+      if (boundary === "selection-record") await h.state.update(h.keys.stateKey, { base: MANAGED_PATH, current: "later-user-stubs", currentPresent: true });
+      if (boundary === "owner-record") await h.state.update(stateKey(h.f.root), { ...h.state.get(stateKey(h.f.root)), phase: "unknown" });
+      if (boundary === "trust") h.f.vscode.workspace.isTrusted = false;
+      if (boundary === "folder") h.f.vscode.workspace.getWorkspaceFolder = () => undefined;
+    });
+    await assert.rejects(h.managed.release(), /changed|Dirty|dirty|Trusted|trusted|Config proof/i);
+    assert.equal(changed, true);
+    assert.deepEqual(fs.readFileSync(file), original, "foreign changes cannot authorize restoring the project config");
+    assert.notEqual(h.state.get(stateKey(h.f.root)), undefined, "failed cleanup retains its durable evidence");
+    assert.deepEqual(h.proofRecords(), records);
+    assert.equal(h.managed.ownsSetting, false);
+    if (replacement) assert.equal(fs.lstatSync(file, { bigint: true }).ino, replacement.ino);
+    if (boundary === "python-choice") assert.equal(h.f.pythonStubPath, "later-user-stubs");
+    if (boundary === "hidden-python") assert.equal(h.f.vscode.workspace.getConfiguration().inspect().globalValue, "hidden-user-stubs");
+    if (boundary === "selection-record") assert.equal(h.state.get(h.keys.stateKey).current, "later-user-stubs");
+    if (boundary === "owner-record") assert.equal(h.state.get(stateKey(h.f.root)).phase, "unknown");
+  });
+}
+
+test("normal release recovery preserves a foreign generic selection record", async t => {
+  const h = await normalReleaseGeneration(t);
+  h.f.configFile.onRequest(action => { if (action === "verify") throw new Error("interrupted normal release"); });
+  await assert.rejects(h.managed.release(), /interrupted normal release/);
+  h.f.configFile.restart(); h.f.configFile.onRequest(() => {});
+  const foreign = { base: MANAGED_PATH, current: "later-user-stubs", currentPresent: true };
+  await h.state.update(h.keys.stateKey, foreign);
+  const original = fs.readFileSync(path.join(h.f.root, "pyproject.toml"));
+  const owner = h.state.get(stateKey(h.f.root));
+  await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker), /generation ownership changed/);
+  assert.deepEqual(h.state.get(h.keys.stateKey), foreign);
+  assert.deepEqual(h.state.get(stateKey(h.f.root)), owner);
+  assert.deepEqual(fs.readFileSync(path.join(h.f.root, "pyproject.toml")), original);
+});
+
+test("normal release recovery cannot clear a later owner record during native verification", async t => {
+  const h = await normalReleaseGeneration(t);
+  h.f.configFile.onRequest(action => { if (action === "verify") throw new Error("interrupted normal release"); });
+  await assert.rejects(h.managed.release(), /interrupted normal release/);
+  h.f.configFile.restart();
+  const foreign = { ...h.state.get(stateKey(h.f.root)), phase: "unknown" };
+  let changed = false;
+  h.f.configFile.onRequest(async action => {
+    if (action === "verify" && !changed) { changed = true; await h.state.update(stateKey(h.f.root), foreign); }
+  });
+  await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker), /cleanup inputs changed/);
+  assert.equal(changed, true);
+  assert.deepEqual(h.state.get(stateKey(h.f.root)), foreign);
+  assert.notEqual(h.state.get(h.keys.stateKey), undefined);
+});
+
+async function supersedeOwnerWrite(t, boundary, mutate = () => {}) {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs","extraPaths":["vendor"]}',
+    pythonStubPath: "python-custom-stubs", standaloneAliases: true });
+  const state = stateStore();
+  let lease = true;
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker, { ownerCurrent: () => lease });
+  const publisher = createAnalysisGenerations(f.vscode, f.root, managed.root);
+  const groups = type => new Map([["example_generated", [
+    { relative_path: "example_generated/default.pyi", text: `value: ${type}\n` },
+  ]]]);
+  await publisher.publish(groups("str"), "before-owner-cancellation", () => true, managed, "a".repeat(64), "b".repeat(64), []);
+  const selected = managed.selectedSetting;
+  const prior = structuredClone(state.get(stateKey(f.root)));
+  const config = fs.readFileSync(path.join(f.root, "pyrightconfig.json"));
+  const python = structuredClone(f.vscode.workspace.getConfiguration().inspect());
+  const generation = publisher.current(managed)[0];
+  const protectedFiles = [...generation.files.keys(), "complete.json"].map(name => [path.join(generation.directory, name),
+    fs.readFileSync(path.join(generation.directory, name))]);
+  let current = true, armed = true, entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const update = state.update;
+  state.update = async (key, value) => {
+    const hold = armed && boundary.includes("memento") && key === stateKey(f.root) && value?.phase === "rotate";
+    if (hold) armed = false;
+    if (hold && boundary !== "post-memento") { entered(); await gate; }
+    await update(key, value);
+    if (hold && boundary === "post-memento") { entered(); await gate; }
+  };
+  t.after(release);
+  const rename = fs.renameSync;
+  t.mock.method(fs, "renameSync", (source, target, ...args) => {
+    if (armed && ["before-retry", "after-rename"].includes(boundary) && path.basename(target) === "project-config-owner.json" &&
+        JSON.parse(fs.readFileSync(source)).phase === "rotate") {
+      armed = false;
+      if (boundary === "before-retry") { current = false; throw Object.assign(new Error("owner rename temporarily locked"), { code: "EBUSY" }); }
+      const result = rename(source, target, ...args);
+      queueMicrotask(() => { current = false; });
+      return result;
+    }
+    return rename(source, target, ...args);
+  });
+  const publishing = publisher.publish(groups("str | None"), "superseded-owner-write", () => current, managed,
+    "c".repeat(64), "d".repeat(64), []).then(value => ({ value }), error => ({ error }));
+  if (boundary.includes("memento")) {
+    await Promise.race([started, publishing.then(() => assert.fail("the actual owner write must reach its held Memento update"))]);
+    try {
+      await mutate({ f, state, managed, revoke() { lease = false; } });
+      if (boundary === "pre-memento-transient") {
+        const configuration = f.vscode.workspace.getConfiguration();
+        await configuration.update("analysis.stubPath", "custom_stubs", 2);
+        await configuration.update("analysis.stubPath", selected, 2);
+      }
+      current = false;
+    } finally { release(); }
+  }
+  const result = await publishing;
+  state.update = update;
+  return { f, state, managed, publisher, groups, selected, prior, config, python, generation, protectedFiles, result };
+}
+
+for (const boundary of ["before-retry", "after-rename", "pre-memento", "post-memento", "pre-memento-transient"]) {
+  test(`superseded owner write at ${boundary} permits the next valid edit and cold acquisition`, async t => {
+    const h = await supersedeOwnerWrite(t, boundary);
+    assert.match(h.result.error?.message ?? "", /Superseded analysis|phase or Python settings changed/);
+    assert.equal(h.managed.selectedSetting, h.selected, "stale metadata cannot select a type generation");
+    assert.deepEqual(fs.readFileSync(path.join(h.f.root, "pyrightconfig.json")), h.config);
+    assert.deepEqual(h.f.vscode.workspace.getConfiguration().inspect(), h.python);
+    assert.deepEqual(h.state.get(stateKey(h.f.root)), h.prior, "unselected intent is reconciled to the known active owner");
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(h.managed.root, "project-config-owner.json"))), JSON.parse(JSON.stringify(h.prior)));
+    assert.equal(fs.readdirSync(h.managed.root).some(name => name.startsWith(".graphql-desk-owner-") && name.endsWith(".tmp")), false);
+    assert.equal(h.managed.ownsGeneration(h.generation.directory, h.generation.manifestFingerprint), true);
+    for (const [file, bytes] of h.protectedFiles) assert.deepEqual(fs.readFileSync(file), bytes);
+    const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker);
+    assert.equal(reopened.selectedSetting, h.selected, "cold acquisition cannot inherit an incomplete stale rotation");
+    assert.equal(await h.publisher.publish(h.groups("int"), "current-edit", () => true, h.managed,
+      "e".repeat(64), "f".repeat(64), []), true);
+    assert.equal(h.managed.stillOwnsSetting(), true, "the original instance remains usable after cancellation");
+    const latest = await createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker);
+    assert.equal(latest.selectedSetting, h.managed.selectedSetting);
+    await latest.release();
+  });
+}
+
+for (const boundary of ["owner-native", "owner-dirty", "config-dirty", "python-choice", "hidden-python", "owner-state", "phase-object", "lease", "trust", "folder", "target-proof", "handoff-native", "handoff-state"]) {
+  test(`superseded owner completion preserves changed ${boundary}`, async t => {
+    let preservedOwner, preservedPython, preservedConfig, replacement, targetFile, targetBytes;
+    const h = await supersedeOwnerWrite(t, "post-memento", async ({ f, state, managed, revoke }) => {
+      const file = path.join(managed.root, "project-config-owner.json");
+      if (boundary === "owner-native") {
+        fs.renameSync(file, `${file}.preserved`);
+        fs.copyFileSync(`${file}.preserved`, file);
+        replacement = fs.lstatSync(file, { bigint: true });
+      }
+      if (boundary.endsWith("-dirty")) f.vscode.workspace.textDocuments.push({ isDirty: true, uri: f.vscode.Uri.file(
+        boundary === "owner-dirty" ? file : path.join(f.root, "pyrightconfig.json")) });
+      if (boundary === "python-choice") await f.vscode.workspace.getConfiguration().update("analysis.stubPath", "later-user-stubs", 2);
+      if (boundary === "hidden-python") f.setGlobalPythonStubPath("hidden-user-stubs");
+      if (boundary === "owner-state") await state.update(stateKey(f.root), { ...state.get(stateKey(f.root)), phase: "unknown" });
+      if (boundary === "phase-object") state.get(stateKey(f.root)).phase = "unknown";
+      if (boundary === "lease") revoke();
+      if (boundary === "trust") f.vscode.workspace.isTrusted = false;
+      if (boundary === "folder") f.vscode.workspace.getWorkspaceFolder = () => undefined;
+      if (boundary === "target-proof") {
+        const target = fs.readdirSync(path.join(managed.root, "generations")).find(name => name.startsWith("g-2-") && !name.endsWith(".json"));
+        targetFile = path.join(managed.root, "generations", target, "example_generated", "default.pyi");
+        fs.appendFileSync(targetFile, "# foreign artifact\n");
+        targetBytes = fs.readFileSync(targetFile);
+      }
+      preservedOwner = fs.readFileSync(file);
+      preservedConfig = fs.readFileSync(path.join(f.root, "pyrightconfig.json"));
+      preservedPython = structuredClone(f.vscode.workspace.getConfiguration().inspect());
+      if (boundary.startsWith("handoff-")) {
+        const read = fs.readFileSync;
+        let armed = true;
+        t.mock.method(fs, "readFileSync", (target, ...args) => {
+          const result = read(target, ...args);
+          if (armed && target === file) {
+            armed = false;
+            queueMicrotask(() => {
+              if (boundary === "handoff-native") {
+                fs.renameSync(file, `${file}.preserved-handoff`);
+                fs.copyFileSync(`${file}.preserved-handoff`, file);
+                replacement = fs.lstatSync(file, { bigint: true });
+              } else void state.update(stateKey(f.root), { ...state.get(stateKey(f.root)), phase: "unknown" });
+            });
+          }
+          return result;
+        });
+      }
+    });
+    assert.ok(h.result.error, "a semantic cancellation cannot finish through a foreign ownership change");
+    assert.notEqual(h.result.error.message, "Superseded analysis", "ownership failures are not classified as harmless semantic cancellation");
+    const later = await h.publisher.publish(h.groups("int"), "later-current", () => true, h.managed,
+      "e".repeat(64), "f".repeat(64), []).then(value => ({ value }), error => ({ error }));
+    assert.notEqual(later.value, true);
+    const owner = path.join(h.managed.root, "project-config-owner.json");
+    assert.deepEqual(fs.readFileSync(owner), preservedOwner);
+    assert.deepEqual(fs.readFileSync(path.join(h.f.root, "pyrightconfig.json")), preservedConfig);
+    assert.deepEqual(h.f.vscode.workspace.getConfiguration().inspect(), preservedPython);
+    if (replacement) assert.equal(fs.lstatSync(owner, { bigint: true }).ino, replacement.ino);
+    if (targetFile) assert.deepEqual(fs.readFileSync(targetFile), targetBytes);
+    if (["owner-state", "phase-object", "handoff-state"].includes(boundary)) assert.equal(h.state.get(stateKey(h.f.root)).phase, "unknown");
+  });
+}

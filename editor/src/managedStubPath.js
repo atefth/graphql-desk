@@ -20,8 +20,11 @@ function serializeStateUpdate(workspaceState, key, update) {
   return pending;
 }
 
-function updateManagedState(workspaceState, key, value) {
-  return serializeStateUpdate(workspaceState, key, () => workspaceState?.update?.(key, value));
+function updateManagedState(workspaceState, key, value, check = () => true) {
+  return serializeStateUpdate(workspaceState, key, () => {
+    if (check() !== true) throw new Error("Managed state changed; preserved");
+    return workspaceState?.update?.(key, value);
+  });
 }
 
 function isManagedGeneration(workspace, setting, baseSetting = ".graphql-desk/typings") {
@@ -56,6 +59,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
   const managedBase = options.baseSetting ?? ".graphql-desk/typings";
   const suffix = options.stateSuffix ?? "";
   const inspection = config.inspect?.("analysis.stubPath");
+  let expectedSettings = JSON.stringify([inspection?.globalValue, inspection?.workspaceValue, inspection?.workspaceFolderValue]);
   const explicitlyConfigured = inspection && [inspection.globalValue, inspection.workspaceValue, inspection.workspaceFolderValue].some(value => value !== undefined);
   const configured = explicitlyConfigured
     ? config.get("analysis.stubPath", "") : "";
@@ -112,10 +116,19 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
   if (!inside(workspace, root)) throw new Error("Configured Pylance stubPath is outside the workspace; preserved");
   const created = [];
   let selectionQueue = Promise.resolve();
+  const settingsSnapshot = () => {
+    const value = config.inspect?.("analysis.stubPath") ?? {};
+    return JSON.stringify([value.globalValue, value.workspaceValue, value.workspaceFolderValue]);
+  };
   const serializeSelection = operation => {
     const pending = selectionQueue.then(operation, operation);
     selectionQueue = pending.catch(() => {});
     return pending;
+  };
+  const revokeForRouting = async () => {
+    ownsSetting = false;
+    await serializeStateUpdate(workspaceState, generationStateKey, () => {});
+    await serializeStateUpdate(workspaceState, stagingStateKey, () => {});
   };
   try {
     const relative = path.relative(workspace, root);
@@ -137,6 +150,8 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
       root,
       get ownsSetting() { return ownsSetting; },
       get selectedSetting() { return setting; },
+      routingSettingsCurrent() { return settingsSnapshot() === expectedSettings; },
+      revokeForRouting,
       waitForGenerationSelection() { return selectionQueue; },
       checkSettingOwnership(check = () => true) {
         return serializeSelection(() => ownsSetting && ownsCurrentValue(setting) && check());
@@ -155,6 +170,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
         if (!ownsSetting || !ownsCurrentValue(setting) || !inside(generations, target) || target === generations ||
             !/^g-[0-9]+-[0-9a-f-]{36}$/i.test(path.basename(target)) || !/^[a-f0-9]{64}$/.test(manifestFingerprint ?? "")) return Promise.resolve(false);
         const record = async () => {
+          if (!ownsSetting || !ownsCurrentValue(setting)) return false;
           const current = workspaceState?.get?.(generationStateKey);
           const records = current && typeof current === "object" && !Array.isArray(current) ? current : {};
           await workspaceState?.update?.(generationStateKey, { ...records, [path.basename(target)]: manifestFingerprint });
@@ -167,6 +183,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
         const current = workspaceState?.get?.(generationStateKey);
         if (!ownsSetting || !inside(path.join(root, "generations"), target) || current?.[path.basename(target)] !== manifestFingerprint) return Promise.resolve(false);
         const forget = async () => {
+          if (!ownsSetting) return false;
           const records = workspaceState?.get?.(generationStateKey);
           if (records?.[path.basename(target)] !== manifestFingerprint) return false;
           const next = { ...records };
@@ -184,6 +201,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
         return records?.[path.basename(target)]?.fingerprint === markerFingerprint;
       },
       stagingEntries() {
+        if (!ownsSetting) return {};
         const records = workspaceState?.get?.(stagingStateKey);
         return records && typeof records === "object" && !Array.isArray(records)
           ? Object.fromEntries(Object.entries(records).map(([id, entry]) => [id, entry && typeof entry === "object" ? { ...entry } : entry]))
@@ -211,6 +229,7 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
         const current = workspaceState?.get?.(stagingStateKey);
         if (!ownsSetting || !inside(path.join(root, "generations"), target) || current?.[path.basename(target)]?.fingerprint !== markerFingerprint) return Promise.resolve(false);
         const forget = async () => {
+          if (!ownsSetting) return false;
           const records = workspaceState?.get?.(stagingStateKey);
           if (records?.[path.basename(target)]?.fingerprint !== markerFingerprint) return false;
           const next = { ...records };
@@ -277,6 +296,18 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
               return false;
             }
             if (!ownsCurrentValue(targetSetting)) throw new Error(ownershipError());
+            const current = config.inspect?.("analysis.stubPath") ?? {};
+            const expected = JSON.parse(expectedSettings);
+            const layer = current.workspaceFolderValue === targetSetting ? 2 : current.workspaceValue === targetSetting ? 1 : null;
+            if (layer === null) throw new Error(ownershipError());
+            // An owned write cannot adopt concurrent changes to hidden user layers.
+            expected[layer] = targetSetting;
+            if (vscode.workspace.workspaceFolders?.length === 1 && !vscode.workspace.workspaceFile &&
+                current.workspaceValue === targetSetting && current.workspaceFolderValue === targetSetting) {
+              // A standalone folder exposes one physical setting through both views.
+              expected[1] = expected[2] = targetSetting;
+            }
+            expectedSettings = JSON.stringify(expected);
             return true;
           } catch (error) {
             if (ownsCurrentValue(targetSetting)) {
@@ -316,6 +347,37 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
         setting = restored ?? "";
         ownsSetting = false;
         await workspaceState?.update?.(stateKey, undefined);
+      },
+      releaseForRouting(isCurrent = () => true) {
+        return serializeSelection(async () => {
+          if (!ownsSetting) return;
+          if (options.config) throw new Error("Project config routing requires its owned release adapter");
+          const captured = settingsSnapshot();
+          const check = () => {
+            const settingsPath = path.join(workspace, ".vscode", "settings.json");
+            const workspaceFile = vscode.workspace.workspaceFile?.scheme === "file" ? vscode.workspace.workspaceFile.fsPath : null;
+            if (!vscode.workspace.isTrusted || !isCurrent() || settingsSnapshot() !== captured ||
+                vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === "file" &&
+                  (normalized(document.uri.fsPath) === normalized(settingsPath) || workspaceFile && normalized(document.uri.fsPath) === normalized(workspaceFile)))) {
+              throw new Error("Pylance routing settings changed or dirty; preserved");
+            }
+          };
+          check();
+          const before = config.inspect?.("analysis.stubPath") ?? {};
+          const layer = before.workspaceFolderValue === setting ? "workspaceFolderValue" : before.workspaceValue === setting ? "workspaceValue" : null;
+          if (settingPresent && ownsCurrentValue(setting) && layer !== null) {
+            await config.update("analysis.stubPath", undefined, vscode.ConfigurationTarget.WorkspaceFolder);
+            const after = config.inspect?.("analysis.stubPath") ?? {};
+            if (!vscode.workspace.isTrusted || !isCurrent() || after[layer] !== undefined ||
+                ["globalValue", "workspaceValue", "workspaceFolderValue"].some(name => name !== layer && after[name] !== before[name])) {
+              throw new Error("Pylance routing settings changed; preserved");
+            }
+          }
+          // A third value is already the user's choice and is never restored over.
+          await revokeForRouting();
+          setting = config.get("analysis.stubPath", "");
+          await workspaceState?.update?.(stateKey, undefined);
+        });
       },
     };
   } catch (error) {

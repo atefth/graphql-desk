@@ -138,7 +138,7 @@ async function run() {
       "GraphQL Desk publishes a complete operation generation and resolves the generated package path", 45000);
     assert.equal(configured.consumerImport, "from graphql_desk_generated.default import graphql");
     await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
-    const first = await until(generation, value => value?.text.includes("String") && !value.text.includes("None"),
+    const first = await until(generation, value => value?.text?.includes("String") && !value.text.includes("None"),
       "Pylance infers the non-null project-config result after its managed settings refresh");
     assert.ok(first.generatedStub.includes("selected"), `The generated operation result contains selected: ${JSON.stringify(first)}`);
     assert.ok(first.graphqlDefinitions.some(item => item.uri?.endsWith("graphql_desk_generated/default.py")),
