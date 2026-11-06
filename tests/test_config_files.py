@@ -641,5 +641,19 @@ class ConfigFileTests(unittest.TestCase):
         self.assertEqual(temporary.read_text(), "foreign data")
 
 
+class ConfigSecurityNoopTests(unittest.TestCase):
+    def test_exact_security_does_not_reapply_inheritance(self) -> None:
+        with (
+            patch("sys.platform", "win32"),
+            patch(
+                "graphql_desk.config_files.config_dacl", return_value=b"exact"
+            ) as read,
+            patch("ctypes.WinDLL", create=True) as native,
+        ):
+            config_files.apply_config_dacl(123, b"exact")
+        read.assert_called_once_with(123)
+        native.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -183,12 +183,15 @@ def _same_config_owner(original: bytes | None, staged: bytes | None) -> bool:
 def apply_config_dacl(descriptor: int, dacl: bytes | None) -> None:
     if sys.platform != "win32":
         return
+    if dacl is None:
+        raise OSError("Original configuration security was not captured")
+    # Avoid SetSecurityInfo's inheritance processing when security is already exact.
+    if config_dacl(descriptor) == dacl:
+        return
     import ctypes
     import msvcrt
     from ctypes import wintypes
 
-    if dacl is None:
-        raise OSError("Original configuration security was not captured")
     security = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.ReOpenFile.argtypes = [
