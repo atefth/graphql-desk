@@ -283,6 +283,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (error.code === "ENOENT") rememberDiskFingerprint(pending.temporaryPath, "missing");
     }
   }
+  function armOwnedConfigTemporary(key, temporary) {
+    clearTimeout(temporary.timer);
+    temporary.timer = setTimeout(() => {
+      if (pendingOwnedProjectConfigWrites.get(temporary.owner)?.temporaryPath === key) return;
+      if (ownedProjectConfigTemporaryPaths.get(key) === temporary) ownedProjectConfigTemporaryPaths.delete(key);
+    }, 5000);
+    temporary.timer.unref?.();
+  }
   function invalidate(source, ranges, diskEvent = false) {
     if (disposed) return;
     if (diskEvent && ranges == null && source?.scheme === "file") {
@@ -766,12 +774,13 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         pending.previousHash === payload.expected_hash && typeof payload.text === "string" &&
         pending.nextHash === createHash("sha256").update(payload.text, "utf8").digest("hex") && temporary.hash === pending.nextHash;
       if (activeStage) { clearTimeout(temporary.timer); temporary.staging = true; }
-      try { return await state.worker.request({ ...payload, op: "config_file", workspace: state.root, action }); }
+      const wire = action === "stage" && typeof payload?.temporary === "string" && path.isAbsolute(payload.temporary)
+        ? { ...payload, temporary: temporaryKey } : payload;
+      try { return await state.worker.request({ ...wire, op: "config_file", workspace: state.root, action }); }
       finally {
         if (activeStage && ownedProjectConfigTemporaryPaths.get(temporaryKey) === temporary) {
           delete temporary.staging;
-          temporary.timer = setTimeout(() => ownedProjectConfigTemporaryPaths.delete(temporaryKey), 5000);
-          temporary.timer.unref?.();
+          armOwnedConfigTemporary(temporaryKey, temporary);
         }
       }
     },
@@ -908,7 +917,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
               catch (error) { if (error.code === "ENOENT") return; }
             }
             ownedProjectConfigHashes.delete(filename);
-            pendingOwnedProjectConfigWrites.delete(filename);
+            finishOwnedConfigWrite(filename);
           }
         }
         if (resource?.scheme === "file") {
@@ -1074,10 +1083,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         const current = ownedProjectConfigHashes.get(key);
         if (current !== undefined && current !== previousHash) return false;
         const temporaryKey = canonical(temporaryPath);
-        const timer = setTimeout(() => ownedProjectConfigTemporaryPaths.delete(temporaryKey), 5000);
-        timer.unref?.();
-        ownedProjectConfigTemporaryPaths.set(temporaryKey, { owner: key, hash: fingerprint, timer });
+        const temporary = { owner: key, hash: fingerprint, timer: null };
+        ownedProjectConfigTemporaryPaths.set(temporaryKey, temporary);
         pendingOwnedProjectConfigWrites.set(key, { previousHash, nextHash: fingerprint, temporaryPath: temporaryKey });
+        armOwnedConfigTemporary(temporaryKey, temporary);
         return true;
       }
       if (phase === "cancel") {

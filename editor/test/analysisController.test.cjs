@@ -40,6 +40,31 @@ test("config dispatch waits report request errors instead of waiting for an impo
   await assert.rejects(configRequestStarted(pending, Promise.reject(failure)), error => error === failure);
 });
 
+test("config staging sends a canonical worker path while preserving the caller's journal spelling", async t => {
+  const fixture = await setup(t);
+  const folder = fixture.vscode.workspace.workspaceFolders[0];
+  const text = "staged config";
+  const hash = value => createHash("sha256").update(value).digest("hex");
+  const file = path.join(fixture.root, "pyproject.toml");
+  const previousHash = hash(await fs.readFile(file));
+  const temporary = `${fixture.root}${path.sep}..${path.sep}${path.basename(fixture.root)}${path.sep}.graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp`;
+  const payload = { file: "pyproject.toml", temporary, expected_hash: previousHash, text };
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; }, workerFactory: () => ({
+    invalidate() {}, dispose() {}, async request(message) {
+      assert.equal(path.dirname(message.temporary), message.workspace, "Python requires the exact canonical parent");
+      await fs.writeFile(message.temporary, text);
+      fixture.watchers.find(item => item.pattern.pattern === "**/*").fire(Uri.file(temporary));
+      return { ok: true, token: "a".repeat(32) };
+    },
+  }) });
+  t.after(() => controller.dispose());
+  assert.equal(controller.trackOwnedProjectConfigWrite(file, hash(text), { phase: "begin", previousHash, temporaryPath: temporary }), true);
+  assert.equal((await controller.configFile(folder, "stage", payload)).ok, true);
+  assert.equal(payload.temporary, temporary);
+  assert.equal(invalidations, 0);
+});
+
 function uri(value) {
   const parsed = new URL(value);
   return { scheme: parsed.protocol.slice(0, -1), fsPath: fileURLToPath(new URL(value.replace(/^untitled:/, "file:"))), toString: () => value };
@@ -227,7 +252,7 @@ test("acknowledging a config record disposes the real controller's occupied work
   assert.deepEqual(await fs.readFile(file), original);
 });
 
-for (const scenario of ["success", "failure", "unreadable"]) {
+for (const scenario of ["success", "failure", "unreadable", "delayed dispatch"]) {
   test(`only an actively dispatched config stage ignores its incomplete temp bytes: ${scenario}`, async t => {
     const rejectStage = scenario === "failure";
     const fixture = await setup(t);
@@ -255,6 +280,7 @@ for (const scenario of ["success", "failure", "unreadable"]) {
     t.after(() => { release(); controller.dispose(); });
     const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
     assert.equal(controller.trackOwnedProjectConfigWrite(file, hash(text), { phase: "begin", previousHash, temporaryPath: temporary }), true);
+    if (scenario === "delayed dispatch") t.mock.timers.tick(6000);
     const stage = controller.configFile(fixture.vscode.workspace.workspaceFolders[0], "stage",
       { file: "pyproject.toml", temporary, expected_hash: previousHash, text })
       .then(value => ({ value }), error => ({ error }));
@@ -323,6 +349,29 @@ test("a queued config stage cannot exempt a temporary path before worker dispatc
   release();
   await Promise.all([first, queued]);
   assert.equal(calls, 1);
+});
+
+test("a foreign config change clears a pending temp registration after its timer has fired", async t => {
+  const fixture = await setup(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const file = path.join(fixture.root, "pyproject.toml");
+  const temporaryPath = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+  const ownedText = "owned pending bytes";
+  const previousHash = createHash("sha256").update(await fs.readFile(file)).digest("hex");
+  const nextHash = createHash("sha256").update(ownedText).digest("hex");
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+  t.after(() => controller.dispose());
+  assert.equal(controller.trackOwnedProjectConfigWrite(file, nextHash, { phase: "begin", previousHash, temporaryPath }), true);
+  await fs.writeFile(temporaryPath, ownedText);
+  t.mock.timers.tick(6000);
+  await fs.writeFile(file, "foreign config contents");
+  const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+  watcher.fire(Uri.file(file));
+  assert.equal(invalidations, 1);
+  controller.trackOwnedProjectConfigWrite(file, null, { phase: "cancel" });
+  watcher.fire(Uri.file(temporaryPath));
+  assert.equal(invalidations, 2, "expired registrations cannot survive losing their pending transaction");
 });
 
 test("configuration diagnostics follow the current dirty pyproject and clear after repair", async t => {

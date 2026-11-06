@@ -38,7 +38,7 @@ function pythonVersion(python) {
 
 exports.run = async () => {
   const suite = process.env.GRAPHQL_DESK_TEST_SUITE;
-  const results = { host: vscode.version, extensions: {}, pylance: {}, lifecycle: { invalidationAndRepair: {}, skipTraces: [], coldTrace: [], stubPathSelections: [] } };
+  const results = { host: vscode.version, extensions: {}, pylance: {}, lifecycle: { invalidationAndRepair: {}, skipTraces: [], coldTrace: [], managedRootErrors: [], stubPathSelections: [] } };
   let settingChanges;
   let diagnosticChanges;
   let selectionChanges;
@@ -72,6 +72,8 @@ exports.run = async () => {
         if (property === "appendLine") return value => {
           if (typeof value === "string" && value.startsWith("Live typing skipped: ") &&
               results.lifecycle.skipTraces.length < 80) results.lifecycle.skipTraces.push(value);
+          if (typeof value === "string" && value.startsWith("Managed stub root unavailable: ") &&
+              results.lifecycle.managedRootErrors.length < 10) results.lifecycle.managedRootErrors.push(value.slice(0, 2048));
           if (typeof value === "string" && value.startsWith("GraphQL Desk trace: ")) {
             results.lifecycle.coldTrace.push(value);
             if (results.lifecycle.coldTrace.length > 80) results.lifecycle.coldTrace.shift();
