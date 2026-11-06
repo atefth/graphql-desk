@@ -148,6 +148,17 @@ config/Python/type selection. Root independently passed all 18 new cases; the
 peer passed those plus the existing Native-verification case. Exact-head hosted
 acceptance remains required; no timeout or assertion is waived.
 
+At `105857a`, 27 hosted jobs passed, including both factory hosts. The TOML host
+stopped before its schema edit because the initial non-null polling predicate
+called `includes` on a missing observation's `text`. Its generation reader can
+return a no-text record while no generation is selected or an owned file is
+temporarily absent; the trace does not identify which branch occurred. The
+predicate now guards optional text, matching the existing nullable predicate.
+Replaying the actual predicate reproduces the old exception for both pending
+shapes and verifies that they now keep polling, while String succeeds and
+nullable/Unknown observations do not. All type, stub, setting-mirror and timeout
+checks remain unchanged. This fixture correction does not prove reader safety.
+
 ## Requirement-to-example/evidence map
 
 | #81 area | Documentation and runnable evidence | Boundary |
