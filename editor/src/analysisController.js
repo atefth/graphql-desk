@@ -105,7 +105,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       stopPolling(state); state.polls.clear();
       state.artifactsAbort?.abort();
       clearCache(state, "drop-state"); state.worker.dispose();
-      reconcileSchemaWatches(state, new Set()); states.delete(root);
+      reconcileSchemaWatches(state, new Set()); reconcileSourcePolls(state, new Set()); states.delete(root);
     }
   }
   function clearCache(state, reason) {
@@ -190,7 +190,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   const trusted = () => {
     const allowed = !disposed && vscode.workspace.isTrusted === true;
     if (!allowed) status(null);
-    if (!allowed) for (const state of states.values()) { stopPolling(state); clearCache(state, "workspace-trust-revoked"); state.worker.invalidate(); }
+    if (!allowed) for (const state of states.values()) { stopPolling(state); reconcileSourcePolls(state, new Set()); clearCache(state, "workspace-trust-revoked"); state.worker.invalidate(); }
     return allowed;
   };
   const localPath = document => {
@@ -244,7 +244,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (state && (state.python !== python || state.setting !== setting)) { dropState(root); state = null; }
     if (!state) {
       state = { root, folder, python, setting, worker: workerFactory({ python, workspace: root, isTrusted: trusted }),
-        running: false, pending: new Map(), cached: null, artifactsAbort: null, targets: [], credentials: new Map(), revisions: [], watches: new Map(),
+        running: false, pending: new Map(), cached: null, artifactsAbort: null, targets: [], credentials: new Map(), revisions: [], watches: new Map(), sourcePolls: new Map(),
         polls: new Map(), pollTimer: null, pollAbort: null, polling: false, pollPaused: false };
       states.set(root, state);
     }
@@ -403,6 +403,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     // Runtime companions count as sources only if the file is not a GraphQL Desk artifact.
     const candidates = new Set(found.filter(uri => uri.scheme === "file").map(uri => canonical(uri.fsPath))
       .filter(filename => !isGeneratedRuntime(filename)));
+    const diskCandidates = new Set(candidates);
     for (const document of documents) {
       const filename = localPath(document);
       // VS Code can retain a clean document after its backing file was renamed or deleted.
@@ -437,7 +438,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       }
     }
     const texts = new Map(documents.map(document => [document.uri.toString(), { path: localPath(document), version: document.version, text: document.getText(), is_dirty: document.isDirty }]));
-    return { request, texts };
+    return { request, texts, diskCandidates };
   }
   // Coalesce analysis work; config transactions need each captured text's reply.
   function enqueue(state, action, kind = "analyze", ticket = epoch, configRequest = false) {
@@ -468,6 +469,30 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       }
       schedulePolling(state);
     });
+  }
+  function reconcileSourcePolls(state, filenames, diskCandidates = new Set()) {
+    state.sourceDiskCandidates = diskCandidates;
+    for (const [filename, listener] of state.sourcePolls) if (!filenames.has(filename)) {
+      fs.unwatchFile(filename, listener); state.sourcePolls.delete(filename);
+    }
+    for (const filename of filenames) if (!state.sourcePolls.has(filename)) {
+      const listener = (current, previous) => {
+        if (trusted() && states.get(state.root) === state && state.sourcePolls.get(filename) === listener) {
+          if (canonical(filename) !== filename) {
+            fs.unwatchFile(filename, listener); state.sourcePolls.delete(filename);
+            invalidate(null);
+            return;
+          }
+          // Node reports one all-zero stat when a never-saved source starts absent.
+          if (!state.sourceDiskCandidates.has(filename) && current?.nlink === 0n && previous?.nlink === 0n) return;
+          invalidate(vscode.Uri.file(filename), null, true);
+        }
+      };
+      state.sourcePolls.set(filename, listener);
+      // Stable VS Code subscriptions share native events; stat polling also sees a lost rename.
+      try { fs.watchFile(filename, { persistent: false, bigint: true }, listener); }
+      catch (error) { fs.unwatchFile(filename, listener); state.sourcePolls.delete(filename); throw error; }
+    }
   }
   function reconcileSchemaWatches(state, filenames) {
     for (const [filename, handles] of state.watches) if (!filenames.has(filename)) {
@@ -596,6 +621,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         schemaPaths, signature: captureSignature(captured, schemaPaths),
         revisionSignature: JSON.stringify(latestRevisions) };
       state.cached = result;
+      const candidates = new Set(captured.request.candidates);
+      const sourcePaths = new Set(bundle.request.modules.map(module => vscode.Uri.parse(module.uri))
+        .filter(uri => uri.scheme === "file").map(uri => canonical(uri.fsPath))
+        .filter(filename => inside(state.root, filename) && candidates.has(filename)));
+      if (prepared.configuration_diagnostics.length) {
+        for (const filename of state.sourcePolls.keys()) if (candidates.has(filename)) sourcePaths.add(filename);
+      }
+      reconcileSourcePolls(state, sourcePaths, latest.diskCandidates);
       reconcilePolling(state);
       return result;
     } finally { cancellation?.dispose(); }

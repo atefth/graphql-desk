@@ -106,3 +106,22 @@ providers or activate an extension. Twelve tests include a real persistent Pytho
 round trip, Unicode/external schema buffers, process restart, framed faults,
 timeout/cancellation, HTTP refresh/abort/restart and final-await races; provider/highlighting tests remain
 separate. No generated analysis files are written.
+
+The activated analysis controller keeps VS Code's recursive source watcher as
+the fast path. Verified, selected Python module paths also use Node's built-in
+`fs.watchFile` at its default 5007 ms interval: stable VS Code subscriptions share
+native events, so adding another subscription would not recover a lost rename.
+This fallback detects persistent changes to known paths even when native events
+are lost, and triggers the existing recapture/freshness checks. It does not
+discover unrelated new files or guarantee observing a change restored between
+polls. Schema watches and ordinary unsaved editor updates are unchanged.
+
+Only analyzed file modules are polled, not raw discovery candidates or generated
+outputs. Invalid project configuration retains previous module watches only
+while their paths remain current candidates. Exact listeners retire on source,
+workspace or interpreter removal, disposal and observed trust loss. A redirected
+path is retired before any content fingerprint is read; polling itself follows
+filesystem links for metadata. Duplicate disk notifications share the existing
+fingerprint cache. Polling adds roughly one metadata check per selected module
+per five seconds; project-scale idle CPU and latency remain unverified under
+the open performance acceptance #77.
