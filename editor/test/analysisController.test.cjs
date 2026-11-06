@@ -215,6 +215,49 @@ for (const revokeTrust of [false, true]) {
   });
 }
 
+test("source quarantine preserves an active owned config receipt and serializes its RPCs", async t => {
+  const fixture = await setup(t);
+  const folder = fixture.vscode.workspace.workspaceFolders[0];
+  const file = path.join(fixture.root, "pyproject.toml");
+  const temporary = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+  const hash = value => createHash("sha256").update(value).digest("hex");
+  let release, started;
+  const held = new Promise(resolve => { release = resolve; });
+  const firstStarted = new Promise(resolve => { started = resolve; });
+  let invalidations = 0, busy = false;
+  const actions = [];
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: () => ({
+    invalidate() { invalidations += 1; }, dispose() {}, async request(request) {
+      assert.equal(busy, false, "quarantine must wait for the native config phase");
+      busy = true;
+      try {
+        actions.push(request.op === "config_file" ? request.action : request.op);
+        if (request.action === "stage") { started(); await held; }
+        assert.equal(invalidations, actions.length > 3 ? 1 : 0, "source changes must not revoke an owned config receipt");
+        return { ok: true, token: "a".repeat(32) };
+      } finally { busy = false; }
+    },
+  }) });
+  t.after(() => { release(); controller.dispose(); });
+  const text = "staged config";
+  const expectedHash = hash(await fs.readFile(file));
+  assert.equal(controller.trackOwnedProjectConfigWrite(file, hash(text), { phase: "begin", previousHash: expectedHash,
+    temporaryPath: temporary }), true);
+  const stage = controller.configFile(folder, "stage", { file: "pyproject.toml", temporary, text, expected_hash: expectedHash })
+    .then(value => ({ value }), error => ({ error }));
+  await configRequestStarted(firstStarted, stage);
+  const quarantine = controller.quarantine({ workspace: fixture.root, projects: [], invalidated_owners: [] });
+  assert.equal(invalidations, 0);
+  release();
+  assert.equal((await stage).value?.ok, true);
+  assert.equal((await quarantine)?.ok, true);
+  assert.equal((await controller.configFile(folder, "verify", { token: "a".repeat(32) })).ok, true);
+  assert.deepEqual(actions, ["stage", "quarantine", "verify"]);
+  controller.trackOwnedProjectConfigWrite(file, null, { phase: "cancel" });
+  assert.equal((await controller.quarantine({ workspace: fixture.root, projects: [], invalidated_owners: [] }))?.ok, true);
+  assert.equal(invalidations, 1, "ordinary quarantine retains worker invalidation after the transaction");
+});
+
 test("acknowledging a config record disposes the real controller's occupied workspace worker", async t => {
   const fixture = await setup(t);
   const folder = fixture.vscode.workspace.workspaceFolders[0];

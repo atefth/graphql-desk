@@ -811,7 +811,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!preserve_current) {
       state.artifactsAbort?.abort();
       clearCache(state, "pyright-config-update-failed");
-      state.worker.invalidate();
+      // Keep the native staging receipt alive until its owned transaction finishes.
+      if (![...pendingOwnedProjectConfigWrites.keys()].some(file => path.dirname(file) === root)) state.worker.invalidate();
     }
     const ticket = epoch;
     try {
