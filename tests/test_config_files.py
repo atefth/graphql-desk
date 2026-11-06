@@ -393,13 +393,49 @@ class ConfigFileTests(unittest.TestCase):
             side_effect=OSError("PRIVATE_FAILURE"),
         ):
             reply = self.worker.handle(request)
-        self.assertEqual(reply, {"ok": False, "error": "editor-request-failed"})
+        self.assertEqual(
+            reply,
+            {
+                "ok": False,
+                "error": "editor-request-failed",
+                "config_phase": "copy-dacl",
+                "native_code": 0,
+            },
+        )
+        self.assertNotIn("PRIVATE_FAILURE", json.dumps(reply))
         temporary = Path(cast(str, request["temporary"]))
         self.assertEqual(temporary.read_bytes(), b"")
         next_request = self.request()
         self.assertFalse(self.worker.handle(next_request)["ok"])
         self.assertFalse(Path(cast(str, next_request["temporary"])).exists())
         self.assertEqual(self.target.read_bytes(), self.original)
+
+    def test_stage_failure_reports_only_fixed_phase_and_bounded_native_code(
+        self,
+    ) -> None:
+        for code, expected in ((13, 13), (65536, 0), (-1, 0)):
+            with self.subTest(code=code):
+                worker = EditorWorker(config_workspace=self.root)
+                request = self.request()
+                with patch(
+                    "graphql_desk.config_files.apply_config_dacl",
+                    side_effect=OSError(code, "PRIVATE_FAILURE"),
+                ):
+                    reply = worker.handle(request)
+                self.assertEqual(
+                    reply,
+                    {
+                        "ok": False,
+                        "error": "editor-request-failed",
+                        "config_phase": "copy-dacl",
+                        "native_code": expected,
+                    },
+                )
+                self.assertNotIn("PRIVATE", json.dumps(reply))
+                self.assertEqual(
+                    Path(cast(str, request["temporary"])).read_bytes(), b""
+                )
+                self.assertEqual(self.target.read_bytes(), self.original)
 
     def test_changed_stage_is_preserved_before_writing_content(self) -> None:
         request = self.request()

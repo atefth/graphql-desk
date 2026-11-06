@@ -324,7 +324,10 @@ function activate(context) {
         onOwnership: (filename, value, previousValue, previousPresent) =>
           controller.setManagedProjectStubPath(folder.uri.fsPath, filename, value, previousValue, previousPresent),
       }) ??
-      await createManagedStubPath(vscode, folder, context.workspaceState))();
+      await createManagedStubPath(vscode, folder, context.workspaceState))().catch(error => {
+        output.appendLine(`Managed stub root unavailable: ${String(error)}`);
+        throw error;
+      });
   }
   function managedRoot(folder, folderRoot, generatedPackages = []) {
     let promise = roots.get(folderRoot);

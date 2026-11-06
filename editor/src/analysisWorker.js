@@ -12,6 +12,9 @@ const LIVE_STUB_ROOT = ".graphql-desk/live-typings";
 const generationStubPath = value => typeof value === "string" &&
   /^\.graphql-desk\/live-typings\/generations\/g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
 const failure = () => new Error("GraphQL Desk worker request failed");
+class ConfigStageFailure extends Error {}
+const configFailurePhases = new Set(["create-empty", "read-empty-security", "preserve-owner", "copy-dacl",
+  "compare-dacl", "recheck-empty", "write-content", "verify-stage"]);
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const keys = (value, expected) => object(value) && Object.keys(value).sort().join(",") === [...expected].sort().join(",");
 const string = value => typeof value === "string" && value.length > 0;
@@ -339,6 +342,16 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
           const active = pending;
           if (!active || !trusted()) throw failure();
           const reply = parseFrame(Buffer.concat(parts, bytes));
+          if (active.request.op === "config_file" && active.request.action === "stage" &&
+              keys(reply, ["ok", "error", "config_phase", "native_code"]) && reply.ok === false &&
+              reply.error === "editor-request-failed" && configFailurePhases.has(reply.config_phase) &&
+              Number.isSafeInteger(reply.native_code) && reply.native_code >= 0 && reply.native_code <= 65535) {
+            pending = null;
+            active.cleanup();
+            active.reject(new ConfigStageFailure(`GraphQL Desk config stage ${reply.config_phase} failed (native code ${reply.native_code}); preserved`));
+            failed();
+            return;
+          }
           if (!validReply(reply, active.request)) throw failure();
           parts.length = 0;
           bytes = 0;
@@ -443,7 +456,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
           stop(); throw failure();
         }
         return result;
-      } catch { if (child === process) stop(); throw failure(); }
+      } catch (error) { if (child === process) stop(); throw error instanceof ConfigStageFailure ? error : failure(); }
     },
     invalidate: stop,
     close() { disposed = true; stop(); },

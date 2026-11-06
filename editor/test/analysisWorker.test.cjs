@@ -178,6 +178,24 @@ test("config staging is opt-in and requires bounded exact requests and matching 
   await assert.rejects(candidate.worker.request({ op: "config_file", workspace: fixture.workspace, action: "verify", token }), generic);
 });
 
+test("config stage failures expose only fixed phases and bounded native codes and stop the worker", async t => {
+  for (const [response, expected] of [
+    [{ ok: false, error: "editor-request-failed", config_phase: "copy-dacl", native_code: 5 },
+      { message: "GraphQL Desk config stage copy-dacl failed (native code 5); preserved" }],
+    [{ ok: false, error: "editor-request-failed", config_phase: "PRIVATE_SECRET", native_code: 5 }, generic],
+    [{ ok: false, error: "editor-request-failed", config_phase: "copy-dacl", native_code: 65536 }, generic],
+    [{ ok: false, error: "editor-request-failed", config_phase: "copy-dacl", native_code: -1 }, generic],
+    [{ ok: false, error: "editor-request-failed", config_phase: "copy-dacl", native_code: 5, secret: "PRIVATE_SECRET" }, generic],
+  ]) {
+    const fake = fakeSpawn(child => child.stdout.write(JSON.stringify(response) + "\n"));
+    const fixture = setup(t, fake, { configFiles: true });
+    await assert.rejects(fixture.worker.request({ op: "config_file", workspace: fixture.workspace, action: "stage",
+      file: "pyrightconfig.json", temporary: path.join(fixture.workspace, ".graphql-desk-01234567-89ab-cdef-0123-456789abcdef.tmp"),
+      expected_hash: "a".repeat(64), text: "PRIVATE_CONFIG" }), expected);
+    assert.equal(fake.children[0].killed, true);
+  }
+});
+
 test("real isolated persistent worker uses Unicode dirty external schema and rejects old IDs after restart", async t => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-transport-"));
   t.after(() => fs.rm(temporary, { recursive: true, force: true }));

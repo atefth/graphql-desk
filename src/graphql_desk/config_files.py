@@ -391,6 +391,7 @@ class ConfigFileStage:
     complete: bool = False
     revoked: bool = False
     attempted: bool = False
+    failure_phase: str = field(default="create-empty", init=False)
 
     @classmethod
     def capture(
@@ -420,26 +421,32 @@ class ConfigFileStage:
         self.attempted = True
         descriptor = os.open(self.temporary, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
         with os.fdopen(descriptor, "wb") as stream:
+            self.failure_phase = "read-empty-security"
             self.staged = _proof(
                 ConfigSnapshot(b"", os.fstat(descriptor), config_dacl(descriptor))
             )
             check_config_acl(descriptor)
+            self.failure_phase = "preserve-owner"
             preserve_config_owner(descriptor, original, config_dacl(descriptor))
             self.staged = _proof(
                 ConfigSnapshot(b"", os.fstat(descriptor), config_dacl(descriptor))
             )
+            self.failure_phase = "copy-dacl"
             apply_config_dacl(descriptor, original.dacl)
+            self.failure_phase = "compare-dacl"
             check_config_acl(descriptor)
             if config_dacl(descriptor) != original.dacl:
                 raise ValueError("Configuration authorization was not preserved")
             self.staged = _proof(
                 ConfigSnapshot(b"", os.fstat(descriptor), config_dacl(descriptor))
             )
+            self.failure_phase = "recheck-empty"
             _check_directories(self.directories)
             if not same_output(self.target, original) or not _matches_proof(
                 self.temporary, self.staged
             ):
                 raise ValueError("Configuration source or empty stage changed")
+            self.failure_phase = "write-content"
             stream.write(data)
             stream.flush()
             self.staged = _proof(
@@ -447,6 +454,7 @@ class ConfigFileStage:
             )
             os.fsync(descriptor)
         self.complete = True
+        self.failure_phase = "verify-stage"
         self.verify()
 
     def verify(self) -> None:

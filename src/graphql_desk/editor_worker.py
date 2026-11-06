@@ -987,10 +987,24 @@ class EditorWorker:
 
     def handle(self, value: object) -> dict[str, object]:
         """Malformed/failed messages invalidate all previously issued job IDs."""
+        previous_stage = self._config_stage
         try:
             return self._handle(value)
-        except Exception:
+        except Exception as error:
+            stage = self._config_stage
             self.invalidate()
+            if stage is not None and stage is not previous_stage and stage.attempted:
+                native_code = getattr(error, "winerror", None) or getattr(
+                    error, "errno", 0
+                )
+                if type(native_code) is not int or not 0 <= native_code <= 65535:
+                    native_code = 0
+                return {
+                    "ok": False,
+                    "error": "editor-request-failed",
+                    "config_phase": stage.failure_phase,
+                    "native_code": native_code,
+                }
             return {"ok": False, "error": "editor-request-failed"}
 
     def _config_file(self, raw: dict[str, object]) -> dict[str, object]:

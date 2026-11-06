@@ -211,6 +211,12 @@ restaging. Changed or foreign files remain untouched. An incomplete stage blocks
 further staging across worker restarts instead of accumulating another temporary
 file on every retry.
 
+A failed native stage reports only a fixed step name and a bounded numeric
+system error code. The transport validates those fields and stops the worker;
+raw exception text, config contents, paths and security descriptors stay out of
+the failure reply. The first managed-root failure is logged before a later
+recovery attempt can mask it with an incomplete-receipt message.
+
 Staged-file cleanup also uses a read-only native verification followed by the
 editor's final synchronous dirty-buffer, trust, directory, identity and byte
 checks before unlink. Python only confirms the resulting absence. The journal
@@ -232,7 +238,7 @@ Backend and transport fixtures cover these boundaries; complete installed-editor
 and platform verification is tracked by #356. This does not resolve reader-safe
 generation retirement under #355 or pass broad TYPE-01 acceptance.
 
-Local verification for this change passed 106 backend tests (four existing POSIX
+Prior local verification passed 106 backend tests (four existing POSIX
 cases skipped on Windows), 369 editor tests, Ruff, mypy and Pyright. Installed
 VS Code 1.141.0 exercised the TOML lifecycle and 1.142.0 the JSONC lifecycle,
 both with Python extension 2026.10.0 and Pylance 2026.4.1. The fixtures verify
@@ -240,7 +246,10 @@ setup, nullable schema refresh, restart recovery and restoration of custom
 settings. Permission evidence composes unchanged native `init` security-helper
 fixtures with new staging/protocol/race tests and those installed-editor flows;
 the separately blocked protected-DACL editor probe was not executed or retried.
-Required hosted platform checks remain the merge gate.
+Diagnostic-specific checks pass 30 synthetic-security Python tests and 24 Node
+transport tests. The mixed-list host flow also passes locally with Python
+3.10.18. Hosted Windows editor failures during initial config staging remain
+unexplained; required hosted platform checks block merge until they pass.
 
 ### Immutable generations and recovery (#37 acceptance complete)
 
