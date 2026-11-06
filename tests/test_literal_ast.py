@@ -6,9 +6,16 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
-from graphql import FragmentDefinitionNode, parse
+from graphql import (
+    FieldNode,
+    FragmentDefinitionNode,
+    ListValueNode,
+    OperationDefinitionNode,
+    parse,
+)
 
 from graphql_desk import gql
 from graphql_desk.literal_ast import render_document_ast_types, render_literal_ast_types
@@ -25,6 +32,40 @@ fragment F on User { label }
 
 
 class LiteralAstTests(unittest.TestCase):
+    def test_identical_private_node_projections_share_declarations(self) -> None:
+        document = parse("{ left { id name } right { id name } }")
+        original = document.definitions
+        output = render_document_ast_types(document, name="Exact")
+        self.assertEqual(output.count("(_ast.FieldNode):"), 4)
+        self.assertEqual(output.count("(_ast.SelectionSetNode):"), 2)
+        self.assertEqual(output.count("(_ast.NameNode):"), 4)
+        self.assertEqual(output.count("class ExactDocument("), 1)
+        self.assertIs(document.definitions, original)
+
+    def test_shared_nodes_keep_distinct_const_and_ordinary_checker_bases(self) -> None:
+        document = parse("query Q($v:[Int]=[1]) { field(arg:[1]) }")
+        operation = document.definitions[0]
+        assert isinstance(operation, OperationDefinitionNode)
+        assert operation.variable_definitions is not None
+        shared = operation.variable_definitions[0].default_value
+        assert isinstance(shared, ListValueNode)
+        field = operation.selection_set.selections[0]
+        assert isinstance(field, FieldNode)
+        assert field.arguments is not None
+        field = replace(field, arguments=(replace(field.arguments[0], value=shared),))
+        operation = replace(
+            operation,
+            selection_set=replace(operation.selection_set, selections=(field,)),
+        )
+        document = replace(document, definitions=(operation,))
+        output = render_document_ast_types(document, name="Exact")
+        self.assertEqual(output.count("(_ast.ConstListValueNode):"), 1)
+        self.assertEqual(output.count("(_ast.ListValueNode):"), 1)
+        assert field.arguments is not None
+        assert operation.variable_definitions is not None
+        self.assertIs(field.arguments[0].value, shared)
+        self.assertIs(operation.variable_definitions[0].default_value, shared)
+
     def test_existing_composed_runtime_ast_retains_empty_directive_tuples(self) -> None:
         fields = gql("fragment Fields on Book @_unmask { title }")
         other = gql("fragment Other on Book { id }")
@@ -202,6 +243,7 @@ class LiteralAstTests(unittest.TestCase):
 from typing_extensions import assert_type
 from graphql import DocumentNode, Node, OperationType, parse, print_ast
 from graphql import ListValueNode, OperationDefinitionNode
+from graphql.language.ast import Location
 if TYPE_CHECKING:
     from generated import ReadDocument
     from unlocated import NoLocDocument
@@ -230,7 +272,8 @@ fields = node.definitions[0].directives[0].arguments[0].value.fields
 assert_type(fields[0].value.value, Literal[True])
 assert_type(fields[1].value.kind, Literal["null_value"])
 assert_type(node.definitions[1].type_condition.name.value, Literal["User"])
-assert_type(node.loc.start, int)
+location: Location = node.loc
+assert_type(location.start, int)
 def consume(value: Node) -> None:
     assert value is original
 consume(node)
@@ -273,11 +316,26 @@ assert_type(unlocated.definitions[0].selection_set.selections[0].loc, None)
                 'wrong: Literal["other"] = node.definitions[0].name.value\n'
                 "outside = node.definitions[2]\n"
                 'node.definitions[0].name.value = "changed"\n'
+                'wrong_alias: Literal["other"] = field.alias.value\n'
+                "wrong_location: None = node.loc\n"
+                "wrong_no_location: Location = unlocated.loc\n"
+                'wrong_directive: Literal["include"] = '
+                "node.definitions[0].directives[0].name.value\n"
+                'wrong_enum: Literal["RED"] = mixed.values[3].value\n'
+                "wrong_operation: Literal[OperationType.MUTATION] = "
+                "node.definitions[0].operation\n"
             )
             (root / "fixture.py").write_text(fixture + negative, encoding="utf-8")
-            self.checkers(root, success=False, first_bad_line=len(fixture.splitlines()))
+            self.checkers(
+                root,
+                success=False,
+                first_bad_line=len(fixture.splitlines()),
+                bad_count=len(negative.splitlines()),
+            )
 
-    def checkers(self, root: Path, *, success: bool, first_bad_line: int = 0) -> None:
+    def checkers(
+        self, root: Path, *, success: bool, first_bad_line: int = 0, bad_count: int = 3
+    ) -> None:
         mypy = subprocess.run(
             [
                 sys.executable,
@@ -298,10 +356,10 @@ assert_type(unlocated.definitions[0].selection_set.selections[0].loc, None)
         )
         if not success:
             errors = [line for line in mypy.stdout.splitlines() if ": error:" in line]
-            self.assertEqual(len(errors), 3, mypy.stdout)
+            self.assertEqual(len(errors), bad_count, mypy.stdout)
             self.assertEqual(
                 {int(line.split(":")[1]) for line in errors},
-                set(range(first_bad_line + 1, first_bad_line + 4)),
+                set(range(first_bad_line + 1, first_bad_line + bad_count + 1)),
             )
         pyright = subprocess.run(
             [
@@ -322,11 +380,11 @@ assert_type(unlocated.definitions[0].selection_set.selections[0].loc, None)
             pyright.returncode, 0 if success else 1, pyright.stdout + pyright.stderr
         )
         diagnostics = json.loads(pyright.stdout)["generalDiagnostics"]
-        self.assertEqual(len(diagnostics), 0 if success else 3, diagnostics)
+        self.assertEqual(len(diagnostics), 0 if success else bad_count, diagnostics)
         if not success:
             self.assertEqual(
                 {item["range"]["start"]["line"] for item in diagnostics},
-                set(range(first_bad_line, first_bad_line + 3)),
+                set(range(first_bad_line, first_bad_line + bad_count)),
             )
 
 
