@@ -3,7 +3,8 @@
 GraphQL Desk is an unreleased development project. The source tree contains a
 Python package and a private VS Code development extension. There is no published
 wheel, Marketplace install, complete support-matrix result, or full-parity claim
-implied by these instructions. The repository license is still an owner decision.
+implied by these instructions. The owner selected the [MIT license](../../LICENSE)
+on 2026-11-06; release acceptance remains separate.
 
 ## Install the locked development environment
 

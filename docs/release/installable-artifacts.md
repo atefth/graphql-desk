@@ -3,16 +3,18 @@
 Issue [#78](https://github.com/atefth/graphql-desk/issues/78) requires evidence from
 the artifacts users install. This first slice checks the Python wheel and source
 distribution. It does not approve a release, implement VSIX packaging, or establish
-the complete platform support matrix. The repository owner's project-license
-decision is still required.
+the complete platform support matrix. The owner selected MIT on 2026-11-06;
+distribution acceptance and publication remain separate.
 
 ## Maintained package inputs
 
-Hatchling 1.32.4 remains the build backend. `project.license-files` includes the
+Hatchling 1.32.4 remains the build backend. The project SPDX expression is `MIT`.
+`project.license-files` includes the root [LICENSE](../../LICENSE), the
 [third-party notices](third-party-notices.md),
 [candidate dependency inventory](runtime-dependencies.json), and their verbatim
-license/notice files using Hatch's native PEP 639 handling. This adds no license
-expression or license grant for GraphQL Desk. The inventory also describes Node
+license/notice files using Hatch's native PEP 639 handling. The checker requires
+`License-Expression: MIT` and the exact root license bytes in both Python archives.
+The inventory also describes Node
 candidates; including their notices does not bundle those packages in the Python
 wheel. Wheel notice paths preserve the relative links between these documents.
 
@@ -30,6 +32,7 @@ The source distribution deliberately contains a minimal, buildable source set:
 | `docs/release` | Release documentation, inventory and required notices |
 | `pyproject.toml` | Build and package metadata |
 | `README.md` | Package description |
+| `LICENSE` | Owner-approved MIT grant |
 
 The staged build also creates exactly two empty regular `.gitignore` and
 `.hgignore` files with exclusive creation. Hatch searches for these files up its
@@ -119,13 +122,13 @@ not an operating-system guarantee against arbitrary concurrent filesystem or
 tool changes. Platform/tool components can still write outside configured paths.
 The shared provisioned cache is intentionally retained for reuse.
 
-CI sets the same repository-owned cache before `uv sync`, then separately primes
-registry metadata with an online, hash-checked reinstall of the complete locked
-runtime export into the disposable CI environment. The checker makes its own
-fresh private export; its archive builds and proof installations remain offline.
-Standalone builds into `dist` are unnecessary. Focused unit tests use synthetic
-archives and mocked official commands; passing them alone is not offline-install
-evidence.
+CI sets the same repository-owned cache before `uv sync`. A separate online
+provisioning step exports the full locked runtime requirements and reinstalls
+them with hash checking into the disposable CI environment to prime the registry
+cache. The checker then creates its own fresh export; its artifact builds and
+proof installations remain offline. No standalone build into `dist` is needed.
+The focused unit tests use synthetic archives and mocked official build/install
+commands; passing those tests alone is not evidence of an offline install.
 
 ## Remaining release acceptance
 
@@ -147,6 +150,33 @@ This establishes equality within this local run. Cross-platform reproducibility
 remains unverified. Hosted validation of the final PR tree, including this evidence
 update, is recorded in that PR's exact-head checks; broader platform acceptance
 remains open.
+
+A later cold-cache reproduction used the pinned uv 0.13.2: ordinary locked sync
+alone did not prepare the cache for the offline proof, while the explicit online,
+hash-checked runtime reinstall did. This does not change the earlier replay's
+tool version or establish a uv defect. Subsequent artifact checks use the pinned
+tool version.
+
+The subsequent MIT-bearing replay used pinned uv 0.13.2 and CPython 3.13.7 on
+Windows against reviewed candidate tree
+`f6f14e2cb9ec0bf5e8f7ccee285cd3ed01cf1b8c`, based on corrected packaging commit
+`8f6f06270a54cd7739ffd46ab264436f9d00e38b`. Independent direct/source-rebuilt
+wheels and the source archive passed the strict checks, including
+`License-Expression: MIT`, the exact root grant and third-party notice bytes.
+Both fresh offline installations passed dependency checks, isolated imports and
+console/module help. Both wheel SHA-256 values were
+`c1e7ef8f82cd416bbc9502263fccf651cb156f24d46a7b60b6bc017ca436f089`.
+
+Separate hash-pinned online runtime preparation preceded that offline replay;
+its temporary target was removed. No `distribution-check-*` directories remained.
+The candidate record and logs are
+`.tmp/issue79-notices/mit-replay-candidate.json`,
+`mit-cache-preparation-20261106.log` and `mit-official-replay-20261106.log` in the
+same directory. This establishes the scoped local MIT artifact result, not
+cross-platform reproducibility or full release acceptance. Hosted checks must
+still validate the final follow-up tree, including this evidence update. The
+editor manifest and root lock metadata also declare MIT; later VSIX staging can
+reuse the root license rather than maintaining a duplicate.
 
 Existing local `dist` outputs were stale and are not release evidence: one wheel
 declared an older GraphQL-core pin and lacked tomlkit; an old source archive

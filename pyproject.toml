@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "Typed GraphQL documents for Python"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
 license-files = [
+    "LICENSE",
     "docs/release/third-party-notices.md",
     "docs/release/runtime-dependencies.json",
     "docs/release/licenses/*",
@@ -39,7 +41,7 @@ dev = [
 packages = ["src/graphql_desk"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src/graphql_desk", "docs/release", "pyproject.toml", "README.md"]
+only-include = ["src/graphql_desk", "docs/release", "pyproject.toml", "README.md", "LICENSE"]
 
 [tool.ruff]
 target-version = "py310"

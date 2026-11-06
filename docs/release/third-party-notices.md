@@ -2,8 +2,9 @@
 
 This is a reviewable inventory of the current locked runtime candidates for
 GraphQL Desk 0.1.0. It is not a license grant for GraphQL Desk, a legal-clearance
-opinion, or evidence of what a released wheel or VSIX contains. The repository's
-own license still needs its owner's decision. Issue [#79](https://github.com/atefth/graphql-desk/issues/79)
+opinion, or evidence of what a released wheel or VSIX contains. The owner selected
+the [MIT license](../../LICENSE) for GraphQL Desk on 2026-11-06; dependencies keep
+their own terms. Issue [#79](https://github.com/atefth/graphql-desk/issues/79)
 and artifact acceptance [#78](https://github.com/atefth/graphql-desk/issues/78) remain open.
 
 ## Scope and provenance
@@ -135,5 +136,4 @@ Existing dependency CI runs the Python license checker, hash-required
 Those checks are evidence for their exact run, not a permanent advisory-free
 claim. Review any new advisory or license change before release; no findings
 are waived here. Packaged workspace-trust, secret-redaction and adversarial
-acceptance, the owner's GraphQL Desk license and final artifact checks remain
-required before #79 can close.
+acceptance and final artifact checks remain required before #79 can close.

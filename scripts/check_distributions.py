@@ -28,7 +28,13 @@ else:
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-SOURCE_ROOTS = ("src/graphql_desk", "docs/release", "pyproject.toml", "README.md")
+SOURCE_ROOTS = (
+    "src/graphql_desk",
+    "docs/release",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+)
 SDIST_CONTROLS = (".gitignore", ".hgignore")
 
 
@@ -66,6 +72,10 @@ def _project(root: Path) -> dict[str, Any]:
     includes = data["tool"]["hatch"]["build"]["targets"]["sdist"]["only-include"]
     if includes != list(SOURCE_ROOTS):
         raise ValueError("Source archive inclusion policy needs review")
+    if data["project"].get("license") != "MIT" or "LICENSE" not in data["project"].get(
+        "license-files", []
+    ):
+        raise ValueError("Project MIT license selection needs review")
     return cast(dict[str, Any], data["project"])
 
 
@@ -101,7 +111,12 @@ def source_inputs(root: Path) -> dict[str, bytes]:
         ):
             raise ValueError("Private or generated source archive input")
         files[name] = file.read_bytes()
-    for required in ("pyproject.toml", "README.md", "src/graphql_desk/py.typed"):
+    for required in (
+        "pyproject.toml",
+        "README.md",
+        "LICENSE",
+        "src/graphql_desk/py.typed",
+    ):
         if required not in files:
             raise ValueError(f"Missing maintained source archive input: {required}")
     return files
@@ -131,6 +146,7 @@ def _metadata(data: bytes, root: Path, project: dict[str, Any]) -> None:
         "requires-python",
         "requires-dist",
         "license-file",
+        "license-expression",
         "description-content-type",
     }
     if any(field.lower() not in allowed for field in message.keys()):
@@ -141,6 +157,7 @@ def _metadata(data: bytes, root: Path, project: dict[str, Any]) -> None:
         ("Version", project["version"]),
         ("Summary", project["description"]),
         ("Requires-Python", project["requires-python"]),
+        ("License-Expression", "MIT"),
     ):
         if message.get_all(field) != [expected]:
             raise ValueError(f"Distribution metadata differs: {field}")

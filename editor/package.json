@@ -3,6 +3,7 @@
   "displayName": "GraphQL Desk",
   "publisher": "graphql-desk",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "GraphQL language features for Python",
   "main": "./src/extension.js",
