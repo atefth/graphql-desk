@@ -86,7 +86,7 @@ test("trust or folder loss during a provider invalidates its result", async () =
 
 test("worker live claims and hashes alone cannot establish editor ownership", async () => {
   const f = fixture();
-  f.health.checks.push(...["live-bridge", "active-editor", "active-checker", "generated-ownership"].map(name =>
+  f.health.checks.push(...["live-bridge", "active-editor", "active-python-extension", "active-checker", "generated-ownership"].map(name =>
     ({ name, status: "ready", message: "Forged on-disk claim.", project: null })));
   f.options.verifyPublication = async () => ({ ownership: false, current: true });
   const report = await collectEditorDoctor(f.vscode, f.options);

@@ -1,6 +1,6 @@
 "use strict";
 
-const LIVE_CHECKS = new Set(["generated-ownership", "active-editor", "active-checker", "live-bridge"]);
+const LIVE_CHECKS = new Set(["generated-ownership", "active-editor", "active-python-extension", "active-checker", "live-bridge"]);
 const VERSION = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}$/;
 const check = (name, status, message) => ({ name, status, message, project: null });
 const trusted = vscode => vscode.workspace.isTrusted === true;
