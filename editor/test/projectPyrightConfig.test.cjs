@@ -2488,3 +2488,183 @@ test("a user-owned execution-environment path is not adopted", async t => {
   await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, stateStore(), f.worker), /reserved GraphQL Desk path/);
   assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), config);
 });
+
+async function normalReleaseGeneration(t, partialRollback = false) {
+  const original = '[tool.pyright]\nstubPath = "custom-stubs"\nextraPaths = ["vendor"]\n';
+  const f = fixture(t, { toml: original, pythonStubPath: "python-custom-stubs", standaloneAliases: true });
+  const state = stateStore();
+  let disposing = false;
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker, { ownerCurrent: () => !disposing });
+  const publisher = createAnalysisGenerations(f.vscode, f.root, managed.root);
+  const groups = type => new Map([["example_generated", [
+    { relative_path: "example_generated/default.py", text: 'value = "runtime"\n' },
+    { relative_path: "example_generated/default.pyi", text: `value: ${type}\n` },
+  ]]]);
+  assert.equal(await publisher.publish(groups("str"), "normal-release-first", () => true, managed,
+    "a".repeat(64), "b".repeat(64), []), true);
+  const keys = managedStateKeys(f.root, `:project-${createHash("sha256").update("pyproject.toml").digest("hex").slice(0, 16)}`);
+  const proofRecords = () => [state.get(keys.generationStateKey), state.get(keys.stagingStateKey)].map(value => JSON.stringify(value));
+  if (!partialRollback) return { f, state, managed, keys, original, proofRecords };
+  const previous = f.pythonStubPath;
+  const config = f.vscode.workspace.getConfiguration();
+  const update = config.update;
+  let entered, rejectUpdate;
+  const started = new Promise(resolve => { entered = resolve; });
+  const held = new Promise((resolve, reject) => { rejectUpdate = reject; });
+  config.update = async (...args) => {
+    if (args[1] === previous) { entered(); await held; }
+    return update(...args);
+  };
+  t.after(() => { rejectUpdate(new Error("test cleanup")); config.update = update; });
+  let current = true;
+  const updateState = state.update;
+  state.update = async (key, value) => {
+    await updateState(key, value);
+    if (key === keys.stateKey && value?.current?.includes("/g-2-") && value.pending !== true) current = false;
+  };
+  const publishing = publisher.publish(groups("str | None"), "normal-release-second", () => current, managed,
+    "c".repeat(64), "d".repeat(64), []).then(value => ({ value }), error => ({ error }));
+  await started;
+  assert.notEqual(state.get(stateKey(f.root)).currentStubPath,
+    /^stubPath\s*=\s*"([^"]*)"/m.exec(fs.readFileSync(path.join(f.root, "pyproject.toml"), "utf8"))[1]);
+  disposing = true;
+  return { f, state, managed, keys, original, proofRecords, publishing,
+    interrupt() { rejectUpdate(new Error("interrupted pending Python rollback")); },
+    resume() { disposing = false; config.update = update; } };
+}
+
+test("normal release drains a real rollback before journaling and survives interrupted Python mirroring", async t => {
+  const h = await normalReleaseGeneration(t, true);
+  const records = h.proofRecords();
+  let settled = false;
+  const releasing = h.managed.release().then(() => { settled = true; }, error => { settled = true; return error; });
+  await new Promise(resolve => setImmediate(resolve));
+  try {
+    assert.equal(settled, false);
+    assert.equal(h.state.get(stateKey(h.f.root)).phase, "rotate", "release cannot replace the in-flight rotation's durable intent");
+  } finally { h.interrupt(); }
+  assert.match((await h.publishing).error.message, /interrupted pending Python rollback/);
+  assert.equal(await releasing, undefined);
+  assert.equal(fs.readFileSync(path.join(h.f.root, "pyproject.toml"), "utf8"), h.original);
+  assert.equal(h.f.pythonStubPath, "python-custom-stubs");
+  assert.equal(h.managed.ownsSetting, false);
+  assert.equal(h.state.get(h.keys.stateKey), undefined);
+  assert.deepEqual(h.proofRecords(), records, "teardown cannot discard generations or staging reader provenance");
+  h.resume();
+  const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker);
+  await reopened.release();
+});
+
+for (const boundary of ["verify", "finish"]) test(`normal release recovers a settled partial rollback interrupted at ${boundary}`, async t => {
+  const h = await normalReleaseGeneration(t, true);
+  h.interrupt();
+  assert.match((await h.publishing).error.message, /interrupted pending Python rollback/);
+  const records = h.proofRecords();
+  let interrupted = false;
+  h.f.configFile.onRequest(action => {
+    if (action === boundary && !interrupted) { interrupted = true; throw new Error("interrupted normal release"); }
+  });
+  await assert.rejects(h.managed.release(), /interrupted normal release/);
+  assert.equal(interrupted, true);
+  const release = h.state.get(stateKey(h.f.root));
+  assert.equal(release.phase, "release");
+  assert.match(release.currentStubPath, /\/g-1-/);
+  assert.match(release.pythonStubPath.current, /\/g-2-/);
+  assert.equal(h.managed.ownsSetting, false);
+  const snapshot = h.state.snapshot();
+  const generation = path.join(h.managed.root, "generations", `g-3-${randomUUID()}`);
+  assert.equal(await h.managed.recordGeneration(generation, "a".repeat(64)), false);
+  assert.equal(await h.managed.forgetGeneration(generation, "a".repeat(64)), false);
+  assert.equal(await h.managed.selectGeneration(generation), false);
+  await assert.rejects(h.managed.recordStaging(generation, "b".repeat(64), `.graphql-desk-${randomUUID()}-marker-${randomUUID()}.tmp`), /not owned/);
+  assert.deepEqual(h.state.snapshot(), snapshot);
+  h.resume(); h.f.configFile.restart(); h.f.configFile.onRequest(() => {});
+  const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker);
+  assert.deepEqual(h.proofRecords(), records, "cold release recovery retains reader provenance");
+  await reopened.release();
+  assert.equal(h.f.pythonStubPath, "python-custom-stubs");
+  assert.equal(fs.readFileSync(path.join(h.f.root, "pyproject.toml"), "utf8"), h.original);
+});
+
+test("normal release revokes its generation capability and permits fresh acquisition", async t => {
+  const h = await normalReleaseGeneration(t);
+  const records = h.proofRecords();
+  await h.managed.release();
+  assert.equal(h.managed.ownsSetting, false);
+  assert.equal(h.state.get(h.keys.stateKey), undefined);
+  assert.deepEqual(h.proofRecords(), records);
+  const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker);
+  assert.equal(reopened.ownsSetting, true);
+  await reopened.release();
+});
+
+for (const boundary of ["python-choice", "hidden-python", "dirty-config", "dirty-settings", "native-file", "selection-record", "owner-record", "trust", "folder"]) {
+  test(`normal release preserves changed ${boundary} after its durable intent`, async t => {
+    const h = await normalReleaseGeneration(t);
+    const file = path.join(h.f.root, "pyproject.toml");
+    const original = fs.readFileSync(file);
+    const records = h.proofRecords();
+    let changed = false;
+    let replacement;
+    h.f.configFile.onRequest(async action => {
+      if (action !== "verify" || changed) return;
+      changed = true;
+      assert.equal(h.managed.ownsSetting, false, "the durable intent revokes the old capability before native cleanup");
+      if (boundary === "python-choice") await h.f.vscode.workspace.getConfiguration().update("analysis.stubPath", "later-user-stubs", 2);
+      if (boundary === "hidden-python") h.f.setGlobalPythonStubPath("hidden-user-stubs");
+      if (boundary.startsWith("dirty-")) h.f.vscode.workspace.textDocuments.push({ isDirty: true,
+        uri: h.f.vscode.Uri.file(boundary === "dirty-config" ? file : path.join(h.f.root, ".vscode", "settings.json")) });
+      if (boundary === "native-file") {
+        fs.renameSync(file, `${file}.preserved`);
+        fs.writeFileSync(file, original, { flag: "wx" });
+        replacement = fs.lstatSync(file, { bigint: true });
+      }
+      if (boundary === "selection-record") await h.state.update(h.keys.stateKey, { base: MANAGED_PATH, current: "later-user-stubs", currentPresent: true });
+      if (boundary === "owner-record") await h.state.update(stateKey(h.f.root), { ...h.state.get(stateKey(h.f.root)), phase: "unknown" });
+      if (boundary === "trust") h.f.vscode.workspace.isTrusted = false;
+      if (boundary === "folder") h.f.vscode.workspace.getWorkspaceFolder = () => undefined;
+    });
+    await assert.rejects(h.managed.release(), /changed|Dirty|dirty|Trusted|trusted|Config proof/i);
+    assert.equal(changed, true);
+    assert.deepEqual(fs.readFileSync(file), original, "foreign changes cannot authorize restoring the project config");
+    assert.notEqual(h.state.get(stateKey(h.f.root)), undefined, "failed cleanup retains its durable evidence");
+    assert.deepEqual(h.proofRecords(), records);
+    assert.equal(h.managed.ownsSetting, false);
+    if (replacement) assert.equal(fs.lstatSync(file, { bigint: true }).ino, replacement.ino);
+    if (boundary === "python-choice") assert.equal(h.f.pythonStubPath, "later-user-stubs");
+    if (boundary === "hidden-python") assert.equal(h.f.vscode.workspace.getConfiguration().inspect().globalValue, "hidden-user-stubs");
+    if (boundary === "selection-record") assert.equal(h.state.get(h.keys.stateKey).current, "later-user-stubs");
+    if (boundary === "owner-record") assert.equal(h.state.get(stateKey(h.f.root)).phase, "unknown");
+  });
+}
+
+test("normal release recovery preserves a foreign generic selection record", async t => {
+  const h = await normalReleaseGeneration(t);
+  h.f.configFile.onRequest(action => { if (action === "verify") throw new Error("interrupted normal release"); });
+  await assert.rejects(h.managed.release(), /interrupted normal release/);
+  h.f.configFile.restart(); h.f.configFile.onRequest(() => {});
+  const foreign = { base: MANAGED_PATH, current: "later-user-stubs", currentPresent: true };
+  await h.state.update(h.keys.stateKey, foreign);
+  const original = fs.readFileSync(path.join(h.f.root, "pyproject.toml"));
+  const owner = h.state.get(stateKey(h.f.root));
+  await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker), /generation ownership changed/);
+  assert.deepEqual(h.state.get(h.keys.stateKey), foreign);
+  assert.deepEqual(h.state.get(stateKey(h.f.root)), owner);
+  assert.deepEqual(fs.readFileSync(path.join(h.f.root, "pyproject.toml")), original);
+});
+
+test("normal release recovery cannot clear a later owner record during native verification", async t => {
+  const h = await normalReleaseGeneration(t);
+  h.f.configFile.onRequest(action => { if (action === "verify") throw new Error("interrupted normal release"); });
+  await assert.rejects(h.managed.release(), /interrupted normal release/);
+  h.f.configFile.restart();
+  const foreign = { ...h.state.get(stateKey(h.f.root)), phase: "unknown" };
+  let changed = false;
+  h.f.configFile.onRequest(async action => {
+    if (action === "verify" && !changed) { changed = true; await h.state.update(stateKey(h.f.root), foreign); }
+  });
+  await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker), /cleanup inputs changed/);
+  assert.equal(changed, true);
+  assert.deepEqual(h.state.get(stateKey(h.f.root)), foreign);
+  assert.notEqual(h.state.get(h.keys.stateKey), undefined);
+});

@@ -20,8 +20,11 @@ function serializeStateUpdate(workspaceState, key, update) {
   return pending;
 }
 
-function updateManagedState(workspaceState, key, value) {
-  return serializeStateUpdate(workspaceState, key, () => workspaceState?.update?.(key, value));
+function updateManagedState(workspaceState, key, value, check = () => true) {
+  return serializeStateUpdate(workspaceState, key, () => {
+    if (check() !== true) throw new Error("Managed state changed; preserved");
+    return workspaceState?.update?.(key, value);
+  });
 }
 
 function isManagedGeneration(workspace, setting, baseSetting = ".graphql-desk/typings") {

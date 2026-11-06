@@ -99,7 +99,25 @@ as soon as release intent is durable; retained generation and staging proof is
 not discarded. Fifteen focused recovery and safety cases passed independently;
 the combined configured editor suite passed **507 tests**, with zero failures,
 skips or cancellations. This does not relax active/setup/rotation checks or prove
-reader lifetime safety. Hosted acceptance of this final source remains required.
+reader lifetime safety. Hosted acceptance of those corrections remains required.
+
+At `75e08fa`, the next hosted run passed **27 jobs**; the TOML restart host and
+aggregate failed. After restart the config selected g-4 while its Python mirror
+selected g-5, and cleanup rejected the mismatch. There was no missing-file or
+watcher-crash evidence. Actual manager/generation replays reproduced a consistent
+defect: normal cleanup could save the old selection while rollback had already
+changed the config but was still updating Python. The precise hosted interleaving
+was not recorded and remains unproved.
+
+Normal cleanup now waits on the existing selection queue, journals the verified
+current config/Python pair, and revokes the old capability after release intent
+is durable. It clears only its matching generic selection record, checked inside
+the existing state-update queue. Cold cleanup also guards the owner/phase record
+through native verification and preserves generation/staging provenance instead
+of orphaning retained reader files. All **523 configured editor tests** passed,
+with zero failures/skips/cancellations; 16 new regressions passed independently.
+Fresh exact-head hosted checks remain required before merge. Stable default
+activation, cold stable selection and reader retirement remain separate gates.
 
 ## Requirement-to-example/evidence map
 

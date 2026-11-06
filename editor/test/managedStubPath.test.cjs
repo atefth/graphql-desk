@@ -71,6 +71,26 @@ async function ownGeneration(managed, verification) {
   assert.equal(await managed.recordGeneration(verification.directory, verification.manifestFingerprint), true);
 }
 
+test("a queued managed-state clear checks the record after earlier writes settle", async () => {
+  const values = new Map([["selection", "owned"]]);
+  let entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  const state = { get: key => values.get(key), async update(key, value) {
+    if (value === "foreign") { entered(); await held; }
+    values.set(key, value);
+  } };
+  const writing = updateManagedState(state, "selection", "foreign");
+  await started;
+  const clearing = updateManagedState(state, "selection", undefined, () => state.get("selection") === "owned");
+  const rejected = assert.rejects(clearing, /Managed state changed/);
+  release();
+  await Promise.all([writing, rejected]);
+  assert.equal(state.get("selection"), "foreign");
+  await assert.rejects(updateManagedState(state, "selection", undefined, () => { throw new Error("revoked teardown"); }), /revoked teardown/);
+  assert.equal(state.get("selection"), "foreign");
+});
+
 test("only a custom configuration adapter receives the final synchronous generation guard", async t => {
   const f = await fixture(t, undefined);
   const config = f.vscode.workspace.getConfiguration();

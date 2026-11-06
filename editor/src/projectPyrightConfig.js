@@ -1117,6 +1117,10 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   const genericOwner = workspaceState?.get?.(generationKeys.stateKey);
 
   if (saved?.version === 3 && saved.phase === "release") {
+    if (genericOwner !== undefined && (genericOwner?.base !== MANAGED_PATH ||
+        genericOwner.current !== saved.currentStubPath || genericOwner.pending === true)) {
+      throw new Error("Pyright generation ownership changed during cleanup; preserved");
+    }
     const pythonBefore = pythonSettings.snapshot();
     const pythonValue = pythonBefore.folderPresent ? pythonBefore.folderValue : pythonBefore.workspacePresent ? pythonBefore.workspaceValue : pythonBefore.globalPresent ? pythonBefore.globalValue : "";
     const prior = pythonOwner.snapshot;
@@ -1149,10 +1153,21 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       saved = next;
       expectedPythonSnapshot = pythonSnapshot;
     }
+    const releaseRecord = JSON.stringify(saved);
+    const releaseState = JSON.stringify(workspaceState?.get?.(key));
+    const cleanupCurrent = () => {
+      if (ownerCurrent() !== true || pythonSettings.dirty() || JSON.stringify(saved) !== releaseRecord ||
+          JSON.stringify(workspaceState?.get?.(key)) !== releaseState || !routeCurrent()) {
+        throw new Error("Pyright cleanup inputs changed; preserved");
+      }
+      return true;
+    };
+    cleanupCurrent();
     if (!restored) {
       const released = await updateProjectConfig(vscode, folder, "release_stub_path", worker, {
         ...restoreOwnership, expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath,
-      }, MANAGED_PATH, onOwnedWrite, configFile, () => configurationCurrent() && routeCurrent(), routingTarget);
+      }, MANAGED_PATH, onOwnedWrite, configFile, () => configurationCurrent() && cleanupCurrent(), routingTarget);
+      cleanupCurrent();
       if (released.hasStubPath !== saved.originalStubPathPresent ||
           saved.originalStubPathPresent && released.stubPath !== saved.originalStubPath ||
           saved.customStubPathAdded && customPathPresent(released) || customEnvironmentPathsRemain(released)) {
@@ -1170,15 +1185,15 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       }
     }
     await restorePythonStubPath();
-    if (!routeCurrent()) throw new Error("Pyright routing recovery changed; preserved");
+    cleanupCurrent();
+    if (JSON.stringify(pythonSettings.snapshot()) !== JSON.stringify(pythonOwner.snapshot)) throw new Error("Pyright cleanup inputs changed; preserved");
+    // Releasing a setting is not evidence that readers released its generation files.
+    await updateManagedState(workspaceState, generationKeys.stateKey, undefined, () => cleanupCurrent() &&
+      JSON.stringify(workspaceState?.get?.(generationKeys.stateKey)) === JSON.stringify(genericOwner));
+    if (workspaceState?.get?.(generationKeys.stateKey) !== undefined) throw new Error("Pyright generation ownership changed during cleanup; preserved");
+    cleanupCurrent();
     await clearOwner();
     if (!routeCurrent()) throw new Error("Pyright routing recovery changed; preserved");
-    await workspaceState?.update?.(generationKeys.stateKey, undefined);
-    if (!routeCurrent()) throw new Error("Pyright routing recovery changed; preserved");
-    if (!routingRelease) {
-      await updateManagedState(workspaceState, generationKeys.generationStateKey, undefined);
-      await updateManagedState(workspaceState, generationKeys.stagingStateKey, undefined);
-    }
     return createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite: originalOnOwnedWrite, onOwnership, configFile, ownerCurrent });
   }
 
@@ -1402,23 +1417,56 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     },
     async release() {
       if (!managed.ownsSetting) return;
-      await assertEffectiveOwner(false);
-      saved = { ...saved, phase: "release" };
-      await persistOwner(saved, () => managed.ownsSetting && saved?.phase === "release");
-      await managed.release();
-      const latest = await inspectLatest();
-      if (!latest.hasStubPath || latest.stubPath !== currentSetting) throw new Error("Pyright stubPath changed during GraphQL Desk cleanup; preserved");
-      const released = await updateProjectConfig(vscode, folder, "release_stub_path", worker, {
-        expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath, ...restoreOwnership,
-      }, MANAGED_PATH, onOwnedWrite, configFile, configurationCurrent);
-      if (released.hasStubPath !== originalStubPathPresent || originalStubPathPresent && released.stubPath !== originalStubPath ||
-          customStubPathAdded && released.extraPaths.includes(customStubPath) || customEnvironmentPathsRemain(released)) {
-        throw new Error("GraphQL Desk Pyright config cleanup could not be verified; preserved");
-      }
-      await restorePythonStubPath();
-      await clearOwner();
-      saved = undefined;
-      onOwnership(null, null);
+      const completed = await managed.checkSettingOwnership(async () => {
+        await assertEffectiveOwner(false);
+        configurationCurrent();
+        let selection = JSON.stringify(workspaceState?.get?.(generationKeys.stateKey));
+        const selected = workspaceState?.get?.(generationKeys.stateKey);
+        if (selected?.base !== MANAGED_PATH || selected.current !== currentSetting || selected.pending === true) {
+          throw new Error("Pyright generation ownership changed during cleanup; preserved");
+        }
+        // A completed native config write can precede its Python mirror and owner commit.
+        const releasing = { ...saved, phase: "release", currentStubPath: currentSetting, pythonStubPath: pythonOwner };
+        saved = releasing;
+        await persistOwner(releasing, () => managed.ownsSetting && saved === releasing &&
+          JSON.stringify(workspaceState?.get?.(generationKeys.stateKey)) === selection);
+        const record = JSON.stringify(releasing);
+        let pythonSnapshot = JSON.stringify(pythonSettings.snapshot());
+        const check = () => {
+          checkConfigWorkspace(vscode, folder, workspace, inspected.file);
+          if (saved !== releasing || JSON.stringify(saved) !== record ||
+              JSON.stringify(workspaceState?.get?.(key)) !== record ||
+              JSON.stringify(workspaceState?.get?.(generationKeys.stateKey)) !== selection ||
+              pythonSettings.dirty() || JSON.stringify(pythonSettings.snapshot()) !== pythonSnapshot) {
+            throw new Error("Pyright cleanup inputs changed; preserved");
+          }
+          return true;
+        };
+        await managed.revokeForRouting();
+        check();
+        const latest = await inspectLatest();
+        check();
+        if (!latest.hasStubPath || latest.stubPath !== currentSetting) throw new Error("Pyright stubPath changed during GraphQL Desk cleanup; preserved");
+        const released = await updateProjectConfig(vscode, folder, "release_stub_path", worker, {
+          expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath, ...restoreOwnership,
+        }, MANAGED_PATH, onOwnedWrite, configFile, () => configurationCurrent() && check());
+        check();
+        if (released.hasStubPath !== originalStubPathPresent || originalStubPathPresent && released.stubPath !== originalStubPath ||
+            customStubPathAdded && released.extraPaths.includes(customStubPath) || customEnvironmentPathsRemain(released)) {
+          throw new Error("GraphQL Desk Pyright config cleanup could not be verified; preserved");
+        }
+        await restorePythonStubPath();
+        pythonSnapshot = JSON.stringify(pythonOwner.snapshot);
+        check();
+        await updateManagedState(workspaceState, generationKeys.stateKey, undefined, check);
+        selection = undefined;
+        check();
+        await clearOwner();
+        saved = undefined;
+        onOwnership(null, null);
+        return true;
+      });
+      if (!completed) throw new Error("GraphQL Desk Pyright stubPath ownership changed; preserved");
     },
     async releaseForRouting(isCurrent = () => true) {
       if (!managed.ownsSetting) return;
