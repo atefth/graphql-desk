@@ -1,0 +1,11 @@
+type Query {
+  book(id: ID!): Book!
+  greeting: String!
+  warning: String
+}
+
+type Book {
+  id: ID!
+  title: String
+  tags: [String!]!
+}

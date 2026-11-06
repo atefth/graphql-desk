@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "graphql-desk-worked-example"
+version = "0.0.0"
+requires-python = ">=3.10"
+dependencies = ["graphql-desk", "graphql-core"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["build/graphql-desk/omitted/demo_generated"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"build/graphql-desk/omitted/graphql_desk-stubs" = "graphql_desk-stubs"
+"app.py" = "example_app.py"
+
+[tool.graphql-desk]
+schema = "schema.graphql"
+generated_package = "demo_generated"
+schema_output = "demo_generated/default.pyi"
+persisted_output = "persisted-manifest.json"
+include = ["authoring/operations.py", "app.py"]
+authoring_roots = ["authoring"]
