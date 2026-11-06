@@ -1,5 +1,6 @@
 """Source-free release projection ownership and wheel checks."""
 
+import ast
 import json
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 from graphql import build_schema
 
+from graphql_desk import __all__ as runtime_exports
 from graphql_desk.cli import main
 from graphql_desk.config import parse_project_config
 from graphql_desk.release_artifacts import (
@@ -56,6 +58,28 @@ class ReleaseArtifactTests(unittest.TestCase):
         self,
     ) -> None:
         files = self.files()
+        root_stub = files["graphql_desk-stubs/__init__.pyi"]
+        declarations = ast.parse(root_stub).body
+        exports = next(
+            node.value
+            for node in declarations
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "__all__"
+                for target in node.targets
+            )
+        )
+        self.assertEqual(set(ast.literal_eval(exports)), set(runtime_exports))
+        imported = {
+            alias.asname or alias.name
+            for node in declarations
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        }
+        defined = {
+            node.name for node in declarations if isinstance(node, ast.FunctionDef)
+        }
+        self.assertLessEqual(set(runtime_exports), imported | defined)
 
         self.assertIn(
             "def parse(source: str | _Source", files["graphql_desk-stubs/__init__.pyi"]

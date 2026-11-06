@@ -1,17 +1,22 @@
 """Real parser companion imports and checker inference without casts."""
 
+import ast
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from graphql import DocumentNode, GraphQLError, parse
 
+from graphql_desk import __all__ as runtime_exports
+from graphql_desk.editor_worker import EditorWorker
 from graphql_desk.literal_ast import render_document_ast_types
 from graphql_desk.parse_generation import (
     render_captured_parse_companion,
@@ -31,9 +36,24 @@ class ParseGenerationTests(unittest.TestCase):
     def test_normal_import_overlay_types_literals_and_preserves_fallbacks(self) -> None:
         source = (
             "from graphql import DocumentNode\n"
-            "from graphql_desk import TypedDocument, gql, parse\n"
-            "from typing import Literal\n"
+            "from graphql_desk import (TypedDocument, PersistedDocument, "
+            "gql, mask_fragments, parse, persisted_id)\n"
+            "from graphql_desk.runtime import "
+            "PersistedDocument as RuntimePersistedDocument\n"
+            "from graphql_desk.fragment_refs import FragmentRef\n"
+            "from graphql_desk_generated.default import graphql\n"
+            "from graphql_desk_generated._documents.default.d0 import "
+            "GraphqlDeskIdentity as FieldsIdentity\n"
+            "from typing import Any, Literal\n"
             "from typing_extensions import assert_type\n"
+            "fields = graphql('fragment Fields on Query { field }')\n"
+            "masked = mask_fragments((fields,), {'field': 'value'})\n"
+            "assert_type(masked, FragmentRef[FieldsIdentity])\n"
+            "assert_type(persisted_id('public-id'), PersistedDocument[Any, Any])\n"
+            "saved: PersistedDocument[str, int] = PersistedDocument('public-id')\n"
+            "same: RuntimePersistedDocument[str, int] = saved\n"
+            "assert_type(same, PersistedDocument[str, int])\n"
+            "saved = same\n"
             "doc = parse('query Q { field }')\n"
             "assert_type(doc.definitions[0].name.value, Literal['Q'])\n"
             "assert_type(\n"
@@ -49,25 +69,74 @@ class ParseGenerationTests(unittest.TestCase):
             "sdl = parse('type SDL { field: String }')\n"
             "assert_type(sdl, DocumentNode)\n"
             "wrong: Literal['Wrong'] = doc.definitions[0].name.value\n"
+            "persisted_id(123)\n"
+            "wrong_saved: PersistedDocument[bytes, str] = saved\n"
         )
-        modules = (ModuleSnapshot("p", "main", "file:///main.py", 1, source),)
-        overlay = render_captured_parse_overlay(modules)
-        self.assertIn("from .runtime import gql, graphql, init_graphql", overlay.stub)
-        self.assertIn("from .typed_document import TypedDocument", overlay.stub)
-
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source_path = root / "main.py"
             source_path.write_text(source, encoding="utf8")
+            (root / "schema.graphql").write_text(
+                "type Query { field: String }", encoding="utf8"
+            )
+            (root / "pyproject.toml").write_text(
+                '[tool.graphql-desk]\nschema="schema.graphql"\n'
+                'schema_output="graphql_desk_generated/default.pyi"\n',
+                encoding="utf8",
+            )
+            capture = {
+                "workspace": str(root),
+                "candidates": [str(source_path)],
+                "buffers": [],
+                "documents": [],
+                "editor_fallback": None,
+            }
+            worker = EditorWorker()
+            prepared = worker.handle({"op": "prepare", **capture})
+            self.assertTrue(prepared["ok"], prepared)
+            request = {**capture, "id": prepared["id"], "schema_buffers": []}
+            analyzed = worker.handle({"op": "analyze", **request})
+            self.assertTrue(analyzed["ok"], analyzed)
+            artifacts = worker.handle({"op": "artifacts", **request})
+            self.assertTrue(artifacts["ok"], artifacts)
+            projects = cast(list[dict[str, object]], artifacts["projects"])
+            for project in projects:
+                self.assertEqual(
+                    [
+                        item["code"]
+                        for item in cast(
+                            list[dict[str, object]], project["diagnostics"]
+                        )
+                    ],
+                    ["parse-fallback", "parse-fallback"],
+                )
+                for file in cast(list[dict[str, str]], project["files"]):
+                    path = root / file["relative_path"]
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(file["text"], encoding="utf8")
+            overlay = cast(list[dict[str, str]], artifacts["parser_overlay"])
             for base in (root / "typings", root / "site-packages"):
-                package = base / "graphql_desk-stubs"
-                package.mkdir(parents=True)
-                (package / "__init__.pyi").write_text(overlay.stub, encoding="utf8")
-                (package / "py.typed").write_text("partial\n", encoding="utf8")
+                for file in overlay:
+                    path = base / file["relative_path"]
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(file["text"], encoding="utf8")
+            root_stub = (root / "typings/graphql_desk-stubs/__init__.pyi").read_text(
+                encoding="utf8"
+            )
+            exports = next(
+                node.value
+                for node in ast.parse(root_stub).body
+                if isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == "__all__"
+                    for target in node.targets
+                )
+            )
+            self.assertEqual(set(ast.literal_eval(exports)), set(runtime_exports))
             (root / "pyrightconfig.json").write_text(
                 json.dumps(
                     {
-                        "include": ["."],
+                        "include": ["main.py"],
                         "typeCheckingMode": "strict",
                         "pythonVersion": "3.10",
                         "stubPath": "typings",
@@ -97,13 +166,20 @@ class ParseGenerationTests(unittest.TestCase):
                 encoding="utf8",
             )
             self.assertEqual(mypy.returncode, 1, mypy.stdout + mypy.stderr)
-            wrong_line = (
-                source.splitlines().index(
-                    "wrong: Literal['Wrong'] = doc.definitions[0].name.value"
-                )
-                + 1
+            errors = {
+                number
+                for number, line in enumerate(source.splitlines(), 1)
+                if line.startswith(("wrong:", "persisted_id(123)", "wrong_saved:"))
+            }
+            self.assertEqual(mypy.stdout.count(": error:"), len(errors), mypy.stdout)
+            self.assertEqual(
+                {
+                    int(line)
+                    for line in re.findall(r"main\.py:(\d+): error:", mypy.stdout)
+                },
+                errors,
+                mypy.stdout + mypy.stderr,
             )
-            self.assertRegex(mypy.stdout, rf"main\.py:{wrong_line}: error:")
             pyright = subprocess.run(
                 [
                     sys.executable,
@@ -123,10 +199,15 @@ class ParseGenerationTests(unittest.TestCase):
             )
             report = json.loads(pyright.stdout)
             self.assertEqual(pyright.returncode, 1, pyright.stdout + pyright.stderr)
-            self.assertEqual(report["summary"]["errorCount"], 1, pyright.stdout)
             self.assertEqual(
-                report["generalDiagnostics"][0]["range"]["start"]["line"],
-                wrong_line - 1,
+                report["summary"]["errorCount"], len(errors), pyright.stdout
+            )
+            self.assertEqual(
+                {
+                    item["range"]["start"]["line"] + 1
+                    for item in report["generalDiagnostics"]
+                },
+                errors,
             )
 
     def test_workspace_parser_overlay_aggregates_normal_imports(self) -> None:

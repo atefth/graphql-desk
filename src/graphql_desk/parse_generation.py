@@ -71,12 +71,14 @@ def render_captured_parse_overlay(
                 "",
                 "from .fragment_helpers import read_fragment, "
                 "read_fragment_passthrough",
-                "from .runtime import gql, graphql, init_graphql",
+                "from .runtime import PersistedDocument, gql, graphql, "
+                "init_graphql, persisted_id",
                 "from .testing import unsafe_read_result",
                 "",
                 "__all__ = [",
                 "    'TypedDocument', 'gql', 'graphql', 'init_graphql', 'parse',",
                 "    'read_fragment', 'read_fragment_passthrough',",
+                "    'PersistedDocument', 'persisted_id', 'mask_fragments',",
                 "    'unsafe_read_result',",
                 "]",
             )
