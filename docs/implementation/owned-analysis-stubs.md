@@ -233,7 +233,7 @@ and platform verification is tracked by #356. This does not resolve reader-safe
 generation retirement under #355 or pass broad TYPE-01 acceptance.
 
 Local verification for this change passed 106 backend tests (four existing POSIX
-cases skipped on Windows), 365 editor tests, Ruff, mypy and Pyright. Installed
+cases skipped on Windows), 366 editor tests, Ruff, mypy and Pyright. Installed
 VS Code 1.141.0 exercised the TOML lifecycle and 1.142.0 the JSONC lifecycle,
 both with Python extension 2026.10.0 and Pylance 2026.4.1. The fixtures verify
 setup, nullable schema refresh, restart recovery and restoration of custom

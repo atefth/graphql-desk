@@ -2,6 +2,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
+const { realpathSync } = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { createHash } = require("node:crypto");
@@ -24,6 +25,20 @@ async function eventually(accept) {
   }
   assert.fail("Polling did not settle");
 }
+
+async function configRequestStarted(started, request) {
+  await Promise.race([started, request.then(result => {
+    if (result.error) throw result.error;
+    assert.fail("Config request completed before worker dispatch");
+  })]);
+}
+
+test("config dispatch waits report request errors instead of waiting for an impossible start", async () => {
+  const pending = new Promise(() => {});
+  const failure = new Error("request failed before dispatch");
+  await assert.rejects(configRequestStarted(pending, Promise.resolve({ error: failure })), error => error === failure);
+  await assert.rejects(configRequestStarted(pending, Promise.reject(failure)), error => error === failure);
+});
 
 function uri(value) {
   const parsed = new URL(value);
@@ -145,7 +160,8 @@ for (const revokeTrust of [false, true]) {
         busy = true;
         try {
           assert.equal(request.op, "config_file");
-          assert.equal(request.workspace.toLowerCase(), fixture.root.toLowerCase());
+          const expectedRoot = realpathSync.native(fixture.root);
+          assert.equal(request.workspace, process.platform === "win32" ? expectedRoot.toLowerCase() : expectedRoot);
           requests.push(request);
           if (requests.length === 1) { started(); await held; }
           return { ok: true, token: request.token };
@@ -156,7 +172,7 @@ for (const revokeTrust of [false, true]) {
     const folder = fixture.vscode.workspace.workspaceFolders[0];
     const first = controller.configFile(folder, "verify", { token: "a".repeat(32) })
       .then(value => ({ value }), error => ({ error }));
-    await firstStarted;
+    await configRequestStarted(firstStarted, first);
     const second = controller.configFile(folder, "verify", { token: "b".repeat(32) })
       .then(value => ({ value }), error => ({ error }));
     await new Promise(resolve => setImmediate(resolve));
@@ -242,7 +258,7 @@ for (const scenario of ["success", "failure", "unreadable"]) {
     const stage = controller.configFile(fixture.vscode.workspace.workspaceFolders[0], "stage",
       { file: "pyproject.toml", temporary, expected_hash: previousHash, text })
       .then(value => ({ value }), error => ({ error }));
-    await firstStarted;
+    await configRequestStarted(firstStarted, stage);
     watcher.fire(Uri.file(temporary));
     assert.equal(invalidations, 0, "secured empty stage is not a source change");
     t.mock.timers.tick(6000);
@@ -294,8 +310,9 @@ test("a queued config stage cannot exempt a temporary path before worker dispatc
     } }) });
   t.after(() => { release(); controller.dispose(); });
   const folder = fixture.vscode.workspace.workspaceFolders[0];
-  const first = controller.configFile(folder, "verify", { token: "a".repeat(32) }).catch(() => null);
-  await firstStarted;
+  const first = controller.configFile(folder, "verify", { token: "a".repeat(32) })
+    .then(value => ({ value }), error => ({ error }));
+  await configRequestStarted(firstStarted, first);
   assert.equal(controller.trackOwnedProjectConfigWrite(file, hash("next"), { phase: "begin", previousHash, temporaryPath: temporary }), true);
   const queued = controller.configFile(folder, "stage", { file: "pyproject.toml", temporary, expected_hash: previousHash, text: "next" }).catch(() => null);
   await new Promise(resolve => setImmediate(resolve));
