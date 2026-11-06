@@ -1,0 +1,37 @@
+from datetime import datetime
+from enum import Enum
+from pydantic import BaseModel, Field
+from typing import Literal
+
+class Status(str, Enum):
+    """No documentation"""
+    ACTIVE = 'ACTIVE'
+    PAUSED = 'PAUSED'
+    __str__ = str.__str__
+
+class UserFilter(BaseModel):
+    """No documentation"""
+    note: str | None = None
+    limit: int | None = None
+
+class GetUserViewer(BaseModel):
+    """No documentation"""
+    typename: Literal['User'] = Field(alias='__typename', default='User')
+    id: str
+    display_name: str = Field(alias='displayName')
+    status: Status
+    created_at: datetime = Field(alias='createdAt')
+    note: str | None = Field(default=None)
+
+class GetUser(BaseModel):
+    """No documentation found for this operation."""
+    viewer: GetUserViewer
+
+    class Arguments(BaseModel):
+        """Arguments for GetUser """
+        id: str
+        filter: UserFilter | None = Field(default=None)
+
+    class Meta:
+        """Meta class for GetUser """
+        document = 'query GetUser($id: ID!, $filter: UserFilter) {\n  viewer: user(id: $id, filter: $filter) {\n    __typename\n    id\n    displayName: fullName\n    status\n    createdAt\n    note\n  }\n}'
