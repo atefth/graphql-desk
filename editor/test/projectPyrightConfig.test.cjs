@@ -1473,6 +1473,7 @@ test("a generation becoming stale during native verification cannot change proje
   assert.equal(f.pythonStubPath, MANAGED_PATH);
   assert.equal(state.get(`${stateKey(f.root)}:pending-config-write`), undefined);
   assert.equal(state.get(keys.stateKey).current, MANAGED_PATH);
+  assert.equal(state.get(stateKey(f.root)).phase, "active", "an unselected stale intent cannot strand cold rotation recovery");
   f.configFile.onRequest(() => {});
   await managed.release();
   managed.cleanup();
@@ -2668,3 +2669,149 @@ test("normal release recovery cannot clear a later owner record during native ve
   assert.deepEqual(h.state.get(stateKey(h.f.root)), foreign);
   assert.notEqual(h.state.get(h.keys.stateKey), undefined);
 });
+
+async function supersedeOwnerWrite(t, boundary, mutate = () => {}) {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs","extraPaths":["vendor"]}',
+    pythonStubPath: "python-custom-stubs", standaloneAliases: true });
+  const state = stateStore();
+  let lease = true;
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker, { ownerCurrent: () => lease });
+  const publisher = createAnalysisGenerations(f.vscode, f.root, managed.root);
+  const groups = type => new Map([["example_generated", [
+    { relative_path: "example_generated/default.pyi", text: `value: ${type}\n` },
+  ]]]);
+  await publisher.publish(groups("str"), "before-owner-cancellation", () => true, managed, "a".repeat(64), "b".repeat(64), []);
+  const selected = managed.selectedSetting;
+  const prior = structuredClone(state.get(stateKey(f.root)));
+  const config = fs.readFileSync(path.join(f.root, "pyrightconfig.json"));
+  const python = structuredClone(f.vscode.workspace.getConfiguration().inspect());
+  const generation = publisher.current(managed)[0];
+  const protectedFiles = [...generation.files.keys(), "complete.json"].map(name => [path.join(generation.directory, name),
+    fs.readFileSync(path.join(generation.directory, name))]);
+  let current = true, armed = true, entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const update = state.update;
+  state.update = async (key, value) => {
+    const hold = armed && boundary.includes("memento") && key === stateKey(f.root) && value?.phase === "rotate";
+    if (hold) armed = false;
+    if (hold && boundary !== "post-memento") { entered(); await gate; }
+    await update(key, value);
+    if (hold && boundary === "post-memento") { entered(); await gate; }
+  };
+  t.after(release);
+  const rename = fs.renameSync;
+  t.mock.method(fs, "renameSync", (source, target, ...args) => {
+    if (armed && ["before-retry", "after-rename"].includes(boundary) && path.basename(target) === "project-config-owner.json" &&
+        JSON.parse(fs.readFileSync(source)).phase === "rotate") {
+      armed = false;
+      if (boundary === "before-retry") { current = false; throw Object.assign(new Error("owner rename temporarily locked"), { code: "EBUSY" }); }
+      const result = rename(source, target, ...args);
+      queueMicrotask(() => { current = false; });
+      return result;
+    }
+    return rename(source, target, ...args);
+  });
+  const publishing = publisher.publish(groups("str | None"), "superseded-owner-write", () => current, managed,
+    "c".repeat(64), "d".repeat(64), []).then(value => ({ value }), error => ({ error }));
+  if (boundary.includes("memento")) {
+    await Promise.race([started, publishing.then(() => assert.fail("the actual owner write must reach its held Memento update"))]);
+    try {
+      await mutate({ f, state, managed, revoke() { lease = false; } });
+      if (boundary === "pre-memento-transient") {
+        const configuration = f.vscode.workspace.getConfiguration();
+        await configuration.update("analysis.stubPath", "custom_stubs", 2);
+        await configuration.update("analysis.stubPath", selected, 2);
+      }
+      current = false;
+    } finally { release(); }
+  }
+  const result = await publishing;
+  state.update = update;
+  return { f, state, managed, publisher, groups, selected, prior, config, python, generation, protectedFiles, result };
+}
+
+for (const boundary of ["before-retry", "after-rename", "pre-memento", "post-memento", "pre-memento-transient"]) {
+  test(`superseded owner write at ${boundary} permits the next valid edit and cold acquisition`, async t => {
+    const h = await supersedeOwnerWrite(t, boundary);
+    assert.match(h.result.error?.message ?? "", /Superseded analysis|phase or Python settings changed/);
+    assert.equal(h.managed.selectedSetting, h.selected, "stale metadata cannot select a type generation");
+    assert.deepEqual(fs.readFileSync(path.join(h.f.root, "pyrightconfig.json")), h.config);
+    assert.deepEqual(h.f.vscode.workspace.getConfiguration().inspect(), h.python);
+    assert.deepEqual(h.state.get(stateKey(h.f.root)), h.prior, "unselected intent is reconciled to the known active owner");
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(h.managed.root, "project-config-owner.json"))), JSON.parse(JSON.stringify(h.prior)));
+    assert.equal(fs.readdirSync(h.managed.root).some(name => name.startsWith(".graphql-desk-owner-") && name.endsWith(".tmp")), false);
+    assert.equal(h.managed.ownsGeneration(h.generation.directory, h.generation.manifestFingerprint), true);
+    for (const [file, bytes] of h.protectedFiles) assert.deepEqual(fs.readFileSync(file), bytes);
+    const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker);
+    assert.equal(reopened.selectedSetting, h.selected, "cold acquisition cannot inherit an incomplete stale rotation");
+    assert.equal(await h.publisher.publish(h.groups("int"), "current-edit", () => true, h.managed,
+      "e".repeat(64), "f".repeat(64), []), true);
+    assert.equal(h.managed.stillOwnsSetting(), true, "the original instance remains usable after cancellation");
+    const latest = await createManagedProjectConfig(h.f.vscode, h.f.folder, h.state, h.f.worker);
+    assert.equal(latest.selectedSetting, h.managed.selectedSetting);
+    await latest.release();
+  });
+}
+
+for (const boundary of ["owner-native", "owner-dirty", "config-dirty", "python-choice", "hidden-python", "owner-state", "phase-object", "lease", "trust", "folder", "target-proof", "handoff-native", "handoff-state"]) {
+  test(`superseded owner completion preserves changed ${boundary}`, async t => {
+    let preservedOwner, preservedPython, preservedConfig, replacement, targetFile, targetBytes;
+    const h = await supersedeOwnerWrite(t, "post-memento", async ({ f, state, managed, revoke }) => {
+      const file = path.join(managed.root, "project-config-owner.json");
+      if (boundary === "owner-native") {
+        fs.renameSync(file, `${file}.preserved`);
+        fs.copyFileSync(`${file}.preserved`, file);
+        replacement = fs.lstatSync(file, { bigint: true });
+      }
+      if (boundary.endsWith("-dirty")) f.vscode.workspace.textDocuments.push({ isDirty: true, uri: f.vscode.Uri.file(
+        boundary === "owner-dirty" ? file : path.join(f.root, "pyrightconfig.json")) });
+      if (boundary === "python-choice") await f.vscode.workspace.getConfiguration().update("analysis.stubPath", "later-user-stubs", 2);
+      if (boundary === "hidden-python") f.setGlobalPythonStubPath("hidden-user-stubs");
+      if (boundary === "owner-state") await state.update(stateKey(f.root), { ...state.get(stateKey(f.root)), phase: "unknown" });
+      if (boundary === "phase-object") state.get(stateKey(f.root)).phase = "unknown";
+      if (boundary === "lease") revoke();
+      if (boundary === "trust") f.vscode.workspace.isTrusted = false;
+      if (boundary === "folder") f.vscode.workspace.getWorkspaceFolder = () => undefined;
+      if (boundary === "target-proof") {
+        const target = fs.readdirSync(path.join(managed.root, "generations")).find(name => name.startsWith("g-2-") && !name.endsWith(".json"));
+        targetFile = path.join(managed.root, "generations", target, "example_generated", "default.pyi");
+        fs.appendFileSync(targetFile, "# foreign artifact\n");
+        targetBytes = fs.readFileSync(targetFile);
+      }
+      preservedOwner = fs.readFileSync(file);
+      preservedConfig = fs.readFileSync(path.join(f.root, "pyrightconfig.json"));
+      preservedPython = structuredClone(f.vscode.workspace.getConfiguration().inspect());
+      if (boundary.startsWith("handoff-")) {
+        const read = fs.readFileSync;
+        let armed = true;
+        t.mock.method(fs, "readFileSync", (target, ...args) => {
+          const result = read(target, ...args);
+          if (armed && target === file) {
+            armed = false;
+            queueMicrotask(() => {
+              if (boundary === "handoff-native") {
+                fs.renameSync(file, `${file}.preserved-handoff`);
+                fs.copyFileSync(`${file}.preserved-handoff`, file);
+                replacement = fs.lstatSync(file, { bigint: true });
+              } else void state.update(stateKey(f.root), { ...state.get(stateKey(f.root)), phase: "unknown" });
+            });
+          }
+          return result;
+        });
+      }
+    });
+    assert.ok(h.result.error, "a semantic cancellation cannot finish through a foreign ownership change");
+    assert.notEqual(h.result.error.message, "Superseded analysis", "ownership failures are not classified as harmless semantic cancellation");
+    const later = await h.publisher.publish(h.groups("int"), "later-current", () => true, h.managed,
+      "e".repeat(64), "f".repeat(64), []).then(value => ({ value }), error => ({ error }));
+    assert.notEqual(later.value, true);
+    const owner = path.join(h.managed.root, "project-config-owner.json");
+    assert.deepEqual(fs.readFileSync(owner), preservedOwner);
+    assert.deepEqual(fs.readFileSync(path.join(h.f.root, "pyrightconfig.json")), preservedConfig);
+    assert.deepEqual(h.f.vscode.workspace.getConfiguration().inspect(), preservedPython);
+    if (replacement) assert.equal(fs.lstatSync(owner, { bigint: true }).ino, replacement.ino);
+    if (targetFile) assert.deepEqual(fs.readFileSync(targetFile), targetBytes);
+    if (["owner-state", "phase-object", "handoff-state"].includes(boundary)) assert.equal(h.state.get(stateKey(h.f.root)).phase, "unknown");
+  });
+}

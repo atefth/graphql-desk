@@ -313,10 +313,11 @@ function discardOwnerStage(state, stage, guards) {
 }
 
 async function writePersistentOwner(workspace, value, expectedHash, createdDirectories, state, guards) {
-  if (typeof guards?.check !== "function" || typeof guards.cleanup !== "function") {
+  if (typeof guards?.check !== "function" || typeof guards.complete !== "function" || typeof guards.cleanup !== "function") {
     throw new Error("GraphQL Desk owner phase guards required");
   }
   guards.check();
+  if (guards.originalStage) verifyOwnerStage(guards.originalStage);
   if (state.pending) {
     if (state.pending.active || state.pending.published) throw new Error("Pending GraphQL Desk owner write needs recovery; preserved");
     discardOwnerStage(state, state.pending, guards);
@@ -351,6 +352,7 @@ async function writePersistentOwner(workspace, value, expectedHash, createdDirec
   if ((original?.hash ?? null) !== expectedHash) throw new Error("GraphQL Desk Pyright ownership record changed concurrently; preserved");
   const checkOriginal = () => {
     guards.check();
+    if (guards.originalStage) verifyOwnerStage(guards.originalStage);
     guards.cleanup(file, original?.identity);
     if (ancestors.some(([directory, identity]) => !sameDirectory(identity, safeIdentity(directory, true, true)))) {
       throw new Error("GraphQL Desk owner directory changed; preserved");
@@ -389,7 +391,7 @@ async function writePersistentOwner(workspace, value, expectedHash, createdDirec
         await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
       }
     }
-    guards.check();
+    guards.complete();
     const identity = verifyOwnerStage(stage, true);
     stage.identity = identity;
     return { hash: createHash("sha256").update(bytes).digest("hex"),
@@ -955,7 +957,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   if (saved?.version === 3 && !validProjectOwner(saved)) throw new Error("GraphQL Desk Pyright config ownership changed; preserved");
   if (saved && ![2, 3].includes(saved.version)) throw new Error("GraphQL Desk Pyright config ownership changed; preserved");
   const ownerWriteState = { pending: null };
-  const persistOwner = async (value, phaseCurrent) => {
+  const persistOwner = async (value, phaseCurrent, admissionCurrent = () => true, originalStage) => {
     if (typeof phaseCurrent !== "function") throw new Error("Owner-record phase guard required");
     const lock = normalized(workspace);
     if (activeConfigWrites.has(lock)) throw new Error("Another Pyright config or owner write is pending; preserved");
@@ -969,20 +971,26 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     };
     const inputs = [inspected.file, ...(inspected.format === "toml" ? [path.join(workspace, "pyrightconfig.json")] : [])]
       .map(filename => [filename, capture(filename)]);
+    const complete = () => {
+      checkConfigWorkspace(vscode, folder, workspace, inspected.file);
+      if (JSON.stringify(workspaceState?.get?.(key)) !== stateSnapshot) throw new Error("GraphQL Desk owner state changed; preserved");
+      if (phaseCurrent() !== true || saved !== beforeSaved || JSON.stringify(saved) !== savedSnapshot ||
+          pythonSettings.dirty() || JSON.stringify(pythonSettings.snapshot()) !== pythonSnapshot) {
+        throw new Error("GraphQL Desk owner phase or Python settings changed; preserved");
+      }
+      for (const [filename, original] of inputs) {
+        const current = capture(filename);
+        if (original ? !current || !sameConfigIdentity(original.identity, current.identity) || original.hash !== current.hash : current !== null) {
+          throw new Error("GraphQL Desk owner config inputs changed; preserved");
+        }
+      }
+    };
     const guards = {
+      originalStage,
+      complete,
       check() {
-        checkConfigWorkspace(vscode, folder, workspace, inspected.file);
-        if (JSON.stringify(workspaceState?.get?.(key)) !== stateSnapshot) throw new Error("GraphQL Desk owner state changed; preserved");
-        if (phaseCurrent() !== true || saved !== beforeSaved || JSON.stringify(saved) !== savedSnapshot ||
-            pythonSettings.dirty() || JSON.stringify(pythonSettings.snapshot()) !== pythonSnapshot) {
-          throw new Error("GraphQL Desk owner phase or Python settings changed; preserved");
-        }
-        for (const [filename, original] of inputs) {
-          const current = capture(filename);
-          if (original ? !current || !sameConfigIdentity(original.identity, current.identity) || original.hash !== current.hash : current !== null) {
-            throw new Error("GraphQL Desk owner config inputs changed; preserved");
-          }
-        }
+        complete();
+        if (admissionCurrent() !== true) throw new Error("GraphQL Desk owner phase or Python settings changed; preserved");
       },
       cleanup(filename, identity) {
         checkConfigWorkspace(vscode, folder, workspace, filename);
@@ -997,15 +1005,19 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     try {
       const written = await writePersistentOwner(workspace, value, ownerHash, ownerCreatedDirectories, ownerWriteState, guards);
       const stage = ownerWriteState.pending;
-      guards.check();
+      guards.complete();
+      guards.cleanup(stage.file, stage.identity);
       verifyOwnerStage(stage);
       ownerHash = written.hash;
       stateSnapshot = JSON.stringify(value);
       await workspaceState?.update?.(key, value);
-      guards.check();
+      const admitted = admissionCurrent() === true;
+      guards.complete();
+      guards.cleanup(stage.file, stage.identity);
       verifyOwnerStage(stage);
       if (JSON.stringify(workspaceState?.get?.(key)) !== JSON.stringify(value)) throw new Error("GraphQL Desk owner state changed; preserved");
       ownerWriteState.pending = null;
+      return { admitted, stage };
     } finally {
       if (ownerWriteState.pending) ownerWriteState.pending.active = false;
       activeConfigWrites.delete(lock);
@@ -1323,12 +1335,61 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       if (restoring) throw new Error("Project Pyright stubPath restoration is handled by GraphQL Desk cleanup; preserved");
       if (pythonSettings.dirty()) throw new Error("Dirty workspace settings; preserved");
       validatePythonStubPath(pythonSettings, pythonOwner.current || "");
+      const previousOwner = saved;
+      const previousOwnerSnapshot = JSON.stringify(saved);
+      const previousPython = pythonOwner;
+      const pythonSnapshot = JSON.stringify(pythonSettings.snapshot());
+      const selectionSnapshot = JSON.stringify(workspaceState?.get?.(generationKeys.stateKey));
       saved = { ...saved, phase: "rotate", pythonStubPath: { ...pythonOwner, pending: target } };
-      await persistOwner(saved, () => ownerCurrent() === true && generationCurrent() === true);
+      const intent = saved;
+      const intentSnapshot = JSON.stringify(intent);
+      let publication;
+      try {
+        publication = await persistOwner(intent, () => {
+          // Proof exceptions remain fatal; the boolean controls semantic admission.
+          generationCurrent();
+          return ownerCurrent() === true && saved === intent;
+        }, generationCurrent);
+      } catch (error) {
+        if (!ownerWriteState.pending) saved = previousOwner;
+        throw error;
+      }
       const previousSetting = currentSetting;
-      const updated = await updateProjectConfig(vscode, folder, restoringManagedBase ? "restore_stub_path" : "set_stub_path",
-        worker, ownership, target, onOwnedWrite, configFile,
-        () => configurationCurrent() && generationCurrent() === true);
+      let updated;
+      try {
+        if (!publication.admitted) throw new Error("Superseded analysis");
+        updated = await updateProjectConfig(vscode, folder, restoringManagedBase ? "restore_stub_path" : "set_stub_path",
+          worker, ownership, target, onOwnedWrite, configFile,
+          () => configurationCurrent() && generationCurrent() === true);
+      } catch (error) {
+        if (generationCurrent() === true) throw error;
+        try {
+          if (saved !== intent || JSON.stringify(saved) !== intentSnapshot ||
+              JSON.stringify(workspaceState?.get?.(key)) !== intentSnapshot) {
+            throw new Error("Unselected GraphQL Desk rotation changed; preserved");
+          }
+          const unchanged = () => {
+            generationCurrent();
+            const current = readFileSafe(vscode, workspace, inspected.file);
+            if (ownerCurrent() !== true || previousOwner.phase !== "active" || currentSetting !== previousSetting ||
+                pythonOwner !== previousPython || JSON.stringify(pythonSettings.snapshot()) !== pythonSnapshot ||
+                JSON.stringify(workspaceState?.get?.(generationKeys.stateKey)) !== selectionSnapshot ||
+                !sameConfigIdentity(latest.identity, current.identity) || latest.hash !== current.hash ||
+                !sameDirectory(latest.snapshot.workspaceIdentity, current.workspaceIdentity)) {
+              throw new Error("Unselected GraphQL Desk rotation changed; preserved");
+            }
+            return true;
+          };
+          unchanged();
+          saved = previousOwner;
+          await persistOwner(previousOwner, () => unchanged() && saved === previousOwner && JSON.stringify(saved) === previousOwnerSnapshot,
+            undefined, publication.stage);
+        } catch (recoveryError) {
+          await managed.revokeForRouting();
+          throw recoveryError;
+        }
+        throw error;
+      }
       currentSetting = updated.hasStubPath ? updated.stubPath : "";
       currentPresent = updated.hasStubPath;
       activeConfigHash = updated.hash;

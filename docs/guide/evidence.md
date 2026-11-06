@@ -119,6 +119,35 @@ with zero failures/skips/cancellations; 16 new regressions passed independently.
 Fresh exact-head hosted checks remain required before merge. Stable default
 activation, cold stable selection and reader retirement remain separate gates.
 
+At `eb9da9f`, hosted checks again passed **27 jobs**; the VS Code 1.142 factory
+host and aggregate failed. Its trace reported an owner-phase/Python-settings guard rejection followed by
+a pending owner-write block. Real manager replays reproduced source freshness
+expiring after an owned record was renamed or while its Memento write awaited.
+That stranded the published record and prevented later edits or cold acquisition.
+This is a demonstrated defect consistent with the trace, not proof of the exact
+hosted interleaving.
+
+Semantic freshness still gates initial intent admission and the existing guarded
+selector path; journal completion alone authorizes no config, Python or type
+selection. Once the exact owned rename has committed, only that record's Native and
+Memento pairing may complete under unchanged phase, lifecycle, config, Python,
+trust, dirty-buffer and Native proofs. Target proof exceptions remain fatal.
+A proven unselected stale intent is restored to its known prior active owner;
+the exact paired Memento and descriptor-derived owner identity protect that
+handoff and every replacement retry. Failed reconciliation revokes management
+and preserves uncertain records. This reuses the existing writer and selection queue, with no new
+journal, prefix-based adoption or general compare-and-swap claim.
+
+All **541 configured editor tests** passed, with zero failures/skips/cancellations.
+The 18 new regressions cover five cancellation boundaries and thirteen foreign,
+dirty, lifecycle, Native and state changes. Four published-stage cases and two
+handoff negatives failed before their corrections. Original-instance recovery,
+immediate cold acquisition, a later valid edit and subsequent cold acquisition
+are checked together, preserving prior reader records and rejecting stale
+config/Python/type selection. Root independently passed all 18 new cases; the
+peer passed those plus the existing Native-verification case. Exact-head hosted
+acceptance remains required; no timeout or assertion is waived.
+
 ## Requirement-to-example/evidence map
 
 | #81 area | Documentation and runnable evidence | Boundary |
