@@ -460,7 +460,26 @@ async function runHost(version, suite, factorySuite, temporary, osTemp, cachePat
   let precisionRemovedWorkspace;
   if (suite === "factoryPrecision") {
     precisionRemovedWorkspace = path.join(temporary, "factory-precision-removed");
-    await fs.mkdir(precisionRemovedWorkspace);
+    await fs.mkdir(path.join(precisionRemovedWorkspace, ".vscode"), { recursive: true });
+    await fs.mkdir(path.join(precisionRemovedWorkspace, ".graphql-desk"));
+    // Copy the pristine fixture before activation can rotate its project config.
+    for (const name of ["pyproject.toml", "pyrightconfig.json", "schema.graphql", "consumer.py", "fragments.py"]) {
+      await fs.copyFile(path.join(workspace, name), path.join(precisionRemovedWorkspace, name));
+    }
+    await fs.copyFile(path.join(workspace, ".graphql-desk", "keep.txt"), path.join(precisionRemovedWorkspace, ".graphql-desk", "keep.txt"));
+    await fs.writeFile(path.join(precisionRemovedWorkspace, ".vscode", "settings.json"), JSON.stringify({
+      "python.defaultInterpreterPath": python,
+      "graphqlDesk.pythonPath": python,
+      "python.analysis.typeCheckingMode": "strict",
+      "python.analysis.stubPath": "python-custom-stubs",
+    }, null, 2));
+    await fs.cp(path.join(workspace, "graphql_desk_generated"), path.join(precisionRemovedWorkspace, "graphql_desk_generated"), { recursive: true });
+    const pristineConfig = JSON.parse(await fs.readFile(path.join(precisionRemovedWorkspace, "pyrightconfig.json"), "utf8"));
+    assert.deepEqual(pristineConfig, { extraPaths: ["vendor"], typeCheckingMode: "strict" },
+      "The second project starts with its original config, without a managed generation or owner");
+    const managedEntries = await fs.readdir(path.join(precisionRemovedWorkspace, ".graphql-desk"));
+    assert.deepEqual(managedEntries, ["keep.txt"], "No first-project ownership or managed files cross into the second project");
+    console.log(`Factory precision second-project setup: ${JSON.stringify({ config: pristineConfig, managedEntries })}`);
     launchTarget = path.join(temporary, "factory-precision.code-workspace");
     await fs.writeFile(launchTarget, JSON.stringify({
       folders: [{ path: workspace }, { path: precisionRemovedWorkspace }],

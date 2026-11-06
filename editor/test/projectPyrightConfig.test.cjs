@@ -1422,6 +1422,77 @@ test("a managed generation update is owned before the workspace setting change e
   assert.equal(f.pythonStubPath, "python-custom");
 });
 
+for (const rollback of [false, true]) test(`package validation waits for native generation ${rollback ? "rollback" : "commit"}`, async t => {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs","extraPaths":["vendor"]}' });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const id = `g-1-${randomUUID()}`;
+  const directory = path.join(managed.root, "generations", id);
+  fs.mkdirSync(directory, { recursive: true });
+  const fingerprint = "a".repeat(64);
+  const keys = managedStateKeys(f.root, `:project-${createHash("sha256").update("pyrightconfig.json").digest("hex").slice(0, 16)}`);
+  await state.update(keys.generationStateKey, { [id]: fingerprint });
+  const manifest = { owner: "graphql-desk-analysis-generation", format: 2, id, artifactFingerprint: fingerprint };
+  let releaseFinish, startedFinish;
+  const finishing = new Promise(resolve => { releaseFinish = resolve; });
+  const started = new Promise(resolve => { startedFinish = resolve; });
+  let held = false;
+  f.configFile.onRequest(async action => {
+    if (action === "finish" && !held) { held = true; startedFinish(); await finishing; }
+  });
+  let current = true;
+  const selecting = managed.selectGeneration(directory, () => current, {
+    directory, manifest, manifestFingerprint: fingerprint,
+    verify: () => ({ directory, manifest, manifestFingerprint: fingerprint }),
+  });
+  await started;
+  assert.equal(parseJsonConfig(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")).stubPath,
+    path.relative(f.root, directory).split(path.sep).join("/"), "the native rename has already happened");
+  let settled = false;
+  const validating = managed.validateGeneratedPackages(["graphql_desk_generated"])
+    .then(value => { settled = true; return { value }; }, error => { settled = true; return { error }; });
+  let settledDuringFinish;
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    settledDuringFinish = settled;
+    current = !rollback;
+  } finally { releaseFinish(); }
+  assert.equal(await selecting, !rollback);
+  const validationResult = await validating;
+  assert.equal(settledDuringFinish, false, "package validation cannot inspect a half-completed generation transaction");
+  assert.deepEqual(validationResult, { value: true });
+  assert.equal(await managed.checkSettingOwnership(), true);
+  await managed.release();
+  managed.cleanup();
+});
+
+test("async TOML package validation holds the selection queue through inspection", async t => {
+  const f = fixture(t, { toml: '[tool.pyright]\nstubPath = "custom-stubs"\n' });
+  let hold = false, held = false, releaseInspect, startedInspect;
+  const inspecting = new Promise(resolve => { releaseInspect = resolve; });
+  const started = new Promise(resolve => { startedInspect = resolve; });
+  const worker = async (...args) => {
+    if (hold && !held && args[2] === "inspect") { held = true; startedInspect(); await inspecting; }
+    return f.worker(...args);
+  };
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), worker);
+  hold = true;
+  const validating = managed.validateGeneratedPackages(["graphql_desk_generated"]);
+  await started;
+  let settled = false;
+  const ownership = managed.checkSettingOwnership().then(value => { settled = true; return value; });
+  let settledDuringInspect;
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    settledDuringInspect = settled;
+  } finally { releaseInspect(); }
+  assert.equal(await validating, true);
+  assert.equal(await ownership, true);
+  assert.equal(settledDuringInspect, false, "the queue must remain held across the asynchronous config inspection");
+  await managed.release();
+  managed.cleanup();
+});
+
 test("managed config fails closed when existing stubs shadow generated package", async t => {
   const f = fixture(t, { json: '{"stubPath":"custom-stubs"}' });
   const shadow = path.join(f.root, "custom-stubs", "graphql_desk_generated");

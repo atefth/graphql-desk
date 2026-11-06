@@ -140,8 +140,26 @@ function reconfigureWorkspaceRoots(options) {
   rootReconfigurationQueues.set(options.roots, next);
   return next;
 }
-function waitForRootReconfigurations(roots) {
-  return (rootReconfigurationQueues.get(roots) ?? Promise.resolve()).catch(() => {});
+async function waitForRootReconfigurations(roots) {
+  let pending;
+  do {
+    pending = rootReconfigurationQueues.get(roots);
+    await (pending ?? Promise.resolve()).catch(() => {});
+  } while (rootReconfigurationQueues.get(roots) !== pending);
+}
+
+async function acquireManagedRoot(roots, folder, folderRoot, generatedPackages, create) {
+  await waitForRootReconfigurations(roots);
+  let promise = roots.get(folderRoot);
+  if (!promise) {
+    promise = create(folder);
+    roots.set(folderRoot, promise);
+    promise.catch(() => { if (roots.get(folderRoot) === promise) roots.delete(folderRoot); });
+  }
+  return promise.then(async managed => {
+    await managed.validateGeneratedPackages?.(generatedPackages);
+    return managed;
+  });
 }
 
 async function drainPublications(publications, cancel) {
@@ -315,6 +333,10 @@ function activate(context) {
     output.appendLine(`Live typing skipped: ${reason}`);
   }
   function createManagedRoot(folder) {
+    if (!controller.isTrusted() || !(vscode.workspace.workspaceFolders ?? []).includes(folder) ||
+        vscode.workspace.getWorkspaceFolder(folder.uri) !== folder) {
+      return Promise.reject(new Error("Trusted current workspace folder required"));
+    }
     return (async () => await createManagedProjectConfig(vscode, folder, context.workspaceState,
       (target, text, action, managedPath, ownership) => controller.editPyrightConfig(target, text, action, managedPath, ownership), {
         configFile: (target, action, payload) => controller.configFile(target, action, payload),
@@ -330,16 +352,7 @@ function activate(context) {
       });
   }
   function managedRoot(folder, folderRoot, generatedPackages = []) {
-    let promise = roots.get(folderRoot);
-    if (!promise) {
-      promise = createManagedRoot(folder);
-      roots.set(folderRoot, promise);
-      promise.catch(() => { if (roots.get(folderRoot) === promise) roots.delete(folderRoot); });
-    }
-    return promise.then(async managed => {
-      await managed.validateGeneratedPackages?.(generatedPackages);
-      return managed;
-    });
+    return acquireManagedRoot(roots, folder, folderRoot, generatedPackages, createManagedRoot);
   }
   async function retireRoot(folderRoot, managed) {
     latestArtifacts.delete(folderRoot);
@@ -864,5 +877,5 @@ function activate(context) {
   refreshVisible(null, true);
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate, analysisRequestIsCurrent, artifactsWithRetry, drainPublications, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations };
+module.exports = { activate, deactivate, acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, drainPublications, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations };
 

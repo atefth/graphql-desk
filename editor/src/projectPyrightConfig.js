@@ -1121,14 +1121,18 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     cleanup() { managed.cleanup(); cleanupCreated([...preflight.created, ...ownerCreatedDirectories]); },
     projectConfig: true,
     async validateGeneratedPackages(packages) {
-      const latest = await assertEffectiveOwner();
-      const roots = [saved.customStubPathAdded ? saved.customStubPath : null, ...latest.extraPaths,
-        ...latest.executionEnvironments.flatMap(item => item.extraPaths)].filter(Boolean)
-        .map(value => path.resolve(configDirectory, value)).filter(value => !isManagedSelection(path.relative(configDirectory, value).split(path.sep).join("/")));
-      const names = new Set(["graphql_desk-stubs", ...packages.map(value => value.split(".")[0])]);
-      for (const rootPath of new Set(roots)) for (const name of names) {
-        if (packageRootExists(rootPath, name)) throw new Error(`Configured Pyright path shadows GraphQL Desk's generated package ${name}; preserved`);
-      }
+      const owned = await managed.checkSettingOwnership(async () => {
+        const latest = await assertEffectiveOwner();
+        const roots = [saved.customStubPathAdded ? saved.customStubPath : null, ...latest.extraPaths,
+          ...latest.executionEnvironments.flatMap(item => item.extraPaths)].filter(Boolean)
+          .map(value => path.resolve(configDirectory, value)).filter(value => !isManagedSelection(path.relative(configDirectory, value).split(path.sep).join("/")));
+        const names = new Set(["graphql_desk-stubs", ...packages.map(value => value.split(".")[0])]);
+        for (const rootPath of new Set(roots)) for (const name of names) {
+          if (packageRootExists(rootPath, name)) throw new Error(`Configured Pyright path shadows GraphQL Desk's generated package ${name}; preserved`);
+        }
+        return true;
+      });
+      if (!owned) throw new Error("GraphQL Desk Pyright stubPath ownership changed; preserved");
       return true;
     },
     async release() {

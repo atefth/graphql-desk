@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { analysisRequestIsCurrent, artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations } = require("../src/extension");
+const { acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations } = require("../src/extension");
 
 test("superseded typing tickets cannot recover or publish generated types", () => {
   const result = { isCurrent: () => true };
@@ -236,6 +236,98 @@ test("overlapping stubPath changes reconcile in order", async () => {
   finishFirst();
   await Promise.all([first, second]);
   assert.deepEqual(order, ["first-start", "first-end", "second"]);
+});
+
+test("new typing acquisition waits for an in-flight root replacement", async () => {
+  const root = path.resolve("acquire-during-reconfiguration");
+  const folder = { uri: { fsPath: root } };
+  const validated = [];
+  const current = { root: path.join(root, "old"), checkSettingOwnership: async () => false,
+    validateGeneratedPackages: async () => validated.push("old"), cleanup() {} };
+  const replacement = { root: path.join(root, "new"),
+    validateGeneratedPackages: async packages => validated.push(packages), cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(current)]]);
+  let releaseCreate;
+  let startedCreate;
+  const creating = new Promise(resolve => { releaseCreate = resolve; });
+  const started = new Promise(resolve => { startedCreate = resolve; });
+  const reconfiguration = reconfigureWorkspaceRoots({ roots, folders: [folder], create: async () => {
+    startedCreate(); await creating; return replacement;
+  }, retire: async () => {} });
+  await started;
+  let acquired = false;
+  const acquisition = acquireManagedRoot(roots, folder, root, ["generated"], async () => assert.fail("use the replacement"))
+    .then(managed => { acquired = true; return managed; });
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(acquired, false, "a new typing ticket cannot obtain the retiring manager");
+    assert.deepEqual(validated, [], "the old manager cannot authorize another publication");
+  } finally { releaseCreate(); }
+  assert.equal(await acquisition, replacement);
+  await reconfiguration;
+  assert.deepEqual(validated, [["generated"]]);
+});
+
+test("typing acquisition drains root replacements queued while it is waiting", async () => {
+  const root = path.resolve("acquire-during-queued-reconfiguration");
+  const folder = { uri: { fsPath: root } };
+  const validated = [];
+  const current = { root: path.join(root, "old"), checkSettingOwnership: async () => false, cleanup() {} };
+  const firstReplacement = { root: path.join(root, "first"), checkSettingOwnership: async () => false,
+    validateGeneratedPackages: async () => validated.push("first"), cleanup() {} };
+  const finalReplacement = { root: path.join(root, "final"),
+    validateGeneratedPackages: async () => validated.push("final"), cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(current)]]);
+  let releaseFirst, releaseSecond, startedFirst, startedSecond;
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+  const secondGate = new Promise(resolve => { releaseSecond = resolve; });
+  const firstStarted = new Promise(resolve => { startedFirst = resolve; });
+  const secondStarted = new Promise(resolve => { startedSecond = resolve; });
+  const first = reconfigureWorkspaceRoots({ roots, folders: [folder], create: async () => {
+    startedFirst(); await firstGate; return firstReplacement;
+  }, retire: async () => {} });
+  await firstStarted;
+  let acquired = false;
+  const acquisition = acquireManagedRoot(roots, folder, root, [], async () => assert.fail("use the final replacement"))
+    .then(managed => { acquired = true; return managed; });
+  const second = reconfigureWorkspaceRoots({ roots, folders: [folder], create: async () => {
+    startedSecond(); await secondGate; return finalReplacement;
+  }, retire: async () => {} });
+  releaseFirst();
+  await secondStarted;
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(acquired, false, "a subsequently queued replacement must finish too");
+    assert.deepEqual(validated, []);
+  } finally { releaseSecond(); }
+  assert.equal(await acquisition, finalReplacement);
+  await Promise.all([first, second]);
+  assert.deepEqual(validated, ["final"]);
+});
+
+test("typing acquisition rejects a removed folder after waiting for retirement", async () => {
+  const root = path.resolve("acquire-after-folder-removal");
+  const folder = { uri: { fsPath: root } };
+  const current = { root: path.join(root, "old"), checkSettingOwnership: async () => true, cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(current)]]);
+  let releaseRetire, startedRetire;
+  const retiring = new Promise(resolve => { releaseRetire = resolve; });
+  const started = new Promise(resolve => { startedRetire = resolve; });
+  const reconfiguration = reconfigureWorkspaceRoots({ roots, folders: [],
+    create: async () => assert.fail("removed folders are not reconfigured"),
+    retire: async () => { startedRetire(); await retiring; } });
+  await started;
+  let checkedCurrentFolder = false;
+  const acquisition = acquireManagedRoot(roots, folder, root, [], async () => {
+    checkedCurrentFolder = true;
+    throw new Error("Trusted current workspace folder required");
+  });
+  const rejection = assert.rejects(acquisition, /Trusted current workspace folder required/);
+  assert.equal(checkedCurrentFolder, false, "creation waits until retirement has finished");
+  releaseRetire();
+  await Promise.all([reconfiguration, rejection]);
+  assert.equal(checkedCurrentFolder, true, "a cache miss still requires the creator's current-folder check");
+  assert.equal(roots.has(root), false, "a rejected stale folder does not leave a cached manager");
 });
 
 test("concurrent root reconfigurations create and retire a replacement only once", async () => {

@@ -238,18 +238,27 @@ Backend and transport fixtures cover these boundaries; complete installed-editor
 and platform verification is tracked by #356. This does not resolve reader-safe
 generation retirement under #355 or pass broad TYPE-01 acceptance.
 
-Prior local verification passed 106 backend tests (four existing POSIX
-cases skipped on Windows), 369 editor tests, Ruff, mypy and Pyright. Installed
-VS Code 1.141.0 exercised the TOML lifecycle and 1.142.0 the JSONC lifecycle,
-both with Python extension 2026.10.0 and Pylance 2026.4.1. The fixtures verify
-setup, nullable schema refresh, restart recovery and restoration of custom
-settings. Permission evidence composes unchanged native `init` security-helper
-fixtures with new staging/protocol/race tests and those installed-editor flows;
-the separately blocked protected-DACL editor probe was not executed or retried.
-Diagnostic-specific checks pass 30 synthetic-security Python tests and 24 Node
-transport tests. The mixed-list host flow also passes locally with Python
-3.10.18. Hosted Windows editor failures during initial config staging remain
-unexplained; required hosted platform checks block merge until they pass.
+An empty stage whose owner and DACL already match exactly is left unchanged;
+reapplying Windows security information can process inheritance unnecessarily.
+Different descriptors still use the native copy and exact post-copy checks.
+Source quarantine preserves the worker holding an active config transaction;
+ordinary invalidation, trust loss and workspace/interpreter shutdown retain
+their cancellation behavior. Root acquisition waits for manager replacement,
+and package validation shares the generation-selection queue through commit,
+rollback and asynchronous config inspection.
+
+Final local verification passes 396 editor tests, 31 config tests and 30 CLI
+tests (four existing POSIX skips on Windows), plus Ruff, mypy and Pyright.
+Installed VS Code 1.141.0 exercises factory precision and fault-injected output
+lifecycle, and 1.142.0 exercises factory publication, with Python 3.10.18,
+Python extension 2026.10.0 and Pylance 2026.4.1. Earlier JSONC/TOML checks cover
+setup, nullability, restart and restoration. Permission evidence composes the
+unchanged native `init` fixtures with staging/protocol/race tests and editor
+flows; the separately blocked protected-DACL editor probe was not executed or
+retried. Required exact-head hosted platform checks remain the merge gate.
+The precision fixture prepares two pristine projects before editor launch;
+late project-config creation in an already-managed empty folder remains a
+separate open acceptance case under #329.
 
 ### Immutable generations and recovery (#37 acceptance complete)
 
