@@ -36,14 +36,18 @@ version="0.1.0"
 description="Typed GraphQL documents for Python"
 readme="README.md"
 requires-python=">=3.10"
+license="MIT"
 dependencies=["graphql-core==3.3.1"]
-license-files=["docs/release/third-party-notices.md", "docs/release/licenses/*"]
+license-files=["LICENSE",
+"docs/release/third-party-notices.md", "docs/release/licenses/*"]
 [project.scripts]
 graphql-desk="graphql_desk.cli:main"
 [tool.hatch.build.targets.sdist]
-only-include=["src/graphql_desk", "docs/release", "pyproject.toml", "README.md"]
+only-include=["src/graphql_desk", "docs/release",
+"pyproject.toml", "README.md", "LICENSE"]
 """,
             "README.md": b"Example package\n",
+            "LICENSE": (repository / "LICENSE").read_bytes(),
             "src/graphql_desk/__init__.py": (
                 b"raise AssertionError('never imported by archive inspection')\n"
             ),
@@ -73,6 +77,7 @@ only-include=["src/graphql_desk", "docs/release", "pyproject.toml", "README.md"]
             b"Metadata-Version: 2.5\nName: graphql-desk\nVersion: 0.1.0\n"
             b"Summary: Typed GraphQL documents for Python\n"
             b"Requires-Python: >=3.10\nRequires-Dist: graphql-core==3.3.1\n"
+            b"License-Expression: MIT\nLicense-File: LICENSE\n"
             b"License-File: docs/release/third-party-notices.md\n"
             b"License-File: docs/release/licenses/dependency.txt\n"
             b"Description-Content-Type: text/markdown\n\nExample package\n"
@@ -88,7 +93,7 @@ only-include=["src/graphql_desk", "docs/release", "pyproject.toml", "README.md"]
             {
                 f"{self.info}licenses/{name}": data
                 for name, data in self.contents.items()
-                if name.startswith("docs/release/")
+                if name == "LICENSE" or name.startswith("docs/release/")
             }
         )
         files.update(
@@ -173,6 +178,8 @@ only-include=["src/graphql_desk", "docs/release", "pyproject.toml", "README.md"]
     ) -> None:
         for name, replacement in (
             ("graphql_desk/py.typed", None),
+            (f"{self.info}licenses/LICENSE", None),
+            (f"{self.info}licenses/LICENSE", b"license changed"),
             ("graphql_desk/__init__.py", b"foreign"),
             (
                 f"{self.info}licenses/docs/release/licenses/dependency.txt",
@@ -188,6 +195,16 @@ only-include=["src/graphql_desk", "docs/release", "pyproject.toml", "README.md"]
                 self.metadata.replace(b"Version: 0.1.0", b"Version: 0.0.1"),
             ),
             (f"{self.info}METADATA", b"Project-URL: PRIVATE\n" + self.metadata),
+            (
+                f"{self.info}METADATA",
+                self.metadata.replace(b"License-Expression: MIT\n", b""),
+            ),
+            (
+                f"{self.info}METADATA",
+                self.metadata.replace(
+                    b"License-Expression: MIT", b"License-Expression: ISC"
+                ),
+            ),
             (
                 f"{self.info}entry_points.txt",
                 b"[console_scripts]\ngraphql-desk = foreign:main\n",
@@ -360,6 +377,41 @@ only-include=["src/graphql_desk", "docs/release", "pyproject.toml", "README.md"]
         path.write_bytes(data)
         with self.assertRaisesRegex(ValueError, "selection is missing"):
             checker.check_core_wheel(self.wheel(), self.root)
+
+    def test_sdist_requires_the_root_grant_and_matching_mit_metadata(self) -> None:
+        original = self.contents["LICENSE"]
+        for replacement in (None, b"license changed"):
+            if replacement is None:
+                del self.contents["LICENSE"]
+            else:
+                self.contents["LICENSE"] = replacement
+            path = self.sdist()
+            self.contents["LICENSE"] = original
+            with self.subTest(replacement=replacement), self.assertRaises(ValueError):
+                checker.check_core_sdist(path, self.root)
+        for metadata in (
+            self.metadata.replace(b"License-Expression: MIT\n", b""),
+            self.metadata.replace(
+                b"License-Expression: MIT", b"License-Expression: ISC"
+            ),
+        ):
+            with patch.object(self, "metadata", metadata):
+                path = self.sdist()
+            with self.assertRaisesRegex(ValueError, "License-Expression"):
+                checker.check_core_sdist(path, self.root)
+
+    def test_project_license_policy_requires_mit_and_the_root_license_file(
+        self,
+    ) -> None:
+        path = self.root / "pyproject.toml"
+        original = path.read_bytes()
+        for changed in (
+            original.replace(b'license="MIT"', b'license="ISC"'),
+            original.replace(b'license-files=["LICENSE",', b"license-files=["),
+        ):
+            path.write_bytes(changed)
+            with self.assertRaisesRegex(ValueError, "MIT license selection"):
+                checker.check_core_wheel(self.wheel(), self.root)
 
     def test_task_directory_cleans_success_and_failure_inside_repository(self) -> None:
         for failure in (False, True):

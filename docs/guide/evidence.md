@@ -4,8 +4,9 @@ This guide and the worked project address
 [#81](https://github.com/atefth/graphql-desk/issues/81). Documentation and one
 example do not close the pinned conformance corpus
 [#80](https://github.com/atefth/graphql-desk/issues/80), the full parity epic, or a
-release gate. The root README refresh also remains outstanding; the current
-worked workflow is described by these guide pages.
+release gate. The owner approved the concise [root README](../../README.md) and
+the [MIT license](../../LICENSE) on 2026-11-06. The worked workflow is described
+by these guide pages.
 
 ## Executable worked evidence
 
@@ -63,13 +64,14 @@ their current state. This documentation does not satisfy their remaining gates.
 
 All broad product gates remain open, including lifecycle/reader retention,
 performance and release acceptance. The optional standalone-source/cache/editor
-items are not silently promised. The repository license remains an owner
-decision, and the blocked root README update remains owner follow-up. No issue
-or gate should be closed solely because this guide or the verifier exists.
+items are not silently promised. The MIT/README owner decisions above resolve
+those documentation prerequisites. No issue or gate should be closed solely
+because this guide or the verifier exists.
 
-The README replacement was not executed: automatic approval review rejected the
-PowerShell/Python action `Path('README.md').write_text(<replacement README>,
+An earlier README replacement was not executed: automatic approval review
+rejected the PowerShell/Python action `Path('README.md').write_text(<replacement README>,
 encoding='utf8')`, stating only **"blocked by policy"**. README was left untouched;
-the write was not retried or routed through another tool. That owner action is
-still outstanding, so this is a reviewable guide/example deliverable, not a claim
-that #81's complete documentation readiness has passed.
+the write was not retried or routed through another tool during that task. The
+later owner-approved concise README is a separate update. This historical
+rejection does not leave a current README blocker, and the guide/example alone
+does not establish #81's complete acceptance.

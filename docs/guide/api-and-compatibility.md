@@ -117,5 +117,5 @@ requirements, not results established by these guides.
 Standalone `.graphql` discovery, persistent turbo caching, extra editors and saved
 model/client generation are optional or separate work, not available features
 promised here. The Ariadne/Turms evaluation does not install or adopt either as a
-core backend. The repository's license choice also remains unresolved; these
-examples do not supply that decision.
+core backend. The owner selected the [MIT license](../../LICENSE) on 2026-11-06;
+third-party dependencies keep their own license terms.
