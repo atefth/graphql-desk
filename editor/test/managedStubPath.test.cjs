@@ -95,6 +95,78 @@ test("only a custom configuration adapter receives the final synchronous generat
   assert.equal(f.updates.length, 0, "stale generations are never temporarily committed");
 });
 
+for (const layer of ["workspaceValue", "globalValue"]) {
+  test(`managed-root initialization does not absorb ${layer} changes during its ownership write`, async t => {
+    const f = await fixture(t, undefined);
+    const config = f.vscode.workspace.getConfiguration();
+    const values = {};
+    config.inspect = () => ({ ...values });
+    config.get = (_name, fallback) => values.workspaceFolderValue ?? values.workspaceValue ?? values.globalValue ?? fallback;
+    let entered, release;
+    const started = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const update = f.workspaceState.update;
+    f.workspaceState.update = async (key, value) => { await update(key, value); entered(); await gate; };
+    const pending = createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+    await Promise.race([started, pending.then(() => assert.fail("the ownership write must be held"))]);
+    values[layer] = "user-stubs";
+    release();
+    const managed = await pending;
+    assert.equal(managed.routingSettingsCurrent(), false);
+    await managed.releaseForRouting();
+    assert.equal(config.get("analysis.stubPath"), "user-stubs");
+    assert.equal(f.updates.length, 0);
+  });
+}
+
+test("fallback routing release drains native selection and removes only its completed owned override", async t => {
+  const f = await fixture(t, undefined);
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+  const generation = path.join(managed.root, "generations", "g-1-00000000-0000-0000-0000-000000000000");
+  await fs.mkdir(generation, { recursive: true });
+  const verification = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+    id: path.basename(generation), artifactFingerprint: "a" }, manifestFingerprint: "b".repeat(64), verify() { return this; } };
+  await ownGeneration(managed, verification);
+  let started;
+  const entered = new Promise(resolve => { started = resolve; });
+  f.onConfigUpdate(() => started());
+  const finishUpdate = f.delayNextUpdate();
+  const selecting = managed.selectGeneration(generation, () => true, verification);
+  await Promise.race([entered, selecting.then(() => assert.fail("native selection should be held"))]);
+  let finished = false;
+  const releasing = managed.releaseForRouting().then(() => { finished = true; });
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(finished, false);
+    assert.equal(f.updates.length, 1);
+  } finally { finishUpdate(); }
+  assert.equal(await selecting, true);
+  await releasing;
+  assert.equal(f.values["analysis.stubPath"], undefined);
+  assert.equal(managed.ownsSetting, false);
+  assert.equal(f.stored.get(managedStateKeys(f.workspace).stateKey), undefined);
+  assert.equal(fsSync.existsSync(generation), true, "routing does not assert that readers released an old generation");
+});
+
+test("fallback routing preserves an external choice and refuses dirty or stale settings", async t => {
+  for (const boundary of ["external", "dirty", "stale"]) {
+    const f = await fixture(t, undefined);
+    const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);
+    if (boundary === "external") f.values["analysis.stubPath"] = "new-user-stubs";
+    if (boundary === "dirty") f.vscode.workspace.textDocuments.push({ isDirty: true,
+      uri: { scheme: "file", fsPath: f.settingsPath } });
+    if (boundary === "external") {
+      await managed.releaseForRouting();
+      assert.equal(f.values["analysis.stubPath"], "new-user-stubs");
+      assert.equal(managed.ownsSetting, false);
+    } else {
+      await assert.rejects(managed.releaseForRouting(() => boundary !== "stale"), /changed or dirty/);
+      assert.equal(managed.ownsSetting, true);
+    }
+    assert.deepEqual(f.updates, [], "no external or dirty setting is rewritten");
+  }
+});
+
 test("prepares an owned root without changing stubPath before a complete generation exists", async t => {
   const f = await fixture(t, undefined);
   const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState);

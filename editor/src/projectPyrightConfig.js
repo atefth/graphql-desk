@@ -9,6 +9,7 @@ const { createManagedStubPath, managedStateKeys, isManagedGeneration, updateMana
 
 const MANAGED_PATH = ".graphql-desk/live-typings";
 const OWNER_FILE = "project-config-owner.json";
+const MAX_OWNER_DIRECTORY_ENTRIES = 4096;
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const normalized = value => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
 const same = (left, right) => left.dev === right.dev && left.ino === right.ino;
@@ -172,6 +173,10 @@ async function acknowledgePendingConfigWrite(vscode, folder, workspaceState, inv
   } finally { activeConfigWrites.delete(lock); }
 }
 
+function advancePythonStubSnapshot(snapshot, value, layer) {
+  return { ...snapshot, [`${layer}Present`]: value !== undefined && value !== null, [`${layer}Value`]: value ?? null };
+}
+
 function pythonStubSettings(vscode, folder, workspace) {
   const configuration = vscode.workspace.getConfiguration("python", folder.uri);
   const setting = "analysis.stubPath";
@@ -278,34 +283,120 @@ function readPersistentOwner(workspace) {
   return null;
 }
 
-function writePersistentOwner(workspace, value, expectedHash, createdDirectories) {
+function verifyOwnerStage(stage, published = false) {
+  if (stage.ancestors.some(([directory, identity]) => !sameDirectory(identity, safeIdentity(directory, true, true)))) {
+    throw new Error("GraphQL Desk owner directory changed; preserved");
+  }
+  const file = stage.published ? stage.file : stage.temporary;
+  const observed = safeIdentity(file, false, true);
+  if (!sameConfigIdentity(stage.identity, observed, published) || observed.size !== BigInt(stage.bytes.length) ||
+      !stage.bytes.equals(fs.readFileSync(file)) || !sameConfigIdentity(observed, safeIdentity(file, false, true))) {
+    throw new Error("GraphQL Desk owner staging file changed; preserved");
+  }
+  return observed;
+}
+
+function discardOwnerStage(state, stage, guards) {
+  guards.cleanup(stage.temporary, stage.identity);
+  if (stage.ancestors.some(([directory, identity]) => !sameDirectory(identity, safeIdentity(directory, true, true)))) {
+    throw new Error("GraphQL Desk owner directory changed; preserved");
+  }
+  try { fs.lstatSync(stage.temporary, { bigint: true }); }
+  catch (error) { if (error.code === "ENOENT" && !stage.published) { state.pending = null; return; } throw error; }
+  if (stage.published) throw new Error("GraphQL Desk owner publication needs recovery; preserved");
+  verifyOwnerStage(stage);
+  fs.unlinkSync(stage.temporary);
+  state.pending = null;
+}
+
+async function writePersistentOwner(workspace, value, expectedHash, createdDirectories, state, guards) {
+  if (typeof guards?.check !== "function" || typeof guards.cleanup !== "function") {
+    throw new Error("GraphQL Desk owner phase guards required");
+  }
+  guards.check();
+  if (state.pending) {
+    if (state.pending.active || state.pending.published) throw new Error("Pending GraphQL Desk owner write needs recovery; preserved");
+    discardOwnerStage(state, state.pending, guards);
+  }
   const { root, created: directoriesCreated } = ensureWorkspaceRoot(workspace, true);
   createdDirectories.push(...directoriesCreated);
+  const directory = fs.opendirSync(root);
+  try {
+    for (let count = 0; ; count += 1) {
+      const entry = directory.readSync();
+      if (entry === null) break;
+      if (count === MAX_OWNER_DIRECTORY_ENTRIES) throw new Error(`GraphQL Desk owner directory exceeds ${MAX_OWNER_DIRECTORY_ENTRIES} entries; preserved: ${root}`);
+      if (entry.name.startsWith(".graphql-desk-owner-") && entry.name.endsWith(".tmp")) {
+        throw new Error(`Unverified GraphQL Desk owner temporary needs recovery; preserved: ${path.join(root, entry.name)}`);
+      }
+    }
+  } finally { directory.closeSync(); }
+  const ancestors = [workspace, path.join(workspace, ".graphql-desk"), root]
+    .map(directory => [directory, safeIdentity(directory, true, true)]);
   const file = path.join(root, OWNER_FILE);
   const serialized = `${JSON.stringify(value, null, 2)}\n`;
-  let currentHash = null;
+  const bytes = Buffer.from(serialized, "utf8");
+  if (bytes.length > 64 * 1024) throw new Error("GraphQL Desk owner record is too large; preserved");
+  let original = null;
   try {
-    const stat = safeIdentity(file);
+    const stat = safeIdentity(file, false, true);
     if (stat.size > 64 * 1024) throw new Error("GraphQL Desk Pyright ownership record is too large; preserved");
-    currentHash = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    const hash = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    if (!sameConfigIdentity(stat, safeIdentity(file, false, true))) throw new Error("GraphQL Desk owner record changed; preserved");
+    original = { identity: stat, hash };
   } catch (error) { if (error.code !== "ENOENT") throw error; }
-  if (currentHash !== expectedHash) throw new Error("GraphQL Desk Pyright ownership record changed concurrently; preserved");
-  const temporary = path.join(root, `.graphql-desk-owner-${randomUUID()}.tmp`);
-  let created;
-  try {
-    const descriptor = fs.openSync(temporary, "wx");
-    try { created = fs.fstatSync(descriptor); fs.writeFileSync(descriptor, serialized, "utf8"); fs.fsyncSync(descriptor); }
-    finally { fs.closeSync(descriptor); }
-    const observed = readPersistentOwner(workspace);
-    if ((observed?.hash ?? null) !== expectedHash || !same(created, fs.lstatSync(temporary))) {
-      throw new Error("GraphQL Desk Pyright ownership record changed during update; preserved");
+  if ((original?.hash ?? null) !== expectedHash) throw new Error("GraphQL Desk Pyright ownership record changed concurrently; preserved");
+  const checkOriginal = () => {
+    guards.check();
+    guards.cleanup(file, original?.identity);
+    if (ancestors.some(([directory, identity]) => !sameDirectory(identity, safeIdentity(directory, true, true)))) {
+      throw new Error("GraphQL Desk owner directory changed; preserved");
     }
-    fs.renameSync(temporary, file);
-    if (fs.readFileSync(file, "utf8") !== serialized) throw new Error("GraphQL Desk Pyright ownership record update could not be verified");
-    return createHash("sha256").update(serialized).digest("hex");
+    if (original) {
+      const current = safeIdentity(file, false, true);
+      if (!sameConfigIdentity(original.identity, current) ||
+          createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== expectedHash ||
+          !sameConfigIdentity(current, safeIdentity(file, false, true))) throw new Error("GraphQL Desk owner record changed; preserved");
+    } else {
+      try { fs.lstatSync(file, { bigint: true }); }
+      catch (error) { if (error.code === "ENOENT") return; throw error; }
+      throw new Error("GraphQL Desk owner record appeared; preserved");
+    }
+  };
+  const temporary = path.join(root, `.graphql-desk-owner-${randomUUID()}.tmp`);
+  let stage;
+  try {
+    checkOriginal();
+    const descriptor = fs.openSync(temporary, "wx");
+    try {
+      stage = { file, temporary, bytes, ancestors, identity: fs.fstatSync(descriptor, { bigint: true }), active: true, published: false, check: guards.check };
+      state.pending = stage;
+      fs.writeFileSync(descriptor, bytes);
+      fs.fsyncSync(descriptor);
+      stage.identity = fs.fstatSync(descriptor, { bigint: true });
+    }
+    finally { fs.closeSync(descriptor); }
+    for (let attempt = 0; ; attempt += 1) {
+      checkOriginal();
+      guards.cleanup(temporary, stage.identity);
+      verifyOwnerStage(stage);
+      try { fs.renameSync(temporary, file); stage.published = true; break; }
+      catch (error) {
+        if (attempt === 3 || !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
+        await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+    guards.check();
+    const identity = verifyOwnerStage(stage, true);
+    stage.identity = identity;
+    return { hash: createHash("sha256").update(bytes).digest("hex"),
+      notification: { file, temporary, identity, bytes, ancestors } };
   } catch (error) {
-    try { const stat = fs.lstatSync(temporary); if (created && !stat.isSymbolicLink() && same(created, stat)) fs.unlinkSync(temporary); }
-    catch { /* Preserve any temporary path that is no longer verified as ours. */ }
+    if (stage) {
+      stage.active = false;
+      try { discardOwnerStage(state, stage, guards); }
+      catch { error.message += `; owner staging preserved: ${temporary}`; }
+    }
     throw error;
   }
 }
@@ -669,21 +760,52 @@ async function invokeToml(folder, text, action, worker, ownership = {}, managedP
     } } : {}), text: result.text };
 }
 
-async function updateProjectConfig(vscode, folder, action, worker, ownership = {}, managedPath = MANAGED_PATH, onOwnedWrite, configFile, isCurrent = () => true) {
+function projectConfigFile(workspace) {
+  for (const name of ["pyrightconfig.json", "pyproject.toml"]) {
+    const file = path.join(workspace, name);
+    try { fs.lstatSync(file); return file; }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
+  return null;
+}
+
+async function readProjectConfig(vscode, folder, worker, targetFile) {
   if (!folder || folder.uri.scheme !== "file" || !path.isAbsolute(folder.uri.fsPath) || !vscode.workspace.isTrusted) {
     throw new Error("Trusted file workspace required");
   }
   const workspace = path.resolve(folder.uri.fsPath);
-  const jsonFile = path.join(workspace, "pyrightconfig.json");
-  const tomlFile = path.join(workspace, "pyproject.toml");
-  const jsonExists = fs.existsSync(jsonFile);
-  const tomlExists = fs.existsSync(tomlFile);
-  if (!jsonExists && !tomlExists) return null;
-  const file = jsonExists ? jsonFile : tomlFile;
+  if (targetFile !== undefined && (!["pyrightconfig.json", "pyproject.toml"].includes(path.basename(targetFile)) ||
+      path.resolve(targetFile) !== path.join(workspace, path.basename(targetFile)))) throw new Error("Unsafe Pyright routing target; preserved");
+  const file = targetFile ?? projectConfigFile(workspace);
+  if (!file) return { workspace, file: null };
+  if (targetFile !== undefined) {
+    try { fs.lstatSync(file); }
+    catch (error) { if (error.code === "ENOENT") return { workspace, file: null }; throw error; }
+  }
   const snapshot = readFileSafe(vscode, workspace, file);
-  const format = jsonExists ? "jsonc" : "toml";
+  const format = path.basename(file) === "pyrightconfig.json" ? "jsonc" : "toml";
   const inspected = format === "jsonc" ? modifyJsonConfig(snapshot.text, "inspect") : await invokeToml(folder, snapshot.text, "inspect", worker);
+  return { ...inspected, file, format, workspace, snapshot, identity: snapshot.identity, hash: snapshot.hash };
+}
+
+async function inspectProjectConfigRoute(vscode, folder, worker) {
+  const inspected = await readProjectConfig(vscode, folder, worker);
+  return { file: inspected.found ? inspected.file : null, isCurrent(ownedFile) {
+    checkConfigWorkspace(vscode, folder, inspected.workspace, path.join(inspected.workspace, "pyrightconfig.json"));
+    checkConfigWorkspace(vscode, folder, inspected.workspace, path.join(inspected.workspace, "pyproject.toml"));
+    if (projectConfigFile(inspected.workspace) !== inspected.file) return false;
+    if (!inspected.file) return true;
+    // Only the old owned target may change through the guarded release writer.
+    if (ownedFile === inspected.file) return true;
+    const current = readFileSafe(vscode, inspected.workspace, inspected.file);
+    return sameConfigIdentity(current.identity, inspected.identity) && current.hash === inspected.hash;
+  } };
+}
+
+async function updateProjectConfig(vscode, folder, action, worker, ownership = {}, managedPath = MANAGED_PATH, onOwnedWrite, configFile, isCurrent = () => true, targetFile) {
+  const inspected = await readProjectConfig(vscode, folder, worker, targetFile);
   if (!inspected.found) return null;
+  const { workspace, file, format, snapshot } = inspected;
   if (action === "inspect") return { ...inspected, file, format, identity: snapshot.identity, workspace, hash: snapshot.hash };
   if (action === "remove_stale_generations" && format === "jsonc") {
     const updated = removeStaleGenerationSearchPaths(snapshot.text, workspace);
@@ -706,14 +828,24 @@ async function updateProjectConfig(vscode, folder, action, worker, ownership = {
   return { ...update, file, format, workspace, hash: createHash("sha256").update(update.text, "utf8").digest("hex") };
 }
 
-async function createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite = () => {}, onOwnership = () => {}, configFile } = {}) {
+async function createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite = () => {}, onOwnership = () => {}, configFile, ownerCurrent } = {}) {
   if (!folder || folder.uri.scheme !== "file" || !path.isAbsolute(folder.uri.fsPath) || !vscode.workspace.isTrusted) {
     throw new Error("Trusted file workspace required");
   }
-  await recoverPendingConfigWrite(vscode, folder, path.resolve(folder.uri.fsPath), workspaceState, configFile);
-  const inspected = await updateProjectConfig(vscode, folder, "inspect", worker);
-  if (!inspected) return null;
-  const workspace = inspected.workspace;
+  if (typeof ownerCurrent !== "function") throw new Error("Owner-record freshness guard required");
+  const workspace = path.resolve(folder.uri.fsPath);
+  await recoverPendingConfigWrite(vscode, folder, workspace, workspaceState, configFile);
+  const key = stateKey(workspace);
+  const persisted = readPersistentOwner(workspace);
+  let saved = workspaceState?.get?.(key) ?? persisted?.value;
+  const routingRelease = saved?.version === 3 && saved.phase === "release" && saved.routing === true;
+  const routingTarget = routingRelease ? path.join(workspace, saved.file ?? "") : undefined;
+  let inspected = await readProjectConfig(vscode, folder, worker, routingTarget);
+  if (!inspected.found) {
+    if (!routingRelease) return null;
+    inspected = { extraPaths: [], executionEnvironments: [], stubPath: null, hasStubPath: false,
+      ...inspected, file: routingTarget, format: path.basename(routingTarget) === "pyrightconfig.json" ? "jsonc" : "toml" };
+  }
   const originalOnOwnedWrite = onOwnedWrite;
   let activeConfigHash = inspected.hash;
   onOwnedWrite = async (filename, fingerprint, operation) => {
@@ -762,17 +894,15 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     if (operation.phase === "commit" && path.resolve(filename) === path.resolve(inspected.file)) activeConfigHash = fingerprint;
     return result;
   };
-  const key = stateKey(workspace);
-  const persisted = readPersistentOwner(workspace);
   let ownerHash = persisted?.hash ?? null;
   const ownerCreatedDirectories = [];
-  let saved = workspaceState?.get?.(key) ?? persisted?.value;
   const fileKey = path.relative(workspace, inspected.file).split(path.sep).join("/");
   const configDirectory = path.dirname(inspected.file);
   const managedRoot = normalized(path.resolve(configDirectory, MANAGED_PATH));
   const stateSuffix = `:project-${createHash("sha256").update(fileKey).digest("hex").slice(0, 16)}`;
   const generationKeys = managedStateKeys(workspace, stateSuffix);
   const pythonSettings = pythonStubSettings(vscode, folder, workspace);
+  const initialPythonSnapshot = pythonSettings.snapshot();
   const configPaths = config => [config.stubPath ?? "typings", ...config.extraPaths,
     ...config.executionEnvironments.flatMap(item => item.extraPaths)];
   const resolvesToManagedRoot = value => normalized(path.resolve(configDirectory, value)) === managedRoot;
@@ -793,6 +923,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       value.customStubPathEnvironmentRoots.every(root => typeof root === "string" && root) &&
       new Set(value.customStubPathEnvironmentRoots).size === value.customStubPathEnvironmentRoots.length) &&
     typeof value.currentStubPath === "string" && ["prepare", "active", "release", "rotate"].includes(value.phase) &&
+    (value.routing === undefined || value.routing === true && value.phase === "release") &&
     (value.pythonStubPath === undefined || value.pythonStubPath && typeof value.pythonStubPath.current === "string" &&
       value.pythonStubPath.snapshot && typeof value.pythonStubPath.snapshot === "object") &&
     (value.legacyOwnership === null || validOwnership(value.legacyOwnership));
@@ -801,9 +932,62 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   }
   if (saved?.version === 3 && !validProjectOwner(saved)) throw new Error("GraphQL Desk Pyright config ownership changed; preserved");
   if (saved && ![2, 3].includes(saved.version)) throw new Error("GraphQL Desk Pyright config ownership changed; preserved");
-  const persistOwner = async value => {
-    ownerHash = writePersistentOwner(workspace, value, ownerHash, ownerCreatedDirectories);
-    await workspaceState?.update?.(key, value);
+  const ownerWriteState = { pending: null };
+  const persistOwner = async (value, phaseCurrent) => {
+    if (typeof phaseCurrent !== "function") throw new Error("Owner-record phase guard required");
+    const lock = normalized(workspace);
+    if (activeConfigWrites.has(lock)) throw new Error("Another Pyright config or owner write is pending; preserved");
+    const beforeSaved = saved;
+    const savedSnapshot = JSON.stringify(saved);
+    let stateSnapshot = JSON.stringify(workspaceState?.get?.(key));
+    const pythonSnapshot = JSON.stringify(pythonSettings.snapshot());
+    const capture = filename => {
+      try { return readFileSafe(vscode, workspace, filename); }
+      catch (error) { if (error.code === "ENOENT") return null; throw error; }
+    };
+    const inputs = [inspected.file, ...(inspected.format === "toml" ? [path.join(workspace, "pyrightconfig.json")] : [])]
+      .map(filename => [filename, capture(filename)]);
+    const guards = {
+      check() {
+        checkConfigWorkspace(vscode, folder, workspace, inspected.file);
+        if (JSON.stringify(workspaceState?.get?.(key)) !== stateSnapshot) throw new Error("GraphQL Desk owner state changed; preserved");
+        if (phaseCurrent() !== true || saved !== beforeSaved || JSON.stringify(saved) !== savedSnapshot ||
+            pythonSettings.dirty() || JSON.stringify(pythonSettings.snapshot()) !== pythonSnapshot) {
+          throw new Error("GraphQL Desk owner phase or Python settings changed; preserved");
+        }
+        for (const [filename, original] of inputs) {
+          const current = capture(filename);
+          if (original ? !current || !sameConfigIdentity(original.identity, current.identity) || original.hash !== current.hash : current !== null) {
+            throw new Error("GraphQL Desk owner config inputs changed; preserved");
+          }
+        }
+      },
+      cleanup(filename, identity) {
+        checkConfigWorkspace(vscode, folder, workspace, filename);
+        if (vscode.workspace.textDocuments?.some(document => {
+          if (!document.isDirty || !["file", "untitled"].includes(document.uri.scheme) || !document.uri.fsPath) return false;
+          if (normalized(document.uri.fsPath) === normalized(filename)) return true;
+          try { return identity && same(identity, fs.statSync(document.uri.fsPath, { bigint: true })); } catch { return false; }
+        })) throw new Error("Dirty GraphQL Desk owner file; preserved");
+      },
+    };
+    activeConfigWrites.add(lock);
+    try {
+      const written = await writePersistentOwner(workspace, value, ownerHash, ownerCreatedDirectories, ownerWriteState, guards);
+      const stage = ownerWriteState.pending;
+      guards.check();
+      verifyOwnerStage(stage);
+      ownerHash = written.hash;
+      stateSnapshot = JSON.stringify(value);
+      await workspaceState?.update?.(key, value);
+      guards.check();
+      verifyOwnerStage(stage);
+      if (JSON.stringify(workspaceState?.get?.(key)) !== JSON.stringify(value)) throw new Error("GraphQL Desk owner state changed; preserved");
+      ownerWriteState.pending = null;
+    } finally {
+      if (ownerWriteState.pending) ownerWriteState.pending.active = false;
+      activeConfigWrites.delete(lock);
+    }
   };
   const clearOwner = async () => {
     removePersistentOwner(workspace, ownerHash);
@@ -832,23 +1016,32 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   if (saved?.version === 3 && (!saved.pythonStubPath || saved.customStubPathEnvironmentRoots === undefined)) {
     const current = pythonSettings.effective();
     saved = { ...saved, customStubPathEnvironmentRoots,
-      pythonStubPath: saved.pythonStubPath ?? { snapshot: pythonSettings.snapshot(), current: current || "" } };
-    await persistOwner(saved);
+      pythonStubPath: saved.pythonStubPath ?? { snapshot: initialPythonSnapshot, current: current || "" } };
+    await persistOwner(saved, ownerCurrent);
   }
-  let pythonOwner = saved?.pythonStubPath ?? { snapshot: pythonSettings.snapshot(), current: pythonSettings.effective() || "" };
+  let pythonOwner = saved?.pythonStubPath ?? { snapshot: initialPythonSnapshot, current: pythonSettings.effective() || "" };
+  let expectedPythonSnapshot = JSON.stringify(initialPythonSnapshot);
   const configurationCurrent = () => {
     if (pythonSettings.dirty()) throw new Error("Dirty workspace settings; preserved");
     validatePythonStubPath(pythonSettings, pythonOwner.current || "");
+    if (JSON.stringify(pythonSettings.snapshot()) !== expectedPythonSnapshot) throw new Error("Pylance Python stub settings changed; preserved");
     return true;
   };
   const setPythonStubPath = async (value, expected = pythonOwner.current) => {
     if (pythonSettings.dirty()) throw new Error("Dirty workspace settings; preserved");
     validatePythonStubPath(pythonSettings, expected);
+    if (JSON.stringify(pythonSettings.snapshot()) !== expectedPythonSnapshot) throw new Error("Pylance Python stub settings changed; preserved");
     const previous = pythonOwner;
     pythonOwner = { ...pythonOwner, current: value };
     try {
       await pythonSettings.update(value);
       validatePythonStubPath(pythonSettings, value);
+      const current = pythonSettings.snapshot();
+      const layer = current.folderPresent && current.folderValue === value ? "folder" :
+        current.workspacePresent && current.workspaceValue === value ? "workspace" : null;
+      if (layer === null) throw new Error("Pylance Python stub setting ownership changed; preserved");
+      // Advance only the owned layer; concurrent hidden user choices require routing.
+      expectedPythonSnapshot = JSON.stringify(advancePythonStubSnapshot(JSON.parse(expectedPythonSnapshot), value, layer));
     } catch (error) {
       pythonOwner = previous;
       throw error;
@@ -877,8 +1070,9 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       normalized(path.resolve(configDirectory, value)).startsWith(`${managedRoot}${path.sep}`) &&
       isManagedGeneration(workspace, path.relative(workspace, path.resolve(configDirectory, value)).split(path.sep).join("/"), MANAGED_PATH)));
   const inspectLatest = async () => {
-    const latest = await updateProjectConfig(vscode, folder, "inspect", worker);
-    if (!latest || path.resolve(latest.file) !== path.resolve(inspected.file)) {
+    const latest = await readProjectConfig(vscode, folder, worker, routingTarget);
+    if (routingRelease && !latest.found) return latest;
+    if (!latest.found || path.resolve(latest.file) !== path.resolve(inspected.file)) {
       throw new Error("Effective Pyright config changed while GraphQL Desk owned stubPath; preserved");
     }
     return latest;
@@ -896,10 +1090,14 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   const genericOwner = workspaceState?.get?.(generationKeys.stateKey);
 
   if (saved?.version === 3 && saved.phase === "release") {
+    const route = routingRelease ? await inspectProjectConfigRoute(vscode, folder, worker) : null;
+    const routeCurrent = () => !route || route.isCurrent(inspected.file);
     const latest = await inspectLatest();
-    const restored = latest.hasStubPath === saved.originalStubPathPresent &&
+    if (!routeCurrent()) throw new Error("Pyright routing recovery changed; preserved");
+    const absent = routingRelease && !latest.found;
+    const restored = absent || latest.hasStubPath === saved.originalStubPathPresent &&
       (!saved.originalStubPathPresent || latest.stubPath === saved.originalStubPath);
-    if (restored && (saved.customStubPathAdded && customPathPresent(latest) || customEnvironmentPathsRemain(latest))) {
+    if (!absent && restored && (saved.customStubPathAdded && customPathPresent(latest) || customEnvironmentPathsRemain(latest))) {
       throw new Error("Pyright config changed during GraphQL Desk cleanup; preserved");
     }
     if (!restored && (!latest.hasStubPath || latest.stubPath !== saved.currentStubPath)) {
@@ -908,19 +1106,32 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     if (!restored) {
       const released = await updateProjectConfig(vscode, folder, "release_stub_path", worker, {
         ...restoreOwnership, expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath,
-      }, MANAGED_PATH, onOwnedWrite, configFile, configurationCurrent);
+      }, MANAGED_PATH, onOwnedWrite, configFile, () => configurationCurrent() && routeCurrent(), routingTarget);
       if (released.hasStubPath !== saved.originalStubPathPresent ||
           saved.originalStubPathPresent && released.stubPath !== saved.originalStubPath ||
           saved.customStubPathAdded && customPathPresent(released) || customEnvironmentPathsRemain(released)) {
         throw new Error("GraphQL Desk Pyright config cleanup could not be verified; preserved");
       }
     }
+    if (routingRelease && absent) {
+      checkConfigWorkspace(vscode, folder, workspace, inspected.file);
+      if (latest.file) {
+        const current = readFileSafe(vscode, workspace, latest.file);
+        if (!sameConfigIdentity(current.identity, latest.identity) || current.hash !== latest.hash) throw new Error("Pyright routing recovery changed; preserved");
+      } else {
+        try { fs.lstatSync(inspected.file); throw new Error("Pyright routing target appeared; preserved"); }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+      }
+    }
     await restorePythonStubPath();
+    if (!routeCurrent()) throw new Error("Pyright routing recovery changed; preserved");
     await clearOwner();
     await workspaceState?.update?.(generationKeys.stateKey, undefined);
-    await updateManagedState(workspaceState, generationKeys.generationStateKey, undefined);
-    await updateManagedState(workspaceState, generationKeys.stagingStateKey, undefined);
-    return createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite: originalOnOwnedWrite, onOwnership, configFile });
+    if (!routingRelease) {
+      await updateManagedState(workspaceState, generationKeys.generationStateKey, undefined);
+      await updateManagedState(workspaceState, generationKeys.stagingStateKey, undefined);
+    }
+    return createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite: originalOnOwnedWrite, onOwnership, configFile, ownerCurrent });
   }
 
   if (saved?.version === 3 && saved.phase === "rotate") {
@@ -943,7 +1154,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     saved = { ...saved, phase: "active", currentStubPath: target,
       pythonStubPath: { ...saved.pythonStubPath, current: target, pending: undefined } };
     pythonOwner = saved.pythonStubPath;
-    await persistOwner(saved);
+    await persistOwner(saved, ownerCurrent);
   }
 
   if (saved?.version === 3 && saved.phase === "active") {
@@ -957,11 +1168,11 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       const pending = workspaceState?.get?.(generationKeys.stateKey);
       if (pending?.pending === true && pending.current === latest.stubPath && pending.previous === saved.currentStubPath && isManagedSelection(latest.stubPath)) {
         saved = { ...saved, currentStubPath: latest.stubPath };
-        await persistOwner(saved);
+        await persistOwner(saved, ownerCurrent);
       } else if (pending?.release === true && latest.stubPath === (saved.originalStubPath ?? "")) {
         saved = { ...saved, phase: "release", currentStubPath: latest.stubPath };
-        await persistOwner(saved);
-        return createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite: originalOnOwnedWrite, onOwnership, configFile });
+        await persistOwner(saved, ownerCurrent);
+        return createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite: originalOnOwnedWrite, onOwnership, configFile, ownerCurrent });
       } else {
         throw new Error("GraphQL Desk Pyright stubPath ownership changed; preserved");
       }
@@ -973,7 +1184,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       const latest = await inspectLatest();
       if (latest.stubPath === MANAGED_PATH && (!saved.customStubPathAdded || customPathPresent(latest)) && customEnvironmentPathsPresent(latest)) {
         saved = { ...saved, phase: "active", currentStubPath: MANAGED_PATH };
-        await persistOwner(saved);
+        await persistOwner(saved, ownerCurrent);
       } else if ((latest.hasStubPath === saved.originalStubPathPresent) &&
           (!latest.hasStubPath || latest.stubPath === saved.originalStubPath)) {
         inspected.stubPath = latest.stubPath;
@@ -990,10 +1201,10 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
         originalStubPathPresent, originalStubPath: originalStubPath ?? null,
         customStubPath, customStubPathAdded, customStubPathEnvironmentRoots, removeExtraPathsKey,
         currentStubPath: current.hasStubPath ? current.stubPath : "", phase: "prepare",
-        pythonStubPath: { snapshot: pythonSettings.snapshot(), current: pythonSettings.effective() || "" },
+        pythonStubPath: { snapshot: initialPythonSnapshot, current: pythonSettings.effective() || "" },
         legacyOwnership: legacy,
       };
-      await persistOwner({ ...owner, phase: "prepare" });
+      await persistOwner({ ...owner, phase: "prepare" }, ownerCurrent);
       const prepared = current.stubPath === MANAGED_PATH && current.hasStubPath
         ? current
         : await updateProjectConfig(vscode, folder, "prepare_stub_path", worker, {
@@ -1012,7 +1223,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       if (pythonCurrent !== MANAGED_PATH) await setPythonStubPath(MANAGED_PATH, pythonCurrent);
       saved = { ...owner, currentStubPath: MANAGED_PATH, phase: "active",
         pythonStubPath: { ...pythonOwner, current: MANAGED_PATH } };
-      await persistOwner(saved);
+      await persistOwner(saved, ownerCurrent);
     }
   }
 
@@ -1050,7 +1261,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       if (pythonSettings.dirty()) throw new Error("Dirty workspace settings; preserved");
       validatePythonStubPath(pythonSettings, pythonOwner.current || "");
       saved = { ...saved, phase: "rotate", pythonStubPath: { ...pythonOwner, pending: target } };
-      await persistOwner(saved);
+      await persistOwner(saved, () => ownerCurrent() === true && generationCurrent() === true);
       const previousSetting = currentSetting;
       const updated = await updateProjectConfig(vscode, folder, restoringManagedBase ? "restore_stub_path" : "set_stub_path",
         worker, ownership, target, onOwnedWrite, configFile,
@@ -1062,7 +1273,11 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       validatePythonStubPath(pythonSettings, target);
       pythonOwner = { ...pythonOwner, current: target, pending: undefined };
       const next = { ...saved, currentStubPath: currentSetting, phase: "active", pythonStubPath: pythonOwner };
-      await persistOwner(next);
+      // Record the already-committed target before the manager decides whether
+      // a superseded generation must be rolled back.
+      await persistOwner(next, () => ownerCurrent() === true && saved.phase === "rotate" &&
+        saved.pythonStubPath?.pending === target && currentPresent && currentSetting === target &&
+        pythonOwner.current === target && (pythonSettings.effective() || "") === target);
       saved = next;
       onOwnership(inspected.format === "toml" ? inspected.file : null, currentSetting,
         previousSetting, true);
@@ -1103,6 +1318,8 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     ...managed,
     get ownsSetting() { return managed.ownsSetting; },
     get selectedSetting() { return managed.selectedSetting; },
+    configurationFile: inspected.file,
+    routingSettingsCurrent() { return JSON.stringify(pythonSettings.snapshot()) === expectedPythonSnapshot; },
     checkSettingOwnership() {
       return managed.checkSettingOwnership(() => configStillEffective() &&
         (pythonSettings.effective() || "") === (pythonOwner.current || ""));
@@ -1139,7 +1356,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       if (!managed.ownsSetting) return;
       await assertEffectiveOwner(false);
       saved = { ...saved, phase: "release" };
-      await persistOwner(saved);
+      await persistOwner(saved, () => managed.ownsSetting && saved?.phase === "release");
       await managed.release();
       const latest = await inspectLatest();
       if (!latest.hasStubPath || latest.stubPath !== currentSetting) throw new Error("Pyright stubPath changed during GraphQL Desk cleanup; preserved");
@@ -1155,7 +1372,73 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       saved = undefined;
       onOwnership(null, null);
     },
+    async releaseForRouting(isCurrent = () => true) {
+      if (!managed.ownsSetting) return;
+      const released = await managed.checkSettingOwnership(async () => {
+        const capturedPython = pythonSettings.snapshot();
+        const pythonSnapshot = JSON.stringify(capturedPython);
+        const routing = await inspectProjectConfigRoute(vscode, folder, worker);
+        const check = () => {
+          checkConfigWorkspace(vscode, folder, workspace, inspected.file);
+          if (!isCurrent() || pythonSettings.dirty() || JSON.stringify(pythonSettings.snapshot()) !== pythonSnapshot ||
+              !routing.isCurrent(inspected.file)) throw new Error("Pyright routing inputs changed; preserved");
+          return true;
+        };
+        check();
+        const latest = await readProjectConfig(vscode, folder, worker, inspected.file);
+        check();
+        if (latest.found && (!latest.hasStubPath || latest.stubPath !== currentSetting ||
+            saved.customStubPathAdded && !customPathPresent(latest) || !customEnvironmentPathsPresent(latest, false) ||
+            managedSearchAliases(latest))) throw new Error("Pyright routing ownership changed; preserved");
+        // A permanent user choice becomes the next manager's prior value. Never
+        // briefly restore the superseded setting over that choice.
+        if (pythonSnapshot !== expectedPythonSnapshot) {
+          const expected = JSON.parse(expectedPythonSnapshot);
+          const prior = { ...capturedPython };
+          for (const layer of ["folder", "workspace", "global"]) {
+            if (capturedPython[`${layer}Present`] === expected[`${layer}Present`] &&
+                capturedPython[`${layer}Value`] === expected[`${layer}Value`]) {
+              prior[`${layer}Present`] = pythonOwner.snapshot[`${layer}Present`];
+              prior[`${layer}Value`] = pythonOwner.snapshot[`${layer}Value`];
+            }
+          }
+          pythonOwner = { snapshot: prior, current: pythonSettings.effective() || "" };
+        }
+        saved = { ...saved, phase: "release", routing: true, pythonStubPath: pythonOwner };
+        await persistOwner(saved, check);
+        check();
+        if (latest.found) {
+          const result = await updateProjectConfig(vscode, folder, "release_stub_path", worker, {
+            expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath, ...restoreOwnership,
+          }, MANAGED_PATH, onOwnedWrite, configFile, check, inspected.file);
+          check();
+          if (!result || result.hasStubPath !== originalStubPathPresent || originalStubPathPresent && result.stubPath !== originalStubPath ||
+              saved.customStubPathAdded && result.extraPaths.includes(customStubPath) || customEnvironmentPathsRemain(result) ||
+              readFileSafe(vscode, workspace, inspected.file).hash !== result.hash) {
+            throw new Error("Pyright routing cleanup could not be verified; preserved");
+          }
+        } else if (latest.file) {
+          const current = readFileSafe(vscode, workspace, latest.file);
+          if (!sameConfigIdentity(current.identity, latest.identity) || current.hash !== latest.hash) throw new Error("Pyright routing target changed; preserved");
+        } else {
+          try { fs.lstatSync(inspected.file); throw new Error("Pyright routing target appeared; preserved"); }
+          catch (error) { if (error.code !== "ENOENT") throw error; }
+        }
+        check();
+        await restorePythonStubPath();
+        // Restoration can change only the owned Python layer; the next manager
+        // captures that completed state after this selection queue drains.
+        if (pythonSettings.dirty() || !isCurrent() || !routing.isCurrent(inspected.file)) throw new Error("Pyright routing inputs changed; preserved");
+        await updateManagedState(workspaceState, generationKeys.stateKey, undefined);
+        await managed.revokeForRouting();
+        await clearOwner();
+        saved = undefined;
+        onOwnership(null, null);
+        return true;
+      });
+      if (!released) throw new Error("Pyright routing ownership changed; preserved");
+    },
   };
 }
 
-module.exports = { MANAGED_PATH, parseJsonConfig, modifyJsonConfig, updateProjectConfig, createManagedProjectConfig, acknowledgePendingConfigWrite, safeIdentity, normalized, stateKey };
+module.exports = { MANAGED_PATH, parseJsonConfig, modifyJsonConfig, updateProjectConfig, inspectProjectConfigRoute, createManagedProjectConfig, acknowledgePendingConfigWrite, safeIdentity, normalized, stateKey };

@@ -25,6 +25,42 @@ The verifier's success message is a scoped result. It is not a new measurement
 for all Python minors or host operating systems. The wheel is built and imported
 as an archive, not installed into a clean consumer environment by this example.
 
+## Config routing and owner-record replacement
+
+For [#329](https://github.com/atefth/graphql-desk/issues/329), the final independent
+editor suite passed **472 tests**, with no failures, skips or cancellations, on
+2026-11-06. The connected [project-config](../../editor/test/projectPyrightConfig.test.cjs),
+[managed-setting](../../editor/test/managedStubPath.test.cjs) and
+[lifecycle](../../editor/test/extensionLifecycle.test.cjs) fixtures cover routing
+and interrupted owner writes.
+
+One local Windows development-host run passed all seven phases in VS Code
+1.142.0: config-empty startup, late JSON creation, permanent folder choice,
+hidden Workspace choice, JSON precedence over TOML, JSON removal selecting TOML,
+and JSON recreation restoring precedence. It checked precise nullable and
+non-null typing, deliberate type errors and the exact native config path.
+Python's public API selected the same CPython **3.10.18** before and after the
+run. The isolated profile used copied Python **2026.10.0**, Pylance **2026.4.1**,
+debugpy **2026.6.0** and Python Environments **1.40.0**, with application extension
+updates disabled and Pylance Trace enabled; final versions and paths matched.
+Real deactivation restored user settings/configs while preserving unsaved text,
+source bytes and user files.
+
+Owner replacement uses one exclusively created stage and at most four async
+attempts, waiting 50/100/150 ms between retries. Each attempt rechecks phase,
+trust, dirty buffers, settings/config/state, native identity, bytes and ancestry.
+Cold scanning stops at a 4,096-entry budget; unknown or unverifiable stages are
+preserved and block further allocation. The earlier Windows failure's
+lock-versus-permission cause remains unproved.
+
+The physically verified config-empty fixture stayed within the explicitly
+approved `E:/code/gql.py` boundary and was removed, along with its isolated host
+profile. This local-only harness is not a published general runner. This proves
+a source extension in an installed editor's **development host**, not an
+installed VSIX or all-platform acceptance. Final exact-head hosted checks remain
+required; [#355](https://github.com/atefth/graphql-desk/issues/355) retention and
+the broader parity/release gates remain open.
+
 ## Requirement-to-example/evidence map
 
 | #81 area | Documentation and runnable evidence | Boundary |

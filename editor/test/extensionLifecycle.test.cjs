@@ -5,7 +5,96 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, operationDependencyImpact, presentDoctorReport, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, verifyDoctorPublication, waitForRootReconfigurations } = require("../src/extension");
+const { acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, dispatchConfigurationChange, operationDependencyImpact, presentDoctorReport, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, verifyDoctorPublication, waitForRootReconfigurations } = require("../src/extension");
+const { createManagedStubPath } = require("../src/managedStubPath");
+
+for (const layer of ["workspaceValue", "globalValue"]) {
+ for (const inFlight of [false, true]) {
+  test(`configuration dispatch detects masked ${layer}${inFlight ? " during owned selection" : ""} even when every affects check is false`, async t => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "hidden-stub-choice-"));
+    t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
+    const folder = { uri: { scheme: "file", fsPath: workspace } };
+    const values = {};
+    const stored = new Map();
+    const state = { get: key => stored.get(key), update: async (key, value) => stored.set(key, value) };
+    let release, entered;
+    const held = new Promise(resolve => { release = resolve; });
+    const started = new Promise(resolve => { entered = resolve; });
+    let holding = inFlight;
+    const configuration = { get: (_key, fallback) => values.workspaceFolderValue ?? values.workspaceValue ?? values.globalValue ?? fallback,
+      inspect: () => ({ ...values }), update: async (_key, value) => {
+        values.workspaceFolderValue = value;
+        if (holding) { holding = false; entered(); await held; }
+      } };
+    const vscode = { workspace: { isTrusted: true, textDocuments: [], workspaceFolders: [folder], getConfiguration: () => configuration },
+      ConfigurationTarget: { WorkspaceFolder: 2 } };
+    const current = await createManagedStubPath(vscode, folder, state);
+    const generation = path.join(current.root, "generations", "g-1-00000000-0000-0000-0000-000000000000");
+    fs.mkdirSync(generation, { recursive: true });
+    const verification = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+      id: path.basename(generation), artifactFingerprint: "a" }, manifestFingerprint: "b".repeat(64), verify() { return this; } };
+    assert.equal(await current.recordGeneration(generation, verification.manifestFingerprint), true);
+    const selecting = current.selectGeneration(generation, () => true, verification);
+    if (inFlight) await Promise.race([started, selecting.then(() => assert.fail("the actual owned update must be held"))]);
+    else assert.equal(await selecting, true);
+    const roots = new Map([[workspace, Promise.resolve(current)]]);
+    const selected = configuration.get();
+    values[layer] = `${layer}-user-stubs`;
+    assert.equal(configuration.get(), selected, "the new layer is hidden by the unchanged owned folder override");
+    let handoffs = 0;
+    const dispatched = dispatchConfigurationChange(roots, { affectsConfiguration: () => false }, async () => {
+      handoffs += 1;
+      await reconfigureWorkspaceRoots({ roots, folders: [folder],
+        create: () => createManagedStubPath(vscode, folder, state),
+        retire: async (_root, managed, reroute) => { assert.equal(reroute, true); await managed.releaseForRouting(); } });
+      return true;
+    }, () => assert.fail("no project settings changed"));
+    if (inFlight) {
+      try { await new Promise(resolve => setImmediate(resolve)); assert.equal(handoffs, 0); }
+      finally { release(); }
+      assert.equal(await selecting, true);
+    }
+    await dispatched;
+    assert.equal(handoffs, 1, "a masked change still reaches the existing ownership/handoff path");
+    assert.notEqual(await roots.get(workspace), current);
+    assert.equal(current.ownsSetting, false);
+    assert.equal(values[layer], `${layer}-user-stubs`);
+    assert.equal(configuration.get(), `${layer}-user-stubs`, "handoff preserves the newly chosen lower layer");
+  });
+ }
+}
+
+test("configuration dispatch does no expensive work for unrelated current settings and retains project refresh", async () => {
+  for (const mode of ["unrelated", "project", "owned-and-project", "rerouted-and-project"]) {
+    const selected = Promise.resolve();
+    const roots = new Map([["root", Promise.resolve({ waitForGenerationSelection: () => selected,
+      routingSettingsCurrent: () => true, checkSettingOwnership: () => assert.fail("the cheap path cannot inspect config files") })]]);
+    let stubCalls = 0;
+    let projectCalls = 0;
+    await dispatchConfigurationChange(roots, { affectsConfiguration: section =>
+      section === "graphqlDesk" ? mode !== "unrelated" : mode.endsWith("-and-project") }, async () => {
+      stubCalls += 1;
+      return mode === "rerouted-and-project";
+    }, () => { projectCalls += 1; });
+    assert.equal(stubCalls, mode.endsWith("-and-project") ? 1 : 0);
+    assert.equal(projectCalls, ["project", "owned-and-project"].includes(mode) ? 1 : 0);
+  }
+});
+
+test("configuration dispatch waits for owned selection before checking the all-layer snapshot", async () => {
+  let release;
+  let finished = false;
+  let checks = 0;
+  const selection = new Promise(resolve => { release = resolve; });
+  const roots = new Map([["root", Promise.resolve({ waitForGenerationSelection: () => selection,
+    routingSettingsCurrent() { checks += 1; assert.equal(finished, true); return true; } })]]);
+  const dispatch = dispatchConfigurationChange(roots, { affectsConfiguration: () => false },
+    async () => assert.fail("an owned in-flight update cannot be mistaken for a user change"), () => assert.fail("unrelated event"));
+  try { await new Promise(resolve => setImmediate(resolve)); assert.equal(checks, 0); }
+  finally { finished = true; release(); }
+  await dispatch;
+  assert.equal(checks, 1);
+});
 
 test("doctor's final command handoff discards a report revoked after its awaited collection", async () => {
   for (const boundary of ["trust", "folder", "generation", "dispose", "none"]) {
@@ -217,6 +306,47 @@ test("reconfiguration reuses a root that still owns its setting", async () => {
   assert.equal(created, false);
   assert.equal(retired, false);
   assert.equal(await roots.get(root), managed);
+});
+
+test("an effective config route change releases the cached owned root before creating its replacement", async () => {
+  const root = path.resolve("late-config-workspace");
+  const folder = { uri: { fsPath: root } };
+  const order = [];
+  const current = { root: path.join(root, "old"), ownsSetting: true,
+    checkSettingOwnership: async () => true, releaseForRouting() {}, cleanup() {} };
+  const replacement = { root: path.join(root, "new"), ownsSetting: true,
+    checkSettingOwnership: async () => true, releaseForRouting() {}, cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(current)]]);
+  let release, started;
+  const gate = new Promise(resolve => { release = resolve; });
+  const entered = new Promise(resolve => { started = resolve; });
+  const reconfiguration = reconfigureWorkspaceRoots({ roots, folders: [folder], routeCurrent: async (_folder, managed) => managed === replacement,
+    retire: async (_root, managed, reroute) => { assert.equal(reroute, true); assert.equal(managed, current);
+      order.push("release"); started(); await gate; order.push("released"); },
+    create: async () => { order.push("create"); return replacement; } });
+  await Promise.race([entered, reconfiguration.then(() => assert.fail("an owned root still needs rerouting"))]);
+  const acquisition = acquireManagedRoot(roots, folder, root, [], async () => assert.fail("use the replacement"));
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(order, ["release"]);
+    assert.equal(roots.has(root), false, "no publication may obtain a retiring root");
+  } finally { release(); }
+  assert.equal(await acquisition, replacement);
+  await reconfiguration;
+  assert.deepEqual(order, ["release", "released", "create"]);
+});
+
+test("dirty or changed routing inputs cannot authorize a replacement, while another workspace can progress", async () => {
+  const root = path.resolve("dirty-routing-workspace");
+  const other = path.resolve("clean-routing-workspace");
+  const current = { root, checkSettingOwnership: async () => true, cleanup() {} };
+  const replacement = { root: other, checkSettingOwnership: async () => true, cleanup() {} };
+  const roots = new Map([[root, Promise.resolve(current)], [other, Promise.resolve(replacement)]]);
+  await assert.rejects(reconfigureWorkspaceRoots({ roots, folders: [root, other].map(fsPath => ({ uri: { fsPath } })),
+    routeCurrent: async folder => { if (folder.uri.fsPath === root) throw new Error("dirty config"); return true; },
+    create: async () => assert.fail("no replacement can be authorized"), retire: async () => assert.fail("preserve the existing root") }), AggregateError);
+  assert.equal(await roots.get(root), current);
+  assert.equal(await roots.get(other), replacement);
 });
 
 test("same-root reconfiguration retains the fresh manager without releasing shared settings", async () => {

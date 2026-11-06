@@ -14,7 +14,7 @@ const { createManagedStubPath } = require("./managedStubPath");
 const { createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
 const { createAnalysisGenerations } = require("./analysisGenerations");
 const { collectEditorDoctor } = require("./doctor");
-const { createManagedProjectConfig, acknowledgePendingConfigWrite } = require("./projectPyrightConfig");
+const { createManagedProjectConfig, inspectProjectConfigRoute, acknowledgePendingConfigWrite } = require("./projectPyrightConfig");
 
 function operationDependencyImpact(previous, current) {
   if (!Array.isArray(previous) || !Array.isArray(current)) return null;
@@ -133,6 +133,25 @@ function serializeStubPathChange(roots, operation) {
   stubPathChangeQueues.set(roots, next.catch(() => {}));
   return next;
 }
+function dispatchConfigurationChange(roots, event, stubPathChanged, projectChanged) {
+  return serializeStubPathChange(roots, async () => {
+    await waitForRootReconfigurations(roots);
+    let changed = false;
+    for (const promise of roots.values()) {
+      try {
+        const managed = await promise;
+        let pending;
+        do {
+          pending = managed.waitForGenerationSelection?.();
+          await pending;
+        } while (managed.waitForGenerationSelection?.() !== pending);
+        if (managed.routingSettingsCurrent?.() === false) { changed = true; break; }
+      } catch { changed = true; break; }
+    }
+    const refreshed = (changed || event.affectsConfiguration("python.analysis.stubPath")) && await stubPathChanged() === true;
+    if (!refreshed && event.affectsConfiguration("graphqlDesk")) projectChanged();
+  });
+}
 function reconfigureWorkspaceRoots(options) {
   const previous = rootReconfigurationQueues.get(options.roots) ?? Promise.resolve();
   const next = previous.catch(() => {}).then(() => reconfigureWorkspaceRootsNow({
@@ -178,7 +197,7 @@ function analysisRequestIsCurrent(ticket, generation, disposed, result) {
   return !disposed && ticket === generation && result.isCurrent();
 }
 
-async function reconfigureWorkspaceRootsNow({ roots, folders, create, retire, abandon = () => {} }) {
+async function reconfigureWorkspaceRootsNow({ roots, folders, create, retire, routeCurrent = async () => true, abandon = () => {} }) {
   const errors = [];
   for (const [folderRoot, promise] of [...roots]) {
     let current;
@@ -191,7 +210,21 @@ async function reconfigureWorkspaceRootsNow({ roots, folders, create, retire, ab
       try { await retire(folderRoot, current); } catch (error) { errors.push(error); }
       continue;
     }
-    if (stillOwnsSetting) continue;
+    let sameRoute;
+    try { sameRoute = await routeCurrent(folder, current); }
+    catch (error) { errors.push(error); continue; }
+    const sameSettings = current.routingSettingsCurrent?.() !== false;
+    if (sameRoute && sameSettings && (stillOwnsSetting || current.ownsSetting === false)) continue;
+    if ((!sameRoute || !sameSettings) && typeof current.releaseForRouting === "function") {
+      if (roots.get(folderRoot) === promise) roots.delete(folderRoot);
+      try {
+        await retire(folderRoot, current, true);
+        const next = create(folder);
+        roots.set(folderRoot, next);
+        try { await next; } catch (error) { if (roots.get(folderRoot) === next) roots.delete(folderRoot); throw error; }
+      } catch (error) { errors.push(error); }
+      continue;
+    }
     let next;
     try { next = await create(folder); }
     catch (error) {
@@ -369,6 +402,8 @@ function activate(context) {
     }
     return (async () => await createManagedProjectConfig(vscode, folder, context.workspaceState,
       (target, text, action, managedPath, ownership) => controller.editPyrightConfig(target, text, action, managedPath, ownership), {
+        ownerCurrent: () => !disposing && !disposed && controller.isTrusted() &&
+          (vscode.workspace.workspaceFolders ?? []).includes(folder) && vscode.workspace.getWorkspaceFolder(folder.uri) === folder,
         configFile: (target, action, payload) => controller.configFile(target, action, payload),
         onOwnedWrite: (filename, fingerprint, operation) => operation
           ? controller.trackOwnedProjectConfigWrite(filename, fingerprint, operation)
@@ -381,22 +416,33 @@ function activate(context) {
         throw error;
       });
   }
-  function managedRoot(folder, folderRoot, generatedPackages = []) {
+  async function managedRoot(folder, folderRoot, generatedPackages = []) {
+    await reconfigureRoots();
     return acquireManagedRoot(roots, folder, folderRoot, generatedPackages, createManagedRoot);
   }
-  async function retireRoot(folderRoot, managed) {
+  async function retireRoot(folderRoot, managed, reroute = false) {
+    const ticket = generation;
     latestArtifacts.delete(folderRoot);
     const prefix = `${folderRoot}\0${managed.root}\0`;
     for (const [key, handle] of outputs) if (key.startsWith(prefix)) {
       await handle.cleanup();
       outputs.delete(key);
     }
-    await managed.release?.();
+    if (reroute) await managed.releaseForRouting(() => !disposing && !disposed && ticket === generation &&
+      (vscode.workspace.workspaceFolders ?? []).some(folder => path.resolve(folder.uri.fsPath) === folderRoot));
+    else await managed.release?.();
     managed.cleanup();
   }
   async function reconfigureRoots() {
     await reconfigureWorkspaceRoots({ roots, folders: () => vscode.workspace.workspaceFolders ?? [],
-      create: createManagedRoot, retire: retireRoot, abandon: managed => supersededRoots.push(managed) });
+      create: createManagedRoot, retire: retireRoot,
+      routeCurrent: async (folder, current) => {
+        const route = await inspectProjectConfigRoute(vscode, folder,
+          (target, text, action, managedPath, ownership) => controller.editPyrightConfig(target, text, action, managedPath, ownership));
+        if (!route.isCurrent()) throw new Error("Pyright routing inputs changed during inspection; preserved");
+        return route.file === (current.configurationFile ?? null);
+      },
+      abandon: managed => supersededRoots.push(managed) });
   }
   async function managedStubPathsAreCurrent() {
     if (!roots.size) return false;
@@ -406,7 +452,7 @@ function activate(context) {
       try {
         const managed = await promise;
         const stillOwnsSetting = await managed.checkSettingOwnership();
-        if (!stillOwnsSetting) {
+        if (!stillOwnsSetting || managed.routingSettingsCurrent?.() === false) {
           output.appendLine(`GraphQL Desk trace: ownership details ${JSON.stringify(managed.ownershipStatus?.() ?? { managerCurrent: false })}`);
           return false;
         }
@@ -826,20 +872,16 @@ function activate(context) {
   highlighting = registerHighlighting(vscode, controller);
   const visible = vscode.window.onDidChangeVisibleTextEditors(() => refreshVisible());
   const configChanged = vscode.workspace.onDidChangeConfiguration(event => {
-    if ((vscode.workspace.workspaceFolders ?? []).some(folder =>
-      event.affectsConfiguration("python.analysis.stubPath", folder.uri))) {
-      // Check and reconfigure as one step so duplicate events cannot reuse a stale root.
-      void serializeStubPathChange(roots, async () => {
-        await waitForRootReconfigurations(roots);
-        const ownedSelection = await managedStubPathsAreCurrent();
-        if (disposed) return;
-        output.appendLine(`GraphQL Desk trace: stubPath event owned=${ownedSelection}`);
-        if (ownedSelection) return;
-        generation += 1;
-        try { await reconfigureRoots(); await refreshVisible(null, true); }
-        catch { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(null, true); }
-      });
-    } else if (event.affectsConfiguration("graphqlDesk")) refreshVisible(null, true);
+    void dispatchConfigurationChange(roots, event, async () => {
+      const ownedSelection = await managedStubPathsAreCurrent();
+      if (disposed) return true;
+      output.appendLine(`GraphQL Desk trace: stubPath event owned=${ownedSelection}`);
+      if (ownedSelection) return false;
+      generation += 1;
+      try { await reconfigureRoots(); await refreshVisible(null, true); }
+      catch { status.text = "GraphQL Desk: managed typing unavailable"; status.show(); refreshVisible(null, true); }
+      return true;
+    }, () => refreshVisible(null, true));
   });
   const foldersChanged = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     generation += 1;
@@ -934,5 +976,5 @@ function activate(context) {
   refreshVisible(null, true);
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate, acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, drainPublications, operationDependencyImpact, presentDoctorReport, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, verifyDoctorPublication, waitForRootReconfigurations };
+module.exports = { activate, deactivate, acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, dispatchConfigurationChange, drainPublications, operationDependencyImpact, presentDoctorReport, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, verifyDoctorPublication, waitForRootReconfigurations };
 
