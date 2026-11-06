@@ -20,6 +20,7 @@
 ## Local storage
 
 - Keep task temp files, caches, and editor profiles inside the primary repository directory, including when working in a linked worktree. Redirect `TEMP`/`TMP` and tool-specific caches such as npm, uv, and pip for the current process where supported; do not change global user settings.
+- Redirect managed Python installations with `UV_PYTHON_INSTALL_DIR` and installed uv tools with `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` into `.graphql-desk-local/tools` before running uv. `TEMP` and `UV_CACHE_DIR` do not redirect those installations. Check a reused environment's `pyvenv.cfg` and `sys.base_prefix`: an environment on E: can still use a base interpreter on C:. Reuse a verified project-local base for task-owned environments; preserve unrelated global installations until their users are known.
 - Reuse shared pinned tool caches when possible to avoid duplicate downloads. After success or failure, remove only task-created artifacts and worktree-specific caches after verifying their resolved paths. Preserve tracked, untracked, and ignored user data, and do not follow or delete junction targets.
 - These repository instructions cannot prevent operating-system or application components from making writes outside the repository; inspect configured paths and report any such limitation honestly.
 
