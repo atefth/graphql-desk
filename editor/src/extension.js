@@ -13,7 +13,7 @@ const { registerHighlighting } = require("./highlighting");
 const { createManagedStubPath } = require("./managedStubPath");
 const { createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
 const { createAnalysisGenerations } = require("./analysisGenerations");
-const { createManagedProjectConfig } = require("./projectPyrightConfig");
+const { createManagedProjectConfig, acknowledgePendingConfigWrite } = require("./projectPyrightConfig");
 
 function operationDependencyImpact(previous, current) {
   if (!Array.isArray(previous) || !Array.isArray(current)) return null;
@@ -317,6 +317,7 @@ function activate(context) {
   function createManagedRoot(folder) {
     return (async () => await createManagedProjectConfig(vscode, folder, context.workspaceState,
       (target, text, action, managedPath, ownership) => controller.editPyrightConfig(target, text, action, managedPath, ownership), {
+        configFile: (target, action, payload) => controller.configFile(target, action, payload),
         onOwnedWrite: (filename, fingerprint, operation) => operation
           ? controller.trackOwnedProjectConfigWrite(filename, fingerprint, operation)
           : controller.markOwnedProjectConfig(filename, fingerprint),
@@ -811,12 +812,25 @@ function activate(context) {
     });
   });
   const command = vscode.commands.registerCommand("graphqlDesk.refreshSchema", () => controller.refresh());
+  const recoverConfig = vscode.commands.registerCommand("graphqlDesk.reviewConfigRecovery", async () => {
+    const folders = (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === "file");
+    const folder = folders.length === 1 ? folders[0] : await vscode.window.showWorkspaceFolderPick();
+    if (!folder) return false;
+    try {
+      const acknowledged = await acknowledgePendingConfigWrite(vscode, folder, context.workspaceState, () => controller.resetConfigWorkspace(folder));
+      if (acknowledged) { generation += 1; refreshVisible(null, true); }
+      return acknowledged;
+    } catch (error) {
+      await vscode.window.showErrorMessage(`GraphQL Desk: ${error instanceof Error ? error.message : "Could not review the pending config write; preserved"}`);
+      return false;
+    }
+  });
   const lifecycle = { dispose() {
     if (disposePromise) return disposePromise;
     if (disposed) return Promise.resolve();
     disposing = true;
     disposePromise = (async () => {
-      clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose(); configChanged.dispose();
+      clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); recoverConfig.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose(); configChanged.dispose();
       await renameStarted;
       await renameClient.stop();
       await drainPublications(publications, () => {

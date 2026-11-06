@@ -243,7 +243,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     if (state && (state.python !== python || state.setting !== setting)) { dropState(root); state = null; }
     if (!state) {
-      state = { root, folder, python, setting, worker: workerFactory({ python, workspace: root, isTrusted: trusted }),
+      state = { root, folder, python, setting, worker: workerFactory({ python, workspace: root, isTrusted: trusted, configFiles: true }),
         running: false, pending: new Map(), cached: null, artifactsAbort: null, targets: [], credentials: new Map(), revisions: [], watches: new Map(), sourcePolls: new Map(),
         polls: new Map(), pollTimer: null, pollAbort: null, polling: false, pollPaused: false };
       states.set(root, state);
@@ -752,6 +752,47 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!trusted() || states.get(state.root) !== state || !reply || reply.ok !== true) throw new Error("Pyproject Pyright config could not be edited safely");
     return reply;
   }
+  async function configFile(folder, action, payload) {
+    if (!folder?.uri || folder.uri.scheme !== "file" || !trusted()) throw new Error("Trusted file workspace required");
+    const state = await stateFor({ uri: folder.uri.toString() });
+    if (!state || !trusted()) throw new Error("Python environment unavailable for safe config publication");
+    const reply = await enqueue(state, async () => {
+      const temporaryKey = action === "stage" && typeof payload?.temporary === "string" ? canonical(payload.temporary) : null;
+      const temporary = ownedProjectConfigTemporaryPaths.get(temporaryKey);
+      const pending = temporary && pendingOwnedProjectConfigWrites.get(temporary.owner);
+      const activeStage = temporary && pending && trusted() && states.get(state.root) === state &&
+        ["pyrightconfig.json", "pyproject.toml"].includes(payload.file) &&
+        temporary.owner === canonical(path.join(state.root, payload.file)) && pending.temporaryPath === temporaryKey &&
+        pending.previousHash === payload.expected_hash && typeof payload.text === "string" &&
+        pending.nextHash === createHash("sha256").update(payload.text, "utf8").digest("hex") && temporary.hash === pending.nextHash;
+      if (activeStage) { clearTimeout(temporary.timer); temporary.staging = true; }
+      try { return await state.worker.request({ ...payload, op: "config_file", workspace: state.root, action }); }
+      finally {
+        if (activeStage && ownedProjectConfigTemporaryPaths.get(temporaryKey) === temporary) {
+          delete temporary.staging;
+          temporary.timer = setTimeout(() => ownedProjectConfigTemporaryPaths.delete(temporaryKey), 5000);
+          temporary.timer.unref?.();
+        }
+      }
+    },
+      `config_file:${action}`, epoch, true);
+    if (!trusted() || states.get(state.root) !== state || !reply || reply.ok !== true) throw new Error("Config file could not be verified safely; preserved");
+    return reply;
+  }
+  function resetConfigWorkspace(folder) {
+    if (!folder?.uri || folder.uri.scheme !== "file" || !trusted()) throw new Error("Trusted file workspace required");
+    const root = canonical(folder.uri.fsPath);
+    const owners = (vscode.workspace.workspaceFolders ?? []).filter(item => item.uri.scheme === "file" && canonical(item.uri.fsPath) === root);
+    if (owners.length !== 1) throw new Error("Pyright config workspace changed; preserved");
+    epoch += 1;
+    dropState(root);
+    interpreters.delete(root);
+    for (const name of ["pyrightconfig.json", "pyproject.toml"]) {
+      const key = canonical(path.join(root, name));
+      finishOwnedConfigWrite(key);
+      ownedProjectConfigHashes.delete(key);
+    }
+  }
   async function quarantine({ workspace, projects, invalidated_owners, preserve_current = false } = {}) {
     if (!trusted() || typeof workspace !== "string" || !path.isAbsolute(workspace) ||
         !Array.isArray(projects) || !Array.isArray(invalidated_owners)) return null;
@@ -841,8 +882,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           if (ownedTemporary) {
             try {
               const stat = fs.lstatSync(resource.fsPath);
-              if (!stat.isSymbolicLink() && stat.isFile() && stat.size <= 1024 * 1024 &&
-                  createHash("sha256").update(fs.readFileSync(resource.fsPath)).digest("hex") === ownedTemporary.hash) return;
+              if (!stat.isSymbolicLink() && stat.isFile() && stat.size <= 1024 * 1024) {
+                const bytes = fs.readFileSync(resource.fsPath);
+                if (ownedTemporary.staging || createHash("sha256").update(bytes).digest("hex") === ownedTemporary.hash) return;
+              }
             } catch (error) { if (error.code === "ENOENT") return; }
             clearTimeout(ownedTemporary.timer);
             ownedProjectConfigTemporaryPaths.delete(temporary);
@@ -1011,7 +1054,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }));
   }
   reconcileFolderWatches();
-  return { analyze, isCurrent, artifacts, quarantine, editPyrightConfig, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
+  return { analyze, isCurrent, artifacts, quarantine, editPyrightConfig, configFile, resetConfigWorkspace, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
     markOwnedProjectConfig(filename, fingerprint) {
       if (typeof filename !== "string" || !path.isAbsolute(filename) || typeof fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(fingerprint)) return false;
       const key = canonical(filename);

@@ -185,6 +185,63 @@ change. The removal fixture uses a preconfigured
 stub root and starts in a two-folder workspace so no single-to-multi-folder
 transition or unsaved-workspace prompt is needed.
 
+### Managed project-config security (#356)
+
+Project-config replacement uses the same native permission checks as `init`.
+The trusted worker receives an explicit real workspace anchor; ordinary workers
+remain read-only. It captures the original file's bytes, identity and security
+metadata, rejects malformed UTF-8, then creates an empty sibling and establishes
+equivalent permissions before writing any config content. Unknown permissions,
+redirected paths or changed ownership fail closed. Config text and native access
+descriptors are not included in recovery records or diagnostics.
+
+The editor journals intent before staging and persists the worker's opaque
+receipt before publication. Native verification is the last awaited operation
+before synchronous trust, dirty-buffer, path, identity and content checks and
+rename. Every bounded Windows lock retry requires fresh native verification.
+Python and Node file identities are never compared across runtimes. These
+guards narrow replacement races; they are not a universal filesystem
+compare-and-swap guarantee.
+
+An interrupted write keeps its recovery journal until native finish or discard
+verifies the exact owned file. A resumed receipt authorizes recovery only, never
+publication. Legacy or incomplete records without a complete security proof
+require explicit recovery; matching hashes alone cannot authorize deletion or
+restaging. Changed or foreign files remain untouched. An incomplete stage blocks
+further staging across worker restarts instead of accumulating another temporary
+file on every retry.
+
+Staged-file cleanup also uses a read-only native verification followed by the
+editor's final synchronous dirty-buffer, trust, directory, identity and byte
+checks before unlink. Python only confirms the resulting absence. The journal
+records cleanup intent first, so recovery distinguishes an interrupted discard
+from a completed config replacement. Opening a dirty staging buffer while the
+native check is pending preserves the file instead of racing an asynchronous
+Python deletion.
+
+For a legacy or incomplete record, run **GraphQL Desk: Review Interrupted Config
+Write**. Inspect the config and reserved temporary paths shown in its dialog
+before confirming. This forgets only the unchanged pending record and resets the
+old worker; it preserves every file. Review or retain any uncertain temporary
+file yourself. Cancellation, workspace changes and a changed record leave the
+record intact. A new update still has to pass ordinary native permission,
+ownership and currentness checks; acknowledgement does not approve those files
+for overwrite or deletion.
+
+Backend and transport fixtures cover these boundaries; complete installed-editor
+and platform verification is tracked by #356. This does not resolve reader-safe
+generation retirement under #355 or pass broad TYPE-01 acceptance.
+
+Local verification for this change passed 106 backend tests (four existing POSIX
+cases skipped on Windows), 365 editor tests, Ruff, mypy and Pyright. Installed
+VS Code 1.141.0 exercised the TOML lifecycle and 1.142.0 the JSONC lifecycle,
+both with Python extension 2026.10.0 and Pylance 2026.4.1. The fixtures verify
+setup, nullable schema refresh, restart recovery and restoration of custom
+settings. Permission evidence composes unchanged native `init` security-helper
+fixtures with new staging/protocol/race tests and those installed-editor flows;
+the separately blocked protected-DACL editor probe was not executed or retried.
+Required hosted platform checks remain the merge gate.
+
 ### Immutable generations and recovery (#37 acceptance complete)
 
 When GraphQL Desk owns the previously unset stubPath, it now stages each analysis

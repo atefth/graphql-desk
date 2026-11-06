@@ -1,6 +1,7 @@
 "use strict";
 
 const { spawn: spawnProcess } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
@@ -44,6 +45,15 @@ function parseFrame(buffer) {
 
 function validReply(reply, request) {
   if (!object(reply) || reply.ok !== true) return false;
+  if (request.op === "config_file") {
+    const token = value => typeof value === "string" && /^[a-f0-9]{32}$/.test(value);
+    if (request.action === "stage") return keys(reply, ["ok", "token", "receipt", "original_hash", "staged_hash"]) &&
+      token(reply.token) && string(reply.receipt) && reply.receipt.length <= 32768 &&
+      /^[A-Za-z0-9+/]+={0,2}$/.test(reply.receipt) && reply.original_hash === request.expected_hash &&
+      reply.staged_hash === createHash("sha256").update(request.text, "utf8").digest("hex");
+    return keys(reply, ["ok", "token"]) && token(reply.token) &&
+      (request.action === "resume" || reply.token === request.token);
+  }
   if (request.op === "pyright_config") return keys(reply, ["ok", "found", "text", "stub_path", "has_stub_path", "extra_paths", "has_execution_environments", "execution_environments", "ownership"]) &&
     typeof reply.found === "boolean" && typeof reply.text === "string" &&
     (reply.stub_path === null || typeof reply.stub_path === "string") &&
@@ -238,9 +248,9 @@ function validReply(reply, request) {
  * The caller owns complete captures, latest-job publication guards and trust events.
  * invalidate() terminates busy work and permits a fresh process; dispose() is final.
  */
-function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000, spawn = spawnProcess }) {
+function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000, configFiles = false, spawn = spawnProcess }) {
   if (!string(python) || !path.isAbsolute(python) || !string(workspace) || !path.isAbsolute(workspace) ||
-      typeof isTrusted !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2147483647) throw failure();
+      typeof isTrusted !== "function" || typeof configFiles !== "boolean" || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2147483647) throw failure();
   const outside = candidate => {
     const relative = path.relative(path.resolve(workspace), candidate);
     return relative && (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative));
@@ -296,7 +306,9 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
     }
   }
   function start() {
-    const process = spawn(python, ["-I", "-X", "utf8", "-m", "graphql_desk.editor_worker"], {
+    const args = ["-I", "-B", "-X", "utf8", "-m", "graphql_desk.editor_worker"];
+    if (configFiles) args.push("--config-workspace", workspace);
+    const process = spawn(python, args, {
       cwd, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
     child = process;
@@ -344,9 +356,24 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
       if (disposed || !trusted() || signal?.aborted) { stop(); throw failure(); }
       let encoded;
       try {
-        if (!object(message) || !["prepare", "analyze", "current", "refresh", "artifacts", "quarantine", "pyright_config"].includes(message.op) ||
+        if (!object(message) || !["prepare", "analyze", "current", "refresh", "artifacts", "quarantine", "pyright_config", "config_file"].includes(message.op) ||
             message.workspace !== workspace) throw failure();
-        if (message.op === "pyright_config") {
+        if (message.op === "config_file") {
+          if (!configFiles) throw failure();
+          const base = ["op", "workspace", "action"];
+          if (message.action === "stage") {
+            if (!keys(message, [...base, "file", "temporary", "expected_hash", "text"]) ||
+                !["pyrightconfig.json", "pyproject.toml"].includes(message.file) ||
+                typeof message.temporary !== "string" || !path.isAbsolute(message.temporary) ||
+                !/^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.relative(workspace, message.temporary)) ||
+                typeof message.expected_hash !== "string" || !/^[a-f0-9]{64}$/.test(message.expected_hash) ||
+                typeof message.text !== "string" || Buffer.byteLength(message.text, "utf8") > 1024 * 1024) throw failure();
+          } else if (message.action === "resume") {
+            if (!keys(message, [...base, "receipt"]) || !string(message.receipt) || message.receipt.length > 32768 ||
+                !/^[A-Za-z0-9+/]+={0,2}$/.test(message.receipt)) throw failure();
+          } else if (!["verify", "verify_discard", "discard", "finish"].includes(message.action) || !keys(message, [...base, "token"]) ||
+              typeof message.token !== "string" || !/^[a-f0-9]{32}$/.test(message.token)) throw failure();
+        } else if (message.op === "pyright_config") {
           if (!keys(message, ["op", "workspace", "text", "action", "managed_path", "ownership"]) || typeof message.text !== "string" ||
               Buffer.byteLength(message.text, "utf8") > 1024 * 1024 || !["inspect", "add", "remove", "set_stub_path", "restore_stub_path", "prepare_stub_path", "release_stub_path"].includes(message.action) ||
               (message.action === "set_stub_path" ? !generationStubPath(message.managed_path) : message.managed_path !== LIVE_STUB_ROOT) || !object(message.ownership) ||

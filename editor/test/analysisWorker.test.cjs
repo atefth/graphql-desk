@@ -6,6 +6,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn: spawnProcess } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const { PassThrough, Writable } = require("node:stream");
 const { createAnalysisWorker, MAX_FRAME_BYTES } = require("../src/analysisWorker");
@@ -117,6 +118,66 @@ function setup(t, fake, options = {}) {
   return { worker, workspace };
 }
 
+test("config staging is opt-in and requires bounded exact requests and matching receipts", async t => {
+  const token = "a".repeat(32);
+  const receipt = Buffer.from("opaque-native-proof").toString("base64");
+  const hash = value => createHash("sha256").update(value).digest("hex");
+  const seen = [];
+  const fake = fakeSpawn((child, chunk) => {
+    const request = JSON.parse(chunk.toString("utf8"));
+    seen.push(request);
+    child.stdout.write(JSON.stringify(request.action === "stage"
+      ? { ok: true, token, receipt, original_hash: request.expected_hash, staged_hash: hash(request.text) }
+      : { ok: true, token }) + "\n");
+  });
+  const fixture = setup(t, fake, { configFiles: true });
+  const stage = { op: "config_file", workspace: fixture.workspace, action: "stage", file: "pyrightconfig.json",
+    temporary: path.join(fixture.workspace, ".graphql-desk-01234567-89ab-cdef-0123-456789abcdef.tmp"),
+    expected_hash: hash("original"), text: '{"stubPath":"managed"}' };
+  assert.equal((await fixture.worker.request(stage)).receipt, receipt);
+  for (const action of ["verify", "verify_discard", "discard", "finish"]) {
+    assert.equal((await fixture.worker.request({ op: "config_file", workspace: fixture.workspace, action, token })).token, token);
+  }
+  assert.equal((await fixture.worker.request({ op: "config_file", workspace: fixture.workspace, action: "resume", receipt })).token, token);
+  assert.deepEqual(seen.map(request => request.action), ["stage", "verify", "verify_discard", "discard", "finish", "resume"]);
+  assert.deepEqual(fake.calls[0][1], ["-I", "-B", "-X", "utf8", "-m", "graphql_desk.editor_worker", "--config-workspace", fixture.workspace]);
+  assert.notEqual(fake.calls[0][2].cwd, fixture.workspace);
+
+  const readonly = fakeSpawn();
+  const defaultWorker = setup(t, readonly);
+  await assert.rejects(defaultWorker.worker.request({ ...stage, workspace: defaultWorker.workspace }), generic);
+  assert.equal(readonly.calls.length, 0);
+  for (const invalid of [
+    { ...stage, file: "other.json" },
+    { ...stage, temporary: path.join(fixture.workspace, "nested", path.basename(stage.temporary)) },
+    { ...stage, temporary: path.join(path.dirname(fixture.workspace), path.basename(stage.temporary)) },
+    { ...stage, text: "x".repeat(1024 * 1024 + 1) },
+    { ...stage, expected_hash: "not-a-hash" },
+    { ...stage, extra: true },
+    { op: "config_file", workspace: fixture.workspace, action: "verify", token: "bad-token" },
+    { op: "config_file", workspace: fixture.workspace, action: "resume", receipt: "../invalid" },
+    { op: "config_file", workspace: fixture.workspace, action: "resume", receipt: "a".repeat(32769) },
+  ]) {
+    const invalidSpawn = fakeSpawn();
+    const candidate = setup(t, invalidSpawn, { configFiles: true });
+    await assert.rejects(candidate.worker.request(invalid), generic);
+    assert.equal(invalidSpawn.calls.length, 0);
+  }
+  for (const badReply of [
+    { ok: true, token, receipt, original_hash: stage.expected_hash, staged_hash: hash("wrong") },
+    { ok: true, token, receipt, original_hash: hash("wrong"), staged_hash: hash(stage.text) },
+    { ok: true, token: "bad", receipt, original_hash: stage.expected_hash, staged_hash: hash(stage.text) },
+    { ok: true, token, receipt, original_hash: stage.expected_hash, staged_hash: hash(stage.text), secret: "extra" },
+  ]) {
+    const malformed = fakeSpawn(child => child.stdout.write(JSON.stringify(badReply) + "\n"));
+    const candidate = setup(t, malformed, { configFiles: true });
+    await assert.rejects(candidate.worker.request(stage), generic);
+  }
+  const malformed = fakeSpawn(child => child.stdout.write(JSON.stringify({ ok: true, token: "b".repeat(32) }) + "\n"));
+  const candidate = setup(t, malformed, { configFiles: true });
+  await assert.rejects(candidate.worker.request({ op: "config_file", workspace: fixture.workspace, action: "verify", token }), generic);
+});
+
 test("real isolated persistent worker uses Unicode dirty external schema and rejects old IDs after restart", async t => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "graphql-desk-transport-"));
   t.after(() => fs.rm(temporary, { recursive: true, force: true }));
@@ -156,7 +217,7 @@ test("exact launch flags, one active request and no queued concurrent work", asy
   await assert.rejects(worker.request(message(workspace)), generic);
   assert.equal(fake.calls.length, 1);
   assert.equal(fake.calls[0][0], python);
-  assert.deepEqual(fake.calls[0][1], ["-I", "-X", "utf8", "-m", "graphql_desk.editor_worker"]);
+  assert.deepEqual(fake.calls[0][1], ["-I", "-B", "-X", "utf8", "-m", "graphql_desk.editor_worker"]);
   assert.equal(fake.calls[0][2].shell, false);
   assert.equal(fake.calls[0][2].windowsHide, true);
   assert.notEqual(fake.calls[0][2].cwd, workspace);
@@ -367,7 +428,7 @@ test("temporary-directory workspace falls back to an outside filesystem-root cwd
   assert.equal(cwd, path.parse(path.resolve(workspace)).root);
   const relative = path.relative(path.resolve(workspace), cwd);
   assert.ok(relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative));
-  assert.deepEqual(fake.calls[0][1], ["-I", "-X", "utf8", "-m", "graphql_desk.editor_worker"]);
+  assert.deepEqual(fake.calls[0][1], ["-I", "-B", "-X", "utf8", "-m", "graphql_desk.editor_worker"]);
   fake.children[0].stdout.write(JSON.stringify(reply) + "\n");
   assert.deepEqual(await active, reply);
 });
