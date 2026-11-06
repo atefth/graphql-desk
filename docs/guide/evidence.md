@@ -71,6 +71,36 @@ installed VSIX or all-platform acceptance. Final exact-head hosted checks remain
 required; [#355](https://github.com/atefth/graphql-desk/issues/355) retention and
 the broader parity/release gates remain open.
 
+The next exact-head hosted run at `c048ce8` completed with **22 successes and
+7 failures**, including the aggregate check. Four editor failures exercised
+unsaved GraphQL-only TOML changes; two factory hosts failed after a lower-priority
+Python setting was changed and quickly restored. These failures are retained in
+[run 42199145008](https://github.com/atefth/graphql-desk/actions/runs/42199145008);
+they are not waived or counted as parity passes.
+
+Actual manager regressions reproduced dirty unrelated TOML blocking both a JSON
+route and a fallback route. Read-only route detection now follows physical config
+precedence, with Native snapshot and trust checks after awaited inspection.
+Absence of a Pyright table permits fallback acquisition even if the GraphQL-only
+buffer is dirty; effective Pyright writers and all other write/cleanup paths
+still require clean buffers. Fourteen focused cases passed independently and all
+**492 editor tests** passed locally, without skips or cancellations. Fresh hosted
+acceptance is still required.
+
+Actual manager and generation-publisher replays also reproduced the interrupted
+routing-release case: a Python setting restored during native verification or
+finish left an outdated saved choice and prevented a fresh manager from
+recovering. Routing-release recovery now captures and guards the latest user
+choice after validating the owned/original project config. It preserves every
+Python layer through release; only fresh authorized setup can mirror its own
+setting again. A string naming a former generation is treated as the user's
+choice, not proof of ownership. The old manager loses its publication capability
+as soon as release intent is durable; retained generation and staging proof is
+not discarded. Fifteen focused recovery and safety cases passed independently;
+the combined configured editor suite passed **507 tests**, with zero failures,
+skips or cancellations. This does not relax active/setup/rotation checks or prove
+reader lifetime safety. Hosted acceptance of this final source remains required.
+
 ## Requirement-to-example/evidence map
 
 | #81 area | Documentation and runnable evidence | Boundary |
