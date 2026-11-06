@@ -299,6 +299,11 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
             if (layer === null) throw new Error(ownershipError());
             // An owned write cannot adopt concurrent changes to hidden user layers.
             expected[layer] = targetSetting;
+            if (vscode.workspace.workspaceFolders?.length === 1 && !vscode.workspace.workspaceFile &&
+                current.workspaceValue === targetSetting && current.workspaceFolderValue === targetSetting) {
+              // A standalone folder exposes one physical setting through both views.
+              expected[1] = expected[2] = targetSetting;
+            }
             expectedSettings = JSON.stringify(expected);
             return true;
           } catch (error) {

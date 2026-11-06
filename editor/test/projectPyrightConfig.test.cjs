@@ -491,7 +491,7 @@ test("real Pyright retains custom stub typing through an explicit environment", 
 });
 
 function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonStubPath, inheritedPythonStubPath, globalPythonStubPath,
-  workspaceSerialized = false } = {}) {
+  workspaceSerialized = false, standaloneAliases = false } = {}) {
   const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "pyright-config-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const folder = { uri: { scheme: "file", fsPath: root, toString: () => `file://${root.replaceAll("\\", "/")}` } };
@@ -503,7 +503,7 @@ function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonSt
   const pythonConfiguration = {
     get: (_name, fallback) => pythonStubPath ?? inheritedPythonStubPath ?? globalPythonStubPath ?? fallback,
     inspect: () => workspaceSerialized ? { workspaceValue: pythonStubPath ?? inheritedPythonStubPath, globalValue: globalPythonStubPath } :
-      { workspaceFolderValue: pythonStubPath, workspaceValue: inheritedPythonStubPath, globalValue: globalPythonStubPath },
+      { workspaceFolderValue: pythonStubPath, workspaceValue: standaloneAliases ? pythonStubPath : inheritedPythonStubPath, globalValue: globalPythonStubPath },
     update: async (_name, value) => {
       pythonStubPath = value;
       if (onPythonSettingChange) await onPythonSettingChange(value);
@@ -602,6 +602,40 @@ function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonSt
     setInheritedPythonStubPath(value) { inheritedPythonStubPath = value; },
     setGlobalPythonStubPath(value) { globalPythonStubPath = value; },
     onPythonSettingChange(callback) { onPythonSettingChange = callback; } };
+}
+
+test("project owner advances both standalone aliases through setup, rotation and restoration", async t => {
+  const original = '{"stubPath":"project-user-stubs"}';
+  const f = fixture(t, { json: original, standaloneAliases: true, globalPythonStubPath: "global-user-stubs" });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  assert.equal(managed.routingSettingsCurrent(), true, "Both native views of the same standalone setting are owned");
+  const generation = path.join(managed.root, "generations", `g-1-${randomUUID()}`);
+  fs.mkdirSync(generation, { recursive: true });
+  const verification = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+    id: path.basename(generation), artifactFingerprint: "a" }, manifestFingerprint: "b".repeat(64), verify() { return this; } };
+  assert.equal(await managed.recordGeneration(generation, verification.manifestFingerprint), true);
+  assert.equal(await managed.selectGeneration(generation, () => true, verification), true);
+  assert.equal(managed.routingSettingsCurrent(), true);
+  assert.equal(f.vscode.workspace.getConfiguration().inspect().globalValue, "global-user-stubs");
+  await managed.release();
+  assert.equal(f.pythonStubPath, undefined);
+  assert.equal(f.vscode.workspace.getConfiguration().get("analysis.stubPath"), "global-user-stubs");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")), JSON.parse(original));
+});
+
+for (const scheme of ["file", "untitled"]) {
+  test(`project owner does not merge independent same-target layers in a ${scheme} workspace`, async t => {
+    const f = fixture(t, { json: "{}" });
+    f.vscode.workspace.workspaceFile = { scheme, fsPath: path.join(f.root, "project.code-workspace") };
+    f.onPythonSettingChange(value => f.setInheritedPythonStubPath(value));
+    const state = stateStore();
+    const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    assert.equal(managed.routingSettingsCurrent(), false, "An independent concurrent Workspace choice must still require routing");
+    const prior = state.get(stateKey(f.root)).pythonStubPath.snapshot;
+    assert.equal(prior.singleFolderDirectory, false, "An untitled workspace file also gives Workspace its own settings layer");
+    assert.equal(prior.workspacePresent, false, "The owned update cannot adopt the concurrent Workspace choice as its prior");
+  });
 }
 
 test("JSONC edit preserves comments, trailing commas, and unrelated settings", () => {

@@ -27,9 +27,11 @@ as an archive, not installed into a clean consumer environment by this example.
 
 ## Config routing and owner-record replacement
 
-For [#329](https://github.com/atefth/graphql-desk/issues/329), the final independent
-editor suite passed **472 tests**, with no failures, skips or cancellations, on
-2026-11-06. The connected [project-config](../../editor/test/projectPyrightConfig.test.cjs),
+For [#329](https://github.com/atefth/graphql-desk/issues/329), the initial independent
+editor suite passed **472 tests** on 2026-11-06. After the standalone-folder
+correction below and deterministic polling-fixture correction, the combined
+independent suite passed **479 tests**, with no failures, skips or cancellations.
+The connected [project-config](../../editor/test/projectPyrightConfig.test.cjs),
 [managed-setting](../../editor/test/managedStubPath.test.cjs) and
 [lifecycle](../../editor/test/extensionLifecycle.test.cjs) fixtures cover routing
 and interrupted owner writes.
@@ -45,6 +47,14 @@ debugpy **2026.6.0** and Python Environments **1.40.0**, with application extens
 updates disabled and Pylance Trace enabled; final versions and paths matched.
 Real deactivation restored user settings/configs while preserving unsaved text,
 source bytes and user files.
+
+That seven-phase run used a workspace file. A standalone folder exposes one
+physical setting through both Workspace and WorkspaceFolder views. The owned
+write advances both only when their observed values equal its exact target and
+there is currently one folder with no workspace file, including no untitled
+workspace. Global and independent workspace choices remain separate. Actual
+manager/dispatcher regressions cover this distinction; final hosted folder-mode
+checks are required rather than inferred from the workspace-file run.
 
 Owner replacement uses one exclusively created stage and at most four async
 attempts, waiting 50/100/150 ms between retries. Each attempt rechecks phase,

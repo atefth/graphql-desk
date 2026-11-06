@@ -8,6 +8,48 @@ const { pathToFileURL } = require("node:url");
 const { acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, dispatchConfigurationChange, operationDependencyImpact, presentDoctorReport, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, verifyDoctorPublication, waitForRootReconfigurations } = require("../src/extension");
 const { createManagedStubPath } = require("../src/managedStubPath");
 
+for (const workspaceScheme of [null, "file", "untitled", "becomes-untitled"]) {
+  test(`owned alias events ${workspaceScheme ? `retain independent ${workspaceScheme} workspace layers` : "do not reroute a standalone folder"}`, async t => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "stub-alias-event-"));
+    t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
+    const folder = { uri: { scheme: "file", fsPath: workspace } };
+    let value;
+    const events = [];
+    const configuration = { get: (_key, fallback) => value ?? fallback,
+      inspect: () => ({ workspaceValue: value, workspaceFolderValue: value }),
+      async update(_key, next) {
+        value = next;
+        if (workspaceScheme === "becomes-untitled") vscode.workspace.workspaceFile = { scheme: "untitled" };
+        // Standalone views alias one file; in a .code-workspace the second
+        // change represents a concurrent same-target user choice instead.
+        events.push(dispatchConfigurationChange(roots, { affectsConfiguration: name => name === "python.analysis.stubPath" },
+          async () => {
+            assert.equal(await managed.checkSettingOwnership(), true);
+            if (!managed.routingSettingsCurrent()) handoffs += 1;
+            return !managed.routingSettingsCurrent();
+          }, () => assert.fail("No GraphQL Desk configuration changed")));
+      } };
+    const stored = new Map();
+    const state = { get: key => stored.get(key), update: async (key, next) => stored.set(key, next) };
+    const vscode = { workspace: { isTrusted: true, workspaceFolders: [folder], textDocuments: [], getConfiguration: () => configuration,
+      ...(workspaceScheme && workspaceScheme !== "becomes-untitled" ? { workspaceFile: { scheme: workspaceScheme, fsPath: path.join(workspace, "project.code-workspace") } } : {}) },
+      ConfigurationTarget: { WorkspaceFolder: 2 } };
+    const managed = await createManagedStubPath(vscode, folder, state);
+    const roots = new Map([[workspace, Promise.resolve(managed)]]);
+    let handoffs = 0;
+    const generation = path.join(managed.root, "generations", "g-1-00000000-0000-0000-0000-000000000000");
+    fs.mkdirSync(generation, { recursive: true });
+    const verification = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2,
+      id: path.basename(generation), artifactFingerprint: "a" }, manifestFingerprint: "b".repeat(64), verify() { return this; } };
+    assert.equal(await managed.recordGeneration(generation, verification.manifestFingerprint), true);
+    assert.equal(await managed.selectGeneration(generation, () => true, verification), true);
+    await Promise.all(events);
+    assert.equal(managed.stillOwnsSetting(), true);
+    assert.equal(managed.routingSettingsCurrent(), workspaceScheme === null);
+    assert.equal(handoffs, workspaceScheme === null ? 0 : 1);
+  });
+}
+
 for (const layer of ["workspaceValue", "globalValue"]) {
  for (const inFlight of [false, true]) {
   test(`configuration dispatch detects masked ${layer}${inFlight ? " during owned selection" : ""} even when every affects check is false`, async t => {

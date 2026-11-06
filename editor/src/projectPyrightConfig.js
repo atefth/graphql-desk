@@ -181,7 +181,6 @@ function pythonStubSettings(vscode, folder, workspace) {
   const configuration = vscode.workspace.getConfiguration("python", folder.uri);
   const setting = "analysis.stubPath";
   const workspaceFile = vscode.workspace.workspaceFile?.scheme === "file" ? vscode.workspace.workspaceFile.fsPath : null;
-  const singleFolderDirectory = (vscode.workspace.workspaceFolders?.length ?? 1) === 1 && !workspaceFile;
   const snapshot = () => {
     const value = configuration.inspect?.(setting) ?? {};
     return {
@@ -191,7 +190,7 @@ function pythonStubSettings(vscode, folder, workspace) {
       workspaceValue: value.workspaceValue ?? null,
       globalPresent: value.globalValue !== undefined,
       globalValue: value.globalValue ?? null,
-      singleFolderDirectory,
+      singleFolderDirectory: vscode.workspace.workspaceFolders?.length === 1 && !vscode.workspace.workspaceFile,
     };
   };
   const effective = () => {
@@ -1041,7 +1040,12 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
         current.workspacePresent && current.workspaceValue === value ? "workspace" : null;
       if (layer === null) throw new Error("Pylance Python stub setting ownership changed; preserved");
       // Advance only the owned layer; concurrent hidden user choices require routing.
-      expectedPythonSnapshot = JSON.stringify(advancePythonStubSnapshot(JSON.parse(expectedPythonSnapshot), value, layer));
+      let expected = advancePythonStubSnapshot(JSON.parse(expectedPythonSnapshot), value, layer);
+      if (current.singleFolderDirectory && current.workspacePresent && current.folderPresent &&
+          current.workspaceValue === value && current.folderValue === value) {
+        expected = advancePythonStubSnapshot(advancePythonStubSnapshot(expected, value, "workspace"), value, "folder");
+      }
+      expectedPythonSnapshot = JSON.stringify(expected);
     } catch (error) {
       pythonOwner = previous;
       throw error;
