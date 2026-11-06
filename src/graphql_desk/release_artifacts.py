@@ -114,7 +114,10 @@ def render_omitted_files(
         f"{package}/__init__.pyi": "",
     }
     parser = render_captured_parse_overlay(())
-    files["graphql_desk-stubs/__init__.pyi"] = parser.stub
+    # Editor overlays supply precise mask overloads; releases use the runtime API.
+    files["graphql_desk-stubs/__init__.pyi"] = (
+        parser.stub + "from .fragment_helpers import mask_fragments as mask_fragments\n"
+    )
     files["graphql_desk-stubs/py.typed"] = "partial\n"
     for schema in config.schemas:
         loaded = schemas[schema.name]
