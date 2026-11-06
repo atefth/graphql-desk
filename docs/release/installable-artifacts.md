@@ -119,15 +119,17 @@ not an operating-system guarantee against arbitrary concurrent filesystem or
 tool changes. Platform/tool components can still write outside configured paths.
 The shared provisioned cache is intentionally retained for reuse.
 
-CI must set the same repository-owned cache before its existing `uv sync` step
-and invoke this checker as the sole artifact build/export/install step. Prior
-standalone builds into `dist` and repository-root requirements exports are unnecessary. The
-focused unit tests use synthetic archives and mocked official build/install
-commands; passing those tests alone is not evidence of an offline install.
+CI sets the same repository-owned cache before `uv sync`, then separately primes
+registry metadata with an online, hash-checked reinstall of the complete locked
+runtime export into the disposable CI environment. The checker makes its own
+fresh private export; its archive builds and proof installations remain offline.
+Standalone builds into `dist` are unnecessary. Focused unit tests use synthetic
+archives and mocked official commands; passing them alone is not offline-install
+evidence.
 
 ## Remaining release acceptance
 
-The local Windows replay with CPython 3.13.7 passed against reviewed candidate
+The local Windows replay with CPython 3.13.7 and uv 0.8.19 passed against reviewed candidate
 tree `64a04a8911193abb881a769679a7a9b503c0070e`. It built an independent direct
 wheel and source archive with Hatch, rebuilt the second wheel from that archive,
 passed the strict contents/bytes/metadata/notices/`RECORD` checks including the two
