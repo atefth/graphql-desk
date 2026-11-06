@@ -1,4 +1,4 @@
-"""Trusted-caller, read-only editor worker; UTF-8 NDJSON on standard streams."""
+"""Trusted-caller editor worker; only explicit config staging writes files."""
 
 import hashlib
 import json
@@ -16,6 +16,10 @@ from uuid import uuid4
 import tomlkit
 from graphql import introspection_from_schema
 
+from .config_files import (
+    ConfigFileStage,
+    capture_config_directories,
+)
 from .editor_analysis import (
     EditorAnalysis,
     analyze_editor_snapshot_details,
@@ -939,7 +943,7 @@ class EditorWorker:
     Failed refresh retains matching last-good only as visible, unavailable state.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, config_workspace: Path | None = None) -> None:
         self._workspace: Path | None = None
         self._generation = 0
         self._identity: str | None = None
@@ -953,6 +957,14 @@ class EditorWorker:
         self._remote: dict[tuple[str, str], RemoteSchemaSnapshot] = {}
         self._last_good: dict[tuple[str, str], RemoteSchemaSnapshot] = {}
         self._remote_revisions: dict[tuple[str, str], str] = {}
+        self._config_directories = (
+            capture_config_directories(config_workspace)
+            if config_workspace is not None
+            else None
+        )
+        if config_workspace is not None:
+            self._workspace = _canonical(config_workspace)
+        self._config_stage: ConfigFileStage | None = None
 
     def _clear_job(self) -> None:
         self._identity = None
@@ -965,6 +977,9 @@ class EditorWorker:
         self._resolver.clear()
 
     def invalidate(self) -> None:
+        if self._config_stage is not None:
+            # Revocation retains the single slot until explicit verified recovery.
+            self._config_stage.revoked = True
         self._clear_job()
         self._remote.clear()
         self._last_good.clear()
@@ -972,17 +987,95 @@ class EditorWorker:
 
     def handle(self, value: object) -> dict[str, object]:
         """Malformed/failed messages invalidate all previously issued job IDs."""
+        previous_stage = self._config_stage
         try:
             return self._handle(value)
-        except Exception:
+        except Exception as error:
+            stage = self._config_stage
             self.invalidate()
+            if stage is not None and stage is not previous_stage and stage.attempted:
+                native_code = getattr(error, "winerror", None) or getattr(
+                    error, "errno", 0
+                )
+                if type(native_code) is not int or not 0 <= native_code <= 65535:
+                    native_code = 0
+                return {
+                    "ok": False,
+                    "error": "editor-request-failed",
+                    "config_phase": stage.failure_phase,
+                    "native_code": native_code,
+                }
             return {"ok": False, "error": "editor-request-failed"}
+
+    def _config_file(self, raw: dict[str, object]) -> dict[str, object]:
+        directories = self._config_directories
+        if directories is None:
+            raise ValueError("Configuration staging is not enabled for this worker")
+        workspace = _path(raw.get("workspace"))
+        if workspace != directories[-1][0] or (
+            self._workspace is not None and _canonical(workspace) != self._workspace
+        ):
+            raise ValueError("Configuration workspace changed")
+        action = raw.get("action")
+        keys = {"op", "workspace", "action"}
+        if action == "stage":
+            item = _object(raw, keys | {"file", "temporary", "expected_hash", "text"})
+            if self._config_stage is not None:
+                raise ValueError("A configuration stage already needs recovery")
+            text = item["text"]
+            if not isinstance(text, str):
+                raise ValueError("Invalid configuration text")
+            stage = ConfigFileStage.capture(
+                directories, _string(item["file"]), _path(item["temporary"])
+            )
+            self._config_stage = stage
+            try:
+                stage.write(text, _string(item["expected_hash"]))
+            except Exception:
+                if not stage.attempted:
+                    self._config_stage = None
+                raise
+            assert stage.original is not None and stage.staged is not None
+            return {
+                "ok": True,
+                "token": stage.token,
+                "receipt": stage.receipt(),
+                "original_hash": stage.original[-2],
+                "staged_hash": stage.staged[-2],
+            }
+        if action == "resume":
+            item = _object(raw, keys | {"receipt"})
+            if self._config_stage is not None:
+                raise ValueError("A configuration stage already needs recovery")
+            stage = ConfigFileStage.resume(directories, _string(item["receipt"]))
+            self._config_stage = stage
+            return {"ok": True, "token": stage.token}
+        item = _object(raw, keys | {"token"})
+        token = _string(item["token"])
+        pending = self._config_stage
+        if pending is None or token != pending.token:
+            raise ValueError("Invalid configuration staging capability")
+        if action == "verify":
+            pending.verify()
+        elif action == "verify_discard":
+            pending.verify_discard()
+        elif action == "discard":
+            pending.discard()
+            self._config_stage = None
+        elif action == "finish":
+            pending.finish()
+            self._config_stage = None
+        else:
+            raise ValueError("Invalid configuration staging action")
+        return {"ok": True, "token": token}
 
     def _handle(self, value: object) -> dict[str, object]:
         if not isinstance(value, dict):
             raise ValueError("Invalid request")
         raw = cast(dict[str, object], value)
         operation = raw.get("op")
+        if operation == "config_file":
+            return self._config_file(raw)
         if operation == "quarantine":
             return _quarantine_request(raw)
         if operation == "pyright_config":
@@ -1609,9 +1702,11 @@ def _float(value: str) -> float:
     return result
 
 
-def serve(reader: BinaryIO, writer: BinaryIO) -> None:
+def serve(
+    reader: BinaryIO, writer: BinaryIO, *, config_workspace: Path | None = None
+) -> None:
     """Read bounded UTF-8 lines; synchronous cancellation requires caller shutdown."""
-    worker = EditorWorker()
+    worker = EditorWorker(config_workspace=config_workspace)
     while line := reader.readline(MAX_LINE_BYTES + 1):
         try:
             if len(line) > MAX_LINE_BYTES:
@@ -1641,4 +1736,10 @@ def serve(reader: BinaryIO, writer: BinaryIO) -> None:
 
 
 if __name__ == "__main__":
-    serve(sys.stdin.buffer, sys.stdout.buffer)
+    arguments = sys.argv[1:]
+    config_workspace = None
+    if arguments:
+        if len(arguments) != 2 or arguments[0] != "--config-workspace":
+            raise SystemExit("Invalid editor worker startup arguments")
+        config_workspace = _path(arguments[1])
+    serve(sys.stdin.buffer, sys.stdout.buffer, config_workspace=config_workspace)

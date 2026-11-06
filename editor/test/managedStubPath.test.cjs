@@ -34,6 +34,7 @@ async function fixture(t, setting, dirty = false, settingLayer = "workspaceFolde
     get: (_key, fallback) => values["analysis.stubPath"] ?? fallback,
     inspect: () => ({ defaultValue: "./typings", [settingLayer]: values["analysis.stubPath"] }),
     async update(key, value, target) {
+      assert.equal(arguments.length, 3, "native configuration updates keep VS Code's argument contract");
       updates.push([key, value, target]);
       assert.equal(key, "analysis.stubPath");
       assert.equal(target, 2);
@@ -69,6 +70,30 @@ async function ownGeneration(managed, verification) {
   verification.manifestFingerprint ??= "a".repeat(64);
   assert.equal(await managed.recordGeneration(verification.directory, verification.manifestFingerprint), true);
 }
+
+test("only a custom configuration adapter receives the final synchronous generation guard", async t => {
+  const f = await fixture(t, undefined);
+  const config = f.vscode.workspace.getConfiguration();
+  const update = config.update.bind(config);
+  let current = true;
+  let finalGuard;
+  config.update = async (key, value, target, guard) => {
+    finalGuard = guard;
+    await new Promise(resolve => setImmediate(resolve));
+    current = false;
+    if (guard && !guard()) throw new Error("custom configuration became stale before commit");
+    return update(key, value, target);
+  };
+  const managed = await createManagedStubPath(f.vscode, f.folder, f.workspaceState, { config });
+  const generation = path.join(managed.root, "generations", "g-1-00000000-0000-0000-0000-000000000000");
+  await fs.mkdir(generation, { recursive: true });
+  const verified = { directory: generation, manifest: { owner: "graphql-desk-analysis-generation", format: 2, id: path.basename(generation), artifactFingerprint: "a" }, verify() { return this; } };
+  await ownGeneration(managed, verified);
+  await assert.rejects(managed.selectGeneration(generation, () => current, verified), /custom configuration became stale/);
+  assert.equal(typeof finalGuard, "function");
+  assert.equal(f.values["analysis.stubPath"], undefined);
+  assert.equal(f.updates.length, 0, "stale generations are never temporarily committed");
+});
 
 test("prepares an owned root without changing stubPath before a complete generation exists", async t => {
   const f = await fixture(t, undefined);

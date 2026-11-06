@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomUUID, createHash } = require("node:crypto");
+const { TextDecoder } = require("node:util");
 const { parse, parseTree, modify, applyEdits } = require("jsonc-parser");
 const { createManagedStubPath, managedStateKeys, isManagedGeneration, updateManagedState } = require("./managedStubPath");
 
@@ -13,27 +14,162 @@ const normalized = value => process.platform === "win32" ? path.resolve(value).t
 const same = (left, right) => left.dev === right.dev && left.ino === right.ino;
 const stateKey = workspace => `managed-pyright-extra-path:${createHash("sha256").update(normalized(workspace)).digest("hex")}`;
 const pendingConfigWriteKey = workspace => `${stateKey(workspace)}:pending-config-write`;
+const activeConfigWrites = new Set();
+const validToken = value => typeof value === "string" && /^[0-9a-f]{32}$/.test(value);
+const validHash = value => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+const validReceipt = value => typeof value === "string" && value.length > 0 && value.length <= 32768;
+const sameConfigIdentity = (left, right, published = false) => same(left, right) &&
+  ["size", "mtimeNs", "mode", "uid", "gid", ...(published ? [] : ["ctimeNs"])].every(key => left[key] === right[key]);
+const sameDirectory = (left, right) => same(left, right) && ["mode", "uid", "gid"].every(key => left[key] === right[key]);
+const dirtyFile = (vscode, file) => vscode.workspace.textDocuments?.some(document => document.isDirty &&
+  document.uri.scheme === "file" && normalized(document.uri.fsPath) === normalized(file)) === true;
 
-async function recoverPendingConfigWrite(workspace, file, workspaceState) {
+function checkConfigWorkspace(vscode, folder, workspace, file) {
+  const owner = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file));
+  if (!vscode.workspace.isTrusted || !owner || folder.uri.scheme !== "file" ||
+      normalized(owner.uri.fsPath) !== normalized(workspace) || normalized(folder.uri.fsPath) !== normalized(workspace)) {
+    throw new Error("Trusted Pyright config workspace changed; preserved");
+  }
+  if (dirtyFile(vscode, file)) throw new Error("Dirty Pyright config buffer; preserved");
+}
+
+async function configPhase(configFile, folder, action, payload, token) {
+  const reply = await configFile(folder, action, payload);
+  if (!reply || reply.ok !== true || !validToken(reply.token) || token && reply.token !== token) {
+    throw new Error("Pyright config permission proof could not be verified; preserved");
+  }
+  return reply;
+}
+
+async function discardOwnedConfigStage(vscode, folder, workspace, temporary, hash, persistDiscarding, phase, checkRecord = () => {}) {
+  let journalCurrent = () => true;
+  const check = () => {
+    checkRecord();
+    if (journalCurrent() !== true) throw new Error("Pyright config write journal changed; preserved");
+    checkConfigWorkspace(vscode, folder, workspace, temporary);
+  };
+  check();
+  const directory = safeIdentity(workspace, true, true);
+  let staged;
+  try { staged = readFileSafe(vscode, workspace, temporary); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  if (staged && staged.hash !== hash) throw new Error("Pyright config stage changed before cleanup; preserved");
+  const saved = await persistDiscarding();
+  if (typeof saved === "function") journalCurrent = saved;
+  else if (saved !== true) throw new Error("Pyright config cleanup receipt could not be saved; preserved");
+  check();
+  await phase("verify_discard");
+  // The native check cannot see dirty editor buffers. No await before unlink.
+  check();
+  if (!sameDirectory(directory, safeIdentity(workspace, true, true))) throw new Error("Pyright config workspace changed during cleanup; preserved");
+  if (staged) {
+    const current = readFileSafe(vscode, workspace, temporary);
+    if (!sameConfigIdentity(staged.identity, current.identity) || current.hash !== staged.hash) throw new Error("Pyright config stage changed during cleanup; preserved");
+    fs.unlinkSync(temporary);
+  } else {
+    try { fs.lstatSync(temporary, { bigint: true }); }
+    catch (error) { if (error.code !== "ENOENT") throw error; await phase("discard"); check(); return; }
+    throw new Error("Pyright config stage appeared during cleanup; preserved");
+  }
+  await phase("discard");
+  check();
+}
+
+async function recoverPendingConfigWrite(vscode, folder, workspace, workspaceState, configFile) {
   const key = pendingConfigWriteKey(workspace);
   const pending = workspaceState?.get?.(key);
   if (pending === undefined) return;
-  const temporary = typeof pending.temporaryPath === "string" ? path.resolve(pending.temporaryPath) : "";
-  const relativeConfig = typeof pending.file === "string" ? pending.file.split("/").join(path.sep) : "";
-  const target = path.resolve(workspace, relativeConfig);
-  const relative = path.relative(workspace, target);
-  if (pending.version !== 1 || target !== path.resolve(file) || !relative || relative === ".." || relative.startsWith(`..${path.sep}`) ||
-      path.dirname(temporary) !== path.dirname(target) || !/^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.basename(temporary)) ||
-      typeof pending.hash !== "string" || !/^[a-f0-9]{64}$/.test(pending.hash)) {
-    throw new Error("Invalid pending GraphQL Desk Pyright config write; preserved");
+  const lock = normalized(workspace);
+  if (activeConfigWrites.has(lock)) throw new Error("Another Pyright config write is pending; preserved");
+  if (!pending || typeof pending !== "object" || Array.isArray(pending)) {
+    throw new Error("Pending Pyright config write needs manual recovery; preserved");
   }
+  const temporary = typeof pending.temporaryPath === "string" ? path.resolve(pending.temporaryPath) : "";
+  const target = path.join(workspace, typeof pending.file === "string" ? pending.file : "");
+  if (pending.version !== 2 || !["pyproject.toml", "pyrightconfig.json"].includes(pending.file) ||
+      path.dirname(temporary) !== path.dirname(target) || !/^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.basename(temporary)) ||
+      !validHash(pending.hash) || !validHash(pending.previousHash) || !validReceipt(pending.receipt) || !validToken(pending.token) ||
+      Object.hasOwn(pending, "discarding") && typeof pending.discarding !== "boolean" ||
+      typeof configFile !== "function") {
+    throw new Error("Pending Pyright config write needs manual recovery; permission proof unavailable; preserved");
+  }
+  const check = () => {
+    checkConfigWorkspace(vscode, folder, workspace, target);
+    checkConfigWorkspace(vscode, folder, workspace, temporary);
+    if (JSON.stringify(workspaceState.get(key)) !== saved) throw new Error("Pyright recovery record changed; preserved");
+  };
+  let saved = JSON.stringify(pending);
+  activeConfigWrites.add(lock);
   try {
-    const before = safeIdentity(temporary);
-    if (before.size > MAX_CONFIG_BYTES || createHash("sha256").update(fs.readFileSync(temporary)).digest("hex") !== pending.hash ||
-        !same(before, fs.lstatSync(temporary))) throw new Error("Pending GraphQL Desk Pyright config temporary changed; preserved");
-    fs.unlinkSync(temporary);
-  } catch (error) { if (error.code !== "ENOENT") throw error; }
-  await workspaceState.update(key, undefined);
+    check();
+    let present = true;
+    try { fs.lstatSync(temporary, { bigint: true }); }
+    catch (error) { if (error.code !== "ENOENT") throw error; present = false; }
+    const phase = async action => {
+      try { await configPhase(configFile, folder, action, { token: pending.token }, pending.token); }
+      catch {
+        check();
+        await configPhase(configFile, folder, "resume", { receipt: pending.receipt }, pending.token);
+        check();
+        await configPhase(configFile, folder, action, { token: pending.token }, pending.token);
+      }
+    };
+    if (pending.discarding === true || present) {
+      await discardOwnedConfigStage(vscode, folder, workspace, temporary, pending.hash, async () => {
+        check();
+        const next = { ...pending, discarding: true };
+        await workspaceState.update(key, next);
+        saved = JSON.stringify(next);
+        check();
+        return true;
+      }, phase, check);
+    } else await phase("finish");
+    check();
+    if (JSON.stringify(workspaceState.get(key)) !== saved) throw new Error("Pyright recovery record changed; preserved");
+    await workspaceState.update(key, undefined);
+  } finally { activeConfigWrites.delete(lock); }
+}
+
+async function acknowledgePendingConfigWrite(vscode, folder, workspaceState, invalidate) {
+  if (!folder || folder.uri.scheme !== "file" || !path.isAbsolute(folder.uri.fsPath) || typeof invalidate !== "function") {
+    throw new Error("Trusted file workspace required");
+  }
+  const workspace = path.resolve(folder.uri.fsPath);
+  const key = pendingConfigWriteKey(workspace);
+  const pending = workspaceState?.get?.(key);
+  if (pending === undefined) return false;
+  const expectedKeys = pending?.version === 1 ? ["version", "file", "temporaryPath", "hash"] :
+    ["version", "file", "temporaryPath", "hash", "previousHash", "receipt", "token", ...(pending && Object.hasOwn(pending, "discarding") ? ["discarding"] : [])];
+  if (!pending || typeof pending !== "object" || Array.isArray(pending) || ![1, 2].includes(pending.version) ||
+      Object.keys(pending).sort().join(",") !== expectedKeys.sort().join(",") || !validHash(pending.hash) ||
+      pending.version === 2 && (!validHash(pending.previousHash) || !(pending.receipt === null || validReceipt(pending.receipt)) ||
+        !(pending.token === null || validToken(pending.token)) || Object.hasOwn(pending, "discarding") && typeof pending.discarding !== "boolean") ||
+      !["pyproject.toml", "pyrightconfig.json"].includes(pending.file) ||
+      typeof pending.temporaryPath !== "string" || !path.isAbsolute(pending.temporaryPath) ||
+      path.dirname(path.resolve(pending.temporaryPath)) !== workspace ||
+      !/^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.basename(pending.temporaryPath)) ||
+      typeof workspaceState.update !== "function") throw new Error("Unrecognized Pyright recovery record; preserved");
+  const file = path.join(workspace, pending.file);
+  const saved = JSON.stringify(pending);
+  const directory = safeIdentity(workspace, true, true);
+  const lock = normalized(workspace);
+  if (activeConfigWrites.has(lock)) throw new Error("Another Pyright config write is pending; preserved");
+  activeConfigWrites.add(lock);
+  try {
+    checkConfigWorkspace(vscode, folder, workspace, file);
+    const choice = await vscode.window.showWarningMessage("Review the interrupted GraphQL Desk config write", {
+      modal: true,
+      detail: `Review these files first:\n${file}\n${pending.temporaryPath}\n\nForget only this pending write record and keep both files. New updates will run the normal permission and ownership checks again.`,
+    }, "I reviewed the files; forget this record");
+    if (choice !== "I reviewed the files; forget this record") return false;
+    checkConfigWorkspace(vscode, folder, workspace, file);
+    if (!sameDirectory(directory, safeIdentity(workspace, true, true)) || JSON.stringify(workspaceState.get(key)) !== saved) {
+      throw new Error("Pyright recovery record or workspace changed; preserved");
+    }
+    invalidate();
+    await workspaceState.update(key, undefined);
+    return true;
+  } finally { activeConfigWrites.delete(lock); }
 }
 
 function pythonStubSettings(vscode, folder, workspace) {
@@ -77,8 +213,8 @@ function validatePythonStubPath(settings, expected) {
   if (current !== expected) throw new Error("Pylance python.analysis.stubPath changed outside GraphQL Desk; preserved");
 }
 
-function safeIdentity(file, directory = false) {
-  const stat = fs.lstatSync(file);
+function safeIdentity(file, directory = false, bigint = false) {
+  const stat = fs.lstatSync(file, { bigint });
   if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile())) throw new Error("Pyright config path is not a safe file");
   return stat;
 }
@@ -401,90 +537,118 @@ function readFileSafe(vscode, workspace, file) {
   if (!parts.length || path.isAbsolute(path.relative(workspace, file)) || path.relative(workspace, file).startsWith(`..${path.sep}`)) {
     throw new Error("Pyright config must be inside the workspace; preserved");
   }
-  safeIdentity(current, true);
+  const workspaceIdentity = safeIdentity(current, true, true);
   for (const [index, part] of parts.entries()) {
     current = path.join(current, part);
-    const stat = safeIdentity(current, index < parts.length - 1);
+    const stat = safeIdentity(current, index < parts.length - 1, true);
     if (index === parts.length - 1) {
       if (stat.size > MAX_CONFIG_BYTES) throw new Error("Pyright config is too large; preserved");
-      if (vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.scheme === "file" &&
-          normalized(document.uri.fsPath) === normalized(current))) throw new Error("Dirty Pyright config buffer; preserved");
+      if (dirtyFile(vscode, current)) throw new Error("Dirty Pyright config buffer; preserved");
       const descriptor = fs.openSync(current, "r");
       try {
-        const opened = fs.fstatSync(descriptor);
-        if (!same(stat, opened) || !opened.isFile() || opened.size > MAX_CONFIG_BYTES) throw new Error("Pyright config changed while opening; preserved");
-        const bytes = Buffer.alloc(opened.size);
+        const opened = fs.fstatSync(descriptor, { bigint: true });
+        if (!sameConfigIdentity(stat, opened) || !opened.isFile() || opened.size > MAX_CONFIG_BYTES) throw new Error("Pyright config changed while opening; preserved");
+        const bytes = Buffer.alloc(Number(opened.size));
         const count = fs.readSync(descriptor, bytes, 0, bytes.length, 0);
-        if (count !== bytes.length || !same(opened, fs.lstatSync(current))) throw new Error("Pyright config changed while reading; preserved");
-        return { text: bytes.toString("utf8"), identity: opened,
+        if (count !== bytes.length || !sameConfigIdentity(opened, fs.fstatSync(descriptor, { bigint: true })) ||
+            !sameConfigIdentity(opened, safeIdentity(current, false, true)) ||
+            !sameDirectory(workspaceIdentity, safeIdentity(workspace, true, true))) throw new Error("Pyright config changed while reading; preserved");
+        let text;
+        try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
+        catch { throw new Error("Invalid UTF-8 Pyright config; preserved"); }
+        return { text, identity: opened, workspaceIdentity,
           hash: createHash("sha256").update(bytes).digest("hex"), filename: current };
       } finally { fs.closeSync(descriptor); }
     }
   }
 }
 
-async function atomicReplace(vscode, workspace, file, text, expected, expectedHash, temporaryPath) {
-  const initialOwner = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file));
-  if (!vscode.workspace.isTrusted || !initialOwner || normalized(initialOwner.uri.fsPath) !== normalized(workspace)) {
-    throw new Error("Trusted file workspace required; preserved");
+async function atomicReplaceOwnedConfig(vscode, folder, workspace, file, text, snapshot, onOwnedWrite, configFile, isCurrent) {
+  if (typeof configFile !== "function" || typeof onOwnedWrite !== "function") {
+    throw new Error("Permission-preserving Pyright config writer and durable journal required; preserved");
   }
-  const targetStat = safeIdentity(file);
-  if (!same(targetStat, expected) || targetStat.size > MAX_CONFIG_BYTES ||
-      createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== expectedHash) {
-    throw new Error("Pyright config changed concurrently; preserved");
-  }
-  if (vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.scheme === "file" &&
-      normalized(document.uri.fsPath) === normalized(file))) throw new Error("Dirty Pyright config buffer; preserved");
-  const temporary = temporaryPath ?? path.join(path.dirname(file), `.graphql-desk-${randomUUID()}.tmp`);
-  const workspaceIdentity = safeIdentity(workspace, true);
-  const bytes = Buffer.from(text, "utf8");
-  const nextHash = createHash("sha256").update(bytes).digest("hex");
-  let created;
+  const key = normalized(workspace);
+  if (activeConfigWrites.has(key)) throw new Error("Another Pyright config write is pending; preserved");
+  activeConfigWrites.add(key);
+  const temporary = path.join(path.dirname(file), `.graphql-desk-${randomUUID()}.tmp`);
+  const nextHash = createHash("sha256").update(text, "utf8").digest("hex");
+  let proof;
+  let committed = false;
+  let began = false;
+  let stageAttempted = false;
+  const check = () => {
+    if (isCurrent() !== true) throw new Error("Pyright config generation is stale; preserved");
+    checkConfigWorkspace(vscode, folder, workspace, file);
+    checkConfigWorkspace(vscode, folder, workspace, temporary);
+    if (!sameDirectory(snapshot.workspaceIdentity, safeIdentity(workspace, true, true))) {
+      throw new Error("Pyright config workspace changed; preserved");
+    }
+    const current = readFileSafe(vscode, workspace, file);
+    if (!sameConfigIdentity(snapshot.identity, current.identity) || current.hash !== snapshot.hash) {
+      throw new Error("Pyright config changed concurrently; preserved");
+    }
+  };
   try {
-    const descriptor = fs.openSync(temporary, "wx");
-    try { created = fs.fstatSync(descriptor); fs.writeFileSync(descriptor, bytes); fs.fsyncSync(descriptor); }
-    finally { fs.closeSync(descriptor); }
+    check();
+    if (await onOwnedWrite(file, nextHash, { phase: "begin", previousHash: snapshot.hash, temporaryPath: temporary }) !== true) {
+      throw new Error("GraphQL Desk could not durably record Pyright config write ownership; preserved");
+    }
+    began = true;
+    check();
+    stageAttempted = true;
+    proof = await configPhase(configFile, folder, "stage", {
+      file: path.basename(file), temporary, expected_hash: snapshot.hash, text,
+    });
+    if (!validReceipt(proof.receipt) || proof.original_hash !== snapshot.hash || proof.staged_hash !== nextHash) {
+      proof = undefined;
+      throw new Error("Pyright config staging permission proof is incomplete; manual recovery required; preserved");
+    }
+    const stagedIdentity = safeIdentity(temporary, false, true);
+    if (await onOwnedWrite(file, nextHash, { phase: "staged", temporaryPath: temporary,
+      token: proof.token, receipt: proof.receipt }) !== true) {
+      throw new Error("Pyright config staging permission proof could not be saved; preserved");
+    }
     for (let attempt = 0; ; attempt += 1) {
-      if (!vscode.workspace.isTrusted) throw new Error("Trusted file workspace required; preserved");
-      const owner = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(file));
-      if (!owner || normalized(owner.uri.fsPath) !== normalized(workspace) ||
-          !same(workspaceIdentity, safeIdentity(workspace, true))) throw new Error("Pyright config workspace changed; preserved");
-      const current = readFileSafe(vscode, workspace, file);
+      check();
+      await configPhase(configFile, folder, "verify", { token: proof.token }, proof.token);
+      // No await between these final freshness guards and the atomic rename.
+      check();
       const staged = readFileSafe(vscode, workspace, temporary);
-      if (!same(expected, current.identity) || current.hash !== expectedHash ||
-          !same(created, staged.identity) || staged.hash !== nextHash) throw new Error("Pyright config changed concurrently; preserved");
-      try { fs.renameSync(temporary, file); break; }
+      if (!sameConfigIdentity(stagedIdentity, staged.identity) || staged.hash !== nextHash) {
+        throw new Error("Pyright config stage changed concurrently; preserved");
+      }
+      try { fs.renameSync(temporary, file); committed = true; break; }
       catch (error) {
         if (attempt === 3 || !["EPERM", "EACCES", "EBUSY"].includes(error.code)) throw error;
         await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
       }
     }
-    const updated = safeIdentity(file);
-    if (updated.size > MAX_CONFIG_BYTES || fs.readFileSync(file, "utf8") !== text) throw new Error("Pyright config update could not be verified");
+    checkConfigWorkspace(vscode, folder, workspace, file);
+    const published = readFileSafe(vscode, workspace, file);
+    if (!sameConfigIdentity(stagedIdentity, published.identity, true) || published.hash !== nextHash) {
+      throw new Error("Pyright config update could not be verified; preserved");
+    }
+    await configPhase(configFile, folder, "finish", { token: proof.token }, proof.token);
+    await onOwnedWrite(file, nextHash, { phase: "commit", temporaryPath: temporary,
+      token: proof.token, receipt: proof.receipt, clearPending: true });
   } catch (error) {
-    try {
-      const current = fs.lstatSync(temporary);
-      if (created && !current.isSymbolicLink() && same(created, current) && current.size === bytes.length &&
-          same(workspaceIdentity, safeIdentity(workspace, true)) && fs.readFileSync(temporary).equals(bytes)) fs.unlinkSync(temporary);
-    } catch { /* Preserve any temporary path that is no longer verified as ours. */ }
+    let clearPending = began && !stageAttempted;
+    if (proof && !committed) {
+      try {
+        await discardOwnedConfigStage(vscode, folder, workspace, temporary, nextHash, async () => {
+          return onOwnedWrite(file, nextHash, { phase: "discarding", temporaryPath: temporary,
+            token: proof.token, receipt: proof.receipt });
+        }, action => configPhase(configFile, folder, action, { token: proof.token }, proof.token));
+        clearPending = true;
+      } catch { /* Keep the receipt and any uncertain or user-edited stage. */ }
+    }
+    if (began) {
+      try { await onOwnedWrite(file, null, { phase: "cancel", temporaryPath: temporary,
+        token: proof?.token, receipt: proof?.receipt, clearPending }); }
+      catch { /* Keep durable recovery state if its cleanup cannot be saved. */ }
+    }
     throw error;
-  }
-}
-
-async function atomicReplaceOwnedConfig(vscode, workspace, file, text, snapshot, onOwnedWrite) {
-  const nextHash = createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
-  const temporaryPath = path.join(path.dirname(file), `.graphql-desk-${randomUUID()}.tmp`);
-  const begin = onOwnedWrite(file, nextHash, { phase: "begin", previousHash: snapshot.hash, temporaryPath });
-  if ((begin && typeof begin.then === "function" ? await begin : begin) === false) {
-    throw new Error("GraphQL Desk could not establish Pyright config write ownership; preserved");
-  }
-  try {
-    await atomicReplace(vscode, workspace, file, text, snapshot.identity, snapshot.hash, temporaryPath);
-  } catch (error) {
-    onOwnedWrite(file, null, { phase: "cancel" });
-    throw error;
-  }
-  onOwnedWrite(file, nextHash, { phase: "commit" });
+  } finally { activeConfigWrites.delete(key); }
 }
 
 async function invokeToml(folder, text, action, worker, ownership = {}, managedPath = MANAGED_PATH) {
@@ -505,7 +669,7 @@ async function invokeToml(folder, text, action, worker, ownership = {}, managedP
     } } : {}), text: result.text };
 }
 
-async function updateProjectConfig(vscode, folder, action, worker, ownership = {}, managedPath = MANAGED_PATH, onOwnedWrite = () => {}) {
+async function updateProjectConfig(vscode, folder, action, worker, ownership = {}, managedPath = MANAGED_PATH, onOwnedWrite, configFile, isCurrent = () => true) {
   if (!folder || folder.uri.scheme !== "file" || !path.isAbsolute(folder.uri.fsPath) || !vscode.workspace.isTrusted) {
     throw new Error("Trusted file workspace required");
   }
@@ -525,7 +689,7 @@ async function updateProjectConfig(vscode, folder, action, worker, ownership = {
     const updated = removeStaleGenerationSearchPaths(snapshot.text, workspace);
     const result = modifyJsonConfig(updated, "inspect");
     if (updated !== snapshot.text) {
-      await atomicReplaceOwnedConfig(vscode, workspace, file, updated, snapshot, onOwnedWrite);
+      await atomicReplaceOwnedConfig(vscode, folder, workspace, file, updated, snapshot, onOwnedWrite, configFile, isCurrent);
     }
     return { ...result, text: updated, file, format, workspace };
   }
@@ -537,32 +701,65 @@ async function updateProjectConfig(vscode, folder, action, worker, ownership = {
     throw new Error("Custom stub execution environment coverage changed during setup; preserved");
   }
   if (update.text !== snapshot.text) {
-    await atomicReplaceOwnedConfig(vscode, workspace, file, update.text, snapshot, onOwnedWrite);
+    await atomicReplaceOwnedConfig(vscode, folder, workspace, file, update.text, snapshot, onOwnedWrite, configFile, isCurrent);
   }
   return { ...update, file, format, workspace, hash: createHash("sha256").update(update.text, "utf8").digest("hex") };
 }
 
-async function createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite = () => {}, onOwnership = () => {} } = {}) {
+async function createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite = () => {}, onOwnership = () => {}, configFile } = {}) {
+  if (!folder || folder.uri.scheme !== "file" || !path.isAbsolute(folder.uri.fsPath) || !vscode.workspace.isTrusted) {
+    throw new Error("Trusted file workspace required");
+  }
+  await recoverPendingConfigWrite(vscode, folder, path.resolve(folder.uri.fsPath), workspaceState, configFile);
   const inspected = await updateProjectConfig(vscode, folder, "inspect", worker);
   if (!inspected) return null;
   const workspace = inspected.workspace;
-  await recoverPendingConfigWrite(workspace, inspected.file, workspaceState);
   const originalOnOwnedWrite = onOwnedWrite;
   let activeConfigHash = inspected.hash;
-  onOwnedWrite = (filename, fingerprint, operation) => {
+  onOwnedWrite = async (filename, fingerprint, operation) => {
     if (!operation) return originalOnOwnedWrite(filename, fingerprint);
     const key = pendingConfigWriteKey(workspace);
     if (operation.phase === "begin") {
-      if (originalOnOwnedWrite(filename, fingerprint, operation) === false) return false;
-      return workspaceState.update(key, { version: 1, file: path.relative(workspace, filename).split(path.sep).join("/"),
-        temporaryPath: operation.temporaryPath, hash: fingerprint }).then(() => true, error => {
+      if (workspaceState?.get?.(key) !== undefined || typeof workspaceState?.update !== "function") {
+        throw new Error("Pending Pyright config write needs recovery before another write; preserved");
+      }
+      if (await originalOnOwnedWrite(filename, fingerprint, operation) === false) return false;
+      try {
+        await workspaceState.update(key, { version: 2, file: path.relative(workspace, filename).split(path.sep).join("/"),
+          temporaryPath: operation.temporaryPath, hash: fingerprint, previousHash: operation.previousHash, receipt: null, token: null });
+        return true;
+      } catch (error) {
         originalOnOwnedWrite(filename, null, { phase: "cancel" });
         throw error;
-      });
+      }
     }
-    const result = originalOnOwnedWrite(filename, fingerprint, operation);
+    const pending = workspaceState.get(key);
+    if (!pending || pending.version !== 2 || pending.temporaryPath !== operation.temporaryPath ||
+        pending.file !== path.relative(workspace, filename).split(path.sep).join("/") ||
+        fingerprint !== null && pending.hash !== fingerprint) {
+      throw new Error("Pyright config write journal changed; preserved");
+    }
+    if (["staged", "discarding"].includes(operation.phase)) {
+      if (pending.hash !== fingerprint || !validToken(operation.token) || !validReceipt(operation.receipt)) {
+        throw new Error("Pyright config permission receipt changed; preserved");
+      }
+      if (pending.receipt !== null && (pending.receipt !== operation.receipt || pending.token !== operation.token)) {
+        throw new Error("Pyright config recovery receipt changed; preserved");
+      }
+      const next = { ...pending, token: operation.token, receipt: operation.receipt,
+        ...(operation.phase === "discarding" ? { discarding: true } : {}) };
+      await workspaceState.update(key, next);
+      if (JSON.stringify(workspaceState.get(key)) !== JSON.stringify(next)) throw new Error("Pyright config write journal changed; preserved");
+      return operation.phase === "discarding" ? () => JSON.stringify(workspaceState.get(key)) === JSON.stringify(next) : true;
+    }
+    if (operation.clearPending === true) {
+      if (pending.receipt !== null && (pending.receipt !== operation.receipt || pending.token !== operation.token)) {
+        throw new Error("Pyright config recovery receipt changed; preserved");
+      }
+      await workspaceState.update(key, undefined);
+    }
+    const result = await originalOnOwnedWrite(filename, fingerprint, operation);
     if (operation.phase === "commit" && path.resolve(filename) === path.resolve(inspected.file)) activeConfigHash = fingerprint;
-    void workspaceState.update(key, undefined).catch(() => {});
     return result;
   };
   const key = stateKey(workspace);
@@ -639,6 +836,11 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     await persistOwner(saved);
   }
   let pythonOwner = saved?.pythonStubPath ?? { snapshot: pythonSettings.snapshot(), current: pythonSettings.effective() || "" };
+  const configurationCurrent = () => {
+    if (pythonSettings.dirty()) throw new Error("Dirty workspace settings; preserved");
+    validatePythonStubPath(pythonSettings, pythonOwner.current || "");
+    return true;
+  };
   const setPythonStubPath = async (value, expected = pythonOwner.current) => {
     if (pythonSettings.dirty()) throw new Error("Dirty workspace settings; preserved");
     validatePythonStubPath(pythonSettings, expected);
@@ -706,7 +908,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     if (!restored) {
       const released = await updateProjectConfig(vscode, folder, "release_stub_path", worker, {
         ...restoreOwnership, expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath,
-      }, MANAGED_PATH, onOwnedWrite);
+      }, MANAGED_PATH, onOwnedWrite, configFile, configurationCurrent);
       if (released.hasStubPath !== saved.originalStubPathPresent ||
           saved.originalStubPathPresent && released.stubPath !== saved.originalStubPath ||
           saved.customStubPathAdded && customPathPresent(released) || customEnvironmentPathsRemain(released)) {
@@ -718,7 +920,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     await workspaceState?.update?.(generationKeys.stateKey, undefined);
     await updateManagedState(workspaceState, generationKeys.generationStateKey, undefined);
     await updateManagedState(workspaceState, generationKeys.stagingStateKey, undefined);
-    return createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite: originalOnOwnedWrite, onOwnership });
+    return createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite: originalOnOwnedWrite, onOwnership, configFile });
   }
 
   if (saved?.version === 3 && saved.phase === "rotate") {
@@ -736,7 +938,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     }
     const target = pending.current;
     if (latest.stubPath !== target) await updateProjectConfig(vscode, folder, "set_stub_path", worker,
-      { expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath }, target, onOwnedWrite);
+      { expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath }, target, onOwnedWrite, configFile, configurationCurrent);
     if (pythonCurrent !== target) await setPythonStubPath(target, pythonCurrent);
     saved = { ...saved, phase: "active", currentStubPath: target,
       pythonStubPath: { ...saved.pythonStubPath, current: target, pending: undefined } };
@@ -747,7 +949,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   if (saved?.version === 3 && saved.phase === "active") {
     let latest = await inspectLatest();
     if (managedSearchAliases(latest)) {
-      latest = await updateProjectConfig(vscode, folder, "remove_stale_generations", worker, {}, MANAGED_PATH, onOwnedWrite);
+      latest = await updateProjectConfig(vscode, folder, "remove_stale_generations", worker, {}, MANAGED_PATH, onOwnedWrite, configFile, configurationCurrent);
     }
     if (latest.stubPath !== saved.currentStubPath || !latest.hasStubPath ||
         saved.customStubPathAdded && !customPathPresent(latest) || !customEnvironmentPathsPresent(latest) ||
@@ -759,7 +961,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       } else if (pending?.release === true && latest.stubPath === (saved.originalStubPath ?? "")) {
         saved = { ...saved, phase: "release", currentStubPath: latest.stubPath };
         await persistOwner(saved);
-        return createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite: originalOnOwnedWrite, onOwnership });
+        return createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite: originalOnOwnedWrite, onOwnership, configFile });
       } else {
         throw new Error("GraphQL Desk Pyright stubPath ownership changed; preserved");
       }
@@ -801,7 +1003,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
           removeManagedPaths: saved?.version === 2 || Boolean(saved?.version === 3 && legacy),
           legacyTopLevel: legacy?.topLevel === true,
           legacyExecutionEnvironmentRoots: Array.isArray(legacy?.executionEnvironmentRoots) ? legacy.executionEnvironmentRoots : [],
-        }, MANAGED_PATH, onOwnedWrite);
+        }, MANAGED_PATH, onOwnedWrite, configFile, configurationCurrent);
       if (prepared.stubPath !== MANAGED_PATH || !prepared.hasStubPath ||
           customStubPathAdded && !prepared.extraPaths.includes(customStubPath) || !customEnvironmentPathsPresent(prepared)) {
         throw new Error("GraphQL Desk managed Pyright stubPath could not be verified; preserved");
@@ -837,7 +1039,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   const config = {
     get: (_key, fallback) => currentPresent ? currentSetting : fallback,
     inspect: () => currentPresent ? { workspaceValue: currentSetting } : {},
-    async update(_key, value) {
+    async update(_key, value, _target, generationCurrent = () => true) {
       const latest = await assertEffectiveOwner();
       const restoring = saved.originalStubPathPresent ? value === saved.originalStubPath : value === undefined;
       const target = typeof value === "string" ? value : MANAGED_PATH;
@@ -851,7 +1053,8 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       await persistOwner(saved);
       const previousSetting = currentSetting;
       const updated = await updateProjectConfig(vscode, folder, restoringManagedBase ? "restore_stub_path" : "set_stub_path",
-        worker, ownership, target, onOwnedWrite);
+        worker, ownership, target, onOwnedWrite, configFile,
+        () => configurationCurrent() && generationCurrent() === true);
       currentSetting = updated.hasStubPath ? updated.stubPath : "";
       currentPresent = updated.hasStubPath;
       activeConfigHash = updated.hash;
@@ -918,14 +1121,18 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     cleanup() { managed.cleanup(); cleanupCreated([...preflight.created, ...ownerCreatedDirectories]); },
     projectConfig: true,
     async validateGeneratedPackages(packages) {
-      const latest = await assertEffectiveOwner();
-      const roots = [saved.customStubPathAdded ? saved.customStubPath : null, ...latest.extraPaths,
-        ...latest.executionEnvironments.flatMap(item => item.extraPaths)].filter(Boolean)
-        .map(value => path.resolve(configDirectory, value)).filter(value => !isManagedSelection(path.relative(configDirectory, value).split(path.sep).join("/")));
-      const names = new Set(["graphql_desk-stubs", ...packages.map(value => value.split(".")[0])]);
-      for (const rootPath of new Set(roots)) for (const name of names) {
-        if (packageRootExists(rootPath, name)) throw new Error(`Configured Pyright path shadows GraphQL Desk's generated package ${name}; preserved`);
-      }
+      const owned = await managed.checkSettingOwnership(async () => {
+        const latest = await assertEffectiveOwner();
+        const roots = [saved.customStubPathAdded ? saved.customStubPath : null, ...latest.extraPaths,
+          ...latest.executionEnvironments.flatMap(item => item.extraPaths)].filter(Boolean)
+          .map(value => path.resolve(configDirectory, value)).filter(value => !isManagedSelection(path.relative(configDirectory, value).split(path.sep).join("/")));
+        const names = new Set(["graphql_desk-stubs", ...packages.map(value => value.split(".")[0])]);
+        for (const rootPath of new Set(roots)) for (const name of names) {
+          if (packageRootExists(rootPath, name)) throw new Error(`Configured Pyright path shadows GraphQL Desk's generated package ${name}; preserved`);
+        }
+        return true;
+      });
+      if (!owned) throw new Error("GraphQL Desk Pyright stubPath ownership changed; preserved");
       return true;
     },
     async release() {
@@ -938,7 +1145,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       if (!latest.hasStubPath || latest.stubPath !== currentSetting) throw new Error("Pyright stubPath changed during GraphQL Desk cleanup; preserved");
       const released = await updateProjectConfig(vscode, folder, "release_stub_path", worker, {
         expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath, ...restoreOwnership,
-      }, MANAGED_PATH, onOwnedWrite);
+      }, MANAGED_PATH, onOwnedWrite, configFile, configurationCurrent);
       if (released.hasStubPath !== originalStubPathPresent || originalStubPathPresent && released.stubPath !== originalStubPath ||
           customStubPathAdded && released.extraPaths.includes(customStubPath) || customEnvironmentPathsRemain(released)) {
         throw new Error("GraphQL Desk Pyright config cleanup could not be verified; preserved");
@@ -951,4 +1158,4 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   };
 }
 
-module.exports = { MANAGED_PATH, parseJsonConfig, modifyJsonConfig, updateProjectConfig, createManagedProjectConfig, safeIdentity, normalized, stateKey };
+module.exports = { MANAGED_PATH, parseJsonConfig, modifyJsonConfig, updateProjectConfig, createManagedProjectConfig, acknowledgePendingConfigWrite, safeIdentity, normalized, stateKey };

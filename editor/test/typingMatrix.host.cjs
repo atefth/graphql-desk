@@ -38,7 +38,7 @@ function pythonVersion(python) {
 
 exports.run = async () => {
   const suite = process.env.GRAPHQL_DESK_TEST_SUITE;
-  const results = { host: vscode.version, extensions: {}, pylance: {}, lifecycle: { invalidationAndRepair: {}, skipTraces: [], coldTrace: [], stubPathSelections: [] } };
+  const results = { host: vscode.version, extensions: {}, pylance: {}, lifecycle: { invalidationAndRepair: {}, skipTraces: [], coldTrace: [], managedRootErrors: [], stubPathSelections: [] } };
   let settingChanges;
   let diagnosticChanges;
   let selectionChanges;
@@ -72,6 +72,8 @@ exports.run = async () => {
         if (property === "appendLine") return value => {
           if (typeof value === "string" && value.startsWith("Live typing skipped: ") &&
               results.lifecycle.skipTraces.length < 80) results.lifecycle.skipTraces.push(value);
+          if (typeof value === "string" && value.startsWith("Managed stub root unavailable: ") &&
+              results.lifecycle.managedRootErrors.length < 10) results.lifecycle.managedRootErrors.push(value.slice(0, 2048));
           if (typeof value === "string" && value.startsWith("GraphQL Desk trace: ")) {
             results.lifecycle.coldTrace.push(value);
             if (results.lifecycle.coldTrace.length > 80) results.lifecycle.coldTrace.shift();
@@ -672,7 +674,7 @@ exports.run = async () => {
     results.pylance.conditionalLiveTyping = true;
     const semanticSettings = JSON.parse(await fs.readFile(path.join(workspace, ".vscode", "settings.json"), "utf8"));
     const semanticRoot = path.resolve(workspace, semanticSettings["python.analysis.stubPath"]);
-    const runtimeCheck = spawnSync(process.env.GRAPHQL_DESK_PYTHON, ["-c", [
+    const runtimeCheck = spawnSync(process.env.GRAPHQL_DESK_PYTHON, ["-B", "-c", [
       "from graphql_desk_generated.sources.operation_semantics import unsafe_read_abstract_result",
       "data = {'node': {'__typename': 'User', 'name': 'x'}, 'search': [{'kind': 'User', 'name': 'x'}]}",
       "result = unsafe_read_abstract_result(data)",
@@ -684,6 +686,7 @@ exports.run = async () => {
       encoding: "utf8",
     });
     assert.equal(runtimeCheck.status, 0, runtimeCheck.stderr);
+    await assert.rejects(fs.access(path.join(semanticRoot, "graphql_desk_generated", "__pycache__")), { code: "ENOENT" });
     results.pylance.aliasedTypenamePreservesRuntimeIdentity = true;
     await replace(semanticDocument, semanticDiskBaseline);
     assert.equal(await semanticDocument.save(), true, "The temporary typing fixture returns to its saved baseline");

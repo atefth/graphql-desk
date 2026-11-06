@@ -13,7 +13,7 @@ const { registerHighlighting } = require("./highlighting");
 const { createManagedStubPath } = require("./managedStubPath");
 const { createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
 const { createAnalysisGenerations } = require("./analysisGenerations");
-const { createManagedProjectConfig } = require("./projectPyrightConfig");
+const { createManagedProjectConfig, acknowledgePendingConfigWrite } = require("./projectPyrightConfig");
 
 function operationDependencyImpact(previous, current) {
   if (!Array.isArray(previous) || !Array.isArray(current)) return null;
@@ -140,8 +140,26 @@ function reconfigureWorkspaceRoots(options) {
   rootReconfigurationQueues.set(options.roots, next);
   return next;
 }
-function waitForRootReconfigurations(roots) {
-  return (rootReconfigurationQueues.get(roots) ?? Promise.resolve()).catch(() => {});
+async function waitForRootReconfigurations(roots) {
+  let pending;
+  do {
+    pending = rootReconfigurationQueues.get(roots);
+    await (pending ?? Promise.resolve()).catch(() => {});
+  } while (rootReconfigurationQueues.get(roots) !== pending);
+}
+
+async function acquireManagedRoot(roots, folder, folderRoot, generatedPackages, create) {
+  await waitForRootReconfigurations(roots);
+  let promise = roots.get(folderRoot);
+  if (!promise) {
+    promise = create(folder);
+    roots.set(folderRoot, promise);
+    promise.catch(() => { if (roots.get(folderRoot) === promise) roots.delete(folderRoot); });
+  }
+  return promise.then(async managed => {
+    await managed.validateGeneratedPackages?.(generatedPackages);
+    return managed;
+  });
 }
 
 async function drainPublications(publications, cancel) {
@@ -315,27 +333,26 @@ function activate(context) {
     output.appendLine(`Live typing skipped: ${reason}`);
   }
   function createManagedRoot(folder) {
+    if (!controller.isTrusted() || !(vscode.workspace.workspaceFolders ?? []).includes(folder) ||
+        vscode.workspace.getWorkspaceFolder(folder.uri) !== folder) {
+      return Promise.reject(new Error("Trusted current workspace folder required"));
+    }
     return (async () => await createManagedProjectConfig(vscode, folder, context.workspaceState,
       (target, text, action, managedPath, ownership) => controller.editPyrightConfig(target, text, action, managedPath, ownership), {
+        configFile: (target, action, payload) => controller.configFile(target, action, payload),
         onOwnedWrite: (filename, fingerprint, operation) => operation
           ? controller.trackOwnedProjectConfigWrite(filename, fingerprint, operation)
           : controller.markOwnedProjectConfig(filename, fingerprint),
         onOwnership: (filename, value, previousValue, previousPresent) =>
           controller.setManagedProjectStubPath(folder.uri.fsPath, filename, value, previousValue, previousPresent),
       }) ??
-      await createManagedStubPath(vscode, folder, context.workspaceState))();
+      await createManagedStubPath(vscode, folder, context.workspaceState))().catch(error => {
+        output.appendLine(`Managed stub root unavailable: ${String(error)}`);
+        throw error;
+      });
   }
   function managedRoot(folder, folderRoot, generatedPackages = []) {
-    let promise = roots.get(folderRoot);
-    if (!promise) {
-      promise = createManagedRoot(folder);
-      roots.set(folderRoot, promise);
-      promise.catch(() => { if (roots.get(folderRoot) === promise) roots.delete(folderRoot); });
-    }
-    return promise.then(async managed => {
-      await managed.validateGeneratedPackages?.(generatedPackages);
-      return managed;
-    });
+    return acquireManagedRoot(roots, folder, folderRoot, generatedPackages, createManagedRoot);
   }
   async function retireRoot(folderRoot, managed) {
     latestArtifacts.delete(folderRoot);
@@ -811,12 +828,25 @@ function activate(context) {
     });
   });
   const command = vscode.commands.registerCommand("graphqlDesk.refreshSchema", () => controller.refresh());
+  const recoverConfig = vscode.commands.registerCommand("graphqlDesk.reviewConfigRecovery", async () => {
+    const folders = (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === "file");
+    const folder = folders.length === 1 ? folders[0] : await vscode.window.showWorkspaceFolderPick();
+    if (!folder) return false;
+    try {
+      const acknowledged = await acknowledgePendingConfigWrite(vscode, folder, context.workspaceState, () => controller.resetConfigWorkspace(folder));
+      if (acknowledged) { generation += 1; refreshVisible(null, true); }
+      return acknowledged;
+    } catch (error) {
+      await vscode.window.showErrorMessage(`GraphQL Desk: ${error instanceof Error ? error.message : "Could not review the pending config write; preserved"}`);
+      return false;
+    }
+  });
   const lifecycle = { dispose() {
     if (disposePromise) return disposePromise;
     if (disposed) return Promise.resolve();
     disposing = true;
     disposePromise = (async () => {
-      clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose(); configChanged.dispose();
+      clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); recoverConfig.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose(); configChanged.dispose();
       await renameStarted;
       await renameClient.stop();
       await drainPublications(publications, () => {
@@ -847,5 +877,5 @@ function activate(context) {
   refreshVisible(null, true);
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate, analysisRequestIsCurrent, artifactsWithRetry, drainPublications, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations };
+module.exports = { activate, deactivate, acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, drainPublications, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations };
 

@@ -98,28 +98,40 @@ async function assertPrecisionWarnings(document, expectedWarnings, label) {
 
 async function assertPreciseControls(document, label) {
   let observed;
-  await until(async () => {
-    observed = {
-      finalSource: await hover(document, "final_source_value"),
-      literalSource: await hover(document, "literal_source_value"),
-      finalOperation: await hover(document, "final_source_operation"),
-      literalOperation: await hover(document, "literal_source_operation"),
-      operationValue: await hover(document, "precise_operation_value"),
-      operationName: await hover(document, "precise_operation_name"),
-      fragmentId: await hover(document, "tuple_fragment_id"),
-    };
-    return /String|str/.test(observed.finalSource) && /String|str/.test(observed.literalSource) &&
-      /Literal\[['"]SourceFinal['"]\]/.test(observed.finalOperation) &&
-      /Literal\[['"]SourceLiteral['"]\]/.test(observed.literalOperation) &&
-      /Int|int/.test(observed.operationValue) && /Literal\[['"]Second['"]\]/.test(observed.operationName) &&
-      /ID|str/.test(observed.fragmentId);
-  }, label);
-  await until(() => lineDiagnostics(document, "final_source_ok").length === 0 &&
-    lineDiagnostics(document, "precise_operation_ok").length === 0 &&
-    lineDiagnostics(document, "precise_operation_bad_variables").length > 0 &&
-    lineDiagnostics(document, "tuple_fragment_id_ok").length === 0,
-  "Pylance confirms precise result and variable types");
-  return observed;
+  try {
+    await until(async () => {
+      observed = {
+        finalSource: await hover(document, "final_source_value"),
+        literalSource: await hover(document, "literal_source_value"),
+        finalOperation: await hover(document, "final_source_operation"),
+        literalOperation: await hover(document, "literal_source_operation"),
+        operationValue: await hover(document, "precise_operation_value"),
+        operationName: await hover(document, "precise_operation_name"),
+        fragmentId: await hover(document, "tuple_fragment_id"),
+      };
+      return /String|str/.test(observed.finalSource) && /String|str/.test(observed.literalSource) &&
+        /Literal\[['"]SourceFinal['"]\]/.test(observed.finalOperation) &&
+        /Literal\[['"]SourceLiteral['"]\]/.test(observed.literalOperation) &&
+        /Int|int/.test(observed.operationValue) && /Literal\[['"]Second['"]\]/.test(observed.operationName) &&
+        /ID|str/.test(observed.fragmentId);
+    }, label);
+    await until(() => lineDiagnostics(document, "final_source_ok").length === 0 &&
+      lineDiagnostics(document, "precise_operation_ok").length === 0 &&
+      lineDiagnostics(document, "precise_operation_bad_variables").length > 0 &&
+      lineDiagnostics(document, "tuple_fragment_id_ok").length === 0,
+    "Pylance confirms precise result and variable types");
+    return observed;
+  } catch (error) {
+    if (error instanceof Error) {
+      error.stack = `${error.stack || error}\nLast precise controls: ${JSON.stringify({
+        hovers: Object.fromEntries(Object.entries(observed ?? {}).map(([name, text]) => [name, text.slice(0, 1024)])),
+        diagnostics: diagnostics(document).slice(0, 10).map(item => ({
+          source: item.source, code: item.code, line: item.range.start.line, message: item.message.slice(0, 512),
+        })),
+      }).slice(0, 8192)}`;
+    }
+    throw error;
+  }
 }
 
 async function assertRepairedControls(document, label) {
@@ -310,19 +322,6 @@ exports.run = async () => {
     const removedWorkspace = process.env.GRAPHQL_DESK_TEST_REMOVED_WORKSPACE;
     if (removedWorkspace) {
       assert.ok(await fs.realpath(removedWorkspace), "A second isolated workspace root is available");
-      await fs.mkdir(path.join(removedWorkspace, ".vscode"), { recursive: true });
-      await fs.mkdir(path.join(removedWorkspace, ".graphql-desk"), { recursive: true });
-      for (const name of ["pyproject.toml", "pyrightconfig.json", "schema.graphql", "consumer.py", "fragments.py"]) {
-        await fs.copyFile(path.join(workspace, name), path.join(removedWorkspace, name));
-      }
-      await fs.copyFile(path.join(workspace, ".graphql-desk", "keep.txt"), path.join(removedWorkspace, ".graphql-desk", "keep.txt"));
-      await fs.writeFile(path.join(removedWorkspace, ".vscode", "settings.json"), JSON.stringify({
-        "python.defaultInterpreterPath": python,
-        "graphqlDesk.pythonPath": python,
-        "python.analysis.typeCheckingMode": "strict",
-        "python.analysis.stubPath": "python-custom-stubs",
-      }, null, 2));
-      await fs.cp(path.join(workspace, "graphql_desk_generated"), path.join(removedWorkspace, "graphql_desk_generated"), { recursive: true });
       const removedUri = vscode.Uri.file(removedWorkspace);
       const removedSourceUri = vscode.Uri.file(path.join(removedWorkspace, "consumer.py"));
       const removedDocument = await vscode.workspace.openTextDocument(removedSourceUri);

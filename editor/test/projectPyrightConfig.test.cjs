@@ -7,12 +7,331 @@ const { createHash, randomUUID } = require("node:crypto");
 const test = require("node:test");
 const { spawnSync } = require("node:child_process");
 const { createAnalysisWorker } = require("../src/analysisWorker");
-const { parseJsonConfig, modifyJsonConfig, updateProjectConfig, createManagedProjectConfig, MANAGED_PATH, stateKey } = require("../src/projectPyrightConfig");
+const { parseJsonConfig, modifyJsonConfig, updateProjectConfig: rawUpdateProjectConfig,
+  createManagedProjectConfig: rawCreateManagedProjectConfig, acknowledgePendingConfigWrite, MANAGED_PATH, stateKey } = require("../src/projectPyrightConfig");
 const { managedStateKeys } = require("../src/managedStubPath");
+const fixtures = new WeakMap();
+
+function createManagedProjectConfig(vscode, folder, state, worker, options = {}) {
+  return rawCreateManagedProjectConfig(vscode, folder, state, worker,
+    { configFile: fixtures.get(vscode)?.configFile, ...options });
+}
+
+function updateProjectConfig(vscode, folder, action, worker, ownership = {}, managedPath = MANAGED_PATH, onOwnedWrite, isCurrent = () => true) {
+  const fixture = fixtures.get(vscode);
+  const journal = async (file, hash, operation) => {
+    fixture.journal.push(operation);
+    if (!["staged", "discarding"].includes(operation.phase) && onOwnedWrite && await onOwnedWrite(file, hash, operation) === false) return false;
+    return true;
+  };
+  return rawUpdateProjectConfig(vscode, folder, action, worker, ownership, managedPath, journal, fixture?.configFile, isCurrent);
+}
+
+// Contract fake only; it does not prove native ACL preservation.
+function configFileFixture(vscode, folder, root) {
+  let pending;
+  let hook = () => {};
+  const calls = [];
+  const directoryProof = () => {
+    const stat = fs.lstatSync(root, { bigint: true });
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Workspace changed; preserved");
+    return [stat.dev, stat.ino, stat.mode, stat.uid, stat.gid].map(String);
+  };
+  const proof = filename => {
+    const stat = fs.lstatSync(filename, { bigint: true });
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) throw new Error("Config proof changed; preserved");
+    return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.mode, stat.uid, stat.gid].map(String)
+      .concat(createHash("sha256").update(fs.readFileSync(filename)).digest("hex"));
+  };
+  const matches = (filename, expected) => {
+    try { return JSON.stringify(proof(filename)) === JSON.stringify(expected); }
+    catch { return false; }
+  };
+  const exists = filename => {
+    try { fs.lstatSync(filename); return true; }
+    catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  };
+  const configFile = async (targetFolder, action, payload) => {
+    if (!vscode.workspace.isTrusted || targetFolder !== folder ||
+        vscode.workspace.getWorkspaceFolder(vscode.Uri.file(root)) !== folder) throw new Error("Trusted config workspace changed; preserved");
+    calls.push({ action, ...payload });
+    await hook(action, payload);
+    if (action === "stage") {
+      if (pending) throw new Error("Pending stage needs recovery");
+      const file = path.join(root, payload.file);
+      assert.ok(["pyproject.toml", "pyrightconfig.json"].includes(payload.file));
+      assert.equal(path.dirname(payload.temporary), root);
+      assert.match(path.basename(payload.temporary), /^\.graphql-desk-[a-f0-9-]{36}\.tmp$/);
+      const original = proof(file);
+      assert.equal(original.at(-1), payload.expected_hash);
+      const bytes = Buffer.from(payload.text, "utf8");
+      assert.ok(bytes.length <= 1024 * 1024);
+      const descriptor = fs.openSync(payload.temporary, "wx", 0o600);
+      try {
+        fs.fchmodSync(descriptor, Number(BigInt(original[4]) & 0o7777n));
+        fs.writeFileSync(descriptor, bytes);
+        fs.fsyncSync(descriptor);
+      } finally { fs.closeSync(descriptor); }
+      const token = randomUUID().replaceAll("-", "");
+      pending = { token, file, temporary: payload.temporary, original, staged: proof(payload.temporary), directory: directoryProof() };
+      const receipt = Buffer.from(JSON.stringify(pending)).toString("base64");
+      return { ok: true, token, receipt, original_hash: payload.expected_hash,
+        staged_hash: createHash("sha256").update(bytes).digest("hex") };
+    }
+    if (action === "resume") {
+      if (pending) throw new Error("Pending stage needs recovery");
+      const recovered = JSON.parse(Buffer.from(payload.receipt, "base64").toString("utf8"));
+      assert.equal(path.dirname(recovered.file), root);
+      assert.equal(path.dirname(recovered.temporary), root);
+      assert.deepEqual(recovered.directory, directoryProof());
+      if (exists(recovered.temporary) ? !matches(recovered.temporary, recovered.staged) :
+        !matches(recovered.file, recovered.staged) && !matches(recovered.file, recovered.original)) {
+        throw new Error("Config recovery proof changed; preserved");
+      }
+      pending = recovered;
+      return { ok: true, token: pending.token };
+    }
+    if (!pending || payload.token !== pending.token) throw new Error("Unknown config stage");
+    assert.deepEqual(pending.directory, directoryProof());
+    const token = pending.token;
+    if (action === "verify") {
+      if (!matches(pending.file, pending.original) || !matches(pending.temporary, pending.staged)) throw new Error("Config proof changed; preserved");
+    } else if (action === "verify_discard") {
+      if (exists(pending.temporary) && !matches(pending.temporary, pending.staged)) throw new Error("Config temporary changed; preserved");
+    } else if (action === "discard") {
+      if (exists(pending.temporary)) throw new Error("Config temporary still exists; preserved");
+      pending = undefined;
+    } else if (action === "finish") {
+      if (exists(pending.temporary) || !matches(pending.file, pending.staged)) throw new Error("Published config proof changed; preserved");
+      pending = undefined;
+    } else throw new Error("Unexpected config action");
+    return { ok: true, token };
+  };
+  configFile.calls = calls;
+  configFile.restart = () => { pending = undefined; };
+  configFile.onRequest = callback => { hook = callback; };
+  return configFile;
+}
 
 function stateStore() {
   const values = new Map();
   return { get: key => values.get(key), update: async (key, value) => value === undefined ? values.delete(key) : values.set(key, value) };
+}
+
+test("discard preserves a staging file opened dirty during the native cleanup request", async t => {
+  const f = fixture(t, { json: '{"extraPaths":["vendor"]}\n' });
+  let temporary;
+  f.configFile.onRequest((action, payload) => {
+    if (action === "stage") temporary = payload.temporary;
+    if (action === "verify") throw new Error("force staged cleanup");
+    if (action === "verify_discard") f.vscode.workspace.textDocuments.push({ isDirty: true,
+      uri: { scheme: "file", fsPath: temporary } });
+  });
+  await assert.rejects(updateProjectConfig(f.vscode, f.folder, "add", f.worker), /force staged cleanup/);
+  assert.equal(fs.existsSync(temporary), true, "cleanup cannot delete a now-dirty editor buffer's file");
+  assert.equal(f.configFile.calls.filter(call => call.action === "verify_discard").length, 1);
+  assert.equal(f.configFile.calls.some(call => call.action === "discard"), false);
+  assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), '{"extraPaths":["vendor"]}\n');
+});
+
+test("discard persists its full receipt before unlink and recovers a lost absence confirmation", async t => {
+  const f = fixture(t, { json: '{"extraPaths":["vendor"]}\n' });
+  const state = stateStore();
+  const key = `${stateKey(f.root)}:pending-config-write`;
+  let temporary;
+  f.configFile.onRequest((action, payload) => {
+    if (action === "stage") temporary = payload.temporary;
+    if (action === "verify") throw new Error("force staged cleanup");
+    if (action === "verify_discard") {
+      const pending = state.get(key);
+      assert.equal(pending.discarding, true);
+      assert.equal(typeof pending.receipt, "string");
+      assert.equal(typeof pending.token, "string");
+    }
+    if (action === "discard") throw new Error("absence confirmation lost");
+  });
+  const unlink = fs.unlinkSync;
+  let removed = 0;
+  t.mock.method(fs, "unlinkSync", file => {
+    if (file === temporary) {
+      removed += 1;
+      assert.equal(state.get(key).discarding, true);
+      assert.equal(f.configFile.calls.at(-1).action, "verify_discard");
+    }
+    return unlink(file);
+  });
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker), /force staged cleanup/);
+  assert.equal(removed, 1);
+  assert.equal(fs.existsSync(temporary), false);
+  assert.equal(state.get(key).discarding, true);
+  f.configFile.restart();
+  f.configFile.onRequest(() => {});
+  const recovered = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  assert.equal(state.get(key), undefined);
+  assert.equal(removed, 1, "an already absent stage must not be deleted again");
+  assert.ok(f.configFile.calls.some(call => call.action === "resume"));
+  await recovered.release();
+  recovered.cleanup();
+});
+
+test("a journal replacement during discard verification preserves the stage and replacement record", async t => {
+  const f = fixture(t, { json: '{}' });
+  const state = stateStore();
+  const key = `${stateKey(f.root)}:pending-config-write`;
+  let temporary;
+  let replacement;
+  f.configFile.onRequest(async (action, payload) => {
+    if (action === "stage") temporary = payload.temporary;
+    if (action === "verify") throw new Error("force staged cleanup");
+    if (action === "verify_discard") {
+      replacement = { ...state.get(key), hash: "c".repeat(64) };
+      await state.update(key, replacement);
+    }
+  });
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker), /force staged cleanup/);
+  assert.ok(replacement);
+  assert.equal(state.get(key), replacement);
+  assert.equal(fs.existsSync(temporary), true);
+  assert.equal(f.configFile.calls.some(call => call.action === "discard"), false);
+});
+
+test("recovery never deletes a file appearing at an initially absent discard path", async t => {
+  const f = fixture(t, { toml: '[project]\nname="kept"\n' });
+  const file = path.join(f.root, "pyproject.toml");
+  const temporary = path.join(f.root, `.graphql-desk-${randomUUID()}.tmp`);
+  const previousHash = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const proof = await f.configFile(f.folder, "stage", { file: "pyproject.toml", temporary, expected_hash: previousHash, text: "owned stage" });
+  const state = stateStore();
+  const key = `${stateKey(f.root)}:pending-config-write`;
+  await state.update(key, { version: 2, file: "pyproject.toml", temporaryPath: temporary, hash: proof.staged_hash,
+    previousHash, receipt: proof.receipt, token: proof.token, discarding: true });
+  fs.unlinkSync(temporary);
+  const configFile = async (...args) => {
+    const reply = await f.configFile(...args);
+    if (args[1] === "verify_discard") fs.writeFileSync(temporary, "new foreign file");
+    return reply;
+  };
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker, { configFile }), /appeared during cleanup/);
+  assert.equal(fs.readFileSync(temporary, "utf8"), "new foreign file");
+  assert.equal(state.get(key).discarding, true);
+  assert.equal(f.configFile.calls.some(call => call.action === "discard"), false);
+});
+
+for (const scenario of ["legacy", "incomplete", "discarding", "cancel", "changed record", "trust loss", "foreign path", "workspace removed"]) {
+  test(`explicit config recovery acknowledgement preserves files: ${scenario}`, async t => {
+    const f = fixture(t, { json: '{"stubPath":"custom-stubs"}\n' });
+    const file = path.join(f.root, "pyrightconfig.json");
+    const temporary = path.join(f.root, `.graphql-desk-${randomUUID()}.tmp`);
+    fs.writeFileSync(temporary, "uncertain preserved data");
+    const state = stateStore();
+    const key = `${stateKey(f.root)}:pending-config-write`;
+    const pending = { version: scenario === "legacy" ? 1 : 2, file: "pyrightconfig.json", temporaryPath: temporary,
+      hash: "a".repeat(64), ...(scenario === "legacy" ? {} : { previousHash: "b".repeat(64), receipt: null, token: null }) };
+    if (scenario === "discarding") pending.discarding = true;
+    if (scenario === "foreign path") pending.temporaryPath = path.join(path.dirname(f.root), path.basename(temporary));
+    await state.update(key, pending);
+    await state.update("unrelated", "preserve");
+    let reset = 0;
+    let dialogs = 0;
+    f.vscode.window = { async showWarningMessage(_message, options, confirm) {
+      dialogs += 1;
+      assert.equal(options.modal, true);
+      assert.ok(options.detail.includes(file));
+      assert.ok(options.detail.includes(temporary));
+      assert.equal(fs.readFileSync(temporary, "utf8"), "uncertain preserved data");
+      if (scenario === "changed record") await state.update(key, { ...pending, hash: "c".repeat(64) });
+      if (scenario === "trust loss") f.vscode.workspace.isTrusted = false;
+      if (scenario === "workspace removed") f.vscode.workspace.getWorkspaceFolder = () => undefined;
+      return scenario === "cancel" ? undefined : confirm;
+    } };
+    const action = () => acknowledgePendingConfigWrite(f.vscode, f.folder, state, () => {
+      assert.equal(state.get(key), pending, "old worker is reset while the recovery intent still exists");
+      reset += 1;
+    });
+    if (["changed record", "trust loss", "foreign path", "workspace removed"].includes(scenario)) {
+      await assert.rejects(action(), /changed|record|workspace/i);
+      assert.ok(state.get(key));
+      assert.equal(reset, 0);
+    } else {
+      assert.equal(await action(), scenario !== "cancel");
+      assert.equal(state.get(key) === undefined, scenario !== "cancel");
+      assert.equal(reset, scenario === "cancel" ? 0 : 1);
+    }
+    assert.equal(dialogs, scenario === "foreign path" ? 0 : 1);
+    assert.equal(state.get("unrelated"), "preserve");
+    assert.equal(fs.readFileSync(file, "utf8"), '{"stubPath":"custom-stubs"}\n');
+    assert.equal(fs.readFileSync(temporary, "utf8"), "uncertain preserved data");
+    assert.deepEqual(f.configFile.calls, [], "acknowledgement grants no native file capability");
+  });
+}
+
+test("config recovery acknowledgement serializes with recovery and preserves an unsuccessful state write", async t => {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs"}\n' });
+  const key = `${stateKey(f.root)}:pending-config-write`;
+  const pending = { version: 2, file: "pyrightconfig.json", temporaryPath: path.join(f.root, `.graphql-desk-${randomUUID()}.tmp`),
+    hash: "a".repeat(64), previousHash: "b".repeat(64), receipt: null, token: null };
+  const state = stateStore();
+  await state.update(key, pending);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  let started;
+  const shown = new Promise(resolve => { started = resolve; });
+  let dialogs = 0;
+  f.vscode.window = { async showWarningMessage(_message, _options, choice) { dialogs += 1; started(); await held; return choice; } };
+  const action = acknowledgePendingConfigWrite(f.vscode, f.folder, state, () => {});
+  t.after(() => release());
+  await shown;
+  await assert.rejects(acknowledgePendingConfigWrite(f.vscode, f.folder, state, () => {}), /Another/);
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker), /Another/);
+  assert.equal(dialogs, 1);
+  assert.deepEqual(f.configFile.calls, []);
+  release();
+  assert.equal(await action, true);
+
+  await state.update(key, pending);
+  const failing = { get: state.get, update: async () => { throw new Error("state unavailable"); } };
+  await assert.rejects(acknowledgePendingConfigWrite(f.vscode, f.folder, failing, () => {}), /state unavailable/);
+  assert.equal(state.get(key), pending);
+});
+
+for (const changedRecord of [false, true]) {
+  test(`automatic config recovery holds the acknowledgement lock${changedRecord ? " and preserves a replaced record" : ""}`, async t => {
+    const f = fixture(t, { toml: '[project]\nname="kept"\n' });
+    const file = path.join(f.root, "pyproject.toml");
+    const temporary = path.join(f.root, `.graphql-desk-${randomUUID()}.tmp`);
+    const originalHash = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    const proof = await f.configFile(f.folder, "stage", { file: "pyproject.toml", temporary, expected_hash: originalHash, text: "owned stage" });
+    const pending = { version: 2, file: "pyproject.toml", temporaryPath: temporary, hash: proof.staged_hash,
+      previousHash: originalHash, receipt: proof.receipt, token: proof.token };
+    const state = stateStore();
+    const key = `${stateKey(f.root)}:pending-config-write`;
+    await state.update(key, pending);
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    let started;
+    const firstStarted = new Promise(resolve => { started = resolve; });
+    f.configFile.onRequest(async action => { if (action === "verify_discard") { started(); await held; } });
+    let dialogs = 0;
+    f.vscode.window = { async showWarningMessage() { dialogs += 1; } };
+    const recovery = createManagedProjectConfig(f.vscode, f.folder, state, f.worker).then(value => ({ value }), error => ({ error }));
+    t.after(() => release());
+    await firstStarted;
+    await assert.rejects(acknowledgePendingConfigWrite(f.vscode, f.folder, state, () => {}), /Another/);
+    assert.equal(dialogs, 0);
+    const replacement = { ...pending, hash: "c".repeat(64) };
+    if (changedRecord) await state.update(key, replacement);
+    release();
+    const result = await recovery;
+    if (changedRecord) {
+      assert.match(result.error?.message, /record changed/);
+      assert.equal(state.get(key), replacement);
+    } else {
+      assert.equal(result.error, undefined);
+      assert.equal(result.value, null);
+      assert.equal(state.get(key), undefined);
+    }
+    assert.equal(fs.readFileSync(file, "utf8"), '[project]\nname="kept"\n');
+  });
 }
 
 test("custom stubs survive explicit execution environment paths and owned release", () => {
@@ -167,9 +486,7 @@ test("real Pyright retains custom stub typing through an explicit environment", 
 });
 
 function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonStubPath, inheritedPythonStubPath } = {}) {
-  const localTemp = path.join(__dirname, "..", ".cache", "issue-329-unit");
-  fs.mkdirSync(localTemp, { recursive: true });
-  const root = fs.mkdtempSync(path.join(localTemp, "pyright-config-"));
+  const root = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "pyright-config-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const folder = { uri: { scheme: "file", fsPath: root, toString: () => `file://${root.replaceAll("\\", "/")}` } };
   if (json !== undefined) fs.writeFileSync(path.join(root, "pyrightconfig.json"), json);
@@ -271,7 +588,10 @@ function fixture(t, { json, toml, dirty = false, pythonStubPath: initialPythonSt
     return { ok: true, found: true, text: output, stub_path: nextStub, has_stub_path: nextHasStub, extra_paths: nextExtra, has_execution_environments: hasEnvs,
       execution_environments: [], ownership: { top_level: !pathLine, execution_environment_roots: [] } };
   };
-  return { root, folder, vscode, worker, get pythonStubPath() { return pythonStubPath; }, onPythonSettingChange(callback) { onPythonSettingChange = callback; } };
+  const configFile = configFileFixture(vscode, folder, root);
+  const journal = [];
+  fixtures.set(vscode, { configFile, journal });
+  return { root, folder, vscode, worker, configFile, journal, get pythonStubPath() { return pythonStubPath; }, onPythonSettingChange(callback) { onPythonSettingChange = callback; } };
 }
 
 test("JSONC edit preserves comments, trailing commas, and unrelated settings", () => {
@@ -407,6 +727,150 @@ test("config replacement stops after the bounded Windows-lock retries", async t 
   assert.equal(attempts, 4);
   assert.equal(fs.readFileSync(file, "utf8"), original);
   assert.deepEqual(fs.readdirSync(f.root), ["pyrightconfig.json"]);
+  assert.equal(f.configFile.calls.filter(call => call.action === "verify").length, 4);
+});
+
+test("mutating paths require a permission backend and durable journal", async t => {
+  const original = '{"extraPaths":["vendor"]}';
+  const f = fixture(t, { json: original });
+  await assert.rejects(rawUpdateProjectConfig(f.vscode, f.folder, "add", f.worker, {}, MANAGED_PATH,
+    async () => true), /Permission-preserving/);
+  await assert.rejects(rawUpdateProjectConfig(f.vscode, f.folder, "add", f.worker, {}, MANAGED_PATH,
+    undefined, f.configFile), /durable journal/);
+  const inspected = await rawUpdateProjectConfig(f.vscode, f.folder, "inspect", f.worker);
+  assert.equal(typeof inspected.identity.ino, "bigint");
+  assert.equal(typeof inspected.identity.dev, "bigint");
+  assert.equal(f.configFile.calls.length, 0);
+  assert.equal(fs.readFileSync(inspected.file, "utf8"), original);
+  assert.deepEqual(fs.readdirSync(f.root), ["pyrightconfig.json"]);
+});
+
+test("malformed UTF-8 is preserved before intent or staging", async t => {
+  const f = fixture(t, { json: "{}" });
+  const file = path.join(f.root, "pyrightconfig.json");
+  const original = Buffer.from('{"private":"user\xff"}', "latin1");
+  fs.writeFileSync(file, original);
+  await assert.rejects(updateProjectConfig(f.vscode, f.folder, "add", f.worker), /Invalid UTF-8/);
+  assert.deepEqual(fs.readFileSync(file), original);
+  assert.equal(f.configFile.calls.length, 0);
+  assert.equal(f.journal.length, 0);
+});
+
+test("intent precedes stage and its permission receipt is durable before every rename", async t => {
+  const f = fixture(t, { json: '{}' });
+  const state = stateStore();
+  const pendingKey = `${stateKey(f.root)}:pending-config-write`;
+  const file = path.join(f.root, "pyrightconfig.json");
+  f.configFile.onRequest(action => {
+    const pending = state.get(pendingKey);
+    if (action === "stage") { assert.equal(pending.version, 2); assert.equal(pending.receipt, null); }
+    if (action === "verify") { assert.equal(typeof pending.receipt, "string"); assert.equal(typeof pending.token, "string"); }
+  });
+  const rename = fs.renameSync;
+  let commits = 0;
+  t.mock.method(fs, "renameSync", (source, destination) => {
+    if (destination === file) {
+      commits += 1;
+      assert.equal(typeof state.get(pendingKey).receipt, "string");
+      assert.equal(f.configFile.calls.at(-1).action, "verify");
+    }
+    return rename(source, destination);
+  });
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  assert.equal(state.get(pendingKey), undefined);
+  await managed.release();
+  managed.cleanup();
+  assert.equal(state.get(pendingKey), undefined);
+  assert.ok(commits >= 2);
+});
+
+for (const race of ["dirty", "trust", "source", "stage", "generation"]) {
+  test(`the final synchronous guard preserves ${race} changes after permission verification`, async t => {
+    const original = '{"extraPaths":["vendor"]}';
+    const f = fixture(t, { json: original });
+    const file = path.join(f.root, "pyrightconfig.json");
+    let current = true;
+    const configFile = async (...args) => {
+      const reply = await f.configFile(...args);
+      if (args[1] === "verify") {
+        if (race === "dirty") f.vscode.workspace.textDocuments.push({ isDirty: true, uri: f.vscode.Uri.file(file) });
+        else if (race === "trust") f.vscode.workspace.isTrusted = false;
+        else if (race === "generation") current = false;
+        else {
+          const target = race === "source" ? file : f.configFile.calls.find(call => call.action === "stage").temporary;
+          const replacement = path.join(f.root, "foreign-replacement");
+          fs.writeFileSync(replacement, fs.readFileSync(target));
+          fs.renameSync(replacement, target);
+        }
+      }
+      return reply;
+    };
+    let commits = 0;
+    const rename = fs.renameSync;
+    t.mock.method(fs, "renameSync", (source, destination) => {
+      if (destination === file && path.basename(source).startsWith(".graphql-desk-")) commits += 1;
+      return rename(source, destination);
+    });
+    await assert.rejects(rawUpdateProjectConfig(f.vscode, f.folder, "add", f.worker, {}, MANAGED_PATH,
+      async () => true, configFile, () => current), /Dirty|Trusted|changed|stale/);
+    assert.equal(commits, 0);
+    assert.equal(fs.readFileSync(file, "utf8"), original);
+    assert.equal(f.configFile.calls.some(call => call.action === "finish"), false);
+  });
+}
+
+test("a failed receipt save preserves the stage and intent before any cleanup", async t => {
+  const original = '{"extraPaths":["vendor"]}';
+  const f = fixture(t, { json: original });
+  const state = stateStore();
+  const update = state.update;
+  const pendingKey = `${stateKey(f.root)}:pending-config-write`;
+  state.update = async (key, value) => {
+    if (key === pendingKey && value?.receipt) throw new Error("receipt storage unavailable");
+    return update(key, value);
+  };
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker), /storage unavailable/);
+  assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), original);
+  assert.deepEqual(f.configFile.calls.map(call => call.action), ["stage"]);
+  assert.equal(state.get(pendingKey).receipt, null);
+  assert.equal(fs.existsSync(state.get(pendingKey).temporaryPath), true);
+});
+
+test("lost staging replies retain incomplete intent and prevent new stage creation", async t => {
+  const original = '{"extraPaths":["vendor"]}';
+  const f = fixture(t, { json: original });
+  const state = stateStore();
+  const configFile = async (...args) => {
+    await f.configFile(...args);
+    throw new Error("stage reply lost");
+  };
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker, { configFile }), /reply lost/);
+  const pending = state.get(`${stateKey(f.root)}:pending-config-write`);
+  assert.equal(pending.version, 2);
+  assert.equal(pending.receipt, null);
+  assert.equal(fs.existsSync(pending.temporaryPath), true);
+  f.configFile.restart();
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker), /manual recovery/);
+  assert.equal(f.configFile.calls.filter(call => call.action === "stage").length, 1);
+  assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), original);
+});
+
+test("freshness failure before native staging clears only the unused intent", async t => {
+  const f = fixture(t, { json: '{"extraPaths":["vendor"]}' });
+  const file = path.join(f.root, "pyrightconfig.json");
+  const userText = '{"extraPaths":["user-added"]}';
+  const state = stateStore();
+  const update = state.update;
+  const pendingKey = `${stateKey(f.root)}:pending-config-write`;
+  state.update = async (key, value) => {
+    await update(key, value);
+    if (key === pendingKey && value?.receipt === null) fs.writeFileSync(file, userText);
+  };
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker), /changed concurrently/);
+  assert.equal(f.configFile.calls.length, 0);
+  assert.equal(state.get(pendingKey), undefined);
+  assert.equal(fs.readFileSync(file, "utf8"), userText);
+  assert.equal(fs.readdirSync(f.root).some(name => /^\.graphql-desk-[a-f0-9-]+\.tmp$/.test(name)), false);
 });
 
 for (const race of ["config edit", "dirty buffer", "trust revoked", "workspace removed", "staged edit"]) {
@@ -435,7 +899,7 @@ for (const race of ["config edit", "dirty buffer", "trust revoked", "workspace r
       /changed|Dirty|trusted/i);
     assert.equal(attempts, 1, "ownership must be rechecked before another rename attempt");
     assert.equal(fs.readFileSync(file, "utf8"), race === "config edit" ? userText : original);
-    assert.equal(fs.existsSync(staged), race === "staged edit");
+    assert.equal(fs.existsSync(staged), ["staged edit", "trust revoked", "workspace removed"].includes(race));
     if (race === "staged edit") assert.equal(fs.readFileSync(staged, "utf8"), userText);
   });
 }
@@ -461,7 +925,7 @@ test("pending ownership recovers before and after the atomic config edit", async
   }
 });
 
-test("restart removes only the recorded atomic Pyright config temporary", async t => {
+test("legacy hash-only config journals require manual recovery and preserve all files", async t => {
   const f = fixture(t, { json: '{"extraPaths":["vendor"]}' });
   const state = stateStore();
   const config = path.join(f.root, "pyrightconfig.json");
@@ -475,12 +939,129 @@ test("restart removes only the recorded atomic Pyright config temporary", async 
     hash: createHash("sha256").update(pendingText).digest("hex"),
   });
 
-  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
-  assert.equal(fs.existsSync(temporary), false);
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker), /manual recovery/);
+  assert.equal(fs.existsSync(temporary), true);
   assert.equal(fs.existsSync(unrelated), true);
+  assert.equal(state.get(`${stateKey(f.root)}:pending-config-write`).version, 1);
+  assert.equal(fs.readFileSync(config, "utf8"), '{"extraPaths":["vendor"]}');
+});
+
+for (const committed of [false, true]) {
+  test(`permission receipts recover ${committed ? "committed" : "uncommitted"} config writes after restart`, async t => {
+    const f = fixture(t, { json: '{"extraPaths":["vendor"]}' });
+    const state = stateStore();
+    const file = path.join(f.root, "pyrightconfig.json");
+    const temporary = path.join(f.root, `.graphql-desk-${randomUUID()}.tmp`);
+    const unrelated = path.join(f.root, `.graphql-desk-${randomUUID()}.tmp`);
+    fs.writeFileSync(unrelated, "unowned");
+    const previousHash = createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    const proof = await f.configFile(f.folder, "stage", { file: "pyrightconfig.json", temporary,
+      expected_hash: previousHash, text: '{"extraPaths":["vendor","typings"]}' });
+    await state.update(`${stateKey(f.root)}:pending-config-write`, {
+      version: 2, file: "pyrightconfig.json", temporaryPath: temporary, hash: proof.staged_hash,
+      previousHash, token: proof.token, receipt: proof.receipt,
+    });
+    if (committed) fs.renameSync(temporary, file);
+    f.configFile.restart();
+    const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+    assert.equal(fs.existsSync(temporary), false);
+    assert.equal(fs.readFileSync(unrelated, "utf8"), "unowned");
+    assert.equal(state.get(`${stateKey(f.root)}:pending-config-write`), undefined);
+    assert.ok(f.configFile.calls.some(call => call.action === "resume"));
+    await managed.release();
+    managed.cleanup();
+    assert.deepEqual(parseJsonConfig(fs.readFileSync(file, "utf8")).extraPaths,
+      committed ? ["vendor", "typings"] : ["vendor"]);
+  });
+}
+
+test("recovery preserves a foreign replacement even when its bytes match the receipt", async t => {
+  const original = '{"extraPaths":["vendor"]}';
+  const f = fixture(t, { json: original });
+  const state = stateStore();
+  const file = path.join(f.root, "pyrightconfig.json");
+  const temporary = path.join(f.root, `.graphql-desk-${randomUUID()}.tmp`);
+  const previousHash = createHash("sha256").update(original).digest("hex");
+  const proof = await f.configFile(f.folder, "stage", { file: "pyrightconfig.json", temporary,
+    expected_hash: previousHash, text: '{"extraPaths":["vendor","typings"]}' });
+  const pending = { version: 2, file: "pyrightconfig.json", temporaryPath: temporary,
+    previousHash, hash: proof.staged_hash, token: proof.token, receipt: proof.receipt };
+  await state.update(`${stateKey(f.root)}:pending-config-write`, pending);
+  const foreign = path.join(f.root, "foreign");
+  fs.writeFileSync(foreign, fs.readFileSync(temporary));
+  fs.renameSync(foreign, temporary);
+  f.configFile.restart();
+  await assert.rejects(createManagedProjectConfig(f.vscode, f.folder, state, f.worker), /proof changed/);
+  assert.equal(fs.existsSync(temporary), true);
+  assert.deepEqual(state.get(`${stateKey(f.root)}:pending-config-write`), { ...pending, discarding: true });
+  assert.equal(fs.readFileSync(file, "utf8"), original);
+});
+
+test("parallel callers cannot overwrite the one active config-write intent", async t => {
+  const f = fixture(t, { json: '{}' });
+  let entered;
+  let release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  f.configFile.onRequest(async action => { if (action === "stage") { entered(); await gate; } });
+  const first = updateProjectConfig(f.vscode, f.folder, "add", f.worker);
+  await started;
+  await assert.rejects(updateProjectConfig(f.vscode, f.folder, "add", f.worker), /Another Pyright config write/);
+  release();
+  await first;
+  assert.equal(f.configFile.calls.filter(call => call.action === "stage").length, 1);
+  assert.equal(f.journal.filter(item => item.phase === "begin").length, 1);
+});
+
+test("a generation becoming stale during native verification cannot change project or Python settings", async t => {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs"}' });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const id = `g-1-${randomUUID()}`;
+  const directory = path.join(managed.root, "generations", id);
+  fs.mkdirSync(directory, { recursive: true });
+  const fingerprint = "a".repeat(64);
+  const keys = managedStateKeys(f.root, `:project-${createHash("sha256").update("pyrightconfig.json").digest("hex").slice(0, 16)}`);
+  await state.update(keys.generationStateKey, { [id]: fingerprint });
+  const manifest = { owner: "graphql-desk-analysis-generation", format: 2, id,
+    artifactFingerprint: fingerprint };
+  let current = true;
+  f.configFile.onRequest(action => { if (action === "verify") current = false; });
+  await assert.rejects(managed.selectGeneration(directory, () => current, {
+    directory, manifest, manifestFingerprint: fingerprint,
+    verify: () => ({ directory, manifest, manifestFingerprint: fingerprint }),
+  }), /stale/);
+  assert.equal(parseJsonConfig(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")).stubPath, MANAGED_PATH);
+  assert.equal(f.pythonStubPath, MANAGED_PATH);
   assert.equal(state.get(`${stateKey(f.root)}:pending-config-write`), undefined);
+  assert.equal(state.get(keys.stateKey).current, MANAGED_PATH);
+  f.configFile.onRequest(() => {});
   await managed.release();
   managed.cleanup();
+});
+
+test("native file witnesses retain distinctions above JavaScript's safe integer range", async t => {
+  const original = '{"extraPaths":["vendor"]}';
+  const f = fixture(t, { json: original });
+  const file = path.join(f.root, "pyrightconfig.json");
+  const lstat = fs.lstatSync;
+  const fstat = fs.fstatSync;
+  const inode = lstat(file, { bigint: true }).ino;
+  let offset = 0n;
+  const adjust = stat => {
+    if (typeof stat.ino === "bigint" && stat.ino === inode) stat.ino = 2n ** 100n + offset;
+    return stat;
+  };
+  t.mock.method(fs, "lstatSync", (...args) => adjust(lstat(...args)));
+  t.mock.method(fs, "fstatSync", (...args) => adjust(fstat(...args)));
+  const configFile = async (...args) => {
+    const reply = await f.configFile(...args);
+    if (args[1] === "verify") offset = 1n;
+    return reply;
+  };
+  await assert.rejects(rawUpdateProjectConfig(f.vscode, f.folder, "add", f.worker, {}, MANAGED_PATH,
+    async () => true, configFile), /changed concurrently/);
+  assert.equal(fs.readFileSync(file, "utf8"), original);
 });
 
 test("pending TOML recovery carries its saved ownership through the worker bridge", async t => {
@@ -571,11 +1152,13 @@ test("real worker accepts rollback from the first generation to the managed base
   await state.update(keys.generationStateKey, { [id]: fingerprint });
 
   let currentChecks = 0;
-  assert.equal(await managed.selectGeneration(directory, () => ++currentChecks === 1, {
+  let becameStale = false;
+  f.onPythonSettingChange(value => { if (value?.endsWith(id)) becameStale = true; });
+  assert.equal(await managed.selectGeneration(directory, () => { currentChecks += 1; return !becameStale; }, {
     directory, manifest, manifestFingerprint: fingerprint,
     verify: () => ({ directory, manifest, manifestFingerprint: fingerprint }),
   }), false);
-  assert.equal(currentChecks, 2);
+  assert.ok(currentChecks >= 2);
   assert.ok(actions.some(item => item.action === "set_stub_path" && item.managedPath.endsWith(id)),
     "the generation must be selected before the stale result triggers rollback");
   assert.ok(actions.some(item => item.action === "restore_stub_path" && item.managedPath === MANAGED_PATH),
@@ -837,6 +1420,77 @@ test("a managed generation update is owned before the workspace setting change e
   await managed.release();
   managed.cleanup();
   assert.equal(f.pythonStubPath, "python-custom");
+});
+
+for (const rollback of [false, true]) test(`package validation waits for native generation ${rollback ? "rollback" : "commit"}`, async t => {
+  const f = fixture(t, { json: '{"stubPath":"custom-stubs","extraPaths":["vendor"]}' });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  const id = `g-1-${randomUUID()}`;
+  const directory = path.join(managed.root, "generations", id);
+  fs.mkdirSync(directory, { recursive: true });
+  const fingerprint = "a".repeat(64);
+  const keys = managedStateKeys(f.root, `:project-${createHash("sha256").update("pyrightconfig.json").digest("hex").slice(0, 16)}`);
+  await state.update(keys.generationStateKey, { [id]: fingerprint });
+  const manifest = { owner: "graphql-desk-analysis-generation", format: 2, id, artifactFingerprint: fingerprint };
+  let releaseFinish, startedFinish;
+  const finishing = new Promise(resolve => { releaseFinish = resolve; });
+  const started = new Promise(resolve => { startedFinish = resolve; });
+  let held = false;
+  f.configFile.onRequest(async action => {
+    if (action === "finish" && !held) { held = true; startedFinish(); await finishing; }
+  });
+  let current = true;
+  const selecting = managed.selectGeneration(directory, () => current, {
+    directory, manifest, manifestFingerprint: fingerprint,
+    verify: () => ({ directory, manifest, manifestFingerprint: fingerprint }),
+  });
+  await started;
+  assert.equal(parseJsonConfig(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8")).stubPath,
+    path.relative(f.root, directory).split(path.sep).join("/"), "the native rename has already happened");
+  let settled = false;
+  const validating = managed.validateGeneratedPackages(["graphql_desk_generated"])
+    .then(value => { settled = true; return { value }; }, error => { settled = true; return { error }; });
+  let settledDuringFinish;
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    settledDuringFinish = settled;
+    current = !rollback;
+  } finally { releaseFinish(); }
+  assert.equal(await selecting, !rollback);
+  const validationResult = await validating;
+  assert.equal(settledDuringFinish, false, "package validation cannot inspect a half-completed generation transaction");
+  assert.deepEqual(validationResult, { value: true });
+  assert.equal(await managed.checkSettingOwnership(), true);
+  await managed.release();
+  managed.cleanup();
+});
+
+test("async TOML package validation holds the selection queue through inspection", async t => {
+  const f = fixture(t, { toml: '[tool.pyright]\nstubPath = "custom-stubs"\n' });
+  let hold = false, held = false, releaseInspect, startedInspect;
+  const inspecting = new Promise(resolve => { releaseInspect = resolve; });
+  const started = new Promise(resolve => { startedInspect = resolve; });
+  const worker = async (...args) => {
+    if (hold && !held && args[2] === "inspect") { held = true; startedInspect(); await inspecting; }
+    return f.worker(...args);
+  };
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, stateStore(), worker);
+  hold = true;
+  const validating = managed.validateGeneratedPackages(["graphql_desk_generated"]);
+  await started;
+  let settled = false;
+  const ownership = managed.checkSettingOwnership().then(value => { settled = true; return value; });
+  let settledDuringInspect;
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    settledDuringInspect = settled;
+  } finally { releaseInspect(); }
+  assert.equal(await validating, true);
+  assert.equal(await ownership, true);
+  assert.equal(settledDuringInspect, false, "the queue must remain held across the asynchronous config inspection");
+  await managed.release();
+  managed.cleanup();
 });
 
 test("managed config fails closed when existing stubs shadow generated package", async t => {

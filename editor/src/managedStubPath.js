@@ -260,7 +260,12 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
             verifyGeneration();
             if (!ownsCurrentValue(oldSetting)) throw new Error(ownershipError());
             verifyGeneration();
-            await config.update("analysis.stubPath", targetSetting, vscode.ConfigurationTarget.WorkspaceFolder);
+            if (options.config) {
+              await config.update("analysis.stubPath", targetSetting, vscode.ConfigurationTarget.WorkspaceFolder,
+                () => { verifyGeneration(); return isCurrent() === true; });
+            } else {
+              await config.update("analysis.stubPath", targetSetting, vscode.ConfigurationTarget.WorkspaceFolder);
+            }
             verifyGeneration();
             await workspaceState?.update?.(stateKey, { base: baseSetting, current: setting, currentPresent: true });
             settingPresent = true;

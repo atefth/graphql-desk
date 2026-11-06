@@ -2,7 +2,6 @@
 
 import argparse
 import ast
-import errno
 import json
 import os
 import shutil
@@ -20,6 +19,7 @@ from typing import Literal, NoReturn, cast
 import tomlkit
 from graphql import GraphQLError, print_schema
 
+from . import config_files
 from .config import (
     ProjectConfig,
     SchemaConfig,
@@ -122,13 +122,6 @@ class CheckDiagnostic:
     end_line: int | None = None
     end_column: int | None = None
     workflow_file: str | None = None
-
-
-@dataclass(frozen=True)
-class _ConfigSnapshot:
-    data: bytes
-    identity: os.stat_result
-    dacl: bytes | None
 
 
 _WARNING_CODES = frozenset(
@@ -763,260 +756,6 @@ def _persisted_outputs(
     raise ValueError("Select --output, configure persisted_output, or redirect stdout")
 
 
-def _check_config_acl(descriptor: int) -> None:
-    if sys.platform == "win32":
-        return
-    if sys.platform == "linux":
-        try:
-            os.getxattr(descriptor, "system.posix_acl_access")
-        except OSError as error:
-            if error.errno == errno.ENODATA:
-                return
-            raise
-        raise OSError("Extended configuration ACLs are not supported")
-    if sys.platform == "darwin":
-        import ctypes
-
-        native = ctypes.CDLL(None, use_errno=True)
-        native.fpathconf.argtypes = [ctypes.c_int, ctypes.c_int]
-        native.fpathconf.restype = ctypes.c_long
-        # Opaque remote authorization cannot be established from the local ACL.
-        ctypes.set_errno(0)
-        opaque = native.fpathconf(descriptor, 14)
-        if opaque != 0:
-            raise OSError("Configuration authorization is opaque or unverified")
-        ctypes.set_errno(0)
-        capability = native.fpathconf(descriptor, 13)
-        if capability == 0:
-            return
-        if capability != 1:
-            raise OSError("Configuration ACL capability is unverified")
-        native.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
-        native.acl_get_fd_np.restype = ctypes.c_void_p
-        native.acl_get_entry.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        native.acl_get_entry.restype = ctypes.c_int
-        native.acl_free.argtypes = [ctypes.c_void_p]
-        native.acl_free.restype = ctypes.c_int
-        ctypes.set_errno(0)
-        acl = native.acl_get_fd_np(descriptor, 0x100)
-        if not acl:
-            if ctypes.get_errno() == errno.ENOENT:
-                return
-            raise OSError("Configuration ACL could not be read")
-        try:
-            entry = ctypes.c_void_p()
-            ctypes.set_errno(0)
-            result = native.acl_get_entry(acl, 0, ctypes.byref(entry))
-            if result == -1 and ctypes.get_errno() == errno.EINVAL:
-                return
-            raise OSError("Extended or unverified configuration ACL is unsupported")
-        finally:
-            ctypes.set_errno(0)
-            if native.acl_free(acl) != 0:
-                raise OSError("Configuration ACL handle could not be freed")
-    raise OSError("Configuration ACL absence could not be verified")
-
-
-def _config_dacl(descriptor: int) -> bytes | None:
-    """Capture owner and DACL in one self-relative security descriptor."""
-    if sys.platform != "win32":
-        return None
-    import ctypes
-    import msvcrt
-    from ctypes import wintypes
-
-    security = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    pointer = ctypes.POINTER(ctypes.c_void_p)
-    security.GetSecurityInfo.argtypes = [
-        wintypes.HANDLE,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        pointer,
-        pointer,
-        pointer,
-        pointer,
-        pointer,
-    ]
-    security.GetSecurityInfo.restype = wintypes.DWORD
-    security.GetSecurityDescriptorLength.argtypes = [ctypes.c_void_p]
-    security.GetSecurityDescriptorLength.restype = wintypes.DWORD
-    security.GetSecurityDescriptorControl.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(wintypes.WORD),
-        ctypes.POINTER(wintypes.DWORD),
-    ]
-    security.GetSecurityDescriptorControl.restype = wintypes.BOOL
-    kernel.LocalFree.argtypes = [ctypes.c_void_p]
-    kernel.LocalFree.restype = ctypes.c_void_p
-    result = ctypes.c_void_p()
-    error = security.GetSecurityInfo(
-        msvcrt.get_osfhandle(descriptor),
-        1,
-        5,
-        None,
-        None,
-        None,
-        None,
-        ctypes.byref(result),
-    )
-    if error:
-        raise ctypes.WinError(error)
-    try:
-        control, revision = wintypes.WORD(), wintypes.DWORD()
-        if not security.GetSecurityDescriptorControl(
-            result, ctypes.byref(control), ctypes.byref(revision)
-        ):
-            raise ctypes.WinError(ctypes.get_last_error())
-        if not control.value & 0x8000:
-            raise OSError("Configuration security is not self-relative")
-        return ctypes.string_at(result, security.GetSecurityDescriptorLength(result))
-    finally:
-        kernel.LocalFree(result)
-
-
-def _same_config_owner(original: bytes | None, staged: bytes | None) -> bool:
-    if sys.platform != "win32":
-        return True
-    if original is None or staged is None:
-        return False
-    import ctypes
-    from ctypes import wintypes
-
-    security = ctypes.WinDLL("advapi32", use_last_error=True)
-    security.GetSecurityDescriptorOwner.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_void_p),
-        ctypes.POINTER(wintypes.BOOL),
-    ]
-    security.GetSecurityDescriptorOwner.restype = wintypes.BOOL
-    security.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    security.EqualSid.restype = wintypes.BOOL
-    source, destination = ctypes.c_void_p(), ctypes.c_void_p()
-    defaulted = wintypes.BOOL()
-    original_buffer = ctypes.create_string_buffer(original)
-    staged_buffer = ctypes.create_string_buffer(staged)
-    for descriptor, owner in (
-        (original_buffer, source),
-        (staged_buffer, destination),
-    ):
-        if not security.GetSecurityDescriptorOwner(
-            descriptor, ctypes.byref(owner), ctypes.byref(defaulted)
-        ):
-            raise ctypes.WinError(ctypes.get_last_error())
-    return bool(
-        source.value and destination.value and security.EqualSid(source, destination)
-    )
-
-
-def _apply_config_dacl(descriptor: int, dacl: bytes | None) -> None:
-    if sys.platform != "win32":
-        return
-    import ctypes
-    import msvcrt
-    from ctypes import wintypes
-
-    if dacl is None:
-        raise OSError("Original configuration security was not captured")
-    security = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.ReOpenFile.argtypes = [
-        wintypes.HANDLE,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.DWORD,
-    ]
-    kernel.ReOpenFile.restype = wintypes.HANDLE
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel.CloseHandle.restype = wintypes.BOOL
-    security.GetSecurityDescriptorControl.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(wintypes.WORD),
-        ctypes.POINTER(wintypes.DWORD),
-    ]
-    security.GetSecurityDescriptorControl.restype = wintypes.BOOL
-    security.GetSecurityDescriptorDacl.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(wintypes.BOOL),
-        ctypes.POINTER(ctypes.c_void_p),
-        ctypes.POINTER(wintypes.BOOL),
-    ]
-    security.GetSecurityDescriptorDacl.restype = wintypes.BOOL
-    security.SetSecurityInfo.argtypes = [
-        wintypes.HANDLE,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-    ]
-    security.SetSecurityInfo.restype = wintypes.DWORD
-    original = ctypes.create_string_buffer(dacl)
-    control, revision = wintypes.WORD(), wintypes.DWORD()
-    present, defaulted, acl = wintypes.BOOL(), wintypes.BOOL(), ctypes.c_void_p()
-    if not security.GetSecurityDescriptorControl(
-        original, ctypes.byref(control), ctypes.byref(revision)
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if not security.GetSecurityDescriptorDacl(
-        original, ctypes.byref(present), ctypes.byref(acl), ctypes.byref(defaulted)
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if not present.value:
-        raise OSError("Absent configuration DACL cannot be preserved")
-    # Reopen the same file object with WRITE_DAC; Python's ordinary fd lacks it.
-    handle = kernel.ReOpenFile(msvcrt.get_osfhandle(descriptor), 0x60000, 7, 0)
-    if handle == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        protection = 0x80000000 if control.value & 0x1000 else 0x20000000
-        error = security.SetSecurityInfo(
-            handle, 1, 4 | protection, None, None, acl, None
-        )
-        if error:
-            raise ctypes.WinError(error)
-    finally:
-        kernel.CloseHandle(handle)
-
-
-def _same_output(path: Path, expected: _ConfigSnapshot) -> bool:
-    try:
-        current = path.lstat()
-        previous = expected.identity
-        metadata_matches = stat.S_ISREG(current.st_mode) and (
-            current.st_dev,
-            current.st_ino,
-            current.st_size,
-            current.st_mtime_ns,
-            current.st_mode,
-            current.st_uid,
-            current.st_gid,
-        ) == (
-            previous.st_dev,
-            previous.st_ino,
-            previous.st_size,
-            previous.st_mtime_ns,
-            previous.st_mode,
-            previous.st_uid,
-            previous.st_gid,
-        )
-        if not metadata_matches:
-            return False
-        with path.open("rb") as stream:
-            _check_config_acl(stream.fileno())
-            return (
-                stream.read() == expected.data
-                and _config_dacl(stream.fileno()) == expected.dacl
-            )
-    except OSError:
-        return False
-
-
 def _check_init_directory(directory: Path, expected: os.stat_result) -> None:
     current = directory.lstat()
     if (
@@ -1030,18 +769,18 @@ def _check_init_directory(directory: Path, expected: os.stat_result) -> None:
 def _commit_init_output(
     temporary: Path,
     target: Path,
-    expected: _ConfigSnapshot | None,
-    staged: _ConfigSnapshot,
+    expected: config_files.ConfigSnapshot | None,
+    staged: config_files.ConfigSnapshot,
     directory_identity: os.stat_result,
 ) -> None:
     recovery: Path | None = None
     moved = committed = False
     try:
         _check_init_directory(target.parent, directory_identity)
-        if not _same_output(temporary, staged):
+        if not config_files.same_output(temporary, staged):
             raise OutputGenerationConflict("Staged configuration changed; rerun init.")
         if expected is not None:
-            if not _same_output(target, expected):
+            if not config_files.same_output(target, expected):
                 raise OutputGenerationConflict(
                     "Project configuration changed; rerun init."
                 )
@@ -1055,23 +794,23 @@ def _commit_init_output(
             _check_init_directory(target.parent, directory_identity)
             os.replace(target, recovery)
             moved = True
-            if not _same_output(recovery, expected):
+            if not config_files.same_output(recovery, expected):
                 raise OutputGenerationConflict(
                     "Project configuration changed; rerun init."
                 )
         _check_init_directory(target.parent, directory_identity)
-        if not _same_output(temporary, staged):
+        if not config_files.same_output(temporary, staged):
             raise OutputGenerationConflict("Staged configuration changed; rerun init.")
         os.link(temporary, target)
         committed = True
         _check_init_directory(target.parent, directory_identity)
-        if not _same_output(target, staged):
+        if not config_files.same_output(target, staged):
             raise OutputGenerationConflict(
                 "Published configuration changed; review retained files."
             )
         if recovery is not None:
             assert expected is not None
-            if not _same_output(recovery, expected):
+            if not config_files.same_output(recovery, expected):
                 raise OutputGenerationConflict(
                     "Configuration changed during init; review the recovery copy."
                 )
@@ -1100,7 +839,7 @@ def _commit_init_output(
 def _stage_outputs(
     outputs: Mapping[Path, str],
     *,
-    expected: Mapping[Path, _ConfigSnapshot | None] | None = None,
+    expected: Mapping[Path, config_files.ConfigSnapshot | None] | None = None,
     directory_identity: os.stat_result | None = None,
 ) -> None:
     if expected is not None and (
@@ -1110,7 +849,7 @@ def _stage_outputs(
     ):
         raise ValueError("Configuration staging requires one matching snapshot")
     staged: list[tuple[Path, Path]] = []
-    stage_snapshots: dict[Path, _ConfigSnapshot] = {}
+    stage_snapshots: dict[Path, config_files.ConfigSnapshot] = {}
     backups: dict[Path, Path | None] = {}
     committed: list[Path] = []
     recovery_paths: list[Path] = []
@@ -1133,43 +872,36 @@ def _stage_outputs(
             ) as stream:
                 staged.append((Path(stream.name), target))
                 if expected is not None:
-                    stage_snapshots[Path(stream.name)] = _ConfigSnapshot(
-                        b"", os.fstat(stream.fileno()), _config_dacl(stream.fileno())
+                    stage_snapshots[Path(stream.name)] = config_files.ConfigSnapshot(
+                        b"",
+                        os.fstat(stream.fileno()),
+                        config_files.config_dacl(stream.fileno()),
                     )
-                    _check_config_acl(stream.fileno())
+                    config_files.check_config_acl(stream.fileno())
                 snapshot = expected.get(target) if expected is not None else None
                 if snapshot is not None:
-                    if not _same_config_owner(
-                        snapshot.dacl, stage_snapshots[Path(stream.name)].dacl
-                    ):
-                        raise OSError("Configuration owner cannot be preserved")
-                    if sys.platform != "win32":
-                        identity = snapshot.identity
-                        os.fchown(stream.fileno(), identity.st_uid, identity.st_gid)
-                        owner = os.fstat(stream.fileno())
-                        if (owner.st_uid, owner.st_gid) != (
-                            identity.st_uid,
-                            identity.st_gid,
-                        ):
-                            raise OSError("Configuration ownership was not preserved")
-                        os.fchmod(
-                            stream.fileno(), stat.S_IMODE(snapshot.identity.st_mode)
-                        )
-                    stage_snapshots[Path(stream.name)] = _ConfigSnapshot(
-                        b"", os.fstat(stream.fileno()), _config_dacl(stream.fileno())
+                    config_files.preserve_config_owner(
+                        stream.fileno(),
+                        snapshot,
+                        stage_snapshots[Path(stream.name)].dacl,
                     )
-                    _apply_config_dacl(stream.fileno(), snapshot.dacl)
+                    stage_snapshots[Path(stream.name)] = config_files.ConfigSnapshot(
+                        b"",
+                        os.fstat(stream.fileno()),
+                        config_files.config_dacl(stream.fileno()),
+                    )
+                    config_files.apply_config_dacl(stream.fileno(), snapshot.dacl)
                 if expected is not None:
                     assert directory_identity is not None
                     _check_init_directory(target.parent, directory_identity)
-                    _check_config_acl(stream.fileno())
+                    config_files.check_config_acl(stream.fileno())
                 stream.write(text)
                 stream.flush()
                 if expected is not None:
-                    stage_snapshots[Path(stream.name)] = _ConfigSnapshot(
+                    stage_snapshots[Path(stream.name)] = config_files.ConfigSnapshot(
                         text.encode("utf-8"),
                         os.fstat(stream.fileno()),
-                        _config_dacl(stream.fileno()),
+                        config_files.config_dacl(stream.fileno()),
                     )
                 os.fsync(stream.fileno())
         if expected is not None:
@@ -1222,7 +954,7 @@ def _stage_outputs(
                 staged_snapshot = stage_snapshots.get(temporary)
                 if expected is not None and (
                     staged_snapshot is None
-                    or not _same_output(temporary, staged_snapshot)
+                    or not config_files.same_output(temporary, staged_snapshot)
                 ):
                     print(
                         f"Changed temporary configuration retained at: {temporary}",
@@ -2229,12 +1961,12 @@ def _init(directory: Path) -> int:
                 raise ValueError("Project configuration is read-only")
             with config_path.open("r+b") as stream:
                 identity = os.fstat(stream.fileno())
-                _check_config_acl(stream.fileno())
+                config_files.check_config_acl(stream.fileno())
                 original = stream.read()
-                expected = _ConfigSnapshot(
-                    original, identity, _config_dacl(stream.fileno())
+                expected = config_files.ConfigSnapshot(
+                    original, identity, config_files.config_dacl(stream.fileno())
                 )
-            if not _same_output(config_path, expected):
+            if not config_files.same_output(config_path, expected):
                 raise ValueError("Project configuration changed")
             document = tomlkit.parse(original.decode("utf-8"))
         else:

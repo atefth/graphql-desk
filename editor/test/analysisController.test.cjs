@@ -2,6 +2,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
+const { realpathSync } = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { createHash } = require("node:crypto");
@@ -10,6 +11,7 @@ const { pathToFileURL, fileURLToPath } = require("node:url");
 const { buildSchema, introspectionFromSchema } = require("graphql");
 const { createAnalysisController } = require("../src/analysisController");
 const { createAnalysisWorker } = require("../src/analysisWorker");
+const { acknowledgePendingConfigWrite, stateKey: projectConfigStateKey } = require("../src/projectPyrightConfig");
 const { createLanguageFeatures } = require("../src/languageFeatures");
 const { createHighlighting } = require("../src/highlighting");
 const { createOwnedAnalysisArtifacts, renderOwnedAnalysisArtifact } = require("../src/ownedAnalysisArtifacts");
@@ -23,6 +25,45 @@ async function eventually(accept) {
   }
   assert.fail("Polling did not settle");
 }
+
+async function configRequestStarted(started, request) {
+  await Promise.race([started, request.then(result => {
+    if (result.error) throw result.error;
+    assert.fail("Config request completed before worker dispatch");
+  })]);
+}
+
+test("config dispatch waits report request errors instead of waiting for an impossible start", async () => {
+  const pending = new Promise(() => {});
+  const failure = new Error("request failed before dispatch");
+  await assert.rejects(configRequestStarted(pending, Promise.resolve({ error: failure })), error => error === failure);
+  await assert.rejects(configRequestStarted(pending, Promise.reject(failure)), error => error === failure);
+});
+
+test("config staging sends a canonical worker path while preserving the caller's journal spelling", async t => {
+  const fixture = await setup(t);
+  const folder = fixture.vscode.workspace.workspaceFolders[0];
+  const text = "staged config";
+  const hash = value => createHash("sha256").update(value).digest("hex");
+  const file = path.join(fixture.root, "pyproject.toml");
+  const previousHash = hash(await fs.readFile(file));
+  const temporary = `${fixture.root}${path.sep}..${path.sep}${path.basename(fixture.root)}${path.sep}.graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp`;
+  const payload = { file: "pyproject.toml", temporary, expected_hash: previousHash, text };
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; }, workerFactory: () => ({
+    invalidate() {}, dispose() {}, async request(message) {
+      assert.equal(path.dirname(message.temporary), message.workspace, "Python requires the exact canonical parent");
+      await fs.writeFile(message.temporary, text);
+      fixture.watchers.find(item => item.pattern.pattern === "**/*").fire(Uri.file(temporary));
+      return { ok: true, token: "a".repeat(32) };
+    },
+  }) });
+  t.after(() => controller.dispose());
+  assert.equal(controller.trackOwnedProjectConfigWrite(file, hash(text), { phase: "begin", previousHash, temporaryPath: temporary }), true);
+  assert.equal((await controller.configFile(folder, "stage", payload)).ok, true);
+  assert.equal(payload.temporary, temporary);
+  assert.equal(invalidations, 0);
+});
 
 function uri(value) {
   const parsed = new URL(value);
@@ -126,6 +167,254 @@ test("TOML Pyright ownership maps across the controller, worker protocol and Pyt
   assert.deepEqual(reply.extra_paths, ["vendor", ".graphql-desk/live-typings"]);
   assert.deepEqual(reply.ownership, { top_level: false, execution_environment_roots: ["src"] });
   assert.deepEqual(reply.execution_environments[0].extra_paths, [".graphql-desk/live-typings"]);
+});
+
+for (const revokeTrust of [false, true]) {
+  test(`native config actions serialize without coalescing${revokeTrust ? " and reject a revoked workspace" : ""}`, async t => {
+    const fixture = await setup(t);
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    let started;
+    const firstStarted = new Promise(resolve => { started = resolve; });
+    const requests = [];
+    let busy = false;
+    const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+      assert.equal(options.configFiles, true);
+      return { invalidate() {}, dispose() {}, async request(request) {
+        assert.equal(busy, false);
+        busy = true;
+        try {
+          assert.equal(request.op, "config_file");
+          const expectedRoot = realpathSync.native(fixture.root);
+          assert.equal(request.workspace, process.platform === "win32" ? expectedRoot.toLowerCase() : expectedRoot);
+          requests.push(request);
+          if (requests.length === 1) { started(); await held; }
+          return { ok: true, token: request.token };
+        } finally { busy = false; }
+      } };
+    } });
+    t.after(() => { release(); controller.dispose(); });
+    const folder = fixture.vscode.workspace.workspaceFolders[0];
+    const first = controller.configFile(folder, "verify", { token: "a".repeat(32) })
+      .then(value => ({ value }), error => ({ error }));
+    await configRequestStarted(firstStarted, first);
+    const second = controller.configFile(folder, "verify", { token: "b".repeat(32) })
+      .then(value => ({ value }), error => ({ error }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(requests.length, 1);
+    if (revokeTrust) fixture.vscode.workspace.isTrusted = false;
+    release();
+    const results = await Promise.all([first, second]);
+    if (revokeTrust) {
+      assert.equal(requests.length, 1);
+      assert.ok(results.every(result => result.error));
+    } else {
+      assert.deepEqual(results.map(result => result.value.token), ["a".repeat(32), "b".repeat(32)]);
+      assert.equal(requests.length, 2);
+    }
+  });
+}
+
+test("source quarantine preserves an active owned config receipt and serializes its RPCs", async t => {
+  const fixture = await setup(t);
+  const folder = fixture.vscode.workspace.workspaceFolders[0];
+  const file = path.join(fixture.root, "pyproject.toml");
+  const temporary = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+  const hash = value => createHash("sha256").update(value).digest("hex");
+  let release, started;
+  const held = new Promise(resolve => { release = resolve; });
+  const firstStarted = new Promise(resolve => { started = resolve; });
+  let invalidations = 0, busy = false;
+  const actions = [];
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: () => ({
+    invalidate() { invalidations += 1; }, dispose() {}, async request(request) {
+      assert.equal(busy, false, "quarantine must wait for the native config phase");
+      busy = true;
+      try {
+        actions.push(request.op === "config_file" ? request.action : request.op);
+        if (request.action === "stage") { started(); await held; }
+        assert.equal(invalidations, actions.length > 3 ? 1 : 0, "source changes must not revoke an owned config receipt");
+        return { ok: true, token: "a".repeat(32) };
+      } finally { busy = false; }
+    },
+  }) });
+  t.after(() => { release(); controller.dispose(); });
+  const text = "staged config";
+  const expectedHash = hash(await fs.readFile(file));
+  assert.equal(controller.trackOwnedProjectConfigWrite(file, hash(text), { phase: "begin", previousHash: expectedHash,
+    temporaryPath: temporary }), true);
+  const stage = controller.configFile(folder, "stage", { file: "pyproject.toml", temporary, text, expected_hash: expectedHash })
+    .then(value => ({ value }), error => ({ error }));
+  await configRequestStarted(firstStarted, stage);
+  const quarantine = controller.quarantine({ workspace: fixture.root, projects: [], invalidated_owners: [] });
+  assert.equal(invalidations, 0);
+  release();
+  assert.equal((await stage).value?.ok, true);
+  assert.equal((await quarantine)?.ok, true);
+  assert.equal((await controller.configFile(folder, "verify", { token: "a".repeat(32) })).ok, true);
+  assert.deepEqual(actions, ["stage", "quarantine", "verify"]);
+  controller.trackOwnedProjectConfigWrite(file, null, { phase: "cancel" });
+  assert.equal((await controller.quarantine({ workspace: fixture.root, projects: [], invalidated_owners: [] }))?.ok, true);
+  assert.equal(invalidations, 1, "ordinary quarantine retains worker invalidation after the transaction");
+});
+
+test("acknowledging a config record disposes the real controller's occupied workspace worker", async t => {
+  const fixture = await setup(t);
+  const folder = fixture.vscode.workspace.workspaceFolders[0];
+  const workers = [];
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: () => {
+    const worker = { occupied: false, disposed: false, invalidate() {}, dispose() { this.disposed = true; }, async request() {
+      if (this.occupied) throw new Error("stage already needs recovery");
+      this.occupied = true;
+      return { ok: true, token: "a".repeat(32) };
+    } };
+    workers.push(worker);
+    return worker;
+  } });
+  t.after(() => controller.dispose());
+  const temporary = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+  const file = path.join(fixture.root, "pyproject.toml");
+  const original = await fs.readFile(file);
+  await fs.writeFile(temporary, "preserved uncertain stage");
+  const request = { file: "pyproject.toml", temporary, expected_hash: createHash("sha256").update(original).digest("hex"), text: "staged" };
+  await controller.configFile(folder, "stage", request);
+  controller.invalidate();
+  await assert.rejects(controller.configFile(folder, "stage", request), /needs recovery/);
+  assert.equal(workers[0].disposed, false, "ordinary trusted invalidation is not a worker reset");
+  const key = `${projectConfigStateKey(fixture.root)}:pending-config-write`;
+  const values = new Map([[key, { version: 2, file: request.file, temporaryPath: temporary,
+    hash: "b".repeat(64), previousHash: request.expected_hash, receipt: null, token: null }]]);
+  const state = { get: name => values.get(name), update: async (name, value) => values.set(name, value) };
+  fixture.vscode.window.showWarningMessage = async (_message, _options, confirm) => confirm;
+  assert.equal(await acknowledgePendingConfigWrite(fixture.vscode, folder, state, () => controller.resetConfigWorkspace(folder)), true);
+  assert.equal(workers[0].disposed, true);
+  assert.equal(state.get(key), undefined);
+  await controller.configFile(folder, "stage", request);
+  assert.equal(workers.length, 2);
+  assert.equal(await fs.readFile(temporary, "utf8"), "preserved uncertain stage");
+  assert.deepEqual(await fs.readFile(file), original);
+});
+
+for (const scenario of ["success", "failure", "unreadable", "delayed dispatch"]) {
+  test(`only an actively dispatched config stage ignores its incomplete temp bytes: ${scenario}`, async t => {
+    const rejectStage = scenario === "failure";
+    const fixture = await setup(t);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const file = path.join(fixture.root, "pyproject.toml");
+    const temporary = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+    const text = '[tool.pyright]\nstubPath="managed"\n';
+    const hash = value => createHash("sha256").update(value).digest("hex");
+    const previousHash = hash(await fs.readFile(file));
+    let invalidations = 0;
+    let started;
+    const firstStarted = new Promise(resolve => { started = resolve; });
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; },
+      workerFactory: () => ({ invalidate() {}, dispose() {}, async request(request) {
+        assert.equal(request.action, "stage");
+        await fs.writeFile(temporary, "");
+        started();
+        await held;
+        if (rejectStage) throw new Error("stage rejected");
+        await fs.writeFile(temporary, text);
+        return { ok: true, token: "a".repeat(32) };
+      } }) });
+    t.after(() => { release(); controller.dispose(); });
+    const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+    assert.equal(controller.trackOwnedProjectConfigWrite(file, hash(text), { phase: "begin", previousHash, temporaryPath: temporary }), true);
+    if (scenario === "delayed dispatch") t.mock.timers.tick(6000);
+    const stage = controller.configFile(fixture.vscode.workspace.workspaceFolders[0], "stage",
+      { file: "pyproject.toml", temporary, expected_hash: previousHash, text })
+      .then(value => ({ value }), error => ({ error }));
+    await configRequestStarted(firstStarted, stage);
+    watcher.fire(Uri.file(temporary));
+    assert.equal(invalidations, 0, "secured empty stage is not a source change");
+    t.mock.timers.tick(6000);
+    await fs.writeFile(temporary, text.slice(0, 7));
+    watcher.fire(Uri.file(temporary));
+    assert.equal(invalidations, 0, "the active RPC outlives the ordinary notification grace timer");
+    if (scenario === "unreadable") {
+      const fsSync = require("node:fs");
+      const originalRead = fsSync.readFileSync;
+      const blockedRead = t.mock.method(fsSync, "readFileSync", function (filename, ...args) {
+        if (path.resolve(filename).toLowerCase() === temporary.toLowerCase()) throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+        return originalRead.call(this, filename, ...args);
+      });
+      try { watcher.fire(Uri.file(temporary)); }
+      finally { blockedRead.mock.restore(); }
+      assert.equal(invalidations, 1, "staging never exempts an unreadable temporary");
+      release();
+      await stage;
+      return;
+    }
+    release();
+    const result = await stage;
+    assert.equal(Boolean(result.error), rejectStage);
+    if (!rejectStage) {
+      watcher.fire(Uri.file(temporary));
+      assert.equal(invalidations, 0, "completed matching bytes retain the existing exemption");
+    }
+    await fs.writeFile(temporary, "foreign replacement");
+    watcher.fire(Uri.file(temporary));
+    assert.equal(invalidations, 1, "success or failure immediately restores strict hash checking");
+  });
+}
+
+test("a queued config stage cannot exempt a temporary path before worker dispatch", async t => {
+  const fixture = await setup(t);
+  const file = path.join(fixture.root, "pyproject.toml");
+  const temporary = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+  const hash = value => createHash("sha256").update(value).digest("hex");
+  const previousHash = hash(await fs.readFile(file));
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  let started;
+  const firstStarted = new Promise(resolve => { started = resolve; });
+  let invalidations = 0;
+  let calls = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; },
+    workerFactory: () => ({ invalidate() {}, dispose() {}, async request(request) {
+      calls += 1; started(); await held; return { ok: true, token: request.token };
+    } }) });
+  t.after(() => { release(); controller.dispose(); });
+  const folder = fixture.vscode.workspace.workspaceFolders[0];
+  const first = controller.configFile(folder, "verify", { token: "a".repeat(32) })
+    .then(value => ({ value }), error => ({ error }));
+  await configRequestStarted(firstStarted, first);
+  assert.equal(controller.trackOwnedProjectConfigWrite(file, hash("next"), { phase: "begin", previousHash, temporaryPath: temporary }), true);
+  const queued = controller.configFile(folder, "stage", { file: "pyproject.toml", temporary, expected_hash: previousHash, text: "next" }).catch(() => null);
+  await new Promise(resolve => setImmediate(resolve));
+  await fs.writeFile(temporary, "");
+  fixture.watchers.find(item => item.pattern.pattern === "**/*").fire(Uri.file(temporary));
+  assert.equal(invalidations, 1);
+  fixture.vscode.workspace.isTrusted = false;
+  release();
+  await Promise.all([first, queued]);
+  assert.equal(calls, 1);
+});
+
+test("a foreign config change clears a pending temp registration after its timer has fired", async t => {
+  const fixture = await setup(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const file = path.join(fixture.root, "pyproject.toml");
+  const temporaryPath = path.join(fixture.root, ".graphql-desk-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.tmp");
+  const ownedText = "owned pending bytes";
+  const previousHash = createHash("sha256").update(await fs.readFile(file)).digest("hex");
+  const nextHash = createHash("sha256").update(ownedText).digest("hex");
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+  t.after(() => controller.dispose());
+  assert.equal(controller.trackOwnedProjectConfigWrite(file, nextHash, { phase: "begin", previousHash, temporaryPath }), true);
+  await fs.writeFile(temporaryPath, ownedText);
+  t.mock.timers.tick(6000);
+  await fs.writeFile(file, "foreign config contents");
+  const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+  watcher.fire(Uri.file(file));
+  assert.equal(invalidations, 1);
+  controller.trackOwnedProjectConfigWrite(file, null, { phase: "cancel" });
+  watcher.fire(Uri.file(temporaryPath));
+  assert.equal(invalidations, 2, "expired registrations cannot survive losing their pending transaction");
 });
 
 test("configuration diagnostics follow the current dirty pyproject and clear after repair", async t => {

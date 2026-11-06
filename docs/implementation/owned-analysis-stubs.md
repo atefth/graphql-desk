@@ -185,6 +185,81 @@ change. The removal fixture uses a preconfigured
 stub root and starts in a two-folder workspace so no single-to-multi-folder
 transition or unsaved-workspace prompt is needed.
 
+### Managed project-config security (#356)
+
+Project-config replacement uses the same native permission checks as `init`.
+The trusted worker receives an explicit real workspace anchor; ordinary workers
+remain read-only. It captures the original file's bytes, identity and security
+metadata, rejects malformed UTF-8, then creates an empty sibling and establishes
+equivalent permissions before writing any config content. Unknown permissions,
+redirected paths or changed ownership fail closed. Config text and native access
+descriptors are not included in recovery records or diagnostics.
+
+The editor journals intent before staging and persists the worker's opaque
+receipt before publication. Native verification is the last awaited operation
+before synchronous trust, dirty-buffer, path, identity and content checks and
+rename. Every bounded Windows lock retry requires fresh native verification.
+Python and Node file identities are never compared across runtimes. These
+guards narrow replacement races; they are not a universal filesystem
+compare-and-swap guarantee.
+
+An interrupted write keeps its recovery journal until native finish or discard
+verifies the exact owned file. A resumed receipt authorizes recovery only, never
+publication. Legacy or incomplete records without a complete security proof
+require explicit recovery; matching hashes alone cannot authorize deletion or
+restaging. Changed or foreign files remain untouched. An incomplete stage blocks
+further staging across worker restarts instead of accumulating another temporary
+file on every retry.
+
+A failed native stage reports only a fixed step name and a bounded numeric
+system error code. The transport validates those fields and stops the worker;
+raw exception text, config contents, paths and security descriptors stay out of
+the failure reply. The first managed-root failure is logged before a later
+recovery attempt can mask it with an incomplete-receipt message.
+
+Staged-file cleanup also uses a read-only native verification followed by the
+editor's final synchronous dirty-buffer, trust, directory, identity and byte
+checks before unlink. Python only confirms the resulting absence. The journal
+records cleanup intent first, so recovery distinguishes an interrupted discard
+from a completed config replacement. Opening a dirty staging buffer while the
+native check is pending preserves the file instead of racing an asynchronous
+Python deletion.
+
+For a legacy or incomplete record, run **GraphQL Desk: Review Interrupted Config
+Write**. Inspect the config and reserved temporary paths shown in its dialog
+before confirming. This forgets only the unchanged pending record and resets the
+old worker; it preserves every file. Review or retain any uncertain temporary
+file yourself. Cancellation, workspace changes and a changed record leave the
+record intact. A new update still has to pass ordinary native permission,
+ownership and currentness checks; acknowledgement does not approve those files
+for overwrite or deletion.
+
+Backend and transport fixtures cover these boundaries; complete installed-editor
+and platform verification is tracked by #356. This does not resolve reader-safe
+generation retirement under #355 or pass broad TYPE-01 acceptance.
+
+An empty stage whose owner and DACL already match exactly is left unchanged;
+reapplying Windows security information can process inheritance unnecessarily.
+Different descriptors still use the native copy and exact post-copy checks.
+Source quarantine preserves the worker holding an active config transaction;
+ordinary invalidation, trust loss and workspace/interpreter shutdown retain
+their cancellation behavior. Root acquisition waits for manager replacement,
+and package validation shares the generation-selection queue through commit,
+rollback and asynchronous config inspection.
+
+Final local verification passes 396 editor tests, 31 config tests and 30 CLI
+tests (four existing POSIX skips on Windows), plus Ruff, mypy and Pyright.
+Installed VS Code 1.141.0 exercises factory precision and fault-injected output
+lifecycle, and 1.142.0 exercises factory publication, with Python 3.10.18,
+Python extension 2026.10.0 and Pylance 2026.4.1. Earlier JSONC/TOML checks cover
+setup, nullability, restart and restoration. Permission evidence composes the
+unchanged native `init` fixtures with staging/protocol/race tests and editor
+flows; the separately blocked protected-DACL editor probe was not executed or
+retried. Required exact-head hosted platform checks remain the merge gate.
+The precision fixture prepares two pristine projects before editor launch;
+late project-config creation in an already-managed empty folder remains a
+separate open acceptance case under #329.
+
 ### Immutable generations and recovery (#37 acceptance complete)
 
 When GraphQL Desk owns the previously unset stubPath, it now stages each analysis

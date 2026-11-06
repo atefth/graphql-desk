@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
-from graphql_desk import cli
+from graphql_desk import config_files
 from graphql_desk.cli import main
 from graphql_desk.config import load_project_config
 
@@ -180,7 +180,7 @@ class InitTests(unittest.TestCase):
         )
         self.config.write_text(parent, encoding="utf-8")
         before = self.config.read_bytes()
-        with patch("graphql_desk.cli._config_dacl", return_value=None):
+        with patch("graphql_desk.config_files.config_dacl", return_value=None):
             code, out, err = self.invoke([], ["init", "child"])
         self.assertEqual((code, out), (1, ""))
         self.assertNotIn("PRIVATE_SECRET", err)
@@ -193,7 +193,7 @@ class InitTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        with patch("graphql_desk.cli._config_dacl", return_value=None):
+        with patch("graphql_desk.config_files.config_dacl", return_value=None):
             self.assertEqual(self.invoke([], ["init", "child"])[0], 0)
         self.assertEqual(child_config.read_bytes(), original)
 
@@ -499,7 +499,7 @@ class InitTests(unittest.TestCase):
             staged = os.fstat(descriptor)
             observed.append((staged.st_uid, staged.st_gid, staged.st_size))
 
-        with patch("graphql_desk.cli._apply_config_dacl", side_effect=observe):
+        with patch("graphql_desk.config_files.apply_config_dacl", side_effect=observe):
             code, _, _ = self.invoke(["schema.graphql", "", "yes"])
         self.assertEqual(code, 0)
         self.assertEqual(observed, [(identity.st_uid, identity.st_gid, 0)])
@@ -520,7 +520,7 @@ class InitTests(unittest.TestCase):
             observed.append(os.fstat(descriptor).st_size)
             raise PermissionError("Cannot preserve original group")
 
-        with patch("graphql_desk.cli.os.fchown", side_effect=deny):
+        with patch("graphql_desk.config_files.os.fchown", side_effect=deny):
             code, _, err = self.invoke(["schema.graphql", "", "yes"])
         self.assertEqual(code, 1)
         self.assertEqual(observed, [0])
@@ -530,10 +530,12 @@ class InitTests(unittest.TestCase):
         self.assertFalse(self.recovery_files())
 
     def test_linux_acl_guard_accepts_only_proven_absence(self) -> None:
-        check_acl = cast(Callable[[int], None], getattr(cli, "_check_config_acl"))
-        with patch("graphql_desk.cli.sys.platform", "linux"):
+        check_acl = cast(
+            Callable[[int], None], getattr(config_files, "check_config_acl")
+        )
+        with patch("graphql_desk.config_files.sys.platform", "linux"):
             with patch(
-                "graphql_desk.cli.os.getxattr",
+                "graphql_desk.config_files.os.getxattr",
                 side_effect=OSError(errno.ENODATA, "No ACL"),
                 create=True,
             ):
@@ -542,7 +544,9 @@ class InitTests(unittest.TestCase):
                 with (
                     self.subTest(value=value),
                     patch(
-                        "graphql_desk.cli.os.getxattr", return_value=value, create=True
+                        "graphql_desk.config_files.os.getxattr",
+                        return_value=value,
+                        create=True,
                     ),
                 ):
                     with self.assertRaises(OSError):
@@ -551,7 +555,7 @@ class InitTests(unittest.TestCase):
                 with (
                     self.subTest(code=code),
                     patch(
-                        "graphql_desk.cli.os.getxattr",
+                        "graphql_desk.config_files.os.getxattr",
                         side_effect=OSError(code, "Unverified ACL"),
                         create=True,
                     ),
@@ -592,7 +596,9 @@ class InitTests(unittest.TestCase):
     def test_darwin_acl_guard_rejects_opaque_errors_and_acl_entries(self) -> None:
         import ctypes
 
-        check_acl = cast(Callable[[int], None], getattr(cli, "_check_config_acl"))
+        check_acl = cast(
+            Callable[[int], None], getattr(config_files, "check_config_acl")
+        )
         cases = (
             (0, 0, None, 0, -1, errno.EINVAL, True),
             (0, 1, None, errno.ENOENT, -1, errno.EINVAL, True),
@@ -628,7 +634,7 @@ class InitTests(unittest.TestCase):
                 native.acl_get_fd_np.side_effect = read
                 native.acl_get_entry.side_effect = first
                 with (
-                    patch("graphql_desk.cli.sys.platform", "darwin"),
+                    patch("graphql_desk.config_files.sys.platform", "darwin"),
                     patch("ctypes.CDLL", return_value=native),
                 ):
                     if allowed:
@@ -682,7 +688,7 @@ class InitTests(unittest.TestCase):
             observed.append(os.fstat(descriptor).st_size)
             raise OSError("Security could not be preserved")
 
-        with patch("graphql_desk.cli._apply_config_dacl", side_effect=fail):
+        with patch("graphql_desk.config_files.apply_config_dacl", side_effect=fail):
             code, _, err = self.invoke(["schema.graphql", "", "yes"])
         self.assertEqual(code, 1)
         self.assertEqual(observed, [0])
@@ -696,15 +702,18 @@ class InitTests(unittest.TestCase):
         private_dacl = windows_security("D:P(A;;FA;;;OW)")
         self.config.write_text('[project]\nname="PRIVATE_CONFIG"\n', encoding="utf-8")
         real_apply = cast(
-            Callable[[int, bytes | None], None], getattr(cli, "_apply_config_dacl")
+            Callable[[int, bytes | None], None],
+            getattr(config_files, "apply_config_dacl"),
         )
-        read_dacl = cast(Callable[[int], bytes | None], getattr(cli, "_config_dacl"))
+        read_dacl = cast(
+            Callable[[int], bytes | None], getattr(config_files, "config_dacl")
+        )
         with self.config.open("r+b") as original:
             real_apply(original.fileno(), private_dacl)
             expected = read_dacl(original.fileno())
         same_owner = cast(
             Callable[[bytes | None, bytes | None], bool],
-            getattr(cli, "_same_config_owner"),
+            getattr(config_files, "_same_config_owner"),
         )
         observed: list[bytes | None] = []
 
@@ -714,7 +723,7 @@ class InitTests(unittest.TestCase):
             real_apply(descriptor, dacl)
             observed.append(read_dacl(descriptor))
 
-        with patch("graphql_desk.cli._apply_config_dacl", side_effect=copy):
+        with patch("graphql_desk.config_files.apply_config_dacl", side_effect=copy):
             code, _, err = self.invoke(["schema.graphql", "", "yes"])
         self.assertEqual(code, 0)
         self.assertEqual(observed, [expected])
@@ -729,7 +738,9 @@ class InitTests(unittest.TestCase):
             real_apply(descriptor, dacl)
             raise OSError("Security operation failed after changing the DACL")
 
-        with patch("graphql_desk.cli._apply_config_dacl", side_effect=partially_fail):
+        with patch(
+            "graphql_desk.config_files.apply_config_dacl", side_effect=partially_fail
+        ):
             code, _, err = self.invoke(["schema.graphql", "", "yes"])
         self.assertEqual(code, 1)
         self.assertEqual(self.config.read_bytes(), original_bytes)
@@ -745,18 +756,19 @@ class InitTests(unittest.TestCase):
         identity = self.config.stat()
         other_owner = windows_security("O:SYD:P(A;;FA;;;OW)")
         read_security = cast(
-            Callable[[int], bytes | None], getattr(cli, "_config_dacl")
+            Callable[[int], bytes | None], getattr(config_files, "config_dacl")
         )
         same_owner = cast(
             Callable[[bytes | None, bytes | None], bool],
-            getattr(cli, "_same_config_owner"),
+            getattr(config_files, "_same_config_owner"),
         )
         with self.config.open("rb") as original_file:
             self.assertFalse(
                 same_owner(read_security(original_file.fileno()), other_owner)
             )
         real_apply = cast(
-            Callable[[int, bytes | None], None], getattr(cli, "_apply_config_dacl")
+            Callable[[int, bytes | None], None],
+            getattr(config_files, "apply_config_dacl"),
         )
 
         def different_owner(descriptor: int) -> bytes | None:
@@ -766,8 +778,10 @@ class InitTests(unittest.TestCase):
             return read_security(descriptor)
 
         with (
-            patch("graphql_desk.cli._config_dacl", side_effect=different_owner),
-            patch("graphql_desk.cli._apply_config_dacl", wraps=real_apply) as apply,
+            patch("graphql_desk.config_files.config_dacl", side_effect=different_owner),
+            patch(
+                "graphql_desk.config_files.apply_config_dacl", wraps=real_apply
+            ) as apply,
         ):
             code, _, err = self.invoke(["schema.graphql", "", "yes"])
         self.assertEqual(code, 1)

@@ -18,7 +18,8 @@
   },
   "contributes": {
     "commands": [
-      {"command": "graphqlDesk.refreshSchema", "title": "GraphQL Desk: Refresh Schema"}
+      {"command": "graphqlDesk.refreshSchema", "title": "GraphQL Desk: Refresh Schema"},
+      {"command": "graphqlDesk.reviewConfigRecovery", "title": "GraphQL Desk: Review Interrupted Config Write"}
     ],
     "configuration": {
       "title": "GraphQL Desk",
