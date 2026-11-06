@@ -559,7 +559,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     state.pollPaused = false;
     schedulePolling(state);
   }
-  async function build(state, token, refreshTarget, pollAbort, stage = () => {}, operationAbort) {
+  async function build(state, token, refreshTarget, pollAbort, stage = () => {}, operationAbort, allowPolling = true) {
     const ticket = epoch;
     stage("analysis-capture-failed");
     check(ticket, token, state, pollAbort?.signal);
@@ -568,7 +568,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const wanted = revisions(state);
     const revisionSignature = JSON.stringify(wanted);
     if (!refreshTarget && state.cached && captureSignature(captured, state.cached.schemaPaths) === state.cached.signature &&
-        state.cached.revisionSignature === revisionSignature) return state.cached;
+        state.cached.revisionSignature === revisionSignature) {
+      if (allowPolling && !state.cached.pollingPrepared) { reconcilePolling(state); state.cached.pollingPrepared = true; }
+      return state.cached;
+    }
     // shortcut: stale jobs finish without publishing to retain fetched schemas; refine if measured edit latency needs interruption.
     const abort = operationAbort ?? pollAbort ?? (refreshTarget ? new AbortController() : null);
     const cancellation = !operationAbort && abort ? token?.onCancellationRequested?.(() => abort.abort()) : undefined;
@@ -625,7 +628,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (state.revisions.some(active => !latestRevisions.some(current => key(current) === key(active) && current.revision === active.revision))) throw new Error("Credentials changed during analysis");
       if (refreshStatus && !pollAbort) report(refreshStatus === "ready" ? "Schema refreshed." : "Schema refresh failed; this schema is unavailable for analysis.");
       // Bind newly discovered targets before computing the credential freshness key.
-      const result = { bundle, request, ticket, preferences: prepared.project_preferences,
+      const result = { bundle, request, ticket, preferences: prepared.project_preferences, pollingPrepared: allowPolling,
         schemaPaths, signature: captureSignature(captured, schemaPaths),
         revisionSignature: JSON.stringify(latestRevisions) };
       state.cached = result;
@@ -637,7 +640,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         for (const filename of state.sourcePolls.keys()) if (candidates.has(filename)) sourcePaths.add(filename);
       }
       reconcileSourcePolls(state, sourcePaths, latest.diskCandidates);
-      reconcilePolling(state);
+      if (allowPolling) reconcilePolling(state);
       return result;
     } finally { cancellation?.dispose(); }
   }
@@ -680,22 +683,23 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       return Boolean(current) && !token?.isCancellationRequested && trusted() && state.cached?.bundle === bundle;
     } catch { clearCache(state, "current-check-error"); return false; }
   }
-  async function artifacts(value, token, onSkip = () => {}) {
+  async function capturedPayload(value, token, onSkip, operation) {
     const skip = reason => { try { onSkip(reason); } catch { /* Diagnostics must not affect analysis. */ } };
     if (!trusted()) { skip("workspace-untrusted"); return null; }
     if (token?.isCancellationRequested) { skip("request-cancelled"); return null; }
     const state = await stateFor(value, skip);
     if (!state) return null;
     if (token?.isCancellationRequested) { skip("request-cancelled"); return null; }
-    state.artifactsAbort?.abort();
+    if (operation === "artifacts") state.artifactsAbort?.abort();
     const abort = new AbortController();
-    state.artifactsAbort = abort;
+    if (operation === "artifacts") state.artifactsAbort = abort;
     const cancellation = token?.onCancellationRequested?.(() => abort.abort());
     let failureReason = "analysis-artifacts-failed";
     try {
       return await enqueue(state, async () => {
-        const cached = state.cached ?? await build(state, token, undefined, undefined, reason => { failureReason = reason; }, abort);
+        const cached = state.cached ?? await build(state, token, undefined, undefined, reason => { failureReason = reason; }, abort, operation !== "doctor");
         if (!cached) { skip("analysis-unavailable"); return null; }
+        if (operation !== "doctor" && !cached.pollingPrepared) { reconcilePolling(state); cached.pollingPrepared = true; }
         failureReason = "artifact-preflight-failed";
         check(cached.ticket, token, state);
         const latest = await capture(state);
@@ -706,7 +710,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           skip(`analysis-snapshot-stale:${captureSignatureChanges(cached.signature, signature)}`); return null;
         }
         failureReason = "worker-artifacts-failed";
-        const reply = await state.worker.request({ op: "artifacts", ...currentOwnedProjectConfigRequest(state, cached.request) }, { signal: abort.signal });
+        const reply = await state.worker.request({ op: operation, ...currentOwnedProjectConfigRequest(state, cached.request) }, { signal: abort.signal });
         check(cached.ticket, token, state);
         if (reply.current === false) {
           clearCache(state, "worker-artifacts-stale");
@@ -721,11 +725,12 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           clearCache(state, "artifacts-final-capture-stale");
           skip("analysis-snapshot-stale"); return null;
         }
+        if (operation === "doctor") return { ...reply, isCurrent: () => isCurrent(cached.bundle, value, token) };
         return { ...reply, isCurrent: () => trusted() && !token?.isCancellationRequested &&
           epoch === cached.ticket && states.get(state.root) === state &&
           state.cached?.signature === cached.signature &&
           state.cached?.revisionSignature === cached.revisionSignature };
-      }, "artifacts").finally(() => {
+      }, operation).finally(() => {
         cancellation?.dispose();
         if (state.artifactsAbort === abort) state.artifactsAbort = null;
       });
@@ -735,6 +740,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       return null;
     }
   }
+  const artifacts = (value, token, onSkip = () => {}) => capturedPayload(value, token, onSkip, "artifacts");
+  const doctor = (value, token, onSkip = () => {}) => capturedPayload(value, token, onSkip, "doctor");
   async function editPyrightConfig(folder, text, action, managedPath = ".graphql-desk/live-typings", ownership = {}) {
     if (!folder?.uri || folder.uri.scheme !== "file" || !trusted()) throw new Error("Trusted file workspace required");
     const state = await stateFor({ uri: folder.uri.toString() });
@@ -1064,7 +1071,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }));
   }
   reconcileFolderWatches();
-  return { analyze, isCurrent, artifacts, quarantine, editPyrightConfig, configFile, resetConfigWorkspace, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
+  return { analyze, isCurrent, artifacts, doctor, quarantine, editPyrightConfig, configFile, resetConfigWorkspace, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
     markOwnedProjectConfig(filename, fingerprint) {
       if (typeof filename !== "string" || !path.isAbsolute(filename) || typeof fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(fingerprint)) return false;
       const key = canonical(filename);

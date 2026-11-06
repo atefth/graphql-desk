@@ -5,7 +5,51 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations } = require("../src/extension");
+const { acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, operationDependencyImpact, presentDoctorReport, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, verifyDoctorPublication, waitForRootReconfigurations } = require("../src/extension");
+
+test("doctor's final command handoff discards a report revoked after its awaited collection", async () => {
+  for (const boundary of ["trust", "folder", "generation", "dispose", "none"]) {
+    const folder = {};
+    const vscode = { workspace: { isTrusted: true, workspaceFolders: [folder] } };
+    const lines = [];
+    const output = { appendLine: line => lines.push(line), show: () => lines.push("shown") };
+    const report = { checks: [], runtime: null, versions: {}, exitCode: 0 };
+    let current = true;
+    let resolve;
+    const pending = new Promise(done => { resolve = done; });
+    const command = (async () => presentDoctorReport(vscode, await pending, folder, () => current, output))();
+    resolve(report);
+    if (boundary === "trust") vscode.workspace.isTrusted = false;
+    else if (boundary === "folder") vscode.workspace.workspaceFolders = [];
+    else if (["generation", "dispose"].includes(boundary)) current = false;
+    const observed = await command;
+    if (boundary === "none") { assert.equal(observed, report); assert.equal(lines.length, 2); }
+    else { assert.equal(observed.exitCode, 1); assert.equal(observed.runtime, null); assert.equal(lines.length, 0); }
+  }
+});
+
+test("doctor ownership needs the live publisher's exact selected proof and current inputs", async () => {
+  const workspace = path.resolve("doctor-project");
+  const publication = { inputFingerprint: "current-input" };
+  const managed = { selectedSetting: ".graphql-desk/typings/stable", checkSettingOwnership: async check => check() };
+  const publisher = { verification: () => ({ directory: path.join(workspace, managed.selectedSetting),
+    manifest: { inputFingerprint: "current-input" } }) };
+  const verify = (owner = managed, source = publisher, current = () => true) =>
+    verifyDoctorPublication(owner, source, publication, workspace, current);
+  assert.deepEqual(await verify(), { ownership: true, current: true });
+  assert.deepEqual(await verify(managed, { verification: () => ({ ...publisher.verification(),
+    manifest: { inputFingerprint: "old-input" } }) }), { ownership: true, current: false });
+  for (const [owner, source, current] of [
+    [managed, {}, () => true],
+    [{ ...managed, checkSettingOwnership: async () => false }, publisher, () => true],
+    [managed, { verification: () => ({ ...publisher.verification(), directory: workspace }) }, () => true],
+    [managed, publisher, () => false],
+  ]) assert.deepEqual(await verify(owner, source, current), { ownership: false, current: false });
+  let live = true;
+  assert.deepEqual(await verify(managed, { verification: () => { live = false; return publisher.verification(); } }, () => live),
+    { ownership: false, current: false });
+  await assert.rejects(verify(managed, { verification() { throw new Error("foreign file changed"); } }), /foreign file changed/);
+});
 
 test("superseded typing tickets cannot recover or publish generated types", () => {
   const result = { isCurrent: () => true };

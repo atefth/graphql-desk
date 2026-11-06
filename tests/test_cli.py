@@ -1360,13 +1360,14 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.stderr, "")
 
     def test_keyboard_interrupt_is_a_sanitized_exit_code(self) -> None:
-        with patch("graphql_desk.cli.load_local_schema", side_effect=KeyboardInterrupt):
+        with patch(
+            "graphql_desk.doctor.load_local_schema", side_effect=KeyboardInterrupt
+        ):
             self.assertEqual(
                 self.invoke(["doctor"]),
                 (
                     130,
                     "",
-                    "GraphQL Desk doctor\nconfiguration: ready (nearest)\n"
-                    "Doctor cancelled.\n",
+                    "GraphQL Desk doctor\nDoctor cancelled.\n",
                 ),
             )
