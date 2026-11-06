@@ -77,6 +77,8 @@ jobs:
       - run: uv run ruff format --check src tests scripts
       - run: uv run pyright
       - run: uv run mypy
+      - name: Verify the worked client and persisted release example
+        run: uv run python -B examples/typed_client/verify.py
 
   dependencies:
     needs: changes
