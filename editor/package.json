@@ -8,7 +8,8 @@
   "main": "./src/extension.js",
   "activationEvents": [
     "onLanguage:python",
-    "onCommand:graphqlDesk.refreshSchema"
+    "onCommand:graphqlDesk.refreshSchema",
+    "onCommand:graphqlDesk.doctor"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -19,6 +20,7 @@
   "contributes": {
     "commands": [
       {"command": "graphqlDesk.refreshSchema", "title": "GraphQL Desk: Refresh Schema"},
+      {"command": "graphqlDesk.doctor", "title": "GraphQL Desk: Doctor"},
       {"command": "graphqlDesk.reviewConfigRecovery", "title": "GraphQL Desk: Review Interrupted Config Write"}
     ],
     "configuration": {
@@ -43,7 +45,7 @@
     "vscode": "^1.141.0"
   },
   "scripts": {
-    "test": "node --test test/languageFeatures.test.cjs test/highlighting.test.cjs test/analysisWorker.test.cjs test/analysisController.test.cjs test/ownedAnalysisStub.test.cjs test/ownedAnalysisArtifacts.test.cjs test/analysisGenerations.test.cjs test/managedStubPath.test.cjs test/projectPyrightConfig.test.cjs test/extensionLifecycle.test.cjs test/renameLanguageClient.test.cjs test/minimatchCompatibility.test.cjs",
+    "test": "node --test test/languageFeatures.test.cjs test/highlighting.test.cjs test/analysisWorker.test.cjs test/analysisController.test.cjs test/ownedAnalysisStub.test.cjs test/ownedAnalysisArtifacts.test.cjs test/analysisGenerations.test.cjs test/managedStubPath.test.cjs test/projectPyrightConfig.test.cjs test/extensionLifecycle.test.cjs test/renameLanguageClient.test.cjs test/minimatchCompatibility.test.cjs test/doctor.test.cjs",
     "test:host": "node test/run-host.cjs"
   },
   "dependencies": {

@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
 const { validOperationManifest } = require("./analysisGenerations");
+const { validWorkerHealth } = require("./doctor");
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const LIVE_STUB_ROOT = ".graphql-desk/live-typings";
@@ -116,6 +117,9 @@ function validReply(reply, request) {
           typeof file.text === "string" && Buffer.byteLength(file.text, "utf8") <= 1024 * 1024);
     });
   }
+  if (request.op === "doctor") return string(request.id) && reply.id === request.id && (reply.current === false
+    ? keys(reply, ["ok", "id", "current"])
+    : reply.current === true && keys(reply, ["ok", "id", "current", "report"]) && validWorkerHealth(reply.report));
   if (request.op === "current") return keys(reply, ["ok", "current"]) && typeof reply.current === "boolean";
   if (request.op === "analyze") {
     const span = value => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 &&
@@ -369,7 +373,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
       if (disposed || !trusted() || signal?.aborted) { stop(); throw failure(); }
       let encoded;
       try {
-        if (!object(message) || !["prepare", "analyze", "current", "refresh", "artifacts", "quarantine", "pyright_config", "config_file"].includes(message.op) ||
+        if (!object(message) || !["prepare", "analyze", "current", "refresh", "artifacts", "doctor", "quarantine", "pyright_config", "config_file"].includes(message.op) ||
             message.workspace !== workspace) throw failure();
         if (message.op === "config_file") {
           if (!configFiles) throw failure();

@@ -20,6 +20,7 @@ from .config_files import (
     ConfigFileStage,
     capture_config_directories,
 )
+from .doctor import collect_snapshot_health
 from .editor_analysis import (
     EditorAnalysis,
     analyze_editor_snapshot_details,
@@ -1086,6 +1087,7 @@ class EditorWorker:
             "current",
             "refresh",
             "artifacts",
+            "doctor",
         }:
             raise ValueError("Invalid operation")
         keys = {"op"} | _CAPTURE_KEYS
@@ -1094,7 +1096,7 @@ class EditorWorker:
         if operation == "refresh":
             keys |= {"project", "schema_name", "credential_revision", "environment"}
         elif (
-            operation in {"prepare", "analyze", "current", "artifacts"}
+            operation in {"prepare", "analyze", "current", "artifacts", "doctor"}
             and "remote_revisions" in raw
         ):
             keys.add("remote_revisions")
@@ -1233,24 +1235,28 @@ class EditorWorker:
         if revisions != self._remote_revisions:
             raise ValueError("Remote credential revision changed")
         remote_schemas = tuple(self._remote[key] for key in sorted(self._remote))
-        if operation in {"current", "artifacts"}:
+        if operation in {"current", "artifacts", "doctor"}:
             has_analyzed_job = self._snapshot is not None and self._analysis is not None
-            current = (
-                self._snapshot is not None
-                and schema_buffers == self._schema_buffers
-                and is_editor_snapshot_current(
-                    self._snapshot,
-                    candidates=capture.candidates,
-                    buffers=buffers,
-                    editor_fallback=capture.fallback,
-                    remote_schemas=remote_schemas,
-                    managed_pyright_config_path=capture.managed_pyright_config_path,
-                    managed_pyright_stub_path=capture.managed_pyright_stub_path,
-                    managed_pyright_previous_stub_path=capture.managed_pyright_previous_stub_path,
-                    managed_pyright_previous_stub_path_present=capture.managed_pyright_previous_stub_path_present,
-                    managed_pyright_previous_stub_path_known=capture.managed_pyright_previous_stub_path_known,
+
+            def current_job() -> bool:
+                return (
+                    self._snapshot is not None
+                    and schema_buffers == self._schema_buffers
+                    and is_editor_snapshot_current(
+                        self._snapshot,
+                        candidates=capture.candidates,
+                        buffers=buffers,
+                        editor_fallback=capture.fallback,
+                        remote_schemas=remote_schemas,
+                        managed_pyright_config_path=capture.managed_pyright_config_path,
+                        managed_pyright_stub_path=capture.managed_pyright_stub_path,
+                        managed_pyright_previous_stub_path=capture.managed_pyright_previous_stub_path,
+                        managed_pyright_previous_stub_path_present=capture.managed_pyright_previous_stub_path_present,
+                        managed_pyright_previous_stub_path_known=capture.managed_pyright_previous_stub_path_known,
+                    )
                 )
-            )
+
+            current = current_job()
             if not current:
                 self._clear_job()
             if operation == "current":
@@ -1261,6 +1267,21 @@ class EditorWorker:
                 return {"ok": True, "id": item["id"], "current": False}
             if self._snapshot is None or self._analysis is None:
                 raise ValueError("Artifacts require a current analyzed job")
+            if operation == "doctor":
+                report = collect_snapshot_health(
+                    self._snapshot,
+                    self._analysis,
+                    configuration_diagnostics=self._preparation.configuration_diagnostics,
+                )
+                if not current_job():
+                    self._clear_job()
+                    return {"ok": True, "id": item["id"], "current": False}
+                return {
+                    "ok": True,
+                    "id": self._identity,
+                    "current": True,
+                    "report": report,
+                }
             projects: list[dict[str, object]] = []
             testing_result_overloads: list[str] = []
             masking_overloads: list[str] = []

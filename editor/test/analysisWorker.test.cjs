@@ -118,6 +118,23 @@ function setup(t, fake, options = {}) {
   return { worker, workspace };
 }
 
+test("doctor accepts only bounded health for its current analyzed job", async t => {
+  const report = { checks: [{ name: "configuration", status: "ready", message: "Captured configuration is ready.", project: null }],
+    runtime: { executable: python, python_version: "3.13.7", graphql_desk_version: "0.1.0", mypy_version: null, pyright_version: null }, exit_code: 0 };
+  const valid = { ok: true, id: "job", current: true, report };
+  const stale = { ok: true, id: "job", current: false };
+  for (const reply of [valid, stale, { ...valid, id: "another-job" }, { ...valid, extra: true },
+    { ...stale, report }, { ...valid, current: "true" }, { ...valid, report: { ...report, extra: true } },
+    { ...valid, report: { ...report, runtime: { ...report.runtime, python_version: "secret\nversion" } } },
+    { ...valid, report: { ...report, checks: [{ ...report.checks[0], message: "x".repeat(4097) }] } }]) {
+    const fake = fakeSpawn(child => child.stdout.write(JSON.stringify(reply) + "\n"));
+    const { worker, workspace } = setup(t, fake);
+    const request = { ...message(workspace), op: "doctor", id: "job", schema_buffers: [] };
+    if (reply === valid || reply === stale) assert.deepEqual(await worker.request(request), reply);
+    else await assert.rejects(worker.request(request), generic);
+  }
+});
+
 test("config staging is opt-in and requires bounded exact requests and matching receipts", async t => {
   const token = "a".repeat(32);
   const receipt = Buffer.from("opaque-native-proof").toString("base64");

@@ -33,6 +33,53 @@ async function configRequestStarted(started, request) {
   })]);
 }
 
+test("doctor uses the selected real worker and keeps its health bound to one capture", async t => {
+  const fixture = await setup(t);
+  const controller = createAnalysisController(fixture.vscode);
+  t.after(() => controller.dispose());
+  const snapshot = controller.snapshot(fixture.main);
+  const observation = await controller.doctor(snapshot);
+  assert.ok(observation?.report, "the analyzed worker supplies captured health");
+  assert.equal(observation.report.runtime.python_version.split(".").length, 3);
+  assert.equal(realpathSync(observation.report.runtime.executable).toLowerCase(), realpathSync(python).toLowerCase());
+  assert.equal(observation.report.checks.find(item => item.name === "configuration").status, "ready");
+  assert.equal(observation.report.checks.find(item => item.name === "live-bridge").status, "unavailable",
+    "worker health cannot attest to editor publication");
+  assert.equal(await observation.isCurrent(), true);
+  await fs.writeFile(path.join(fixture.root, "schema.graphql"), "type Query { changed: Int! }");
+  assert.equal(await observation.isCurrent(), false, "fresh disk checks detect edits even before a watcher notification");
+  const fresh = await controller.doctor(snapshot);
+  assert.ok(fresh);
+  assert.notEqual(fresh.id, observation.id);
+  assert.equal(await observation.isCurrent(), false, "a newer healthy job cannot revalidate the old report");
+  assert.equal(await fresh.isCurrent(), true);
+});
+
+for (const ordinary of ["analyze", "artifacts"]) test(`doctor alone never enables polling, while later ${ordinary} and refresh still do`, async t => {
+  const fixture = await setup(t, 'schema="http://127.0.0.1:1/graphql"\nschema_refresh_interval=1\n');
+  let refreshes = 0;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, request(message, settings) {
+      if (message.op === "refresh") { refreshes += 1; throw new Error("No HTTP is permitted in this regression"); }
+      return worker.request(message, settings);
+    } };
+  } });
+  t.after(() => controller.dispose());
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+  t.after(() => t.mock.timers.reset());
+  const snapshot = controller.snapshot(fixture.main);
+  assert.ok(await controller.doctor(snapshot));
+  t.mock.timers.tick(2000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(refreshes, 0, "a doctor-only capture cannot schedule a later HTTP request");
+  assert.ok(await controller[ordinary](snapshot), "ordinary analysis can reuse the captured job");
+  t.mock.timers.tick(1000);
+  await eventually(() => refreshes === 1);
+  await controller.refresh();
+  assert.ok(refreshes >= 2, "explicit refresh retains its existing network capability");
+});
+
 test("config dispatch waits report request errors instead of waiting for an impossible start", async () => {
   const pending = new Promise(() => {});
   const failure = new Error("request failed before dispatch");

@@ -13,6 +13,7 @@ const { registerHighlighting } = require("./highlighting");
 const { createManagedStubPath } = require("./managedStubPath");
 const { createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
 const { createAnalysisGenerations } = require("./analysisGenerations");
+const { collectEditorDoctor } = require("./doctor");
 const { createManagedProjectConfig, acknowledgePendingConfigWrite } = require("./projectPyrightConfig");
 
 function operationDependencyImpact(previous, current) {
@@ -225,6 +226,35 @@ async function artifactsWithRetry(controller, snapshot, token, onFailure, canRet
   const result = await controller.artifacts(snapshot, token, captureFailure);
   if (result || !canRetry() || !["worker-artifacts-failed", "worker-artifacts-stale"].includes(failureReason)) return result;
   return controller.artifacts(snapshot, token, captureFailure);
+}
+
+async function verifyDoctorPublication(managed, publisher, publication, folderRoot, isCurrent) {
+  const unavailable = { ownership: false, current: false };
+  // Legacy manifests alone cannot establish this session's native ownership.
+  if (!managed || !publication || typeof publisher?.verification !== "function" ||
+      typeof managed.checkSettingOwnership !== "function" || !isCurrent()) return unavailable;
+  let result = unavailable;
+  const owned = await managed.checkSettingOwnership(() => {
+    if (!isCurrent()) return false;
+    const verified = publisher.verification();
+    if (typeof managed.selectedSetting !== "string" ||
+        path.resolve(verified.directory) !== path.resolve(folderRoot, managed.selectedSetting)) return false;
+    result = { ownership: true, current: verified.manifest.inputFingerprint === publication.inputFingerprint };
+    return isCurrent();
+  });
+  return owned === true && isCurrent() ? result : unavailable;
+}
+
+function presentDoctorReport(vscode, report, folder, isCurrent, output) {
+  if (vscode.workspace.isTrusted !== true || !vscode.workspace.workspaceFolders?.includes(folder) || !isCurrent()) {
+    return { checks: [{ name: "live-bridge", status: "unavailable", message: "Editor state changed; run Doctor again.", project: null }],
+      runtime: null, versions: { vscode: null, graphql_desk: null, python: null, pylance: null }, exitCode: 1 };
+  }
+  output.appendLine("GraphQL Desk Doctor (work in progress)");
+  for (const item of report.checks) output.appendLine(`${item.name}: ${item.status}; ${item.message}`);
+  if (report.runtime) output.appendLine(`Python ${report.runtime.python_version}: ${report.runtime.executable}`);
+  output.show(true);
+  return report;
 }
 
 let active;
@@ -828,6 +858,33 @@ function activate(context) {
     });
   });
   const command = vscode.commands.registerCommand("graphqlDesk.refreshSchema", () => controller.refresh());
+  const doctor = vscode.commands.registerCommand("graphqlDesk.doctor", async () => {
+    const document = vscode.window.activeTextEditor?.document;
+    const folders = (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === "file");
+    const folder = document?.uri.scheme === "file" ? vscode.workspace.getWorkspaceFolder(document.uri) :
+      folders.length === 1 ? folders[0] : await vscode.window.showWorkspaceFolderPick();
+    const ticket = generation;
+    const observation = folder && await controller.doctor({ uri: folder.uri.toString() });
+    const report = await collectEditorDoctor(vscode, {
+      folder,
+      workerHealth: async () => observation?.report,
+      isCurrent: async () => !disposing && !disposed && ticket === generation &&
+        observation !== null && observation !== undefined && await observation.isCurrent(),
+      verifyPublication: async () => {
+        const folderRoot = path.resolve(folder.uri.fsPath);
+        await waitForRootReconfigurations(roots);
+        const promise = roots.get(folderRoot);
+        const managed = promise && await promise;
+        const publication = latestArtifacts.get(folderRoot);
+        const current = () => !disposing && !disposed && ticket === generation &&
+          roots.get(folderRoot) === promise && latestArtifacts.get(folderRoot) === publication &&
+          publication?.analysisId === observation?.id;
+        return verifyDoctorPublication(managed, managed && generations.get(`${folderRoot}\0${managed.root}`),
+          publication, folderRoot, current);
+      },
+    });
+    return presentDoctorReport(vscode, report, folder, () => !disposing && !disposed && ticket === generation, output);
+  });
   const recoverConfig = vscode.commands.registerCommand("graphqlDesk.reviewConfigRecovery", async () => {
     const folders = (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === "file");
     const folder = folders.length === 1 ? folders[0] : await vscode.window.showWorkspaceFolderPick();
@@ -846,7 +903,7 @@ function activate(context) {
     if (disposed) return Promise.resolve();
     disposing = true;
     disposePromise = (async () => {
-      clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); recoverConfig.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose(); configChanged.dispose();
+      clearTimeout(timer); clearTimeout(pylanceRestartTimer); command.dispose(); doctor.dispose(); recoverConfig.dispose(); extractFragment.dispose(); status.dispose(); visible.dispose(); foldersChanged.dispose(); configChanged.dispose();
       await renameStarted;
       await renameClient.stop();
       await drainPublications(publications, () => {
@@ -877,5 +934,5 @@ function activate(context) {
   refreshVisible(null, true);
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate, acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, drainPublications, operationDependencyImpact, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, waitForRootReconfigurations };
+module.exports = { activate, deactivate, acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, drainPublications, operationDependencyImpact, presentDoctorReport, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, verifyDoctorPublication, waitForRootReconfigurations };
 
