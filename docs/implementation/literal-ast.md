@@ -4,6 +4,23 @@
 
 Private subclasses remain compatible with ordinary `Node`/`DocumentNode` consumers in both strict checkers. They are static views, not runtime classes: no import, construction or `isinstance` promise applies to generated refinements. Future generated bindings must preserve the original parser objects without wrappers or copying. Tests check real object identity and ordinary AST consumers.
 
+Within one render, nodes with the same checker base and exact ordered field
+annotations reuse one private declaration. Different literal values, child tuple
+shapes, location presence and const-required bases remain distinct. Reuse does
+not merge runtime nodes, expose new public aliases or cache declarations across
+documents. The identity cache includes const context because one runtime node
+can appear in both an ordinary argument and a variable default.
+
+The existing representative 2,048-byte operation emitted 62,942 bytes of AST
+declarations before this reuse and 11,910 bytes afterward (81.08% smaller).
+These are generated-text sizes, not timing, memory or reference-corpus acceptance.
+Multiplying the separate classic per-operation render by 2,000 still gives
+43,806,000 bytes including its result/variable declarations, before facades and
+other output. That illustration is not a lower bound for the stable layout,
+which already shares schema declarations and source aliases. Cross-document
+sharing, bounded transport and the fixed performance gates remain separate work;
+no payload limits have increased.
+
 `render_document_ast_types(document, *, name)` renders the same declarations
 directly from an existing `DocumentNode`. It does not print, reparse, copy or
 normalize nodes. This matters for composed runtime documents: removing a primary

@@ -52,7 +52,8 @@ def render_document_ast_types(document: DocumentNode, *, name: str) -> str:
     ):
         raise ValueError("Only executable GraphQL definitions are supported")
     declarations: list[str] = []
-    names: dict[int, str] = {}
+    names: dict[tuple[int, bool], str] = {}
+    projections: dict[tuple[str, tuple[str, ...]], str] = {}
 
     def annotation(value: object, *, constant: bool = False) -> str:
         if isinstance(value, Node):
@@ -77,7 +78,7 @@ def render_document_ast_types(document: DocumentNode, *, name: str) -> str:
         raise ValueError(f"Unsupported AST attribute type: {type(value).__name__}")
 
     def declaration(node: Node, *, constant: bool = False) -> str:
-        identity = id(node)
+        identity = (id(node), constant)
         if identity in names:
             return names[identity]
         class_name = (
@@ -106,6 +107,11 @@ def render_document_ast_types(document: DocumentNode, *, name: str) -> str:
             "ArgumentNode",
         }:
             base = f"Const{base}"
+        projection = (base, tuple(attributes))
+        if projection in projections:
+            names[identity] = projections[projection]
+            return names[identity]
+        projections[projection] = class_name
         declarations.append(
             f"class {class_name}(_ast.{base}):\n" + "\n".join(attributes)
         )
