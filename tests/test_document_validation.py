@@ -2,10 +2,12 @@
 
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
-from graphql import build_schema
+from graphql import build_schema, parse
 
 from graphql_desk.document_validation import (
+    registered_document_validator,
     validate_indexed_document,
     validate_registered_document,
 )
@@ -16,6 +18,8 @@ from graphql_desk.source_graph import (
     ProjectBindings,
     resolve_project,
 )
+from graphql_desk.source_maps import build_source_map
+from graphql_desk.validation import validate_document
 
 
 class DocumentValidationTests(unittest.TestCase):
@@ -84,6 +88,46 @@ class DocumentValidationTests(unittest.TestCase):
             validate_registered_document(
                 self.context, self.document, owners=owners, modules=self.modules
             )
+
+    def test_factory_reuses_fragment_origins_but_validates_each_closure(self) -> None:
+        owners = {
+            DocumentIdentity(item.call.module, item.call.range): item
+            for item in self.index.documents
+        }
+        expected = tuple(
+            validate_indexed_document(
+                self.context, item, fragment_index=self.index, modules=self.modules
+            )
+            for item in self.index.documents
+        )
+        validate = registered_document_validator(
+            self.context, owners=owners, modules=self.modules, client_directives=()
+        )
+        with (
+            patch(
+                "graphql_desk.document_validation.parse", wraps=parse
+            ) as parse_graphql,
+            patch(
+                "graphql_desk.document_validation.build_source_map",
+                wraps=build_source_map,
+            ) as map_source,
+            patch(
+                "graphql_desk.document_validation.validate_document",
+                wraps=validate_document,
+            ) as validate_closure,
+        ):
+            self.assertEqual(tuple(map(validate, self.index.documents)), expected)
+        self.assertEqual(parse_graphql.call_count, 2)
+        self.assertEqual(map_source.call_count, 2)
+        self.assertEqual(validate_closure.call_count, 2)
+
+        (reference,) = self.document.call.fragments
+        fragment = owners[reference.target]
+        owners[reference.target] = replace(
+            fragment, call=replace(fragment.call, source=fragment.call.source + " ")
+        )
+        with self.assertRaisesRegex(ValueError, "Decoded text does not match"):
+            validate(self.document)
 
     def test_fields_arguments_and_variable_errors_use_shared_policy(self) -> None:
         for text, message in (

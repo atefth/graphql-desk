@@ -40,7 +40,7 @@ from graphql.language.ast import (
 
 from . import TypedDocument
 from .config import ProjectConfig, ScalarMapping
-from .document_validation import validate_registered_document
+from .document_validation import registered_document_validator
 from .fragment_helpers import render_fragment_helpers
 from .fragment_refs import fragment_identity_key
 from .fragments import DefinitionKind, FragmentIndex, IndexedDocument, SchemaContext
@@ -880,6 +880,9 @@ def _generate_factory_artifacts(
                 generation_dependencies.update(resolution.dependencies)
         if "graphql" in context.schema.type_map:
             raise ValueError("Schema aliases collide with generated factory exports")
+        validate_originals = registered_document_validator(
+            context, owners=owners, modules=modules, client_directives=client_directives
+        )
         rejected: set[DocumentIdentity] = set()
         for document in documents:
             call = document.call
@@ -932,13 +935,7 @@ def _generate_factory_artifacts(
                 or carrier(document).operation_name != selected.name
             ):
                 raise ValueError("Indexed selected operation identity differs")
-            errors = validate_registered_document(
-                context,
-                document,
-                owners=owners,
-                modules=modules,
-                client_directives=client_directives,
-            )
+            errors = validate_originals(document)
             if errors:
                 rejected.add(identity)
                 diagnostics.extend(errors)
