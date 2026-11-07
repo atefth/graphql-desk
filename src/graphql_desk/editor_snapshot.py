@@ -822,22 +822,20 @@ def acquire_editor_snapshot(
             text, version = contents(source.path)
             observation = observations[(source.path, "text")]
             saved_key = (source.path, "saved-source")
-            saved_path = _identity(source.path)
-            buffered = saved_path in open_files
-            saved_text: str | None
-            saved_digest: str | None
-            if buffered and not saved_path.is_relative_to(_identity(base)):
-                raise ValueError("Saved source escapes its workspace")
-            if buffered and saved_path.is_file():
-                saved_text, saved_digest = _read(saved_path)
-            elif buffered:
-                saved_text = None
-                saved_digest = None
+            saved_path = observation.canonical
+            if observation.origin == "buffer":
+                if _identity(source.path) != saved_path:
+                    raise ValueError("Inputs changed during snapshot acquisition")
+                if not saved_path.is_relative_to(_identity(base)):
+                    raise ValueError("Saved source escapes its workspace")
+                saved_text, saved_digest = (
+                    _read(saved_path) if saved_path.is_file() else (None, None)
+                )
             else:
                 saved_text, saved_digest = text, observation.digest
             observations[saved_key] = _Observation(
                 source.path,
-                _identity(source.path),
+                saved_path,
                 "saved-disk" if saved_text is not None else "saved-missing",
                 None,
                 saved_digest,

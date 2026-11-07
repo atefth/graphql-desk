@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from graphql import build_schema, introspection_from_schema
 
@@ -804,7 +804,7 @@ class EditorSnapshotTests(unittest.TestCase):
                 workspace=self.root, candidates=(source,), generation=1
             )
 
-    def test_matching_disk_and_saved_views_share_one_verification(self) -> None:
+    def test_matching_disk_and_saved_views_share_one_capture_and_check(self) -> None:
         self.project()
         source = self.write("q.py", _QUERY)
         original_read = Path.read_bytes
@@ -815,13 +815,22 @@ class EditorSnapshotTests(unittest.TestCase):
             reads += path == source
             return original_read(path)
 
-        with patch.object(Path, "read_bytes", count_source):
+        with (
+            patch.object(Path, "read_bytes", count_source),
+            patch.object(
+                editor_snapshot,
+                "_identity",
+                wraps=getattr(editor_snapshot, "_identity"),
+            ) as resolve,
+        ):
             snapshot = acquire_editor_snapshot(
                 workspace=self.root, candidates=(source,), generation=1
             )
             self.assertEqual(reads, 2)
+            self.assertEqual(resolve.call_args_list.count(call(source)), 2)
             self.assertTrue(is_editor_snapshot_current(snapshot, candidates=(source,)))
         self.assertEqual(reads, 4)
+        self.assertEqual(resolve.call_args_list.count(call(source)), 4)
 
     def test_saved_source_change_during_dirty_overlay_acquisition_is_rejected(
         self,
@@ -851,6 +860,40 @@ class EditorSnapshotTests(unittest.TestCase):
                 buffers=(buffer,),
                 generation=1,
             )
+
+    def test_dirty_source_retarget_rejects_before_backing_read(self) -> None:
+        self.project()
+        source = self.write("q.py", _QUERY)
+        other = self.write("z_other.py", _QUERY)
+        buffer = OpenBuffer(source, 3, _QUERY + "\n# dirty", True)
+        other_buffer = OpenBuffer(other, 5, _QUERY)
+        identity = cast(Callable[[Path], Path], getattr(editor_snapshot, "_identity"))
+        digest = cast(Callable[[str], str], getattr(editor_snapshot, "_text_digest"))
+        retargeted = False
+
+        def observe_buffer(text: str) -> str:
+            nonlocal retargeted
+            retargeted |= text == buffer.text
+            return digest(text)
+
+        def resolve(path: Path) -> Path:
+            return identity(other) if retargeted and path == source else identity(path)
+
+        with (
+            patch.object(editor_snapshot, "_text_digest", side_effect=observe_buffer),
+            patch.object(editor_snapshot, "_identity", side_effect=resolve),
+            patch.object(
+                Path, "read_bytes", autospec=True, side_effect=Path.read_bytes
+            ) as read,
+            self.assertRaisesRegex(ValueError, "changed"),
+        ):
+            acquire_editor_snapshot(
+                workspace=self.root,
+                candidates=(source, other),
+                buffers=(buffer, other_buffer),
+                generation=1,
+            )
+        self.assertNotIn(call(other), read.call_args_list)
 
     def test_saved_missing_source_appearing_during_acquisition_is_rejected(
         self,
