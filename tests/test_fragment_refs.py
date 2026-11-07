@@ -41,7 +41,7 @@ class FragmentRefTests(unittest.TestCase):
         child_field: str = "title",
     ) -> dict[str, IndexedDocument]:
         schema = build_schema(
-            "type User { id: ID! title: String! } type Query { user: User }"
+            "type User { id: ID! title: String! other: Int! } type Query { user: User }"
         )
         snapshots = (
             ModuleSnapshot(
@@ -184,6 +184,20 @@ class FragmentRefTests(unittest.TestCase):
                 self.assertRaises(ValueError),
             ):
                 fragment_identity_key(wrong_owner, wrong_fact)
+
+    def test_identity_changes_when_reopened_dependency_reuses_its_version(self) -> None:
+        before = self.documents(child_field="title")["f"]
+        after = self.documents(child_field="other")["f"]
+        assert (
+            before.primary_fragment is not None and after.primary_fragment is not None
+        )
+        self.assertEqual(before.call, after.call)
+        self.assertEqual(before.dependencies, after.dependencies)
+        self.assertEqual(before.primary_fragment, after.primary_fragment)
+        self.assertNotEqual(
+            fragment_identity_key(before, before.primary_fragment),
+            fragment_identity_key(after, after.primary_fragment),
+        )
 
     def test_both_checkers_preserve_capabilities_document_identity_and_literal_ast(
         self,
