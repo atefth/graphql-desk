@@ -14,4 +14,5 @@ editor/node_modules/
 editor/.vscode-test/
 editor/.cache/
 editor/.tmp/
+editor/src/highlighting.js
 tests/host-temp/

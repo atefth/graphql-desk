@@ -84,6 +84,7 @@ extension. Provision the JavaScript dependencies from the checkout:
 ```console
 cd editor
 npm ci --ignore-scripts
+npm run build
 ```
 
 Launch a VS Code development window with `--extensionDevelopmentPath` pointing to
