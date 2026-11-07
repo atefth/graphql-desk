@@ -2364,10 +2364,7 @@ def field_usage_diagnostics(
         DocumentIdentity(item.call.module, item.call.range): item
         for item in index.documents
     }
-    syntax = {
-        identity: (document.call, parse(document.call.source))
-        for identity, document in documents.items()
-    }
+    syntax: dict[DocumentIdentity, tuple[ResolvedCall, DocumentNode]] | None = None
     local_documents: dict[ModuleDependency, list[IndexedDocument]] = {}
     for document in documents.values():
         local_documents.setdefault(document.call.module, []).append(document)
@@ -2376,9 +2373,28 @@ def field_usage_diagnostics(
         policy = (options or {}).get(owner.snapshot.project, FieldUsageOptions())
         if not policy.enabled or owner.star:
             continue
+        owned = local_documents.get(owner.identity)
+        if not owned:
+            continue
+        try:
+            # Indexed constructors produce documents; result reads need another call.
+            has_other_calls = any(
+                isinstance(node, ast.Call)
+                and DocumentIdentity(owner.identity, owner.span(node)) not in documents
+                for node in ast.walk(owner.tree)
+            )
+        except (RecursionError, ValueError):
+            continue
+        if not has_other_calls:
+            continue
+        if syntax is None:
+            syntax = {
+                identity: (document.call, parse(document.call.source))
+                for identity, document in documents.items()
+            }
         states: dict[DocumentIdentity, _State] = {}
         try:
-            for document in local_documents.get(owner.identity, ()):
+            for document in owned:
                 identity = DocumentIdentity(document.call.module, document.call.range)
                 context = schemas.get(document.schema_identity)
                 if context is not None:

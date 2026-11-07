@@ -527,6 +527,17 @@ class EditorAnalysisTests(unittest.TestCase):
         self.assertEqual(response["persisted_id_insertions"], [])
         self.assertEqual(object_(array(response["persisted"])[0])["id"], "opaque:λ")
 
+    def test_empty_type_mapping_does_not_resolve_symbols(self) -> None:
+        payload = request("from graphql_desk import gql\nq=gql('{ user { id } }')")
+        expected = analyze_editor_snapshot(payload)
+        binding = object_(array(payload["bindings"])[0])
+        binding["type_mappings"] = [
+            {"schema_name": "default", "scalars": [], "enums": []}
+        ]
+        with patch("graphql_desk.editor_analysis.resolve_type_symbols") as resolve:
+            self.assertEqual(analyze_editor_snapshot(payload), expected)
+            resolve.assert_not_called()
+
     def test_type_mapping_status_uses_captured_symbols_only(self) -> None:
         payload = request("from graphql_desk import gql\nq=gql('{ date }')")
         schema = object_(array(payload["schemas"])[0])
