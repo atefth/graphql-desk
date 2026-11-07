@@ -1,8 +1,9 @@
 """Usage warnings require typed provenance and remain conservative on escapes."""
 
 import unittest
+from unittest.mock import patch
 
-from graphql import build_schema
+from graphql import build_schema, parse
 
 from graphql_desk.field_usage import FieldUsageOptions, field_usage_diagnostics
 from graphql_desk.fragments import SchemaContext, index_fragments
@@ -51,6 +52,27 @@ def warnings(
 
 
 class FieldUsageTests(unittest.TestCase):
+    def test_document_only_module_skips_graphql_parse_and_state(self) -> None:
+        source = (
+            "from graphql_desk import gql\n"
+            "from graphql_desk.testing import read_result\n"
+            'query = gql("{ user { id name email } }")\n'
+        )
+        with (
+            patch("graphql_desk.field_usage.parse", wraps=parse) as parse_document,
+            patch("graphql_desk.field_usage._state") as state,
+        ):
+            self.assertEqual(warnings(source), [])
+            parse_document.assert_not_called()
+            state.assert_not_called()
+
+        read = source + 'result = read_result(query, {})\nresult["user"]["name"]\n'
+        with patch("graphql_desk.field_usage.parse", wraps=parse) as parse_document:
+            found = warnings(read, extra=(module("other", read),))
+            self.assertEqual(parse_document.call_count, 2)
+        self.assertEqual([field for field, _ in found], ["user"])
+        self.assertIn("user.email", found[0][1])
+
     def test_direct_typed_execution_aliases_and_leaf_reads(self) -> None:
         for read in (
             'print(result["user"]["name"])',

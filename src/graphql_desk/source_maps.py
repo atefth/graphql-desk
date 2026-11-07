@@ -137,6 +137,18 @@ def convert_offset(
         raise ValueError("Unknown offset encoding")
     if offset < 0:
         raise ValueError("Negative offset")
+    if (
+        from_encoding == "codepoint"
+        and to_encoding == "utf-16"
+        and type(text) is str
+        and type(offset) is int
+    ):
+        if offset > len(text):
+            raise ValueError("Offset is outside the text")
+        if text.isascii():
+            return offset
+        # Lone surrogates still occupy one UTF-16 unit each.
+        return len(text[:offset].encode("utf-16-le", "surrogatepass")) // 2
     consumed = converted = 0
     for character in text:
         if consumed == offset:
@@ -317,6 +329,23 @@ def build_source_map(
     call: ResolvedCall | ResolvedParseCall, modules: tuple[ModuleSnapshot, ...]
 ) -> SourceMap:
     """Verify provenance and decode literal tokens without executing project code."""
+    return _build_source_map(call, _snapshot_index(modules))
+
+
+def build_source_maps(
+    calls: tuple[ResolvedCall | ResolvedParseCall, ...],
+    modules: tuple[ModuleSnapshot, ...],
+) -> tuple[SourceMap, ...]:
+    """Build maps in call order using a single validated snapshot index."""
+    if not calls:
+        return ()
+    snapshots = _snapshot_index(modules)
+    return tuple(_build_source_map(call, snapshots) for call in calls)
+
+
+def _snapshot_index(
+    modules: tuple[ModuleSnapshot, ...],
+) -> dict[tuple[str, str], ModuleSnapshot]:
     snapshots: dict[tuple[str, str], ModuleSnapshot] = {}
     uris: set[tuple[str, str]] = set()
     for snapshot in modules:
@@ -326,6 +355,13 @@ def build_source_map(
             raise ValueError("Duplicate module snapshot")
         snapshots[key] = snapshot
         uris.add(uri)
+    return snapshots
+
+
+def _build_source_map(
+    call: ResolvedCall | ResolvedParseCall,
+    snapshots: dict[tuple[str, str], ModuleSnapshot],
+) -> SourceMap:
     required = {
         call.module,
         *call.dependencies,

@@ -32,7 +32,7 @@ from .source_graph import (
     resolve_project,
     resolve_type_symbols,
 )
-from .source_maps import build_source_map, convert_offset
+from .source_maps import build_source_maps, convert_offset
 
 
 def _object(value: object, keys: set[str], label: str) -> dict[str, object]:
@@ -395,6 +395,8 @@ def analyze_editor_snapshot_details(
                 continue
             scalar_facts = cast(list[dict[str, str]], mapping_record["scalars"])
             enum_facts = cast(list[dict[str, str]], mapping_record["enums"])
+            if not scalar_facts and not enum_facts:
+                continue
             try:
                 mapped_type_declarations(
                     schema_context.schema,
@@ -509,9 +511,11 @@ def analyze_editor_snapshot_details(
         ModuleDependency(item.project, item.module, item.uri, item.version): item.source
         for item in modules
     }
-    mappings = [
-        (call, build_source_map(call, tuple(modules))) for call in sources.calls
-    ]
+    mappings = tuple(
+        zip(
+            sources.calls, build_source_maps(sources.calls, tuple(modules)), strict=True
+        )
+    )
     refactor_contexts = {
         module: extraction_contexts(
             snapshots[module], projects[module.project].factories

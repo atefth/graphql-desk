@@ -14,6 +14,7 @@ from graphql_desk.source_maps import (
     Position,
     SourceMap,
     build_source_map,
+    build_source_maps,
     convert_offset,
     offset_to_position,
     position_to_offset,
@@ -205,6 +206,23 @@ class SourceMapTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mapping.to_decoded(replace(call.module, version=2), Span(0, 0))
 
+    def test_batch_matches_single_maps_and_checks_every_call(self) -> None:
+        first, first_call, first_module = mapped("'a'")
+        second_module = snapshot("second", "from graphql_desk import gql\nq=gql('b')")
+        (second_call,) = resolve_project((second_module,)).calls
+        calls = (second_call, first_call)
+        modules = (first_module, second_module)
+        self.assertEqual(
+            build_source_maps(calls, modules),
+            (build_source_map(second_call, modules), first),
+        )
+        with self.assertRaisesRegex(ValueError, "stale"):
+            build_source_maps(calls, (replace(first_module, version=2), second_module))
+        with self.assertRaisesRegex(ValueError, "Duplicate"):
+            build_source_maps(
+                calls, (*modules, replace(second_module, module="same_uri"))
+            )
+
     def test_coordinate_encodings(self) -> None:
         text = "a😀é"
         self.assertEqual(convert_offset(text, 2, to_encoding="utf-8"), 5)
@@ -222,6 +240,21 @@ class SourceMapTests(unittest.TestCase):
                 convert_offset(text, offset)
         with self.assertRaises(ValueError):
             convert_offset("\ud800", 1, to_encoding="utf-8")
+
+    def test_codepoint_prefixes_count_exact_utf16_units(self) -> None:
+        for text, expected in (
+            ("", (0,)),
+            ("ab\r\n", (0, 1, 2, 3, 4)),
+            ("Aé😀\ud800B\udc00Z", (0, 1, 2, 4, 5, 6, 7, 8)),
+        ):
+            self.assertEqual(
+                tuple(convert_offset(text, offset) for offset in range(len(text) + 1)),
+                expected,
+            )
+            with self.assertRaisesRegex(ValueError, "^Negative offset$"):
+                convert_offset(text, -1)
+            with self.assertRaisesRegex(ValueError, "^Offset is outside the text$"):
+                convert_offset(text, len(text) + 1)
 
     def test_physical_lines_and_roundtrips(self) -> None:
         text = "a😀\r\nb\rc\nd\u2028z\n"
