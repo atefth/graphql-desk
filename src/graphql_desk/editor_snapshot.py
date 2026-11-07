@@ -918,16 +918,32 @@ def acquire_editor_snapshot(
             if suffix not in {".graphql", ".gql", ".sdl", ".json"}:
                 raise ValueError("Unsupported local schema format")
             text, version = contents(schema_path)
-            # shortcut: Generation conservatively invalidates all schema contexts.
-            # Refine tokens only with future incremental-cache/performance work.
+            format_ = "introspection" if suffix == ".json" else "sdl"
+            schema_uri = schema_path.as_uri()
+            # Use local typing inputs only. Full configuration facts stay private.
+            token = _text_digest(
+                repr(
+                    (
+                        project_id,
+                        schema.name,
+                        schema_uri,
+                        format_,
+                        _text_digest(text),
+                        schema.scalars,
+                        schema.enums,
+                        schema.disable_masking,
+                        config.client_directives,
+                    )
+                )
+            )
             schemas.append(
                 {
                     "project": project_id,
                     "schema_name": schema.name,
-                    "uri": schema_path.as_uri(),
+                    "uri": schema_uri,
                     "version": version,
-                    "token": f"{generation}:{project_id}:{schema.name}",
-                    "format": "introspection" if suffix == ".json" else "sdl",
+                    "token": token,
+                    "format": format_,
                     "text": text,
                 }
             )

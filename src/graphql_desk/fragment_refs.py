@@ -62,8 +62,9 @@ def fragment_identity_key(owner: IndexedDocument, definition: DefinitionFact) ->
     """Return an opaque key for a local fragment and its complete snapshot closure.
 
     Use the fragment's owning indexed document, not its consuming operation.
-    Caller-owned context tokens and dependency versions establish identity;
-    this does not verify external source/config/schema freshness.
+    Caller-owned context tokens, dependency versions and indexed definitions
+    establish identity.
+    The caller verifies external source, configuration and schema freshness.
     """
     call = owner.call
     if (
@@ -99,6 +100,17 @@ def fragment_identity_key(owner: IndexedDocument, definition: DefinitionFact) ->
         call.binding,
         definition.name,
         definition.type_condition,
+        # Reopened editor buffers can reuse a version for different definitions.
+        [
+            (
+                fact.document.module.module,
+                fact.document.module.uri,
+                fact.document.call_range.start,
+                fact.document.call_range.end,
+                fact.printed,
+            )
+            for fact in owner.definitions
+        ],
         [
             (item.project, item.module, item.uri, item.version)
             for item in sorted(
