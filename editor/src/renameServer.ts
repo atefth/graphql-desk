@@ -1,21 +1,22 @@
-"use strict";
-
-const { createConnection, ProposedFeatures, TextDocuments } = require("vscode-languageserver/node");
-const { TextDocument } = require("vscode-languageserver-textdocument");
-const { PREPARE_REQUEST, PLAN_REQUEST, SYNC_REQUEST, EXTRACT_REQUEST, EXTRACT_PLAN_REQUEST } = require("./renameBridge");
+import { createConnection, ProposedFeatures, TextDocuments, type CancellationToken } from "vscode-languageserver/node";
+import { TextDocument } from "vscode-languageserver-textdocument";
+import {
+  PREPARE_REQUEST, PLAN_REQUEST, SYNC_REQUEST, EXTRACT_REQUEST, EXTRACT_PLAN_REQUEST,
+  type RenamePlan, type RenameTarget,
+} from "./renameBridge";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 documents.listen(connection);
 
-function currentTarget(target) {
+function currentTarget(target: RenameTarget) {
   const document = documents.get(target.uri);
   return document && document.version === target.version && document.getText() === target.text
     ? document : null;
 }
 
-function validPlan(plan) {
-  return plan && Array.isArray(plan.targets) && plan.targets.length > 0 &&
+function validPlan(plan: RenamePlan | null): plan is RenamePlan {
+  return !!plan && Array.isArray(plan.targets) && plan.targets.length > 0 &&
     plan.targets.every(target => typeof target?.uri === "string" && Number.isInteger(target.version) &&
       typeof target.text === "string" && Array.isArray(target.edits) && target.edits.length > 0 &&
       new Set(plan.targets.map(item => item.uri)).size === plan.targets.length);
@@ -44,7 +45,7 @@ connection.onPrepareRename(async (params, token) => {
   } catch { return null; }
 });
 
-async function applyPlan(plan, label, token) {
+async function applyPlan(plan: RenamePlan | null, label: string, token: CancellationToken) {
   if (token.isCancellationRequested || !validPlan(plan) || plan.targets.some(target => !currentTarget(target))) return false;
   // VS Code verifies each version atomically while applying the workspace edit.
   const result = await connection.workspace.applyEdit({

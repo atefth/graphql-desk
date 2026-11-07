@@ -177,8 +177,17 @@ async function run() {
     const actualClient = createRenameLanguageClient(vscode, traced, { isTrusted: () => true });
     clients.push(actualClient);
     await actualClient.start();
-    await requestRename(actualClient.client, actual.documents["main.py"], "UserCard");
-    assert.match(actual.documents["main.py"].getText(), /\.\.\.UserCard/);
+    const mainDocument = actual.documents["main.py"];
+    const { line, character } = positionOf(mainDocument, "Card");
+    const actualPrepared = await actualClient.client.sendRequest(PrepareRenameRequest.type, {
+      textDocument: { uri: mainDocument.uri.toString() }, position: { line, character },
+    });
+    assert.deepEqual(actualPrepared, {
+      range: { start: { line, character }, end: { line, character: character + "Card".length } },
+      placeholder: "Card",
+    });
+    await requestRename(actualClient.client, mainDocument, "UserCard");
+    assert.match(mainDocument.getText(), /\.\.\.UserCard/);
     assert.match(actual.documents["fragments.py"].getText(), /fragment UserCard/);
     await actualClient.stop();
 

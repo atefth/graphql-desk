@@ -1,14 +1,29 @@
-"use strict";
+import path = require("node:path");
+import type { Disposable, LogOutputChannel } from "vscode";
+import type { LanguageClient, LanguageClientOptions, Middleware, ServerOptions } from "vscode-languageclient/node";
+import type { CancellationToken, WorkspaceEdit } from "vscode-languageserver/node";
+import {
+  PREPARE_REQUEST, PLAN_REQUEST, SYNC_REQUEST, EXTRACT_REQUEST, EXTRACT_PLAN_REQUEST,
+  createRenameBridge,
+  type ExtractParams,
+  type RenameBridgeOptions,
+  type RenameLanguage,
+  type RenamePlan,
+} from "./renameBridge";
 
-const path = require("node:path");
-const { PREPARE_REQUEST, PLAN_REQUEST, SYNC_REQUEST, EXTRACT_REQUEST, EXTRACT_PLAN_REQUEST,
-  createRenameBridge } = require("./renameBridge");
+type RenameClientOptions = RenameBridgeOptions & {
+  documentSelector?: LanguageClientOptions["documentSelector"];
+  middleware?: Middleware;
+};
 
-async function stopLanguageClient(client, outputChannel) {
+export async function stopLanguageClient(
+  client: Pick<LanguageClient, "serverProcess" | "dispose">,
+  outputChannel: Pick<LogOutputChannel, "dispose" | "error">,
+) {
   const server = client.serverProcess;
-  const exited = () => server.exitCode != null || server.signalCode != null;
+  const exited = () => server?.exitCode != null || server?.signalCode != null;
   const alreadyClosed = server && exited() && [server.stdout, server.stderr].every(stream => !stream || stream.closed === true);
-  const closed = server && !alreadyClosed ? new Promise(resolve => server.once("close", resolve)) : null;
+  const closed = server && !alreadyClosed ? new Promise<void>(resolve => server.once("close", () => resolve())) : null;
   let channelDisposed = false;
   const disposeChannel = () => {
     if (!channelDisposed) { channelDisposed = true; outputChannel.dispose(); }
@@ -22,7 +37,7 @@ async function stopLanguageClient(client, outputChannel) {
         try { killed = server.kill(); } catch { /* Report failure without dropping the still-live child. */ }
         if (!killed && !exited()) {
           cleanupPending = true;
-          void closed.then(disposeChannel).catch(() => {});
+          void closed?.then(disposeChannel).catch(() => {});
           const message = "GraphQL fragment edit process could not be stopped; cleanup is pending";
           try { outputChannel.error(message); } catch { /* Preserve the shutdown failure if logging also fails. */ }
           throw new Error(message);
@@ -36,13 +51,18 @@ async function stopLanguageClient(client, outputChannel) {
   }
 }
 
-function createRenameLanguageClient(vscode, language, { documentSelector = [{ language: "python", scheme: "file" }],
-  middleware, ...bridgeOptions } = {}) {
-  const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
+export function createRenameLanguageClient(
+  vscode: Pick<typeof import("vscode"), "workspace" | "window" | "Uri" | "Position">,
+  language: RenameLanguage,
+  { documentSelector = [{ language: "python", scheme: "file" }],
+    middleware, ...bridgeOptions }: RenameClientOptions = {},
+) {
+  // Load the VS Code client only inside the host-facing factory.
+  const { LanguageClient, TransportKind }: typeof import("vscode-languageclient/node") = require("vscode-languageclient/node");
   let started = false;
   let stopped = false;
-  let stopPromise;
-  let trustGranted;
+  let stopPromise: Promise<void> | undefined;
+  let trustGranted: Disposable | undefined;
   const trusted = () => {
     try { return !stopped && vscode.workspace.isTrusted === true &&
       (bridgeOptions.isTrusted === undefined || bridgeOptions.isTrusted() === true); }
@@ -54,8 +74,8 @@ function createRenameLanguageClient(vscode, language, { documentSelector = [{ la
     return false;
   };
   class TrustedLanguageClient extends LanguageClient {
-    validateWorkspaceEdit(edit) { return allowed() && super.validateWorkspaceEdit(edit); }
-    async start() {
+    override validateWorkspaceEdit(edit: WorkspaceEdit) { return allowed() && super.validateWorkspaceEdit(edit); }
+    override async start() {
       if (!allowed()) throw new Error("A trusted workspace is required for GraphQL fragment edits");
       started = true;
       await super.start();
@@ -67,7 +87,7 @@ function createRenameLanguageClient(vscode, language, { documentSelector = [{ la
     if (!allowed()) throw new Error("A trusted workspace is required for GraphQL fragment edits");
     return path.join(__dirname, "renameServer.js");
   }
-  const server = {
+  const server: ServerOptions = {
     run: { get module() { return trustedModule(); }, transport: TransportKind.ipc },
     debug: { get module() { return trustedModule(); }, transport: TransportKind.ipc,
       options: { execArgv: ["--nolazy", "--inspect=6009"] } },
@@ -79,7 +99,7 @@ function createRenameLanguageClient(vscode, language, { documentSelector = [{ la
     middleware: { ...middleware,
       sendRequest(type, params, token, next) {
         if (!allowed()) return Promise.reject(new Error("A trusted workspace is required for GraphQL fragment edits"));
-        const send = (...args) => {
+        const send: typeof next = (...args) => {
           if (!allowed()) return Promise.reject(new Error("A trusted workspace is required for GraphQL fragment edits"));
           return next(...args);
         };
@@ -88,7 +108,9 @@ function createRenameLanguageClient(vscode, language, { documentSelector = [{ la
       workspace: { ...middleware?.workspace,
         handleApplyEdit(params, next) {
           if (!allowed()) return { applied: false };
-          const apply = value => allowed() ? next(value) : { applied: false };
+          // v10.1.2 supplies a unary continuation despite its request-handler type.
+          const applyEdit = next as (value: typeof params) => ReturnType<typeof next>;
+          const apply = (value: typeof params) => allowed() ? applyEdit(value) : { applied: false };
           return middleware?.workspace?.handleApplyEdit ? middleware.workspace.handleApplyEdit(params, apply) : apply(params);
         },
       },
@@ -100,7 +122,7 @@ function createRenameLanguageClient(vscode, language, { documentSelector = [{ la
     const result = await bridge.prepare(params, token);
     return allowed() && !token?.isCancellationRequested ? result : null;
   });
-  async function synchronizedPlan(plan, token) {
+  async function synchronizedPlan(plan: RenamePlan | null, token?: CancellationToken) {
     if (!allowed() || !plan || token?.isCancellationRequested) return null;
     try {
       const synchronized = await client.sendRequest(SYNC_REQUEST, plan.targets, token);
@@ -125,7 +147,7 @@ function createRenameLanguageClient(vscode, language, { documentSelector = [{ la
   return {
     client,
     start,
-    async extract(params) {
+    async extract(params: ExtractParams) {
       if (!allowed()) return false;
       await client.start();
       if (!allowed()) return false;
@@ -134,5 +156,3 @@ function createRenameLanguageClient(vscode, language, { documentSelector = [{ la
     stop,
   };
 }
-
-module.exports = { createRenameLanguageClient, stopLanguageClient };
