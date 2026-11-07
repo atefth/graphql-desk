@@ -408,6 +408,7 @@ def analyze_editor_snapshot_details(
         schemas,
         field_usage_options,
         unused_selections=unused_selections,
+        resolver=resolver,
     )
     colocated_diagnostics = tuple(
         diagnostic
