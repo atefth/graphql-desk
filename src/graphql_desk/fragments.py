@@ -1,7 +1,8 @@
 """Finite fragment composition facts from resolved Python source snapshots."""
 
+from collections import defaultdict, deque
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from graphql import (
@@ -106,6 +107,10 @@ class _Invalid(Exception):
         self.diagnostic = diagnostic
 
 
+class _ReuseMismatch(Exception):
+    pass
+
+
 def _identity(call: ResolvedCall) -> DocumentIdentity:
     return DocumentIdentity(call.module, call.range)
 
@@ -203,6 +208,8 @@ def index_fragments(
     sources: ProjectSources,
     *,
     schemas: Mapping[tuple[str, str | None], SchemaContext],
+    previous_documents: tuple[IndexedDocument, ...] = (),
+    unchanged_schemas: frozenset[tuple[str, str]] = frozenset(),
 ) -> FragmentIndex:
     """Index one finite snapshot, preserving runtime composition order.
 
@@ -211,7 +218,66 @@ def index_fragments(
     full operation validation. No AST escapes, source is rewritten, or hash/byte
     normalization policy is selected. Context schemas must remain stable while
     this synchronous function runs; their caller-supplied tokens are copied.
+
+    Reuse requires accepted documents from the previous capture and schema
+    scopes whose exact input bytes were verified unchanged by the caller.
     """
+    try:
+        return _index_fragments(sources, schemas, previous_documents, unchanged_schemas)
+    except _ReuseMismatch:
+        return _index_fragments(sources, schemas, (), frozenset())
+
+
+def _reusable_documents(
+    previous: tuple[IndexedDocument, ...],
+    calls: Mapping[DocumentIdentity, ResolvedCall],
+    schemas: Mapping[tuple[str, str | None], SchemaContext],
+    unchanged_schemas: frozenset[tuple[str, str]],
+    failed: set[DocumentIdentity],
+    mixed: set[tuple[str, str]],
+) -> dict[DocumentIdentity, IndexedDocument]:
+    reusable: dict[DocumentIdentity, IndexedDocument] = {}
+    for document in previous:
+        identity = _identity(document.call)
+        call = calls.get(identity)
+        if call is None or call != document.call or identity in failed:
+            continue
+        context = schemas.get((call.module.project, call.schema_name))
+        if (
+            document.schema_identity not in unchanged_schemas
+            or context is None
+            or document.schema_identity != (call.module.project, context.schema_name)
+            or document.context_token != context.token
+            or any(
+                (dependency.project, dependency.module) in mixed
+                for dependency in (call.module, *call.dependencies)
+            )
+        ):
+            continue
+        reusable[identity] = replace(document, call=call)
+
+    # A hit must keep every explicit edge inside the previous successful graph.
+    dependents: dict[DocumentIdentity, list[DocumentIdentity]] = defaultdict(list)
+    invalid = deque[DocumentIdentity]()
+    for identity, document in reusable.items():
+        for reference in document.call.fragments:
+            if reference.target in reusable:
+                dependents[reference.target].append(identity)
+            else:
+                invalid.append(identity)
+    while invalid:
+        identity = invalid.popleft()
+        if reusable.pop(identity, None) is not None:
+            invalid.extend(dependents[identity])
+    return reusable
+
+
+def _index_fragments(
+    sources: ProjectSources,
+    schemas: Mapping[tuple[str, str | None], SchemaContext],
+    previous_documents: tuple[IndexedDocument, ...],
+    unchanged_schemas: frozenset[tuple[str, str]],
+) -> FragmentIndex:
     calls: dict[DocumentIdentity, ResolvedCall] = {}
     failed: set[DocumentIdentity] = set()
     causes: dict[DocumentIdentity, tuple[GraphDiagnostic, ...]] = {}
@@ -234,8 +300,39 @@ def index_fragments(
     mixed = {key for key, values in versions.items() if len(values) > 1}
     parsed: dict[DocumentIdentity, _Parsed] = {}
     completed: dict[
-        DocumentIdentity, tuple[IndexedDocument, tuple[_Executable, ...]]
-    ] = {}
+        DocumentIdentity, tuple[IndexedDocument, tuple[_Executable, ...] | None]
+    ] = {
+        identity: (document, None)
+        for identity, document in _reusable_documents(
+            previous_documents, calls, schemas, unchanged_schemas, failed, mixed
+        ).items()
+    }
+    materialized: dict[DocumentIdentity, dict[DefinitionFact, _Executable]] = {}
+
+    def cached_nodes(document: IndexedDocument) -> tuple[_Executable, ...]:
+        nodes: list[_Executable] = []
+        try:
+            for fact in document.definitions:
+                if fact.document not in materialized:
+                    owner = calls[fact.document]
+                    current = _parse(
+                        owner, schemas[(owner.module.project, owner.schema_name)]
+                    )
+                    materialized[fact.document] = dict(
+                        zip(current.facts, current.nodes, strict=True)
+                    )
+                nodes.append(materialized[fact.document][fact])
+        except (
+            _Invalid,
+            GraphQLError,
+            KeyError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ):
+            raise _ReuseMismatch from None
+        return tuple(nodes)
+
     for root in calls:
         active: set[DocumentIdentity] = set()
         stack = [(root, False)]
@@ -368,6 +465,9 @@ def index_fragments(
                                 reference.range,
                             )
                         )
+                    if target_nodes is None:
+                        target_nodes = cached_nodes(document)
+                        completed[reference.target] = document, target_nodes
                     for node, fact in zip(target_nodes, document.definitions):
                         previous = fragments.get(fact.name)
                         if previous is not None:

@@ -23,6 +23,7 @@ from .config_files import (
 from .doctor import collect_snapshot_health
 from .editor_analysis import (
     EditorAnalysis,
+    FragmentReuse,
     analyze_editor_snapshot_details,
     editor_diagnostic,
     utf16_points,
@@ -958,6 +959,7 @@ class EditorWorker:
         self._snapshot: EditorSnapshot | None = None
         self._analysis: EditorAnalysis | None = None
         self._previous: EditorSnapshot | None = None
+        self._previous_fragments: FragmentReuse | None = None
         self._schema_buffers: tuple[OpenBuffer, ...] = ()
         self._resolver = IncrementalResolver()
         self._remote: dict[tuple[str, str], RemoteSchemaSnapshot] = {}
@@ -979,6 +981,7 @@ class EditorWorker:
         self._snapshot = None
         self._analysis = None
         self._previous = None
+        self._previous_fragments = None
         self._schema_buffers = ()
         self._resolver.clear()
 
@@ -1563,6 +1566,7 @@ class EditorWorker:
         analysis = analyze_editor_snapshot_details(
             request,
             resolver=self._resolver,
+            previous_fragments=self._previous_fragments,
             external_mapping_modules=snapshot.external_mapping_modules,
             colocated_fragment_checks={
                 config.path.as_uri(): config.check_colocated_fragments
@@ -1584,6 +1588,7 @@ class EditorWorker:
         )
         self._analysis = analysis
         self._snapshot = self._previous = snapshot
+        self._previous_fragments = analysis.fragment_reuse
         self._schema_buffers = schema_buffers
         return {
             "ok": True,
@@ -1665,6 +1670,7 @@ class EditorWorker:
         origin = origins[key]
         self._snapshot = None
         self._previous = None
+        self._previous_fragments = None
         self._resolver.clear()
         self._generation += 1
         try:

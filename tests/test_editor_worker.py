@@ -14,7 +14,7 @@ from typing import cast
 from unittest.mock import call, patch
 from uuid import UUID
 
-from graphql import GraphQLSchema, build_schema, introspection_from_schema
+from graphql import GraphQLSchema, build_schema, introspection_from_schema, parse
 
 import graphql_desk.editor_worker as editor_worker
 from graphql_desk.config import SchemaOrigin
@@ -24,6 +24,28 @@ from tests.test_schema_url import endpoint
 
 
 class EditorWorkerTests(unittest.TestCase):
+    def test_fragment_reuse_does_not_authorize_old_jobs_and_clears_on_failure(
+        self,
+    ) -> None:
+        capture = self.capture()
+        first = self.prepare(capture)
+        self.assertTrue(self.analyze(capture, first)["ok"])
+
+        second = self.prepare(capture)
+        self.assertNotEqual(second, first)
+        with patch("graphql_desk.fragments.parse", wraps=parse) as parse_graphql:
+            self.assertTrue(self.analyze(capture, second)["ok"])
+        parse_graphql.assert_not_called()
+        stale = self.worker.handle(
+            {"op": "current", **capture, "id": first, "schema_buffers": []}
+        )
+        self.assertFalse(stale["ok"])
+
+        third = self.prepare(capture)
+        with patch("graphql_desk.fragments.parse", wraps=parse) as parse_graphql:
+            self.assertTrue(self.analyze(capture, third)["ok"])
+        parse_graphql.assert_called_once()
+
     def test_pyright_config_edit_preserves_toml_comments_and_existing_paths(
         self,
     ) -> None:

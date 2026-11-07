@@ -10,7 +10,11 @@ from unittest.mock import patch
 from graphql import build_schema, introspection_from_schema
 
 from graphql_desk import source_graph
-from graphql_desk.editor_analysis import analyze_editor_json, analyze_editor_snapshot
+from graphql_desk.editor_analysis import (
+    analyze_editor_json,
+    analyze_editor_snapshot,
+    analyze_editor_snapshot_details,
+)
 from graphql_desk.field_usage import FieldUsageOptions
 from graphql_desk.persisted import editor_sha256_id
 from graphql_desk.source_graph import IncrementalResolver, ModuleSnapshot
@@ -69,6 +73,30 @@ def array(value: object) -> list[object]:
 
 
 class EditorAnalysisTests(unittest.TestCase):
+    def test_fragment_reuse_requires_exact_schema_text_even_with_same_token(
+        self,
+    ) -> None:
+        payload = request(
+            "from graphql_desk import gql\nq=gql('fragment Card on User { id }')"
+        )
+        previous = analyze_editor_snapshot_details(payload)
+        schema = object_(array(payload["schemas"])[0])
+        schema["version"] = 3
+        same_text = analyze_editor_snapshot_details(
+            payload, previous_fragments=previous.fragment_reuse
+        )
+        self.assertEqual(same_text.response, analyze_editor_snapshot(payload))
+
+        schema["text"] = "type Person { id: ID! } type Query { user: Person }"
+        cold = analyze_editor_snapshot_details(payload)
+        warm = analyze_editor_snapshot_details(
+            payload, previous_fragments=same_text.fragment_reuse
+        )
+        self.assertEqual(warm.response, cold.response)
+        self.assertEqual(warm.index, cold.index)
+        self.assertEqual(warm.index.documents, ())
+        self.assertIn("Unknown type 'User'", warm.index.diagnostics[0].message)
+
     def test_fragment_extraction_uses_only_composition_capable_factories(self) -> None:
         for source, factory, expected in (
             (
