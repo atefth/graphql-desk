@@ -15,4 +15,7 @@ editor/.vscode-test/
 editor/.cache/
 editor/.tmp/
 editor/src/highlighting.js
+editor/src/renameBridge.js
+editor/src/renameLanguageClient.js
+editor/src/renameServer.js
 tests/host-temp/
