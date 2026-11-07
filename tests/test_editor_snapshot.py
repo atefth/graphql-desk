@@ -3,7 +3,7 @@
 import json
 import tempfile
 import unittest
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from typing import cast
@@ -1303,8 +1303,10 @@ class EditorSnapshotTests(unittest.TestCase):
         second = self.write("editor/q.py", _QUERY)
         alias = self.root / "alias.py"
         config = OpenBuffer(second.parent / "pyproject.toml", 1, _BASE, True)
-        resolve = editor_snapshot._path
-        read = editor_snapshot._read
+        resolve = cast(Callable[[Path], Path], getattr(editor_snapshot, "_path"))
+        read = cast(
+            Callable[[Path], tuple[str, str]], getattr(editor_snapshot, "_read")
+        )
         target = first
 
         def resolve_source(path: Path) -> Path:
