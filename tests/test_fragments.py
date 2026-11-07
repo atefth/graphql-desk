@@ -179,6 +179,20 @@ class FragmentTests(unittest.TestCase):
             "from fragments import card as ui_card",
         )
 
+        (imported,) = sources.document_imports
+        for owner in (
+            replace(imported.module, project="other"),
+            replace(imported.module, uri="file:///p/old/main.py"),
+            replace(imported.module, version=2),
+        ):
+            with self.subTest(owner=owner):
+                mismatched = replace(
+                    sources, document_imports=(replace(imported, module=owner),)
+                )
+                self.assertEqual(
+                    unused_colocated_fragment_diagnostics(mismatched, index), ()
+                )
+
         used = module(
             "main",
             "from fragments import card as ui_card\n"

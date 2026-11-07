@@ -459,15 +459,13 @@ def unused_colocated_fragment_diagnostics(
         for fact in item.definitions
         if fact.kind == "fragment"
     }
+    modules_with_documents = {item.call.module for item in index.documents}
     diagnostics: list[GraphDiagnostic] = []
     for imported in sources.document_imports:
         fragment = indexed.get(imported.document)
         if fragment is None or fragment.primary_fragment is None:
             continue
-        module_documents = tuple(
-            item for item in index.documents if item.call.module == imported.module
-        )
-        if not module_documents:
+        if imported.module not in modules_with_documents:
             continue
         if (imported.module, fragment.schema_identity, imported.document) in used:
             continue
