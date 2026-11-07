@@ -1,9 +1,41 @@
-"use strict";
+import { CharacterStream, onlineParser } from "graphql-language-service";
+import type { CancellationToken, TextDocument, TextEditor, Uri } from "vscode";
 
-const { CharacterStream, onlineParser } = require("graphql-language-service");
-const { toHost } = require("./languageFeatures");
+type Span = { start: number; end: number };
+type HighlightToken = Span & { scope: string };
+type Highlight = HighlightToken & { mode: "lexical" | "resolved" };
+type Snapshot = { uri: string; version: number; text: string };
+type Factory = { module: string; export: string };
+type ModuleIdentity = Pick<Snapshot, "uri" | "version"> & { project: string; module: string };
+type HostSpan = { module: ModuleIdentity; range: Span };
+type Call = {
+  source: string;
+  map: { utf16: readonly { host: HostSpan; decoded: Span; linear: boolean }[] };
+};
+type Bundle = {
+  request: {
+    request_id: string;
+    modules: readonly (ModuleIdentity & { source: string })[];
+    bindings: readonly { project: string; factories: readonly Factory[] }[];
+  };
+  response: {
+    request_id: string;
+    calls: readonly Call[];
+    diagnostics: readonly { code: string; module: ModuleIdentity }[];
+  };
+};
+type HighlightingOptions = {
+  analyze: (snapshot: Snapshot, token?: CancellationToken) => Bundle | null | Promise<Bundle | null>;
+  isCurrent: (bundle: Bundle, snapshot: Snapshot, token?: CancellationToken) => boolean | Promise<boolean>;
+  isTrusted: () => boolean;
+  mapSnapshot?: (snapshot: Snapshot, bundle: Bundle) => Snapshot;
+  snapshot?: (document: TextDocument) => Snapshot;
+};
 
-const COLORS = {
+const { toHost }: { toHost: (bundle: Bundle, call: Call, span: Span) => HostSpan[] } =
+  require("./languageFeatures");
+
+const COLORS: Record<string, string> = {
   keyword: "symbolIcon.keywordForeground", meta: "symbolIcon.keywordForeground",
   def: "symbolIcon.fieldForeground", property: "symbolIcon.fieldForeground",
   type: "symbolIcon.classForeground", variable: "symbolIcon.variableForeground",
@@ -14,7 +46,7 @@ const COLORS = {
   "string-2": "symbolIcon.enumMemberForeground",
 };
 
-function tokens(text) {
+function tokens(text: string): HighlightToken[] {
   const parser = onlineParser();
   const state = parser.startState();
   const result = [];
@@ -33,23 +65,23 @@ function tokens(text) {
   return result;
 }
 
-function decodePythonString(text, raw) {
-  const output = [];
-  const source = [];
-  const append = (value, start, end) => {
+function decodePythonString(text: string, raw: boolean) {
+  const output: string[] = [];
+  const source: Span[] = [];
+  const append = (value: string, start: number, end: number) => {
     output.push(value);
     for (let index = 0; index < value.length; index += 1) source.push({ start, end });
   };
-  const codePoint = digits => {
+  const codePoint = (digits: string) => {
     const value = Number.parseInt(digits, 16);
     return Number.isSafeInteger(value) && value <= 0x10ffff && !(value >= 0xd800 && value <= 0xdfff)
       ? String.fromCodePoint(value) : null;
   };
-  const simple = { "\\": "\\", "'": "'", '"': '"', a: "\x07", b: "\b", f: "\f",
+  const simple: Record<string, string> = { "\\": "\\", "'": "'", '"': '"', a: "\x07", b: "\b", f: "\f",
     n: "\n", r: "\r", t: "\t", v: "\x0b" };
   for (let index = 0; index < text.length;) {
     if (raw || text[index] !== "\\") {
-      const value = String.fromCodePoint(text.codePointAt(index));
+      const value = String.fromCodePoint(text.codePointAt(index)!);
       append(value, index, index + value.length);
       index += value.length;
       continue;
@@ -76,7 +108,7 @@ function decodePythonString(text, raw) {
       continue;
     }
     if (/[0-7]/.test(escape)) {
-      const digits = text.slice(index + 1).match(/^[0-7]{1,3}/)[0];
+      const digits = text.slice(index + 1).match(/^[0-7]{1,3}/)![0];
       append(String.fromCodePoint(Number.parseInt(digits, 8)), index, index + digits.length + 1);
       index += digits.length + 1;
       continue;
@@ -88,7 +120,7 @@ function decodePythonString(text, raw) {
 }
 
 /** Lexical candidates never become semantic source, diagnostics or typed facts. */
-function lexicalCandidates(text, factories = []) {
+function lexicalCandidates(text: string, factories: readonly Factory[] = []) {
   const strings = [];
   const mask = text.split("");
   for (let i = 0; i < text.length;) {
@@ -98,7 +130,7 @@ function lexicalCandidates(text, factories = []) {
     }
     const literal = /^(?:[rRuUbBfF]{0,2})(?:"""|'''|"|')/.exec(text.slice(i));
     if (!literal || (i && /[_0-9A-Za-z]/.test(text[i - 1]))) { i += 1; continue; }
-    const quote = /("""|'''|"|')$/.exec(literal[0])[0];
+    const quote = /("""|'''|"|')$/.exec(literal[0])![0];
     const prefix = literal[0].slice(0, -quote.length).toLowerCase();
     const start = i;
     const bodyStart = i + literal[0].length;
@@ -120,15 +152,15 @@ function lexicalCandidates(text, factories = []) {
     { module: "graphql_desk", export: "graphql" },
     { module: "graphql_desk", export: "gql" }, ...factories,
   ];
-  const callees = new Set();
-  const imports = new Map();
-  const importedName = name => imports.set(name, (imports.get(name) ?? 0) + 1);
+  const callees = new Set<string>();
+  const imports = new Map<string, number>();
+  const importedName = (name: string) => imports.set(name, (imports.get(name) ?? 0) + 1);
   const importsFrom = /^from[ \t]+([_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*)[ \t]+import(?=[ \t(])[ \t]*(?:\([ \t\r\n]*([\s\S]*?)\)|([^\r\n]+))[ \t]*$/gm;
   for (const from of code.matchAll(importsFrom)) {
     const entries = (from[2] ?? from[3]).split(",").map(entry => entry.trim());
     if (entries.at(-1) === "") entries.pop();
     const names = entries.map(entry => /^([_A-Za-z][_0-9A-Za-z]*)(?:\s+as\s+([_A-Za-z][_0-9A-Za-z]*))?$/.exec(entry));
-    if (!names.length || names.some(match => !match)) continue;
+    if (!names.length || !names.every(match => match !== null)) continue;
     for (const match of names) {
       importedName(match[2] ?? match[1]);
       if (constructors.some(item => item.module === from[1] && item.export === match[1])) callees.add(match[2] ?? match[1]);
@@ -159,17 +191,20 @@ function lexicalCandidates(text, factories = []) {
   });
 }
 
-function createHighlighting({ analyze, isCurrent, isTrusted, mapSnapshot = value => value }) {
+function createHighlighting({
+  analyze, isCurrent, isTrusted, mapSnapshot = value => value,
+}: HighlightingOptions) {
   if (![analyze, isCurrent, isTrusted].every((item) => typeof item === "function")) throw new Error("Analysis, trust and freshness callbacks are required");
-  const lexical = (snapshot, factories = []) => lexicalCandidates(snapshot.text, factories).flatMap((candidate) =>
-    tokens(candidate.text).flatMap((token) => {
-      const first = candidate.source[token.start];
-      const last = candidate.source[token.end - 1];
-      return first && last ? [{ ...token, start: first.start + candidate.start,
-        end: last.end + candidate.start, mode: "lexical" }] : [];
-    }));
+  const lexical = (snapshot: Snapshot, factories: readonly Factory[] = []) =>
+    lexicalCandidates(snapshot.text, factories).flatMap((candidate) =>
+      tokens(candidate.text).flatMap((token) => {
+        const first = candidate.source[token.start];
+        const last = candidate.source[token.end - 1];
+        return first && last ? [{ ...token, start: first.start + candidate.start,
+          end: last.end + candidate.start, mode: "lexical" as const }] : [];
+      }));
   return {
-    async highlight(snapshot, token) {
+    async highlight(snapshot: Snapshot, token?: CancellationToken): Promise<Highlight[]> {
       if (token?.isCancellationRequested) return [];
       if (!isTrusted()) return lexical(snapshot);
       try {
@@ -179,9 +214,9 @@ function createHighlighting({ analyze, isCurrent, isTrusted, mapSnapshot = value
             bundle.request.request_id !== bundle.response.request_id ||
             !bundle.request.modules.some((item) => item.uri === snapshot.uri && item.version === snapshot.version && item.source === snapshot.text) ||
             !await isCurrent(bundle, snapshot, token) || token?.isCancellationRequested || !isTrusted()) return [];
-        const result = bundle.response.calls.flatMap((call) => tokens(call.source).flatMap((token) =>
+        const result: Highlight[] = bundle.response.calls.flatMap((call) => tokens(call.source).flatMap((token) =>
           toHost(bundle, call, token).filter((origin) => origin.module.uri === snapshot.uri && origin.module.version === snapshot.version)
-            .map((origin) => ({ ...origin.range, scope: token.scope, mode: "resolved" }))));
+            .map((origin) => ({ ...origin.range, scope: token.scope, mode: "resolved" as const }))));
         const owners = bundle.request.modules.filter(item => item.uri === snapshot.uri &&
           item.version === snapshot.version && item.source === snapshot.text);
         if (bundle.response.diagnostics.some((item) => item.code === "invalid-python" &&
@@ -197,16 +232,19 @@ function createHighlighting({ analyze, isCurrent, isTrusted, mapSnapshot = value
   };
 }
 
-function registerHighlighting(vscode, options) {
+function registerHighlighting(
+  vscode: Pick<typeof import("vscode"), "window" | "ThemeColor" | "Range">,
+  options: HighlightingOptions,
+) {
   let disposed = false;
-  const generations = new Map();
+  const generations = new Map<string, number>();
   const service = createHighlighting({ ...options,
     isCurrent: async (...args) => !disposed && await options.isCurrent(...args) && !disposed,
   });
   const decorations = new Map(Object.entries(COLORS).map(([scope, color]) =>
     [scope, vscode.window.createTextEditorDecorationType({ color: new vscode.ThemeColor(color) })]));
   return {
-    async refresh(editor, token) {
+    async refresh(editor: TextEditor, token?: CancellationToken) {
       if (disposed || editor.document.languageId !== "python") return;
       const document = editor.document;
       const uri = document.uri.toString();
@@ -220,9 +258,9 @@ function registerHighlighting(vscode, options) {
         items.filter((item) => item.scope === scope).map((item) =>
           new vscode.Range(document.positionAt(item.start), document.positionAt(item.end))));
     },
-    close(uri) { generations.set(uri.toString(), (generations.get(uri.toString()) ?? 0) + 1); },
+    close(uri: Uri | string) { generations.set(uri.toString(), (generations.get(uri.toString()) ?? 0) + 1); },
     dispose() { disposed = true; generations.clear(); decorations.forEach((item) => item.dispose()); },
   };
 }
 
-module.exports = { createHighlighting, registerHighlighting, lexicalCandidates, tokens };
+export = { createHighlighting, registerHighlighting, lexicalCandidates, tokens };
