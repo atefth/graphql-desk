@@ -1,33 +1,58 @@
-"use strict";
+import type { WorkspaceFolder } from "vscode";
+
+type DoctorHost = Pick<typeof import("vscode"), "version" | "extensions" | "workspace">;
+type CheckStatus = "ready" | "degraded" | "unavailable";
+type Check = { name: string; status: CheckStatus; message: string; project: string | null };
+type WorkerHealth = {
+  checks: Check[];
+  runtime: {
+    executable: string;
+    python_version: string;
+    graphql_desk_version: string | null;
+    mypy_version: string | null;
+    pyright_version: string | null;
+  };
+  exit_code: 0 | 1;
+};
+type DoctorOptions = {
+  folder?: WorkspaceFolder;
+  workerHealth?: (folder: WorkspaceFolder) => unknown;
+  verifyPublication?: (folder: WorkspaceFolder) => unknown;
+  isCurrent?: () => boolean | PromiseLike<boolean>;
+};
 
 const LIVE_CHECKS = new Set(["generated-ownership", "active-editor", "active-python-extension", "active-checker", "live-bridge"]);
 const VERSION = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}$/;
-const check = (name, status, message) => ({ name, status, message, project: null });
-const trusted = vscode => vscode.workspace.isTrusted === true;
-const plainObject = value => value && Object.getPrototypeOf(value) === Object.prototype;
-const exactKeys = (value, keys) => plainObject(value) && Object.keys(value).sort().join(",") === [...keys].sort().join(",");
-const text = value => typeof value === "string" && value.length > 0 && value.length <= 4096 && !/[\x00-\x1f\x7f]/.test(value);
+const check = (name: string, status: CheckStatus, message: string): Check => ({ name, status, message, project: null });
+const trusted = (vscode: DoctorHost) => vscode.workspace.isTrusted === true;
+const exactKeys = (value: unknown, keys: string[]): value is Record<string, unknown> =>
+  !!value && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 4096 && !/[\x00-\x1f\x7f]/.test(value);
 
-function validWorkerHealth(value) {
-  return exactKeys(value, ["checks", "runtime", "exit_code"]) && [0, 1].includes(value.exit_code) &&
-    Array.isArray(value.checks) && value.checks.length <= 8192 && value.checks.every(item =>
+function validWorkerHealth(value: unknown) {
+  return value && exactKeys(value, ["checks", "runtime", "exit_code"]) && (value.exit_code === 0 || value.exit_code === 1) &&
+    Array.isArray(value.checks) && value.checks.length <= 8192 && value.checks.every((item: unknown) =>
       exactKeys(item, ["name", "status", "message", "project"]) && text(item.name) && text(item.message) &&
-      ["ready", "degraded", "unavailable"].includes(item.status) && (item.project === null || text(item.project))) &&
-    exactKeys(value.runtime, ["executable", "python_version", "graphql_desk_version", "mypy_version", "pyright_version"]) &&
+      (item.status === "ready" || item.status === "degraded" || item.status === "unavailable") && (item.project === null || text(item.project))) &&
+    value.runtime && exactKeys(value.runtime, ["executable", "python_version", "graphql_desk_version", "mypy_version", "pyright_version"]) &&
     text(value.runtime.executable) && typeof value.runtime.python_version === "string" && VERSION.test(value.runtime.python_version) &&
     [value.runtime.graphql_desk_version, value.runtime.mypy_version, value.runtime.pyright_version]
       .every(version => version === null || typeof version === "string" && VERSION.test(version));
 }
 
-function extensionVersion(vscode, id) {
+function isWorkerHealth(value: unknown): value is WorkerHealth {
+  return validWorkerHealth(value) === true;
+}
+
+function extensionVersion(vscode: DoctorHost, id: string) {
   try {
     const extension = vscode.extensions?.getExtension?.(id);
-    const version = extension?.packageJSON?.version;
+    const version: unknown = extension?.packageJSON?.version;
     return extension?.isActive === true && typeof version === "string" && VERSION.test(version) ? version : null;
   } catch { return null; }
 }
 
-function liveVersions(vscode) {
+function liveVersions(vscode: DoctorHost) {
   return {
     vscode: typeof vscode.version === "string" && VERSION.test(vscode.version) ? vscode.version : null,
     graphql_desk: extensionVersion(vscode, "graphql-desk.graphql-desk-editor"),
@@ -36,7 +61,7 @@ function liveVersions(vscode) {
   };
 }
 
-function versionChecks(versions) {
+function versionChecks(versions: ReturnType<typeof liveVersions>) {
   return [
     check("active-editor", versions.vscode && versions.graphql_desk ? "ready" : "unavailable",
       versions.vscode && versions.graphql_desk ? `VS Code ${versions.vscode}; GraphQL Desk ${versions.graphql_desk}.` :
@@ -54,14 +79,14 @@ function versionChecks(versions) {
  * verifyPublication rechecks the selected owned artifacts against this session.
  * isCurrent must revalidate the same source/config/schema/interpreter observation.
  */
-async function collectEditorDoctor(vscode, { folder, workerHealth, verifyPublication, isCurrent } = {}) {
-  const unavailable = message => ({ checks: [check("live-bridge", "unavailable", message)], runtime: null,
+async function collectEditorDoctor(vscode: DoctorHost, { folder, workerHealth, verifyPublication, isCurrent }: DoctorOptions = {}) {
+  const unavailable = (message: string) => ({ checks: [check("live-bridge", "unavailable", message)], runtime: null,
     versions: liveVersions(vscode), exitCode: 1 });
   if (!trusted(vscode)) return unavailable("Trust the workspace before running editor Doctor.");
   const present = () => folder?.uri?.scheme === "file" &&
     vscode.workspace.workspaceFolders?.some(item => item === folder) === true;
-  if (!present()) return unavailable("Select an owning local workspace folder and run Doctor again.");
-  if (![workerHealth, verifyPublication, isCurrent].every(value => typeof value === "function")) {
+  if (!folder || !present()) return unavailable("Select an owning local workspace folder and run Doctor again.");
+  if (typeof workerHealth !== "function" || typeof verifyPublication !== "function" || typeof isCurrent !== "function") {
     return unavailable("Live editor health is unavailable; refresh GraphQL Desk and run Doctor again.");
   }
   const current = async () => trusted(vscode) && present() && await isCurrent() === true && trusted(vscode) && present();
@@ -69,7 +94,7 @@ async function collectEditorDoctor(vscode, { folder, workerHealth, verifyPublica
     if (!await current()) return unavailable("Editor inputs changed; wait for a fresh publication and run Doctor again.");
     const health = await workerHealth(folder);
     if (!await current()) return unavailable("Editor inputs changed during diagnosis; run Doctor again.");
-    if (!validWorkerHealth(health)) return unavailable("The selected Python worker returned invalid health data; check its GraphQL Desk installation.");
+    if (!isWorkerHealth(health)) return unavailable("The selected Python worker returned invalid health data; check its GraphQL Desk installation.");
     // An otherwise valid Python report cannot assert editor authority over the wire.
     const checks = health.checks.filter(item => !LIVE_CHECKS.has(item.name)).map(item => ({ ...item }));
     const runtime = { ...health.runtime };
@@ -101,4 +126,4 @@ async function collectEditorDoctor(vscode, { folder, workerHealth, verifyPublica
   }
 }
 
-module.exports = { collectEditorDoctor, validWorkerHealth };
+export = { collectEditorDoctor, validWorkerHealth };

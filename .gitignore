@@ -14,7 +14,10 @@ editor/node_modules/
 editor/.vscode-test/
 editor/.cache/
 editor/.tmp/
+editor/src/doctor.js
 editor/src/highlighting.js
+editor/src/minimatchCompatibility.js
+editor/src/ownedAnalysisStub.js
 editor/src/renameBridge.js
 editor/src/renameLanguageClient.js
 editor/src/renameServer.js
