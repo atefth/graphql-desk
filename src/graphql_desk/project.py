@@ -17,6 +17,8 @@ from .config import (
 )
 from .source_graph import FactoryBinding, ProjectBindings, ResolvedCall
 
+_ConfigScope = Literal["project", "explicit_cli"]
+
 
 class ProjectConfigDiagnosticError(ValueError):
     """Configuration parse error anchored to its selected pyproject.toml."""
@@ -36,37 +38,51 @@ def _canonical(path: Path) -> Path:
         raise ValueError("Cannot resolve a project path") from None
 
 
-def normalize_config_texts(
-    texts: Mapping[Path, str | None] | None,
-) -> dict[Path, str | None] | None:
-    if texts is None:
-        return None
-    captured: dict[Path, str | None] = {}
-    for path, text in texts.items():
-        identity = _canonical(path)
-        if identity in captured and captured[identity] != text:
-            raise ValueError("Conflicting captured configuration aliases")
-        captured[identity] = text
-    return captured
+class CapturedProjectConfigs:
+    """Reuse parsed configuration facts during one closed capture lookup pass."""
+
+    def __init__(self, texts: Mapping[Path, str | None]) -> None:
+        self._texts: dict[Path, str | None] = {}
+        self._parsed: dict[tuple[Path, _ConfigScope], ProjectConfig | None] = {}
+        for path, text in texts.items():
+            identity = _canonical(path)
+            if identity in self._texts and self._texts[identity] != text:
+                raise ValueError("Conflicting captured configuration aliases")
+            self._texts[identity] = text
+
+    def load(self, canonical_path: Path, scope: _ConfigScope) -> ProjectConfig | None:
+        key = (canonical_path, scope)
+        if key not in self._parsed:
+            if canonical_path not in self._texts:
+                raise ValueError("Configuration path was not captured")
+            text = self._texts[canonical_path]
+            self._parsed[key] = (
+                None
+                if text is None
+                else parse_project_config(
+                    text, config_path=canonical_path, source_scope=scope
+                )
+            )
+        return self._parsed[key]
+
+
+def _captured_configs(
+    texts: Mapping[Path, str | None] | CapturedProjectConfigs | None,
+) -> CapturedProjectConfigs | None:
+    if texts is None or isinstance(texts, CapturedProjectConfigs):
+        return texts
+    return CapturedProjectConfigs(texts)
 
 
 def _load_config(
     path: Path,
-    scope: Literal["project", "explicit_cli"],
-    texts: Mapping[Path, str | None] | None,
+    scope: _ConfigScope,
+    captured: CapturedProjectConfigs | None,
 ) -> ProjectConfig | None:
     try:
-        if texts is None:
+        if captured is None:
             return load_project_config(path, source_scope=scope)
-        identity = _canonical(path)
-        if identity not in texts:
-            raise ValueError("Configuration path was not captured")
-        text = texts[identity]
-        return (
-            None
-            if text is None
-            else parse_project_config(text, config_path=identity, source_scope=scope)
-        )
+        return captured.load(path, scope)
     except ProjectConfigParseError as error:
         raise ProjectConfigDiagnosticError(path, error) from None
 
@@ -76,7 +92,7 @@ def find_project(
     *,
     workspace: Path | None = None,
     selected_config: ProjectConfig | None = None,
-    config_texts: Mapping[Path, str | None] | None = None,
+    config_texts: Mapping[Path, str | None] | CapturedProjectConfigs | None = None,
 ) -> ProjectConfig | None:
     """Find the nearest configured ancestor, including the workspace boundary.
 
@@ -87,7 +103,7 @@ def find_project(
     and a missing key rejects instead of falling back to a later disk read.
     Captured values are authoritative input facts, not current file-type claims.
     """
-    texts = normalize_config_texts(config_texts)
+    captured = _captured_configs(config_texts)
     current = _canonical(directory)
     boundary = _canonical(workspace) if workspace is not None else None
     if current.is_file():
@@ -99,14 +115,14 @@ def find_project(
         resolved = _canonical(candidate)
         if boundary is not None and not resolved.is_relative_to(boundary):
             raise ValueError("Project configuration escapes its workspace")
-        if texts is not None or resolved.is_file():
+        if captured is not None or resolved.is_file():
             scope = (
                 selected_config.source_scope
                 if selected_config is not None
                 and resolved == _canonical(selected_config.path)
                 else "project"
             )
-            config = _load_config(resolved, scope, texts)
+            config = _load_config(resolved, scope, captured)
             if config is not None:
                 return config
         elif candidate.exists() or candidate.is_symlink():
@@ -137,15 +153,15 @@ def effective_project(
     Fallback paths use the workspace root; its config.path is virtual context.
     Command-specific option overrides belong to the future CLI dispatcher.
     """
-    texts = normalize_config_texts(config_texts)
+    captured = _captured_configs(config_texts)
     if explicit_config is not None:
         selected = _load_config(
-            _canonical(directory / explicit_config), "explicit_cli", texts
+            _canonical(directory / explicit_config), "explicit_cli", captured
         )
         if selected is None:
             raise ValueError("Explicit configuration has no GraphQL Desk project")
         return EffectiveProject(selected, "explicit")
-    selected = find_project(directory, workspace=workspace, config_texts=texts)
+    selected = find_project(directory, workspace=workspace, config_texts=captured)
     if selected is not None:
         return EffectiveProject(selected, "nearest")
     if editor_fallback is None:

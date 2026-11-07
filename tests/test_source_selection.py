@@ -369,6 +369,43 @@ class SourceSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not captured"):
             select_project_sources(config, (source,), config_texts={config.path: _BASE})
 
+    def test_closed_selection_parses_each_ancestor_config_once(self) -> None:
+        config = self.config()
+        paths = tuple(
+            self.file(f"{directory}/{module}.py")
+            for directory in ("active", "inactive", "missing")
+            for module in ("first", "second")
+        )
+        active = self.root / "active" / "pyproject.toml"
+        inactive = self.root / "inactive" / "pyproject.toml"
+        capture = {
+            config.path: _BASE,
+            active: _BASE,
+            inactive: "[project]\nname='inactive'",
+            self.root / "missing" / "pyproject.toml": None,
+        }
+
+        with patch(
+            "graphql_desk.project.parse_project_config", wraps=parse_project_config
+        ) as parse:
+            selected = select_project_sources(config, paths, config_texts=capture)
+            self.assertEqual(tuple(item.path for item in selected), paths[2:])
+            self.assertCountEqual(
+                [call.kwargs["config_path"] for call in parse.call_args_list],
+                [config.path, active, inactive],
+            )
+
+            parse.reset_mock()
+            capture[active], capture[inactive] = capture[inactive], capture[active]
+            selected = select_project_sources(config, paths, config_texts=capture)
+            self.assertEqual(
+                tuple(item.path for item in selected), paths[:2] + paths[4:]
+            )
+            self.assertCountEqual(
+                [call.kwargs["config_path"] for call in parse.call_args_list],
+                [config.path, active, inactive],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

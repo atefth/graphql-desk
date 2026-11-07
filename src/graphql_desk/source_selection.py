@@ -10,8 +10,8 @@ from pathlib import Path
 
 from .config import ProjectConfig, generated_output_paths
 from .project import (
+    CapturedProjectConfigs,
     find_project,
-    normalize_config_texts,
     validate_project_ownership,
 )
 
@@ -130,7 +130,10 @@ def select_project_sources(
     config/schema versions still require lifecycle checks. A supplied closed
     config_texts map also governs every nearest-owner lookup.
     """
-    texts = normalize_config_texts(config_texts)
+    # Share parsed facts only inside this capture; resolve owners for every source.
+    captured = (
+        CapturedProjectConfigs(config_texts) if config_texts is not None else None
+    )
     validate_project_ownership((config,))
     root = _resolved(config.root)
     boundary = _resolved(workspace) if workspace is not None else None
@@ -210,7 +213,7 @@ def select_project_sources(
             path.parent,
             workspace=root if path.is_relative_to(root) else None,
             selected_config=config,
-            config_texts=texts,
+            config_texts=captured,
         )
         if owner is not None and _identity(owner.path) != _identity(config.path):
             continue
