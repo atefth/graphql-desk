@@ -212,7 +212,7 @@ def select_project_sources(
         owner = find_project(
             path.parent,
             workspace=root if path.is_relative_to(root) else None,
-            selected_config=config,
+            selected_config=config if config.source_scope == "explicit_cli" else None,
             config_texts=captured,
         )
         if owner is not None and _identity(owner.path) != _identity(config.path):

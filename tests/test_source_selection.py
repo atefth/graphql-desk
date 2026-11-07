@@ -4,8 +4,9 @@ import tempfile
 import unittest
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
+import graphql_desk.project as project
 from graphql_desk.config import (
     ProjectConfig,
     load_project_config,
@@ -246,6 +247,20 @@ class SourceSelectionTests(unittest.TestCase):
         nested.path.write_text("[tool.graphql-desk]\nunknown=true", encoding="utf-8")
         with self.assertRaises(ValueError):
             select_project_sources(config, (parent, child))
+
+    def test_project_selection_resolves_each_config_candidate_once(self) -> None:
+        config = self.config()
+        paths = (self.file("one.py"), self.file("two.py"))
+        with patch.object(
+            project, "_canonical", wraps=getattr(project, "_canonical")
+        ) as resolve:
+            selected = select_project_sources(
+                config, paths, config_texts={config.path: _BASE}
+            )
+        self.assertEqual(tuple(item.path for item in selected), paths)
+        # One resolution to capture the config, one to validate the owner, and
+        # one during each nearest-project lookup.
+        self.assertEqual(resolve.call_args_list.count(call(config.path)), 4)
 
     def test_entrypoints_unknown_excluded_and_ambiguous(self) -> None:
         config = self.config('entrypoints=["pkg/q.py"]\n')
