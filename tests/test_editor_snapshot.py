@@ -13,7 +13,10 @@ from graphql import build_schema, introspection_from_schema
 
 import graphql_desk.editor_snapshot as editor_snapshot
 import graphql_desk.source_graph as source_graph
-from graphql_desk.editor_analysis import analyze_editor_snapshot
+from graphql_desk.editor_analysis import (
+    analyze_editor_snapshot,
+    analyze_editor_snapshot_details,
+)
 from graphql_desk.editor_snapshot import (
     EditorSnapshot,
     OpenBuffer,
@@ -22,6 +25,7 @@ from graphql_desk.editor_snapshot import (
     is_editor_snapshot_current,
     prepare_editor_snapshot,
 )
+from graphql_desk.fragment_refs import fragment_identity_key
 from graphql_desk.project import EffectiveProject, effective_project
 from graphql_desk.source_graph import (
     FactoryBinding,
@@ -74,6 +78,84 @@ def graph_inputs(
 
 
 class EditorSnapshotTests(unittest.TestCase):
+    def test_fragment_identity_changes_only_with_its_project_inputs(self) -> None:
+        source_text = (
+            "from graphql_desk import graphql\n"
+            'card=graphql("fragment Card on User { id }")\n'
+        )
+        candidates = tuple(
+            self.write(f"{name}/fragments.py", source_text)
+            for name in ("alpha", "beta")
+        )
+        config = {
+            name: _BASE.replace("graphql_desk_generated", f"generated_{name}")
+            + f'generated_package="generated_{name}"\n'
+            for name in ("alpha", "beta")
+        }
+        alpha = self.project("alpha/", config["alpha"])
+        beta = self.project("beta/", config["beta"])
+
+        def identities(snapshot: EditorSnapshot) -> dict[str, str]:
+            result: dict[str, str] = {}
+            for document in analyze_editor_snapshot_details(
+                snapshot.request
+            ).index.documents:
+                assert document.primary_fragment is not None
+                result[document.call.module.project] = fragment_identity_key(
+                    document, document.primary_fragment
+                )
+            return result
+
+        first = acquire_editor_snapshot(
+            workspace=self.root, candidates=candidates, generation=1
+        )
+        baseline = identities(first)
+        alpha_id = (alpha / "pyproject.toml").as_uri()
+        beta_id = (beta / "pyproject.toml").as_uri()
+        self.assertNotEqual(baseline[alpha_id], baseline[beta_id])
+        buffers = (
+            OpenBuffer(
+                alpha / "schema.graphql", 4, _SDL.replace("ID!", "String!"), True
+            ),
+        )
+        edited = acquire_editor_snapshot(
+            workspace=self.root,
+            candidates=candidates,
+            generation=2,
+            previous=first,
+            buffers=buffers,
+        )
+        changed = identities(edited)
+        self.assertNotEqual(baseline[alpha_id], changed[alpha_id])
+        self.assertEqual(baseline[beta_id], changed[beta_id])
+        self.assertFalse(
+            is_editor_snapshot_current(first, candidates=candidates, buffers=buffers)
+        )
+
+        self.write(
+            "beta/pyproject.toml", config["beta"] + 'client_directives=["local"]\n'
+        )
+        configured = acquire_editor_snapshot(
+            workspace=self.root,
+            candidates=candidates,
+            generation=3,
+            previous=edited,
+            buffers=buffers,
+        )
+        reconfigured = identities(configured)
+        self.assertEqual(changed[alpha_id], reconfigured[alpha_id])
+        self.assertNotEqual(changed[beta_id], reconfigured[beta_id])
+
+        self.write("beta/fragments.py", source_text.replace("{ id }", "{ name }"))
+        changed_source = acquire_editor_snapshot(
+            workspace=self.root,
+            candidates=candidates,
+            generation=4,
+            previous=configured,
+            buffers=buffers,
+        )
+        self.assertNotEqual(reconfigured[beta_id], identities(changed_source)[beta_id])
+
     def test_interpreter_mapping_sources_are_captured_and_refresh_the_snapshot(
         self,
     ) -> None:

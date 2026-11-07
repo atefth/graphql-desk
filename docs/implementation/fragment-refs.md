@@ -9,9 +9,9 @@ carrier without changing its AST or identity.
 `fragment_identity_key(owner, definition)` requires the fragment's owning indexed
 document and one of its fragment facts. Its versioned digest includes the project's
 schema identity and context token, source call identity, fragment name and type
-condition, binding, and the owner's complete transitive dependency identities.
-Use the fragment owner, never the consuming operation's dependency union. Changes
-to an imported dependency therefore invalidate the fragment identity too.
+condition, binding, and the owner's transitive dependency identities and indexed
+definitions. This includes changed fragment text when an editor reuses a buffer
+version after reopening a file. The digest uses the fragment owner's closure.
 
 `FragmentRef[Identity]` has a required read-only callable phantom key whose name
 cannot be a GraphQL field alias. The callable is contravariant, so a reference with

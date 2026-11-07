@@ -2,19 +2,19 @@
 
 import keyword
 import unicodedata
+from typing import cast
 
 from graphql import (
     GraphQLEnumType,
     GraphQLInputObjectType,
+    GraphQLList,
+    GraphQLNonNull,
     GraphQLScalarType,
     GraphQLSchema,
-    ListTypeNode,
-    NamedTypeNode,
-    NonNullTypeNode,
-    TypeNode,
+    GraphQLType,
+    GraphQLWrappingType,
     Undefined,
     assert_valid_schema,
-    parse_type,
     specified_scalar_types,
 )
 
@@ -103,16 +103,19 @@ def mapped_type_declarations(
 
 
 def _input_type(
-    type_: TypeNode, names: dict[str, str], *, nullable: bool = True
+    type_: GraphQLType, names: dict[str, str], *, nullable: bool = True
 ) -> str:
-    if isinstance(type_, NonNullTypeNode):
-        return _input_type(type_.type, names, nullable=False)
-    if isinstance(type_, ListTypeNode):
-        result = f"list[{_input_type(type_.type, names)}]"
-    elif isinstance(type_, NamedTypeNode):
-        result = names.get(type_.name.value, type_.name.value)
+    if isinstance(type_, (GraphQLNonNull, GraphQLList)):
+        inner = cast("GraphQLWrappingType[GraphQLType]", type_).of_type
+        if isinstance(type_, GraphQLNonNull):
+            return _input_type(inner, names, nullable=False)
+        result = f"list[{_input_type(inner, names)}]"
+    elif isinstance(
+        type_, (GraphQLScalarType, GraphQLEnumType, GraphQLInputObjectType)
+    ):
+        result = names.get(type_.name, type_.name)
     else:
-        raise TypeError(f"Unsupported input type node: {type(type_).__name__}")
+        raise TypeError(f"Unsupported GraphQL input type: {type(type_).__name__}")
     return f"{result} | None" if nullable else result
 
 
@@ -159,7 +162,7 @@ def render_schema_types(
                 variant = f"__graphql_desk_oneof_{name}_{index}"
                 variants.append(variant)
                 annotation = _input_type(
-                    parse_type(str(type_.fields[chosen].type)), inputs, nullable=False
+                    type_.fields[chosen].type, inputs, nullable=False
                 )
                 declarations.append(
                     f"{variant} = TypedDict({variant!r}, {{\n"
@@ -172,11 +175,13 @@ def render_schema_types(
             has_default = (
                 field.default is not None or field.default_value is not Undefined
             )
-            field_type = parse_type(str(field.type))
+            field_type: GraphQLType = field.type
+            if has_default and isinstance(field_type, GraphQLNonNull):
+                field_type = cast(
+                    "GraphQLWrappingType[GraphQLType]", field_type
+                ).of_type
             annotation = _input_type(field_type, inputs)
-            if has_default and isinstance(field_type, NonNullTypeNode):
-                annotation = _input_type(field_type.type, inputs)
-            if has_default or not isinstance(field_type, NonNullTypeNode):
+            if has_default or not isinstance(field_type, GraphQLNonNull):
                 rendered = f"NotRequired[{annotation!r}]"
             else:
                 rendered = repr(annotation)
