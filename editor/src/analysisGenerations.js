@@ -188,7 +188,7 @@ function generationFiles(vscode, workspace, directory) {
     verify: () => generationFiles(vscode, workspace, directory) };
 }
 
-function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
+function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved) {
   if (!path.isAbsolute(workspaceRoot) || !path.isAbsolute(managedRoot)) throw new Error("Invalid analysis generation location");
   const workspace = path.resolve(workspaceRoot);
   const root = path.resolve(managedRoot);
@@ -440,31 +440,26 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot) {
       if (now.isSymbolicLink() || !same(record.identity, now) || !record.bytes.equals(fs.readFileSync(file))) throw new Error("Generation artifact changed; preserved");
       if (vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.fsPath && normalized(document.uri.fsPath) === normalized(file))) throw new Error("Generation contains user edits; preserved");
       fs.unlinkSync(file);
+      onRemoved?.(file);
     }
     verifyRoot();
     const manifest = path.join(generation.directory, MANIFEST);
     const manifestStat = fs.lstatSync(manifest);
     if (manifestStat.isSymbolicLink() || !same(generation.manifestIdentity, manifestStat) || !generation.manifestBytes.equals(fs.readFileSync(manifest))) throw new Error("Generation manifest changed; preserved");
     fs.unlinkSync(manifest);
-    const directories = [];
-    function collect(folder) {
-      for (const name of fs.readdirSync(folder)) {
-        const child = path.join(folder, name);
-        const stat = fs.lstatSync(child);
-        if (stat.isSymbolicLink()) throw new Error("Generation contains a symbolic link; preserved");
-        if (stat.isDirectory()) collect(child);
-        directories.push([child, stat]);
-      }
-    }
-    collect(generation.directory);
-    for (const [directory, stat] of directories) {
+    onRemoved?.(manifest);
+    // The verified inventory visits parents first, so remove it in reverse.
+    for (const [relative, identity] of [...generation.directories].reverse()) {
+      const directory = path.join(generation.directory, ...relative.split("/"));
       const now = fs.lstatSync(directory);
-      if (!same(stat, now) || fs.readdirSync(directory).length) throw new Error("Generation directory changed; preserved");
+      if (now.isSymbolicLink() || !same(identity, now) || fs.readdirSync(directory).length) throw new Error("Generation directory changed; preserved");
       fs.rmdirSync(directory);
+      onRemoved?.(directory);
     }
     const current = fs.lstatSync(generation.directory);
     if (!same(generation.identity, current) || fs.readdirSync(generation.directory).length) throw new Error("Generation directory changed; preserved");
     fs.rmdirSync(generation.directory);
+    onRemoved?.(generation.directory);
     return true;
   }
 

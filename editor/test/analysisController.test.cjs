@@ -1196,6 +1196,44 @@ for (const kind of ["artifact", "generation manifest", "generation directory"]) 
   });
 }
 
+test("a verified generation removal can be the first watcher notification", async t => {
+  const fixture = await setup(t);
+  let invalidations = 0;
+  const controller = createAnalysisController(fixture.vscode, { changed() { invalidations += 1; } });
+  t.after(() => controller.dispose());
+  const watcher = fixture.watchers.find(item => item.pattern.pattern === "**/*");
+  const generations = path.join(fixture.root, ".graphql-desk", "live-typings", "generations");
+  const directory = path.join(generations, "g-1-00000000-0000-0000-0000-000000000001");
+  const resource = Uri.file(directory);
+  await fs.mkdir(generations, { recursive: true });
+  const removed = [directory, path.join(directory, "complete.json"),
+    path.join(directory, "pkg"), path.join(directory, "pkg", "__init__.pyi"),
+    ...Array.from({ length: 513 }, (_, index) => path.join(directory, "pkg", `stub${index}.pyi`))];
+  for (const filename of removed) controller.noteOwnedGenerationRemoval(filename);
+  for (const filename of removed) {
+    watcher.fire(Uri.file(filename));
+    watcher.fire(Uri.file(filename));
+  }
+  assert.equal(invalidations, 0);
+
+  watcher.fire(Uri.file(path.join(generations, "g-2-00000000-0000-0000-0000-000000000002")));
+  assert.equal(invalidations, 1, "an unwitnessed deletion still invalidates");
+  await fs.writeFile(directory, "foreign bytes");
+  watcher.fire(resource);
+  await fs.unlink(directory);
+  watcher.fire(resource);
+  assert.equal(invalidations, 3, "a foreign replacement and its deletion are still observed");
+
+  controller.noteOwnedGenerationRemoval(directory);
+  const target = path.join(fixture.root, "foreign-target");
+  await fs.mkdir(target);
+  await fs.symlink(target, directory, "junction");
+  watcher.fire(resource);
+  await fs.unlink(directory);
+  watcher.fire(resource);
+  assert.equal(invalidations, 5, "a replacement link clears the old removal witness");
+});
+
 test("clean generated document notifications after owned cleanup preserve fresh analysis", async t => {
   const fixture = await setup(t);
   let invalidations = 0;

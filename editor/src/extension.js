@@ -502,7 +502,7 @@ function activate(context) {
     const key = `${folderRoot}\0${managed.root}`;
     let publisher = generations.get(key);
     if (!publisher && managed.ownsSetting) {
-      publisher = createAnalysisGenerations(vscode, folderRoot, managed.root);
+      publisher = createAnalysisGenerations(vscode, folderRoot, managed.root, controller.noteOwnedGenerationRemoval);
       generations.set(key, publisher);
     }
     if (publisher && managed.selectedSetting && (!previous || previous.managedRoot !== managed.root ||
@@ -743,7 +743,10 @@ function activate(context) {
         if (disposing || disposed) return;
         const key = `${folderRoot}\0${managed.root}`;
         let publisher = generations.get(key);
-        if (!publisher) { publisher = createAnalysisGenerations(vscode, folderRoot, managed.root); generations.set(key, publisher); }
+        if (!publisher) {
+          publisher = createAnalysisGenerations(vscode, folderRoot, managed.root, controller.noteOwnedGenerationRemoval);
+          generations.set(key, publisher);
+        }
         changedArtifacts = await publisher.recover(managed, isCurrent,
           result.input_fingerprint, result.saved_source_fingerprint, operationManifest);
         if (!isCurrent()) {

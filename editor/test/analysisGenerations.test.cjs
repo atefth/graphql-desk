@@ -8,7 +8,7 @@ const { createHash } = require("node:crypto");
 const { createAnalysisGenerations, validOperationManifest } = require("../src/analysisGenerations");
 const { renderOwnedAnalysisArtifact } = require("../src/ownedAnalysisArtifacts");
 
-function fixture(t) {
+function fixture(t, onRemoved) {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "graphql-desk-generations-"));
   const root = path.join(workspace, ".graphql-desk", "typings");
   fs.mkdirSync(root, { recursive: true });
@@ -33,7 +33,7 @@ function fixture(t) {
     return true;
   } };
   t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
-  return { workspace, root, vscode, managed, publisher: createAnalysisGenerations(vscode, workspace, root) };
+  return { workspace, root, vscode, managed, publisher: createAnalysisGenerations(vscode, workspace, root, onRemoved) };
 }
 
 async function rewriteGenerationAsLegacyStubPackage(f, directory, preserveUnknown = false) {
@@ -115,7 +115,11 @@ test("publishes immutable complete generations and recovers the latest verified 
 
 test("retention cleans owned legacy stub-package generations and preserves foreign entries", async t => {
   for (const preserveUnknown of [false, true]) {
-    const f = fixture(t);
+    const removed = [];
+    const f = fixture(t, directory => {
+      assert.equal(fs.existsSync(directory), false);
+      removed.push(directory);
+    });
     assert.equal(await publish(f, files("str"), "legacy-1"), true);
     const legacy = path.resolve(f.workspace, f.managed.selectedSetting);
     const oldPackage = await rewriteGenerationAsLegacyStubPackage(f, legacy, preserveUnknown);
@@ -128,7 +132,12 @@ test("retention cleans owned legacy stub-package generations and preserves forei
       assert.equal(fs.existsSync(legacy), true, "unverified generation data must block cleanup");
     } else {
       assert.equal(fs.existsSync(legacy), false, "verified legacy output is pruned after two newer generations exist");
+      assert.equal(removed.at(-1), legacy);
+      assert.ok(removed.includes(path.join(legacy, "complete.json")));
+      assert.ok(removed.includes(path.join(oldPackage, "__init__.pyi")));
+      assert.ok(removed.includes(oldPackage));
     }
+    if (preserveUnknown) assert.deepEqual(removed, []);
   }
 });
 

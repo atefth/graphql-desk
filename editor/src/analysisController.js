@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const { createHash, randomUUID } = require("node:crypto");
 const { createAnalysisWorker } = require("./analysisWorker");
 const activationFailed = Symbol("python-extension-activation-failed");
+const MAX_PENDING_GENERATION_REMOVALS = 8192;
 
 const key = target => JSON.stringify([target.project, target.schema_name]);
 const canonical = value => {
@@ -16,6 +17,11 @@ const canonical = value => {
     result = parent === absolute ? absolute : path.join(canonical(parent), path.basename(absolute));
   }
   return process.platform === "win32" ? result.toLowerCase() : result;
+};
+const generationRemovalKey = value => {
+  const absolute = path.resolve(value);
+  const location = path.join(canonical(path.dirname(absolute)), path.basename(absolute));
+  return process.platform === "win32" ? location.toLowerCase() : location;
 };
 const inside = (root, value) => {
   const relative = path.relative(root, value);
@@ -86,6 +92,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   const folderWatchRoots = new Map();
   const ownedAnalysisPaths = new Set();
   const ownedAnalysisDirectories = new Set();
+  const pendingGenerationRemovals = new Set();
   const ownedProjectConfigHashes = new Map();
   const pendingOwnedProjectConfigWrites = new Map();
   const ownedProjectConfigTemporaryPaths = new Map();
@@ -879,11 +886,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       const root = folderWatchRoots.get(uri);
       if (root) {
         const remainingRoots = [...folders.values()].map(folder => canonical(folder.uri.fsPath));
-        for (const filename of ownedAnalysisPaths) {
-          if (inside(root, filename) && !remainingRoots.some(remaining => inside(remaining, filename))) ownedAnalysisPaths.delete(filename);
-        }
-        for (const directory of ownedAnalysisDirectories) {
-          if (inside(root, directory) && !remainingRoots.some(remaining => inside(remaining, directory))) ownedAnalysisDirectories.delete(directory);
+        for (const owned of [ownedAnalysisPaths, ownedAnalysisDirectories, pendingGenerationRemovals]) {
+          for (const filename of owned) {
+            if (inside(root, filename) && !remainingRoots.some(remaining => inside(remaining, filename))) owned.delete(filename);
+          }
         }
       }
       folderWatchRoots.delete(uri);
@@ -892,6 +898,21 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     for (const [uri, folder] of folders) if (!folderWatches.has(uri)) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, "**/*"));
       const sourceChanged = resource => {
+        if (resource?.scheme === "file" && pendingGenerationRemovals.size) {
+          const filename = generationRemovalKey(resource.fsPath);
+          if (pendingGenerationRemovals.delete(filename)) {
+            ownedAnalysisPaths.delete(filename);
+            ownedAnalysisDirectories.delete(filename);
+            recentDiskInvalidations.delete(filename);
+            try { fs.lstatSync(resource.fsPath); }
+            catch (error) {
+              if (error.code === "ENOENT") {
+                rememberDiskFingerprint(filename, "missing", true);
+                return;
+              }
+            }
+          }
+        }
         if (resource?.scheme === "file" && analysisGenerationStagingFile(resource.fsPath)) return;
         if (resource?.scheme === "file") {
           const temporary = canonical(resource.fsPath);
@@ -1072,6 +1093,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
   }
   reconcileFolderWatches();
   return { analyze, isCurrent, artifacts, doctor, quarantine, editPyrightConfig, configFile, resetConfigWorkspace, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
+    noteOwnedGenerationRemoval(removed) {
+      if (disposed) return;
+      // Hold one cleanup burst separately from the history of delivered events.
+      pendingGenerationRemovals.add(generationRemovalKey(removed));
+      if (pendingGenerationRemovals.size > MAX_PENDING_GENERATION_REMOVALS) {
+        pendingGenerationRemovals.delete(pendingGenerationRemovals.values().next().value);
+      }
+    },
     markOwnedProjectConfig(filename, fingerprint) {
       if (typeof filename !== "string" || !path.isAbsolute(filename) || typeof fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(fingerprint)) return false;
       const key = canonical(filename);
@@ -1117,7 +1146,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       managedProjectTomlStubPaths.set(root, { file: canonical(filename), value, previousValue, previousPresent });
       return true;
     },
-    dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); folderWatchRoots.clear(); ownedAnalysisPaths.clear(); ownedAnalysisDirectories.clear(); ownedProjectConfigHashes.clear(); pendingOwnedProjectConfigWrites.clear(); for (const temporary of ownedProjectConfigTemporaryPaths.values()) clearTimeout(temporary.timer); ownedProjectConfigTemporaryPaths.clear(); managedProjectTomlStubPaths.clear(); recentDiskInvalidations.clear(); subscriptions.forEach(item => item.dispose()); } };
+    dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); folderWatchRoots.clear(); ownedAnalysisPaths.clear(); ownedAnalysisDirectories.clear(); pendingGenerationRemovals.clear(); ownedProjectConfigHashes.clear(); pendingOwnedProjectConfigWrites.clear(); for (const temporary of ownedProjectConfigTemporaryPaths.values()) clearTimeout(temporary.timer); ownedProjectConfigTemporaryPaths.clear(); managedProjectTomlStubPaths.clear(); recentDiskInvalidations.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
 module.exports = { createAnalysisController };
 
