@@ -40,7 +40,7 @@ from graphql.language.ast import (
 
 from . import TypedDocument
 from .config import ProjectConfig, ScalarMapping
-from .document_validation import validate_indexed_document
+from .document_validation import validate_registered_document
 from .fragment_helpers import render_fragment_helpers
 from .fragment_refs import fragment_identity_key
 from .fragments import DefinitionKind, FragmentIndex, IndexedDocument, SchemaContext
@@ -932,10 +932,10 @@ def _generate_factory_artifacts(
                 or carrier(document).operation_name != selected.name
             ):
                 raise ValueError("Indexed selected operation identity differs")
-            errors = validate_indexed_document(
+            errors = validate_registered_document(
                 context,
                 document,
-                fragment_index=index,
+                owners=owners,
                 modules=modules,
                 client_directives=client_directives,
             )

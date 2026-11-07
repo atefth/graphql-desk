@@ -1,5 +1,7 @@
 """Validate indexed original ASTs and map errors to supplied Python snapshots."""
 
+from collections.abc import Mapping
+
 from graphql import (
     DocumentNode,
     FragmentDefinitionNode,
@@ -45,6 +47,29 @@ def validate_indexed_document(
         if identity in owners:
             raise ValueError("Duplicate indexed owner identity")
         owners[identity] = registered
+    return validate_registered_document(
+        context,
+        document,
+        owners=owners,
+        modules=modules,
+        client_directives=client_directives,
+        include_deprecations=include_deprecations,
+    )
+
+
+def validate_registered_document(
+    context: SchemaContext,
+    document: IndexedDocument,
+    *,
+    owners: Mapping[DocumentIdentity, IndexedDocument],
+    modules: tuple[ModuleSnapshot, ...],
+    client_directives: tuple[str, ...] = (),
+    include_deprecations: bool = False,
+) -> tuple[GraphDiagnostic, ...]:
+    """Validate original definitions with a prechecked schema and owner registry."""
+    identity = DocumentIdentity(document.call.module, document.call.range)
+    if owners.get(identity) != document:
+        raise ValueError("Indexed document is absent from its owner registry")
     parsed: dict[
         DocumentIdentity,
         dict[DefinitionFact, OperationDefinitionNode | FragmentDefinitionNode],

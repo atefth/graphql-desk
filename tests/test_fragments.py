@@ -436,6 +436,31 @@ class FragmentTests(unittest.TestCase):
                 )
                 self.assertTrue(result.diagnostics)
 
+    def test_fragment_errors_keep_python_anchor_and_syntax_excerpt(self) -> None:
+        for source, message in (
+            ("fragment F on Missing { id }", "Unknown type 'Missing'."),
+            (
+                "fragment F on User {\n id\n",
+                "GraphQL request:2:4\n1 | fragment F on User {\n2 |  id\n  |    ^",
+            ),
+        ):
+            with self.subTest(source=source):
+                invocation = f"graphql({source!r})"
+                snapshot = module("q", f"# 😀\nq={invocation}", version=4)
+                sources = self.resolve(snapshot)
+                (call,) = sources.calls
+                result = index_fragments(sources, schemas=self.schemas)
+                (diagnostic,) = result.diagnostics
+                self.assertEqual(diagnostic.code, "invalid-fragments")
+                self.assertEqual(
+                    (diagnostic.module, diagnostic.range), (call.module, call.range)
+                )
+                self.assertEqual(
+                    snapshot.source[diagnostic.range.start : diagnostic.range.end],
+                    invocation,
+                )
+                self.assertIn(message, diagnostic.message)
+
     def test_operation_targets_and_selection_are_explicit(self) -> None:
         sources = self.resolve(
             module(

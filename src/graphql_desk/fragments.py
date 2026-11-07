@@ -122,7 +122,8 @@ def _parse(call: ResolvedCall, context: SchemaContext) -> _Parsed:
     facts: list[DefinitionFact] = []
     operations: list[DefinitionFact] = []
     names: set[tuple[str, str]] = set()
-    for node in parse(call.source).definitions:
+    # The index keeps Python call spans and never returns the GraphQL AST.
+    for node in parse(call.source, no_location=True).definitions:
         if not isinstance(node, (OperationDefinitionNode, FragmentDefinitionNode)):
             raise _error(
                 call,
