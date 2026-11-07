@@ -764,12 +764,17 @@ def _capture(item: dict[str, object]) -> _Capture:
     buffers = tuple(_buffer(value) for value in _array(item["buffers"]))
     allowed = {_canonical(path) for path in candidates}
     base = _canonical(workspace)
+    # Recheck ancestor aliases when they can add an open document's capability.
+    share_ancestors = all(doc.canonical in allowed for doc in documents)
+    checked_ancestors: set[Path] = set()
     for path in candidates:
         parent = _canonical(path).parent
         if not parent.is_relative_to(base):
             raise ValueError("Candidate escapes workspace")
-        while True:
+        while parent not in checked_ancestors:
             allowed.add(_canonical(parent / "pyproject.toml"))
+            if share_ancestors:
+                checked_ancestors.add(parent)
             if parent == base:
                 break
             parent = parent.parent

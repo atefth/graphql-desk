@@ -7,15 +7,16 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import call, patch
 from uuid import UUID
 
 from graphql import GraphQLSchema, build_schema, introspection_from_schema
 
+import graphql_desk.editor_worker as editor_worker
 from graphql_desk.config import SchemaOrigin
 from graphql_desk.editor_worker import MAX_LINE_BYTES, EditorWorker, serve
 from tests import test_factory_generation as factory_tests
@@ -1935,6 +1936,69 @@ if TYPE_CHECKING:
                     )["ok"]
                 )
         self.assertFalse(self.worker.handle({"op": []})["ok"])
+
+    def test_capture_resolves_shared_config_ancestors_once(self) -> None:
+        nested = self.root / "nested"
+        nested.mkdir()
+        sources = (self.source, nested / "one.py", nested / "two.py")
+        for source in sources[1:]:
+            source.write_text("# source\n", encoding="utf8")
+        nested_config = nested / "pyproject.toml"
+        candidates = [str(source) for source in sources]
+        request = {
+            "op": "prepare",
+            **self.capture(),
+            "candidates": candidates,
+            "documents": [self.document(sources[-1])],
+            "buffers": [self.buffer(sources[-1], "# unsaved\n")],
+        }
+        config_request = {
+            **request,
+            "documents": [self.document(nested_config)],
+            "buffers": [self.buffer(nested_config, '[project]\nname="nested"\n')],
+        }
+        for capture, expected in ((request, 1), (config_request, len(sources))):
+            with patch.object(
+                editor_worker, "_canonical", wraps=getattr(editor_worker, "_canonical")
+            ) as resolve:
+                self.assertTrue(self.worker.handle(capture)["ok"])
+            self.assertEqual(resolve.call_args_list.count(call(self.config)), expected)
+            for source in sources[:2]:
+                self.assertEqual(resolve.call_args_list.count(call(source)), 2)
+
+        unrelated = nested / "unrequested.py"
+        invalid: tuple[dict[str, object], ...] = (
+            {"candidates": [*candidates, str(self.base / "outside.py")]},
+            {"buffers": []},
+            {
+                "documents": [self.document(unrelated)],
+                "buffers": [self.buffer(unrelated, "# unrequested\n")],
+            },
+        )
+        for changes in invalid:
+            self.assertFalse(self.worker.handle({**request, **changes})["ok"])
+
+    def test_retargeted_config_capability_still_requires_open_text(self) -> None:
+        second_source = self.root / "second.py"
+        second_source.write_text("# source\n", encoding="utf8")
+        first, second = self.root / "first.toml", self.root / "second.toml"
+        targets = iter((first, second))
+        canonical = cast(Callable[[Path], Path], getattr(editor_worker, "_canonical"))
+
+        def retarget(path: Path) -> Path:
+            return next(targets) if path == self.config else canonical(path)
+
+        with patch.object(editor_worker, "_canonical", side_effect=retarget) as resolve:
+            result = self.worker.handle(
+                {
+                    "op": "prepare",
+                    **self.capture(),
+                    "candidates": [str(self.source), str(second_source)],
+                    "documents": [self.document(second)],
+                }
+            )
+        self.assertEqual(result, {"ok": False, "error": "editor-request-failed"})
+        self.assertEqual(resolve.call_args_list.count(call(self.config)), 2)
 
     def test_canonical_schema_aliases_and_conflicting_metadata(self) -> None:
         alias = self.base / "alias.graphql"

@@ -1,6 +1,7 @@
 """Validate indexed original ASTs and map errors to supplied Python snapshots."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from functools import partial
 
 from graphql import (
     DocumentNode,
@@ -16,6 +17,9 @@ from .source import Span
 from .source_graph import DocumentIdentity, GraphDiagnostic, ModuleSnapshot
 from .source_maps import SourceMap, build_source_map
 from .validation import validate_deprecations, validate_document
+
+_Executable = OperationDefinitionNode | FragmentDefinitionNode
+_OriginalOwner = tuple[dict[DefinitionFact, _Executable], Source, SourceMap]
 
 
 def validate_indexed_document(
@@ -67,13 +71,96 @@ def validate_registered_document(
     include_deprecations: bool = False,
 ) -> tuple[GraphDiagnostic, ...]:
     """Validate original definitions with a prechecked schema and owner registry."""
+    return _validate_registered_document(
+        context,
+        document,
+        owners=owners,
+        original_owner=partial(_parse_original_owner, modules=modules),
+        client_directives=client_directives,
+        include_deprecations=include_deprecations,
+    )
+
+
+def registered_document_validator(
+    context: SchemaContext,
+    *,
+    owners: Mapping[DocumentIdentity, IndexedDocument],
+    modules: tuple[ModuleSnapshot, ...],
+    client_directives: tuple[str, ...],
+) -> Callable[[IndexedDocument], tuple[GraphDiagnostic, ...]]:
+    """Keep original imported definitions for one synchronous factory build."""
+    referenced = {
+        ref.target for owner in owners.values() for ref in owner.call.fragments
+    }
+    retained: dict[DocumentIdentity, tuple[IndexedDocument, _OriginalOwner]] = {}
+
+    def original_owner(
+        identity: DocumentIdentity, owner: IndexedDocument
+    ) -> _OriginalOwner:
+        previous = retained.get(identity)
+        if previous is not None and previous[0] is owner:
+            return previous[1]
+        original = _parse_original_owner(identity, owner, modules=modules)
+        if identity in referenced:
+            retained[identity] = owner, original
+        return original
+
+    def validate(document: IndexedDocument) -> tuple[GraphDiagnostic, ...]:
+        return _validate_registered_document(
+            context,
+            document,
+            owners=owners,
+            original_owner=original_owner,
+            client_directives=client_directives,
+            include_deprecations=False,
+        )
+
+    return validate
+
+
+def _parse_original_owner(
+    identity: DocumentIdentity,
+    owner: IndexedDocument,
+    *,
+    modules: tuple[ModuleSnapshot, ...],
+) -> _OriginalOwner:
+    mapping = build_source_map(owner.call, modules)
+    source = Source(owner.call.source, name=owner.call.module.uri)
+    originals = parse(source)
+    local: dict[DefinitionFact, _Executable] = {}
+    for node in originals.definitions:
+        if not isinstance(node, (OperationDefinitionNode, FragmentDefinitionNode)):
+            raise ValueError("Indexed source contains a non-executable definition")
+        original = DefinitionFact(
+            identity,
+            "fragment"
+            if isinstance(node, FragmentDefinitionNode)
+            else node.operation.value,
+            node.name.value if node.name else None,
+            node.type_condition.name.value
+            if isinstance(node, FragmentDefinitionNode)
+            else None,
+            print_ast(node),
+        )
+        if original in local:
+            raise ValueError("Duplicate original definition")
+        local[original] = node
+    return local, source, mapping
+
+
+def _validate_registered_document(
+    context: SchemaContext,
+    document: IndexedDocument,
+    *,
+    owners: Mapping[DocumentIdentity, IndexedDocument],
+    original_owner: Callable[[DocumentIdentity, IndexedDocument], _OriginalOwner],
+    client_directives: tuple[str, ...],
+    include_deprecations: bool,
+) -> tuple[GraphDiagnostic, ...]:
     identity = DocumentIdentity(document.call.module, document.call.range)
     if owners.get(identity) != document:
         raise ValueError("Indexed document is absent from its owner registry")
-    parsed: dict[
-        DocumentIdentity,
-        dict[DefinitionFact, OperationDefinitionNode | FragmentDefinitionNode],
-    ] = {}
+    parsed: dict[DocumentIdentity, dict[DefinitionFact, _Executable]] = {}
     origins: dict[int, SourceMap] = {}
     nodes: list[OperationDefinitionNode | FragmentDefinitionNode] = []
     for fact in document.definitions:
@@ -89,33 +176,7 @@ def validate_registered_document(
         ):
             raise ValueError("Indexed definition owner or schema context differs")
         if fact.document not in parsed:
-            mapping = build_source_map(owner.call, modules)
-            source = Source(owner.call.source, name=owner.call.module.uri)
-            originals = parse(source)
-            local: dict[
-                DefinitionFact, OperationDefinitionNode | FragmentDefinitionNode
-            ] = {}
-            for node in originals.definitions:
-                if not isinstance(
-                    node, (OperationDefinitionNode, FragmentDefinitionNode)
-                ):
-                    raise ValueError(
-                        "Indexed source contains a non-executable definition"
-                    )
-                original = DefinitionFact(
-                    fact.document,
-                    "fragment"
-                    if isinstance(node, FragmentDefinitionNode)
-                    else node.operation.value,
-                    node.name.value if node.name else None,
-                    node.type_condition.name.value
-                    if isinstance(node, FragmentDefinitionNode)
-                    else None,
-                    print_ast(node),
-                )
-                if original in local:
-                    raise ValueError("Duplicate original definition")
-                local[original] = node
+            local, source, mapping = original_owner(fact.document, owner)
             parsed[fact.document] = local
             origins[id(source)] = mapping
         original_node = parsed[fact.document].get(fact)
