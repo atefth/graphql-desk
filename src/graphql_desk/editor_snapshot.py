@@ -400,8 +400,10 @@ def _capture_projects(
             raise ValueError("Conflicting open buffers for one canonical file")
         open_files[key] = normalized
     paths = tuple(dict.fromkeys(base / candidate for candidate in candidates))
-    if any(not _path(path).is_relative_to(base) for path in paths):
+    resolved_paths = tuple(map(_path, paths))
+    if any(not path.is_relative_to(base) for path in resolved_paths):
         raise ValueError("Editor source candidate escapes its workspace")
+    directories = dict.fromkeys(path.parent for path in resolved_paths)
     observations: dict[tuple[Path, str], _Observation] = {}
     configs: dict[Path, ProjectConfig] = {}
     config_facts: dict[str, tuple[str, str, str]] = {}
@@ -472,17 +474,22 @@ def _capture_projects(
         )
 
     # Complete the closed capture before any discovery or ownership helper runs.
-    for path in paths:
-        current = _path(path).parent
+    for directory in directories:
+        current = _path(directory)
         while True:
             capture_config(current / "pyproject.toml")
             if current == base:
                 break
             current = current.parent
-    for path in paths:
+    if any(
+        _path(path) != resolved
+        for path, resolved in zip(paths, resolved_paths, strict=True)
+    ):
+        raise ValueError("Editor source candidate changed during configuration capture")
+    for directory in directories:
         try:
             selected = effective_project(
-                _path(path).parent,
+                directory,
                 workspace=base,
                 editor_fallback=editor_fallback,
                 config_texts=config_texts,

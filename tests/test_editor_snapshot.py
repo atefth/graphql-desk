@@ -13,6 +13,7 @@ from graphql import build_schema, introspection_from_schema
 
 import graphql_desk.editor_snapshot as editor_snapshot
 import graphql_desk.source_graph as source_graph
+from graphql_desk.config import parse_project_config
 from graphql_desk.editor_analysis import (
     analyze_editor_snapshot,
     analyze_editor_snapshot_details,
@@ -1279,6 +1280,55 @@ class EditorSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(graph_inputs(empty), ((), ()))
         self.assertTrue(is_editor_snapshot_current(empty, candidates=()))
+
+    def test_snapshot_reuses_config_parsing_for_sources_in_one_directory(self) -> None:
+        self.project()
+        sources = tuple(self.write(f"q{index}.py", _QUERY) for index in range(8))
+        with patch(
+            "graphql_desk.project.parse_project_config", wraps=parse_project_config
+        ) as parse:
+            snapshot = acquire_editor_snapshot(
+                workspace=self.root, candidates=sources, generation=1
+            )
+        self.assertEqual(parse.call_count, 2)
+        modules, _ = graph_inputs(snapshot)
+        self.assertEqual(
+            tuple(item.uri for item in modules),
+            tuple(path.as_uri() for path in sources),
+        )
+
+    def test_prepare_rejects_source_retargeted_during_config_capture(self) -> None:
+        self.write("pyproject.toml", "[project]\nname='inactive'\n")
+        first = self.write("docs/q.py", _QUERY)
+        second = self.write("editor/q.py", _QUERY)
+        alias = self.root / "alias.py"
+        config = OpenBuffer(second.parent / "pyproject.toml", 1, _BASE, True)
+        resolve = editor_snapshot._path
+        read = editor_snapshot._read
+        target = first
+
+        def resolve_source(path: Path) -> Path:
+            return resolve(target if path == alias else path)
+
+        def read_config(path: Path) -> tuple[str, str]:
+            nonlocal target
+            result = read(path)
+            if path == self.root / "pyproject.toml":
+                target = second
+            return result
+
+        with (
+            patch.object(editor_snapshot, "_path", side_effect=resolve_source),
+            patch.object(editor_snapshot, "_read", side_effect=read_config),
+        ):
+            with self.assertRaisesRegex(ValueError, "changed during configuration"):
+                prepare_editor_snapshot(
+                    workspace=self.root, candidates=(alias,), buffers=(config,)
+                )
+            retry = prepare_editor_snapshot(
+                workspace=self.root, candidates=(alias,), buffers=(config,)
+            )
+        self.assertEqual(len(retry.local_schemas), 1)
 
     def test_preparation_lists_external_missing_schema_without_reading_contents(
         self,
