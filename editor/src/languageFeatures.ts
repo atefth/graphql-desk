@@ -36,13 +36,14 @@ type Call = {
   } | null;
 };
 type SchemaFact = Pick<Snapshot, "uri" | "version"> & { project: string; schema_name: string; token: string; format: string };
+type SchemaSnapshot = SchemaFact & { readonly text: string };
 type DiagnosticFact = { module: ModuleIdentity; code: string; range: EncodedSpan; message: string };
 type Bundle = {
   request: {
     request_id: string;
     modules: readonly (ModuleIdentity & { source: string })[];
     bindings: readonly { project: string; schemas: readonly string[]; default_schema?: string | null }[];
-    schemas: readonly (SchemaFact & { text: string })[];
+    schemas: readonly SchemaSnapshot[];
   };
   response: {
     request_id: string;
@@ -162,7 +163,7 @@ function toDecoded(call: Call, snapshot: Snapshot, offset: number): Span[] {
     .filter((range) => boundary(call.source, range.start) && boundary(call.source, range.end)));
 }
 
-function schemaFor(bundle: Bundle, call: Call): gql.GraphQLSchema | null {
+function schemaFor(bundle: Bundle, call: Call, schemas?: Map<SchemaSnapshot, gql.GraphQLSchema>): gql.GraphQLSchema | null {
   const project = call.identity.module.project;
   const bindings = bundle.request.bindings.find((item) => item.project === project);
   const name = call.schema_name ?? bindings?.default_schema;
@@ -171,12 +172,20 @@ function schemaFor(bundle: Bundle, call: Call): gql.GraphQLSchema | null {
   const fact = bundle.response.schemas.find((item) => item.project === project && item.schema_name === name);
   if (!snapshot || !fact || snapshot.uri !== fact.uri || snapshot.version !== fact.version ||
       snapshot.token !== fact.token || snapshot.format !== fact.format) return null;
-  if (snapshot.format === "sdl") return gql.buildSchema(new gql.Source(snapshot.text, snapshot.uri));
-  const data: unknown = JSON.parse(snapshot.text);
-  const introspection = data && typeof data === "object" && "data" in data ? data.data ?? data : data;
-  if (!introspection || typeof introspection !== "object" || !("__schema" in introspection)) return null;
-  // GraphQL validates the introspection payload while building the schema.
-  return gql.buildClientSchema(introspection as gql.IntrospectionQuery);
+  const existing = schemas?.get(snapshot);
+  if (existing) return existing;
+  let schema: gql.GraphQLSchema;
+  if (snapshot.format === "sdl") {
+    schema = gql.buildSchema(new gql.Source(snapshot.text, snapshot.uri));
+  } else {
+    const data: unknown = JSON.parse(snapshot.text);
+    const introspection = data && typeof data === "object" && "data" in data ? data.data ?? data : data;
+    if (!introspection || typeof introspection !== "object" || !("__schema" in introspection)) return null;
+    // GraphQL validates the introspection payload while building the schema.
+    schema = gql.buildClientSchema(introspection as gql.IntrospectionQuery);
+  }
+  schemas?.set(snapshot, schema);
+  return schema;
 }
 
 function fragmentRegistry(bundle: Bundle, call: Call, calls: CallRegistry = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item])), asts: ASTRegistry = new Map()): gql.FragmentDefinitionNode[] {
@@ -967,13 +976,16 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         let semantic: QuickFix[] = [];
         if (diagnostics.some(item => item.code === "graphql.validation" || item.code === "graphql.deprecation")) {
           const validated = [];
+          const schemas = new Map<SchemaSnapshot, gql.GraphQLSchema>();
+          const calls: CallRegistry = new Map(bundle.response.calls.map(item => [documentKey(item.identity), item]));
+          const asts: ASTRegistry = new Map();
           for (const call of bundle.response.calls) {
-            const schema = schemaFor(bundle, call);
+            const schema = schemaFor(bundle, call, schemas);
             if (!schema) continue;
             let ast;
             try { ast = gql.parse(new gql.Source(call.source, documentKey(call.identity))); }
             catch (error) { if (error instanceof gql.GraphQLError) continue; throw error; }
-            const fragments = fragmentRegistry(bundle, call);
+            const fragments = fragmentRegistry(bundle, call, calls, asts);
             const issues = validationIssues(schema, ast, fragments,
               new Set([...CLIENT_DIRECTIVES, ...clientDirectives(bundle, call)]));
             validated.push({ call, schema, ast: { ...ast, definitions: [...ast.definitions, ...fragments] }, ...issues });
@@ -994,8 +1006,11 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
           .map((item) => ({ range: item.range.utf16, message: item.message,
             severity: ["unused-colocated-fragment", "52005"].includes(item.code) ? 2 : 1,
             code: `graphql-desk.${item.code}`, source: "GraphQL Desk" }));
+        const schemas = new Map<SchemaSnapshot, gql.GraphQLSchema>();
+        const calls: CallRegistry = new Map(bundle.response.calls.map(item => [documentKey(item.identity), item]));
+        const asts: ASTRegistry = new Map();
         for (const call of bundle.response.calls) {
-          const schema = schemaFor(bundle, call);
+          const schema = schemaFor(bundle, call, schemas);
           if (!schema) continue;
           const allowed = new Set([...CLIENT_DIRECTIVES, ...clientDirectives(bundle, call)]);
           let ast;
@@ -1014,7 +1029,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
             }
             continue;
           }
-          const { errors, warnings } = validationIssues(schema, ast, fragmentRegistry(bundle, call), allowed);
+          const { errors, warnings } = validationIssues(schema, ast, fragmentRegistry(bundle, call, calls, asts), allowed);
           for (const [issues, severity, code] of [[errors, 1, "graphql.validation"], [warnings, 2, "graphql.deprecation"]] as const) {
             for (const error of issues) {
               for (const node of error.nodes ?? []) {

@@ -23,6 +23,32 @@ test("actual Python source maps give exact schema/deprecation diagnostics and cl
   assert.deepEqual(await createLanguageFeatures(options(fixed)).diagnostics(document(fixed)), []);
 });
 
+test("diagnostics and fixes each reuse the verified schema within their own analysis", async () => {
+  const value = bundle([
+    "from graphql_desk import gql",
+    "a = gql('{ user { nme } }')",
+    "b = gql('{ user { idd } }')",
+  ].join("\n"));
+  const snapshot = document(value);
+  const input = value.request.schemas[0];
+  const text = input.text;
+  let schemaReads = 0;
+  Object.defineProperty(input, "text", { get() { schemaReads++; return text; } });
+  const service = createLanguageFeatures(options(value));
+  const diagnostics = (await service.diagnostics(snapshot)).filter(item => item.code === "graphql.validation");
+  assert.deepEqual(diagnostics.map(item => snapshot.text.slice(item.range.start, item.range.end)), ["nme", "idd"]);
+  assert.equal(schemaReads, 1);
+
+  const actions = await service.codeActions(snapshot, diagnostics);
+  assert.ok(actions.some(item => item.replacement === "name"));
+  assert.ok(actions.some(item => item.replacement === "id"));
+  assert.equal(schemaReads, 2);
+
+  value.response.schemas[0].token = "stale";
+  assert.ok(!(await service.diagnostics(snapshot)).some(item => item.code === "graphql.validation"));
+  assert.equal(schemaReads, 2);
+});
+
 test("unused imported fragments are reported as warnings", async () => {
   const source = "from graphql_desk import gql\nfrom fragments import card as Card\nq=gql('{ user { id } }')";
   const fragment = { project: "p", module: "fragments", uri: "file:///workspace/fragments.py", version: 1,
