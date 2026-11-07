@@ -3042,6 +3042,11 @@ class IncrementalResolver:
         self._parses.clear()
         self._projects.clear()
 
+    def validated_tree(self, snapshot: ModuleSnapshot) -> ast.Module | None:
+        """Return retained read-only syntax validated for this URI and source."""
+        parsed = self._parses.get((snapshot.uri, snapshot.source))
+        return parsed.tree if parsed is not None else None
+
     def resolve(
         self,
         modules: tuple[ModuleSnapshot, ...],

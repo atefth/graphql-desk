@@ -34,6 +34,7 @@ from .source import Span
 from .source_graph import (
     DocumentIdentity,
     GraphDiagnostic,
+    IncrementalResolver,
     ModuleDependency,
     ModuleSnapshot,
     ResolvedCall,
@@ -2343,12 +2344,16 @@ def field_usage_diagnostics(
     options: Mapping[str, FieldUsageOptions] | None = None,
     *,
     unused_selections: list[UnusedSelection] | None = None,
+    resolver: IncrementalResolver | None = None,
 ) -> tuple[GraphDiagnostic, ...]:
     """Report only proven same-file reads; unfamiliar Python remains silent."""
     parsed: dict[tuple[str, str], _Module] = {}
     for snapshot in modules:
         try:
-            tree = ast.parse(snapshot.source)
+            tree = resolver.validated_tree(snapshot) if resolver is not None else None
+            if tree is None:
+                tree = ast.parse(snapshot.source)
+            # Preserve field analysis's own future-annotations compiler context.
             compile(tree, snapshot.uri, "exec")
             parsed[(snapshot.project, snapshot.module)] = _Module(snapshot, tree)
         except (

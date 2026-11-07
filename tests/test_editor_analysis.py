@@ -1,5 +1,6 @@
 """Real snapshot resolution and exact maps cross the JSON boundary unchanged."""
 
+import ast
 import copy
 import json
 import unittest
@@ -10,8 +11,12 @@ from unittest.mock import patch
 from graphql import build_schema, introspection_from_schema
 
 from graphql_desk import source_graph
-from graphql_desk.editor_analysis import analyze_editor_json, analyze_editor_snapshot
-from graphql_desk.field_usage import FieldUsageOptions
+from graphql_desk.editor_analysis import (
+    analyze_editor_json,
+    analyze_editor_snapshot,
+    analyze_editor_snapshot_details,
+)
+from graphql_desk.field_usage import FieldUsageOptions, field_usage_diagnostics
 from graphql_desk.persisted import editor_sha256_id
 from graphql_desk.source_graph import IncrementalResolver, ModuleSnapshot
 
@@ -69,6 +74,30 @@ def array(value: object) -> list[object]:
 
 
 class EditorAnalysisTests(unittest.TestCase):
+    def test_fragment_reuse_requires_exact_schema_text_even_with_same_token(
+        self,
+    ) -> None:
+        payload = request(
+            "from graphql_desk import gql\nq=gql('fragment Card on User { id }')"
+        )
+        previous = analyze_editor_snapshot_details(payload)
+        schema = object_(array(payload["schemas"])[0])
+        schema["version"] = 3
+        same_text = analyze_editor_snapshot_details(
+            payload, previous_fragments=previous.fragment_reuse
+        )
+        self.assertEqual(same_text.response, analyze_editor_snapshot(payload))
+
+        schema["text"] = "type Person { id: ID! } type Query { user: Person }"
+        cold = analyze_editor_snapshot_details(payload)
+        warm = analyze_editor_snapshot_details(
+            payload, previous_fragments=same_text.fragment_reuse
+        )
+        self.assertEqual(warm.response, cold.response)
+        self.assertEqual(warm.index, cold.index)
+        self.assertEqual(warm.index.documents, ())
+        self.assertIn("Unknown type 'User'", warm.index.diagnostics[0].message)
+
     def test_fragment_extraction_uses_only_composition_capable_factories(self) -> None:
         for source, factory, expected in (
             (
@@ -162,6 +191,58 @@ class EditorAnalysisTests(unittest.TestCase):
                 ],
                 [],
             )
+
+    def test_field_usage_reuses_only_exact_validated_python_trees(self) -> None:
+        source = (
+            "# \U0001f600\r\n"
+            "from graphql_desk import gql\r\n"
+            "from graphql_desk.testing import read_result as reader\r\n"
+            "q=gql('{ user { id name } }')\r\n"
+            "result=reader(q, {})\r\n"
+            "print(result['user']['id'])"
+        )
+        payload = request(source)
+        modules = array(payload["modules"])
+        modules.append(module("bad", "return 1"))
+        resolver = IncrementalResolver()
+        analyze_editor_snapshot(payload, resolver=resolver)
+
+        modules[0] = module("main", "# unsaved edit\r\n" + source, version=2)
+        cold = analyze_editor_snapshot(payload)
+        warm = analyze_editor_snapshot_details(payload, resolver=resolver)
+        with patch("ast.parse", wraps=ast.parse) as parse_python:
+            field_usage_diagnostics(
+                warm.modules, warm.index, warm.schemas, resolver=resolver
+            )
+        self.assertEqual(
+            [
+                call.args[0]
+                for call in parse_python.call_args_list
+                if call.kwargs.get("mode", "exec") == "exec"
+            ],
+            ["return 1"],
+        )
+        self.assertEqual(warm.response, cold)
+        self.assertEqual(
+            [object_(item)["code"] for item in array(warm.response["diagnostics"])],
+            ["invalid-python", "52005"],
+        )
+
+    def test_shared_field_tree_still_requires_field_compiler_admission(self) -> None:
+        payload = request(
+            "from graphql_desk import gql\n"
+            "from graphql_desk.testing import read_result\n"
+            "q=gql('{ user { id name } }')\n"
+            "result=read_result(q, {})\n"
+            "print(result['user']['id'])\n"
+            "def unusual(a: (named := int)) -> None: pass\n"
+        )
+        cold = analyze_editor_snapshot(payload)
+        warm = analyze_editor_snapshot(payload, resolver=IncrementalResolver())
+        self.assertNotIn(
+            "52005", [object_(item)["code"] for item in array(cold["diagnostics"])]
+        )
+        self.assertEqual(warm, cold)
 
     def test_unused_selection_facts_require_unconsumed_result_paths(self) -> None:
         prefix = (

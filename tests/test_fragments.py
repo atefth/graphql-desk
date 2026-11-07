@@ -4,7 +4,7 @@ import unittest
 from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
 
-from graphql import build_schema, print_ast
+from graphql import build_schema, parse, print_ast, validate
 
 from graphql_desk import graphql
 from graphql_desk.fragments import (
@@ -557,6 +557,107 @@ class FragmentTests(unittest.TestCase):
         stale = ProjectSources((old.calls[-1], *new.calls[:-1]), ())
         invalid = index_fragments(stale, schemas=self.schemas)
         self.assertFalse(any(item.call.binding == "q" for item in invalid.documents))
+
+    def test_warm_index_only_materializes_needed_cached_fragments(self) -> None:
+        leaf = module("leaf", 'leaf=graphql("fragment F on User { id }")')
+        query = module(
+            "query",
+            'from leaf import leaf\nq=graphql("query Old { user { ...F } }",[leaf])',
+        )
+        sibling = module("sibling", 'other=graphql("{ hello }")')
+        old = index_fragments(self.resolve(leaf, query, sibling), schemas=self.schemas)
+        new = self.resolve(
+            leaf,
+            replace(query, source=query.source.replace("Old", "New"), version=2),
+            sibling,
+        )
+        cold = index_fragments(new, schemas=self.schemas)
+        with (
+            patch("graphql_desk.fragments.parse", wraps=parse) as parse_graphql,
+            patch(
+                "graphql_desk.fragments.validate", wraps=validate
+            ) as validate_graphql,
+        ):
+            warm = index_fragments(
+                new,
+                schemas=self.schemas,
+                previous_documents=old.documents,
+                unchanged_schemas=frozenset({("p", "default")}),
+            )
+        self.assertEqual(warm, cold)
+        self.assertEqual(parse_graphql.call_count, 2)
+        self.assertEqual(validate_graphql.call_count, 1)
+
+        leaf_doc, *other_docs = old.documents
+        (definition,) = leaf_doc.definitions
+        broken = replace(leaf_doc, definitions=(replace(definition, printed="stale"),))
+        self.assertEqual(
+            index_fragments(
+                new,
+                schemas=self.schemas,
+                previous_documents=(broken, *other_docs),
+                unchanged_schemas=frozenset({("p", "default")}),
+            ),
+            cold,
+        )
+
+    def test_warm_index_rechecks_changed_edges_conflicts_and_mixed_versions(
+        self,
+    ) -> None:
+        leaf = module("leaf", 'leaf=graphql("fragment F on User { id }")')
+        query = module(
+            "query", 'from leaf import leaf\nq=graphql("{ user { ...F } }",[leaf])'
+        )
+        original = self.resolve(leaf, query)
+        old = index_fragments(original, schemas=self.schemas)
+        old_leaf, old_query = original.calls
+        changed = self.resolve(
+            replace(leaf, source=leaf.source.replace("User", "Fake")), query
+        )
+        self.assertEqual(
+            old_query,
+            changed.calls[1],
+            "Same metadata does not prove equal transitive source",
+        )
+
+        conflicting = replace(
+            original, calls=(replace(old_leaf, source="{ hello }"), *original.calls)
+        )
+        mixed = replace(
+            original,
+            calls=(
+                *original.calls,
+                replace(old_leaf, module=replace(old_leaf.module, version=2)),
+            ),
+        )
+        missing = replace(original, calls=(old_query,))
+        (reference,) = old_query.fragments
+        cycle = replace(
+            original,
+            calls=(
+                replace(
+                    old_leaf,
+                    fragments=(
+                        replace(
+                            reference,
+                            target=DocumentIdentity(old_query.module, old_query.range),
+                            reference_module=old_leaf.module,
+                        ),
+                    ),
+                ),
+                old_query,
+            ),
+        )
+        for sources in (changed, conflicting, mixed, missing, cycle):
+            cold = index_fragments(sources, schemas=self.schemas)
+            warm = index_fragments(
+                sources,
+                schemas=self.schemas,
+                previous_documents=old.documents,
+                unchanged_schemas=frozenset({("p", "default")}),
+            )
+            self.assertEqual(warm, cold)
+            self.assertTrue(warm.diagnostics)
 
     def test_guarded_invalid_reference_records_cannot_publish(self) -> None:
         sources = self.resolve(

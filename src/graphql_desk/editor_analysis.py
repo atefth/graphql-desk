@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 from urllib.parse import urlsplit
 
@@ -12,6 +12,7 @@ from .field_usage import FieldUsageOptions, UnusedSelection, field_usage_diagnos
 from .fragments import (
     DefinitionFact,
     FragmentIndex,
+    IndexedDocument,
     SchemaContext,
     index_fragments,
     unused_colocated_fragment_diagnostics,
@@ -158,11 +159,22 @@ def analyze_editor_snapshot(
 
 
 @dataclass(frozen=True)
+class FragmentReuse:
+    """Accepted fragment facts and their exact schema inputs from one capture."""
+
+    documents: tuple[IndexedDocument, ...]
+    schema_inputs: dict[tuple[str, str], tuple[str, str, str, str]]
+
+
+@dataclass(frozen=True)
 class EditorAnalysis:
     response: dict[str, object]
     modules: tuple[ModuleSnapshot, ...]
     schemas: dict[tuple[str, str | None], SchemaContext]
     index: FragmentIndex
+    fragment_reuse: FragmentReuse | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 def editor_diagnostic(
@@ -190,6 +202,7 @@ def analyze_editor_snapshot_details(
     external_mapping_modules: tuple[ModuleSnapshot, ...] = (),
     colocated_fragment_checks: Mapping[str, bool] | None = None,
     field_usage_options: Mapping[str, FieldUsageOptions] | None = None,
+    previous_fragments: FragmentReuse | None = None,
 ) -> EditorAnalysis:
     payload = _object(
         request, {"request_id", "modules", "bindings", "schemas"}, "request"
@@ -321,6 +334,7 @@ def analyze_editor_snapshot_details(
     )
     schemas: dict[tuple[str, str | None], SchemaContext] = {}
     schema_facts: list[dict[str, object]] = []
+    schema_inputs: dict[tuple[str, str], tuple[str, str, str, str]] = {}
     seen_schemas: set[tuple[str, str]] = set()
     for value in _array(payload["schemas"], "schemas"):
         item = _object(
@@ -345,6 +359,7 @@ def analyze_editor_snapshot_details(
         token = _string(item["token"], "Schema token")
         format_ = _string(item["format"], "Schema format")
         text = _string(item["text"], "Schema text")
+        schema_inputs[identity] = (uri, token, format_, text)
         try:
             if format_ == "sdl":
                 schema = load_from_sdl(text)
@@ -371,7 +386,21 @@ def analyze_editor_snapshot_details(
                 "format": format_,
             }
         )
-    index = index_fragments(sources, schemas=schemas)
+    unchanged_schemas: frozenset[tuple[str, str]] = (
+        frozenset(
+            identity
+            for identity, inputs in schema_inputs.items()
+            if previous_fragments.schema_inputs.get(identity) == inputs
+        )
+        if previous_fragments is not None
+        else frozenset()
+    )
+    index = index_fragments(
+        sources,
+        schemas=schemas,
+        previous_documents=previous_fragments.documents if previous_fragments else (),
+        unchanged_schemas=unchanged_schemas,
+    )
     unused_selections: list[UnusedSelection] = []
     field_diagnostics = field_usage_diagnostics(
         tuple(modules),
@@ -379,6 +408,7 @@ def analyze_editor_snapshot_details(
         schemas,
         field_usage_options,
         unused_selections=unused_selections,
+        resolver=resolver,
     )
     colocated_diagnostics = tuple(
         diagnostic
@@ -714,4 +744,10 @@ def analyze_editor_snapshot_details(
         ]
         + [editor_diagnostic(item, snapshots) for item in mapping_diagnostics],
     }
-    return EditorAnalysis(response, tuple(modules), schemas, index)
+    return EditorAnalysis(
+        response,
+        tuple(modules),
+        schemas,
+        index,
+        FragmentReuse(index.documents, schema_inputs) if index.documents else None,
+    )
