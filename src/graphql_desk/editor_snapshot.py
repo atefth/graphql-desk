@@ -561,7 +561,20 @@ def _capture_projects(
 
 
 def _check_observations(observations: Iterable[_Observation]) -> None:
-    for observation in observations:
+    facts = tuple(observations)
+    saved_disk = {
+        (fact.path, fact.canonical, fact.digest)
+        for fact in facts
+        if fact.origin == "saved-disk"
+    }
+    for observation in facts:
+        # The matching saved view already rechecks identity, file kind and bytes.
+        if (
+            observation.origin == "disk"
+            and (observation.path, observation.canonical, observation.digest)
+            in saved_disk
+        ):
+            continue
         if _identity(observation.path) != observation.canonical:
             raise ValueError("Inputs changed during snapshot acquisition")
         if observation.origin == "config-disk":

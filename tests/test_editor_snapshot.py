@@ -804,6 +804,25 @@ class EditorSnapshotTests(unittest.TestCase):
                 workspace=self.root, candidates=(source,), generation=1
             )
 
+    def test_matching_disk_and_saved_views_share_one_verification(self) -> None:
+        self.project()
+        source = self.write("q.py", _QUERY)
+        original_read = Path.read_bytes
+        reads = 0
+
+        def count_source(path: Path) -> bytes:
+            nonlocal reads
+            reads += path == source
+            return original_read(path)
+
+        with patch.object(Path, "read_bytes", count_source):
+            snapshot = acquire_editor_snapshot(
+                workspace=self.root, candidates=(source,), generation=1
+            )
+            self.assertEqual(reads, 2)
+            self.assertTrue(is_editor_snapshot_current(snapshot, candidates=(source,)))
+        self.assertEqual(reads, 4)
+
     def test_saved_source_change_during_dirty_overlay_acquisition_is_rejected(
         self,
     ) -> None:
