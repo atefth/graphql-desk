@@ -312,6 +312,8 @@ jobs:
           uv pip install --python .venv-alt/Scripts/python.exe -e .
       - run: npm ci --ignore-scripts
         working-directory: editor
+      - run: npm run build
+        working-directory: editor
       - run: node test/run-host.cjs "${{ matrix.version }}" "${{ matrix.suite }}"
         env:
           GRAPHQL_DESK_ALTERNATE_PYTHON: ${{ matrix.suite == 'typingMatrix' && format('{0}/.venv-alt/Scripts/python.exe', github.workspace) || '' }}
