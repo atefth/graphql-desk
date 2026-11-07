@@ -1,7 +1,91 @@
-"use strict";
+import gql = require("graphql");
+import gls = require("graphql-language-service");
+import type { CancellationToken, Position, TextDocument, Uri } from "vscode";
 
-const gql = require("graphql");
-const gls = require("graphql-language-service");
+type Span = { start: number; end: number };
+type Point = { line: number; character: number };
+type PositionRange = { start: Point; end: Point };
+type Snapshot = { uri: string; version: number; text: string };
+type ModuleIdentity = Pick<Snapshot, "uri" | "version"> & { project: string; module: string };
+type HostSpan = { module: ModuleIdentity; range: Span };
+type EncodedSpan = { codepoint: Span; utf16: Span };
+type DocumentIdentity = { module: ModuleIdentity; call_range: EncodedSpan };
+type FragmentReference = { target: DocumentIdentity; reference_module: ModuleIdentity; range: EncodedSpan };
+type FragmentContext = [project: string, schema: string, token: string];
+type RefactorContext = {
+  factory: string;
+  fragment_insertion: number;
+  fragment_mode: "new" | "new_trailing" | "populated" | "empty_list" | "empty_tuple";
+  indent: string;
+  newline: string;
+  scope: string;
+  statement_start: number;
+};
+type Call = {
+  identity: DocumentIdentity;
+  schema_name?: string | null;
+  source: string;
+  extract?: RefactorContext | null;
+  fragments: readonly FragmentReference[];
+  map: { utf16: readonly { decoded: Span; host: HostSpan; linear: boolean }[] };
+  index?: {
+    schema_name: string;
+    context_token: string;
+    primary_fragment?: { name: string | null } | null;
+    definitions: readonly { kind: string; document: DocumentIdentity; name: string | null }[];
+  } | null;
+};
+type SchemaFact = Pick<Snapshot, "uri" | "version"> & { project: string; schema_name: string; token: string; format: string };
+type DiagnosticFact = { module: ModuleIdentity; code: string; range: EncodedSpan; message: string };
+type Bundle = {
+  request: {
+    request_id: string;
+    modules: readonly (ModuleIdentity & { source: string })[];
+    bindings: readonly { project: string; schemas: readonly string[]; default_schema?: string | null }[];
+    schemas: readonly (SchemaFact & { text: string })[];
+  };
+  response: {
+    request_id: string;
+    schemas: readonly SchemaFact[];
+    calls: readonly Call[];
+    diagnostics: readonly DiagnosticFact[];
+    unused_selections?: readonly { document: DocumentIdentity; diagnostic: DiagnosticFact; range: Span }[];
+    persisted?: readonly { module: ModuleIdentity; id_is_literal: boolean; expected_id: string; id: string; id_range: EncodedSpan }[];
+    persisted_id_insertions?: readonly { module: ModuleIdentity; range: EncodedSpan; expected_id: string; positional: boolean; insertion: EncodedSpan }[];
+  };
+};
+type Directives = (bundle: Bundle, call: Call) => readonly string[];
+type LanguageOptions = {
+  analyze: (snapshot: Snapshot, token?: CancellationToken) => Bundle | null | Promise<Bundle | null>;
+  isCurrent: (bundle: Bundle, snapshot: Snapshot, token?: CancellationToken) => boolean | Promise<boolean>;
+  isTrusted: () => boolean;
+  clientDirectives?: Directives;
+  mapSnapshot?: (snapshot: Snapshot, bundle: Bundle) => Snapshot;
+};
+type RegistrationOptions = LanguageOptions & {
+  snapshot?: (document: TextDocument) => Snapshot;
+  resolveUri?: (uri: string) => Uri;
+};
+type CallRegistry = Map<string, Call>;
+type ASTRegistry = Map<string, gql.DocumentNode | null>;
+type FragmentTarget = { node: gql.FragmentDefinitionNode; owner: Call };
+type FragmentSymbol = {
+  name: string;
+  target: FragmentTarget;
+  selected: { node: gql.NameNode; owner: Call };
+  context: FragmentContext;
+};
+type FragmentOccurrence = { call: Call; node: gql.NameNode };
+type MappedLocation = { module: Pick<ModuleIdentity, "uri" | "version">; range: Span };
+type SourceLocation = HostSpan & { sourceText: string; positionRange: PositionRange };
+type TextChange = { range: Span; replacement: string };
+type SourceEdit = SourceLocation & TextChange;
+type QuickFix = TextChange & { title: string; guardOnApply?: boolean };
+type DiagnosticInput = { code: unknown; message: string; range: Span };
+type FeatureDiagnostic = DiagnosticInput & { code: string; severity: 1 | 2; source: string };
+type ValidatedCall = { call: Call; schema: gql.GraphQLSchema; ast: gql.DocumentNode; errors: readonly gql.GraphQLError[]; warnings: readonly gql.GraphQLError[] };
+type HoverContent = ReturnType<typeof gls.getHoverInformation>;
+type MarkdownInput = Exclude<HoverContent, readonly unknown[]>;
 let guardedEditCommandSequence = 0;
 
 const CLIENT_DIRECTIVES = new Set([
@@ -10,17 +94,17 @@ const CLIENT_DIRECTIVES = new Set([
   "argumentDefinitions", "connection", "refetchable", "relay", "inline",
 ]);
 
-const key = (identity) => JSON.stringify(identity);
-const documentKey = (identity) => key([identity.module, identity.call_range.codepoint]);
-const cancelled = (token) => Boolean(token?.isCancellationRequested);
+const key = (identity: unknown) => JSON.stringify(identity);
+const documentKey = (identity: DocumentIdentity) => key([identity.module, identity.call_range.codepoint]);
+const cancelled = (token?: CancellationToken) => Boolean(token?.isCancellationRequested);
 
-function boundary(text, offset) {
+function boundary(text: string, offset: number) {
   return Number.isInteger(offset) && offset >= 0 && offset <= text.length &&
     !(offset > 0 && offset < text.length &&
       /[\uD800-\uDBFF]/.test(text[offset - 1]) && /[\uDC00-\uDFFF]/.test(text[offset]));
 }
 
-function positionAt(text, offset) {
+function positionAt(text: string, offset: number): Point {
   if (!boundary(text, offset)) throw new Error("Invalid character boundary");
   let line = 0;
   let start = 0;
@@ -33,12 +117,12 @@ function positionAt(text, offset) {
   return { line, character: offset - start };
 }
 
-function moduleSource(bundle, identity) {
+function moduleSource(bundle: Bundle, identity: ModuleIdentity) {
   return bundle.request.modules.find((item) => item.project === identity.project &&
     item.module === identity.module && item.uri === identity.uri && item.version === identity.version);
 }
 
-function projectSpan(query, origin, target, linear) {
+function projectSpan(query: Span, origin: Span, target: Span, linear: boolean): Span[] {
   if (query.start === query.end) {
     if (linear && origin.start <= query.start && query.start <= origin.end) {
       const point = target.start + query.start - origin.start;
@@ -55,11 +139,11 @@ function projectSpan(query, origin, target, linear) {
     end: target.start + Math.min(query.end, origin.end) - origin.start }];
 }
 
-function unique(items) {
+function unique<T>(items: readonly T[]): T[] {
   return [...new Map(items.map((item) => [key(item), item])).values()];
 }
 
-function toHost(bundle, call, span) {
+function toHost(bundle: Bundle, call: Call, span: Span): HostSpan[] {
   if (!boundary(call.source, span.start) || !boundary(call.source, span.end)) return [];
   return unique(call.map.utf16.flatMap((atom) => {
     const source = moduleSource(bundle, atom.host.module);
@@ -70,7 +154,7 @@ function toHost(bundle, call, span) {
   }));
 }
 
-function toDecoded(call, snapshot, offset) {
+function toDecoded(call: Call, snapshot: Snapshot, offset: number): Span[] {
   if (!boundary(snapshot.text, offset)) return [];
   return unique(call.map.utf16.filter((atom) => atom.host.module.uri === snapshot.uri &&
     atom.host.module.version === snapshot.version)
@@ -78,23 +162,26 @@ function toDecoded(call, snapshot, offset) {
     .filter((range) => boundary(call.source, range.start) && boundary(call.source, range.end)));
 }
 
-function schemaFor(bundle, call) {
+function schemaFor(bundle: Bundle, call: Call): gql.GraphQLSchema | null {
   const project = call.identity.module.project;
   const bindings = bundle.request.bindings.find((item) => item.project === project);
   const name = call.schema_name ?? bindings?.default_schema;
-  if (!bindings?.schemas.includes(name)) return null;
+  if (typeof name !== "string" || !bindings?.schemas.includes(name)) return null;
   const snapshot = bundle.request.schemas.find((item) => item.project === project && item.schema_name === name);
   const fact = bundle.response.schemas.find((item) => item.project === project && item.schema_name === name);
   if (!snapshot || !fact || snapshot.uri !== fact.uri || snapshot.version !== fact.version ||
       snapshot.token !== fact.token || snapshot.format !== fact.format) return null;
   if (snapshot.format === "sdl") return gql.buildSchema(new gql.Source(snapshot.text, snapshot.uri));
-  const data = JSON.parse(snapshot.text);
-  return gql.buildClientSchema(data.data ?? data);
+  const data: unknown = JSON.parse(snapshot.text);
+  const introspection = data && typeof data === "object" && "data" in data ? data.data ?? data : data;
+  if (!introspection || typeof introspection !== "object" || !("__schema" in introspection)) return null;
+  // GraphQL validates the introspection payload while building the schema.
+  return gql.buildClientSchema(introspection as gql.IntrospectionQuery);
 }
 
-function fragmentRegistry(bundle, call, calls = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item])), asts = new Map()) {
+function fragmentRegistry(bundle: Bundle, call: Call, calls: CallRegistry = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item])), asts: ASTRegistry = new Map()): gql.FragmentDefinitionNode[] {
   const entries = call.index ? [call.index] : call.fragments
-    .map((reference) => calls.get(documentKey(reference.target))?.index).filter(Boolean);
+    .map((reference) => calls.get(documentKey(reference.target))?.index).filter(entry => entry != null);
   const result = [];
   const seen = new Set();
   for (const entry of entries) {
@@ -106,7 +193,7 @@ function fragmentRegistry(bundle, call, calls = new Map(bundle.response.calls.ma
           owner.index.context_token !== entry.context_token || seen.has(`${ownerKey}:${fact.name}`)) continue;
       const ast = parseCall(owner, asts);
       if (!ast) continue;
-      const definition = ast.definitions.find((node) => node.kind === gql.Kind.FRAGMENT_DEFINITION && node.name.value === fact.name);
+      const definition = ast.definitions.find((node): node is gql.FragmentDefinitionNode => node.kind === gql.Kind.FRAGMENT_DEFINITION && node.name.value === fact.name);
       if (definition) {
         result.push(definition);
         seen.add(`${ownerKey}:${fact.name}`);
@@ -116,20 +203,21 @@ function fragmentRegistry(bundle, call, calls = new Map(bundle.response.calls.ma
   return result;
 }
 
-function schemaContext(call) {
+function schemaContext(call: Call): FragmentContext | null | undefined {
   return call.index && [call.identity.module.project, call.index.schema_name, call.index.context_token];
 }
 
-function fragmentNodes(bundle, call, ast, calls = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item])), asts = new Map()) {
+function fragmentNodes(bundle: Bundle, call: Call, ast: gql.DocumentNode, calls: CallRegistry = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item])), asts: ASTRegistry = new Map()): FragmentTarget[] {
   const nodes = [...ast.definitions.filter((item) => item.kind === gql.Kind.FRAGMENT_DEFINITION),
     ...fragmentRegistry(bundle, call, calls, asts)];
   return nodes.flatMap((node) => {
-    const owner = calls.get(node.loc?.source?.name);
+    const owner = node.loc && calls.get(node.loc.source.name);
     return owner ? [{ node, owner }] : [];
   });
 }
 
-function parseCall(call, asts = new Map()) {
+// Parsed call nodes include locations because parsing never disables them.
+function parseCall(call: Call, asts: ASTRegistry = new Map()): gql.DocumentNode | null | undefined {
   const id = documentKey(call.identity);
   if (asts.has(id)) return asts.get(id);
   try {
@@ -139,15 +227,15 @@ function parseCall(call, asts = new Map()) {
   } catch { asts.set(id, null); return null; }
 }
 
-function fragmentSymbolAt(bundle, call, offset, calls, asts) {
+function fragmentSymbolAt(bundle: Bundle, call: Call, offset: number, calls?: CallRegistry, asts?: ASTRegistry): FragmentSymbol | null {
   const ast = parseCall(call, asts);
   if (!ast) return null;
   const context = schemaContext(call);
   if (!context) return null;
-  const nameNode = [];
+  const nameNode: { node: gql.FragmentDefinitionNode | gql.FragmentSpreadNode; definition: boolean }[] = [];
   gql.visit(ast, {
-    FragmentDefinition(node) { if (node.name.loc.start <= offset && offset < node.name.loc.end) nameNode.push({ node, definition: true }); },
-    FragmentSpread(node) { if (node.name.loc.start <= offset && offset < node.name.loc.end) nameNode.push({ node, definition: false }); },
+    FragmentDefinition(node) { if (node.name.loc!.start <= offset && offset < node.name.loc!.end) nameNode.push({ node, definition: true }); },
+    FragmentSpread(node) { if (node.name.loc!.start <= offset && offset < node.name.loc!.end) nameNode.push({ node, definition: false }); },
   });
   if (nameNode.length !== 1) return null;
   const selected = nameNode[0];
@@ -156,7 +244,7 @@ function fragmentSymbolAt(bundle, call, offset, calls, asts) {
   if (selected.definition) {
     const ownerKey = documentKey(call.identity);
     const matches = definitions.filter((item) => documentKey(item.owner.identity) === ownerKey &&
-      item.node.name.loc.start === selected.node.name.loc.start);
+      item.node.name.loc!.start === selected.node.name.loc!.start);
     return matches.length === 1 ? { name: selected.node.name.value, target: matches[0],
       selected: { node: selected.node.name, owner: call }, context } : null;
   }
@@ -164,7 +252,7 @@ function fragmentSymbolAt(bundle, call, offset, calls, asts) {
     selected: { node: selected.node.name, owner: call }, context } : null;
 }
 
-function fragmentOccurrences(bundle, symbol, includeDeclaration, calls, asts) {
+function fragmentOccurrences(bundle: Bundle, symbol: FragmentSymbol, includeDeclaration: boolean, calls: CallRegistry, asts: ASTRegistry): FragmentOccurrence[] {
   const [project, schema, token] = symbol.context;
   const targetKey = documentKey(symbol.target.owner.identity);
   const result = [];
@@ -176,7 +264,7 @@ function fragmentOccurrences(bundle, symbol, includeDeclaration, calls, asts) {
     const definitions = fragmentNodes(bundle, call, ast, calls, asts).filter((item) => item.owner.index?.schema_name === schema &&
       item.owner.index.context_token === token && item.node.name.value === symbol.name);
     const definition = definitions.find((item) => documentKey(item.owner.identity) === targetKey &&
-      item.node.name.loc.start === symbol.target.node.name.loc.start);
+      item.node.name.loc!.start === symbol.target.node.name.loc!.start);
     if (includeDeclaration && definition && documentKey(definition.owner.identity) === documentKey(call.identity)) {
       result.push({ call: definition.owner, node: definition.node.name });
     }
@@ -184,7 +272,7 @@ function fragmentOccurrences(bundle, symbol, includeDeclaration, calls, asts) {
       FragmentSpread(node) {
         const matches = definitions.filter((item) => item.node.name.value === node.name.value);
         if (matches.length === 1 && documentKey(matches[0].owner.identity) === targetKey &&
-            matches[0].node.name.loc.start === symbol.target.node.name.loc.start) {
+            matches[0].node.name.loc!.start === symbol.target.node.name.loc!.start) {
           result.push({ call, node: node.name });
         }
       },
@@ -193,15 +281,15 @@ function fragmentOccurrences(bundle, symbol, includeDeclaration, calls, asts) {
   return result;
 }
 
-function hostFragmentOccurrence(bundle, item) {
+function hostFragmentOccurrence(bundle: Bundle, item: FragmentOccurrence): (SourceLocation & { name: string }) | null {
   const snapshot = moduleSource(bundle, item.call.identity.module);
   if (!snapshot) return null;
-  const modules = unique(item.call.map.utf16.filter((atom) => atom.decoded.start < item.node.loc.end &&
-    item.node.loc.start < atom.decoded.end).map((atom) => atom.host.module));
+  const modules = unique(item.call.map.utf16.filter((atom) => atom.decoded.start < item.node.loc!.end &&
+    item.node.loc!.start < atom.decoded.end).map((atom) => atom.host.module));
   if (modules.length !== 1 || modules[0].uri !== snapshot.uri || modules[0].version !== snapshot.version) return null;
-  const parts = callMappedParts(item.call, item.node.loc, modules[0]);
+  const parts = callMappedParts(item.call, item.node.loc!, modules[0]);
   if (!parts) return null;
-  const range = { start: parts[0].range.start, end: parts.at(-1).range.end };
+  const range = { start: parts[0].range.start, end: parts.at(-1)!.range.end };
   if (parts.some((part) => part.linear && item.call.source.slice(part.decoded.start, part.decoded.end) !==
       snapshot.source.slice(part.range.start, part.range.end))) return null;
   return { module: item.call.identity.module, range, name: item.node.value,
@@ -209,7 +297,7 @@ function hostFragmentOccurrence(bundle, item) {
     positionRange: { start: positionAt(snapshot.source, range.start), end: positionAt(snapshot.source, range.end) } };
 }
 
-function callMappedParts(call, span, module) {
+function callMappedParts(call: Call, span: Span, module: ModuleIdentity) {
   const parts = call.map.utf16.flatMap((atom) => {
     if (key(atom.host.module) !== key(module)) return [];
     if (!atom.linear && (atom.decoded.start < span.start || atom.decoded.end > span.end)) return [];
@@ -227,7 +315,7 @@ function callMappedParts(call, span, module) {
   return decoded === span.end ? parts : null;
 }
 
-function wordRange(text, offset) {
+function wordRange(text: string, offset: number): Span {
   let start = offset;
   let end = offset;
   while (start > 0 && /[_0-9A-Za-z]/.test(text[start - 1])) start -= 1;
@@ -235,7 +323,7 @@ function wordRange(text, offset) {
   return { start, end };
 }
 
-function editableRange(bundle, call, span, snapshot) {
+function editableRange(bundle: Bundle, call: Call, span: Span, snapshot: Snapshot): Span | null {
   const origins = toHost(bundle, call, span);
   if (origins.length !== 1) return null;
   const origin = origins[0];
@@ -248,7 +336,7 @@ function editableRange(bundle, call, span, snapshot) {
   return origin.range;
 }
 
-function unusedSelectionActions(bundle, snapshot, diagnostics) {
+function unusedSelectionActions(bundle: Bundle, snapshot: Snapshot, diagnostics: readonly DiagnosticInput[]): QuickFix[] {
   const result = [];
   for (const item of bundle.response.unused_selections ?? []) {
     const diagnostic = item.diagnostic;
@@ -262,18 +350,19 @@ function unusedSelectionActions(bundle, snapshot, diagnostics) {
     if (ast.definitions.length !== 1 || ast.definitions[0].kind !== gql.Kind.OPERATION_DEFINITION ||
         ast.definitions[0].operation !== "query" || call.source.includes("#")) continue;
     let unsafe = false;
-    let selected;
+    const selected: gql.FieldNode[] = [];
     gql.visit(ast, {
       Directive() { unsafe = true; },
       FragmentSpread() { unsafe = true; },
       InlineFragment() { unsafe = true; },
       SelectionSet(node) {
-        const field = node.selections.find(field => field.loc.start === item.range.start && field.loc.end === item.range.end);
-        if (field?.kind === gql.Kind.FIELD && !field.selectionSet && !field.arguments.length && node.selections.length > 1) selected = field;
+        const field = node.selections.find(field => field.loc!.start === item.range.start && field.loc!.end === item.range.end);
+        if (field?.kind === gql.Kind.FIELD && !field.selectionSet && !field.arguments!.length && node.selections.length > 1) selected[0] = field;
       },
     });
-    if (unsafe || !selected) continue;
-    let { start, end } = selected.loc;
+    const field = selected[0];
+    if (unsafe || !field) continue;
+    let { start, end } = field.loc!;
     const lineStart = call.source.lastIndexOf("\n", start - 1) + 1;
     const nextLine = call.source.indexOf("\n", end);
     if (/^[ \t]*$/.test(call.source.slice(lineStart, start)) && nextLine !== -1 &&
@@ -283,7 +372,7 @@ function unusedSelectionActions(bundle, snapshot, diagnostics) {
     } else {
       const following = /^[ \t,]+/.exec(call.source.slice(end));
       if (following) end += following[0].length;
-      else start -= /[ \t,]*$/.exec(call.source.slice(0, start))[0].length;
+      else start -= /[ \t,]*$/.exec(call.source.slice(0, start))![0].length;
     }
     const parts = callMappedParts(call, { start, end }, call.identity.module);
     if (!parts || parts.some(part => {
@@ -291,27 +380,29 @@ function unusedSelectionActions(bundle, snapshot, diagnostics) {
       const host = snapshot.text.slice(part.range.start, part.range.end);
       return part.linear ? decoded !== host : decoded !== "\n" || host !== "\r\n";
     })) continue;
-    const range = { start: parts[0].range.start, end: parts.at(-1).range.end };
+    const range = { start: parts[0].range.start, end: parts.at(-1)!.range.end };
     const callRange = call.identity.call_range.utf16;
     if (range.start < callRange.start || range.end > callRange.end) continue;
-    result.push({ title: `Remove unused selection '${selected.alias?.value ?? selected.name.value}'`, range, replacement: "", guardOnApply: true });
+    result.push({ title: `Remove unused selection '${field.alias?.value ?? field.name.value}'`, range, replacement: "", guardOnApply: true });
   }
   return unique(result);
 }
 
-function nodeLocation(bundle, node) {
-  if (!node?.loc) return [];
-  const owner = bundle.response.calls.find((item) => documentKey(item.identity) === node.loc.source.name);
-  if (owner) return toHost(bundle, owner, node.loc);
-  const schema = bundle.request.schemas.find((item) => item.uri === node.loc.source.name && item.format === "sdl");
-  return schema ? [{ module: { uri: schema.uri, version: schema.version }, range: { start: node.loc.start, end: node.loc.end } }] : [];
+function nodeLocation(bundle: Bundle, node: gql.ASTNode): MappedLocation[] {
+  const location = node?.loc;
+  if (!location) return [];
+  const owner = bundle.response.calls.find((item) => documentKey(item.identity) === location.source.name);
+  if (owner) return toHost(bundle, owner, location);
+  const schema = bundle.request.schemas.find((item) => item.uri === location.source.name && item.format === "sdl");
+  return schema ? [{ module: { uri: schema.uri, version: schema.version }, range: { start: location.start, end: location.end } }] : [];
 }
 
-function highlightNode(node) {
-  return node.kind !== gql.Kind.VARIABLE && node.name ? node.name : node.variable ?? node;
+function highlightNode(node: gql.ASTNode): gql.ASTNode {
+  return node.kind !== gql.Kind.VARIABLE && "name" in node && node.name ? node.name :
+    "variable" in node ? node.variable ?? node : node;
 }
 
-function outlineAst(source) {
+function outlineAst(source: string): gql.DocumentNode | null {
   try { return gql.parse(new gql.Source(source)); }
   catch (error) {
     if (!(error instanceof gql.GraphQLError)) return null;
@@ -338,17 +429,18 @@ function outlineAst(source) {
   }
 }
 
-function hoverInformation(schema, text, offset) {
+function hoverInformation(schema: gql.GraphQLSchema, text: string, offset: number): HoverContent {
   const position = gls.offsetToPosition(text, offset);
   let contents = gls.getHoverInformation(schema, text, position, undefined, { useMarkdown: true });
   const context = gls.getContextAtPosition(text, position, schema);
   const info = context?.typeInfo;
   if (typeof contents !== "string" || !contents || !info) return contents;
   const kind = context.token.state.kind;
+  const parent = gql.isNamedType(info.parentType) ? info.parentType : undefined;
   if ((kind === "Field" || kind === "AliasedField") && info.fieldDef?.args.length) {
     // GLS 5.7 omits field arguments from its hover signature.
     const field = info.fieldDef;
-    const name = field.name.startsWith("__") ? field.name : `${info.parentType.name}.${field.name}`;
+    const name = field.name.startsWith("__") ? field.name : `${parent!.name}.${field.name}`;
     const prefix = `\`\`\`graphql\n${name}: ${field.type}\n\`\`\``;
     let args;
     try {
@@ -365,22 +457,22 @@ function hoverInformation(schema, text, offset) {
   if (kind === "ObjectField" && info.inputObjectType && info.fieldDef) {
     // GLS 5.7 qualifies input members with the enclosing output type.
     const field = `${info.fieldDef.name}: ${info.type}`;
-    const prefix = `\`\`\`graphql\n${info.parentType?.name}.${field}\n\`\`\``;
+    const prefix = `\`\`\`graphql\n${parent?.name}.${field}\n\`\`\``;
     if (contents.startsWith(prefix)) contents = `\`\`\`graphql\n${info.inputObjectType.name}.${field}\n\`\`\`` + contents.slice(prefix.length);
   }
   const definition = kind === "Argument" ? info.argDef : kind === "ObjectField" ? info.fieldDef : undefined;
-  if (definition?.defaultValue !== undefined) {
+  if (definition && "defaultValue" in definition && definition.defaultValue !== undefined && gql.isInputType(definition.type)) {
     const value = gql.astFromValue(definition.defaultValue, definition.type);
     if (value) contents += `\n\nDefault:\n\`\`\`graphql\n${gql.print(value)}\n\`\`\``;
   }
   return contents;
 }
 
-function definitionNodes(schema, ast, fragments, offset) {
-  const result = [];
+function definitionNodes(schema: gql.GraphQLSchema, ast: gql.DocumentNode, fragments: readonly gql.FragmentDefinitionNode[], offset: number): gql.NameNode[] {
+  const result: (gql.NameNode | undefined)[] = [];
   const typeInfo = new gql.TypeInfo(schema);
-  let operation;
-  function selected(node) {
+  let operation: gql.OperationDefinitionNode | undefined;
+  function selected(node: gql.ASTNode) {
     return node.loc && node.loc.start <= offset && offset < node.loc.end;
   }
   gql.visit(ast, gql.visitWithTypeInfo(typeInfo, {
@@ -398,7 +490,7 @@ function definitionNodes(schema, ast, fragments, offset) {
     FragmentSpread(node) {
       if (!selected(node.name)) return;
       const targets = [...ast.definitions, ...fragments]
-        .filter((item) => item.kind === gql.Kind.FRAGMENT_DEFINITION && item.name.value === node.name.value);
+        .filter((item): item is gql.FragmentDefinitionNode => item.kind === gql.Kind.FRAGMENT_DEFINITION && item.name.value === node.name.value);
       if (targets.length === 1) result.push(targets[0].name);
     },
     Variable(node) {
@@ -406,11 +498,11 @@ function definitionNodes(schema, ast, fragments, offset) {
         ?.find((item) => item.variable.name.value === node.name.value)?.variable.name);
     },
   }));
-  return result.filter(Boolean);
+  return result.filter(item => item !== undefined);
 }
 
-function validationIssues(schema, ast, fragments, allowed) {
-  const document = { kind: gql.Kind.DOCUMENT, definitions: [...ast.definitions, ...fragments] };
+function validationIssues(schema: gql.GraphQLSchema, ast: gql.DocumentNode, fragments: readonly gql.FragmentDefinitionNode[], allowed: ReadonlySet<string>) {
+  const document: gql.DocumentNode = { kind: gql.Kind.DOCUMENT, definitions: [...ast.definitions, ...fragments] };
   const errors = gls.validateWithCustomRules(schema, document, [gql.ExecutableDefinitionsRule])
     .filter((error) => !(error.message.startsWith("Unknown directive") &&
       error.nodes?.every((node) => node.kind === gql.Kind.DIRECTIVE && allowed.has(node.name.value) &&
@@ -418,30 +510,34 @@ function validationIssues(schema, ast, fragments, allowed) {
   return { errors, warnings: gql.validate(schema, document, [gql.NoDeprecatedCustomRule]) };
 }
 
-function suggestedNames(message) {
+function suggestedNames(message: string) {
   const index = message.indexOf("Did you mean ");
   if (index < 0 || /inline fragment/i.test(message.slice(index))) return [];
   return [...message.slice(index).matchAll(/"([_A-Za-z][_0-9A-Za-z]*)"/g)].map((item) => item[1]);
 }
 
-function deprecatedReplacement(message) {
+function deprecatedReplacement(message: string) {
   const reason = message.split(/is deprecated\.\s*/i)[1] ?? "";
   const match = /\b(?:use|replaced\s+(?:by|with))\s+(?:`([_A-Za-z][_0-9A-Za-z]*)`|"([_A-Za-z][_0-9A-Za-z]*)"|'([_A-Za-z][_0-9A-Za-z]*)'|([_A-Za-z][_0-9A-Za-z]*)(?![_0-9A-Za-z.]))/i.exec(reason);
   return match?.slice(1).find(Boolean) ?? null;
 }
 
-function diagnosticMatches(diagnostics, code, range, message) {
+function diagnosticMatches(diagnostics: readonly DiagnosticInput[], code: string, range: Span, message: string) {
   return diagnostics.some((item) => item.code === code && item.message === message &&
     item.range.start === range.start && item.range.end === range.end);
 }
 
-function suggestionActions(bundle, snapshot, diagnostics, calls) {
+function suggestionActions(bundle: Bundle, snapshot: Snapshot, diagnostics: readonly DiagnosticInput[], calls: readonly ValidatedCall[]): QuickFix[] {
   const result = [];
   const fixableKinds = new Set([gql.Kind.FIELD, gql.Kind.ARGUMENT, gql.Kind.DIRECTIVE,
     gql.Kind.NAMED_TYPE, gql.Kind.OBJECT_FIELD, gql.Kind.ENUM]);
   for (const call of calls) {
     const parsed = call.ast;
-    const nameNodes = (node) => fixableKinds.has(node.kind) ? [node.name ?? (node.kind === gql.Kind.ENUM ? node : null)].filter(Boolean) : [];
+    const nameNodes = (node: gql.ASTNode) => {
+      if (!fixableKinds.has(node.kind)) return [];
+      if ("name" in node && node.name) return [node.name];
+      return node.kind === gql.Kind.ENUM ? [node] : [];
+    };
     for (const error of call.errors) {
       const replacements = [...new Set(suggestedNames(error.message))];
       if (!replacements.length) continue;
@@ -457,7 +553,7 @@ function suggestionActions(bundle, snapshot, diagnostics, calls) {
       }
     }
     const typeInfo = new gql.TypeInfo(call.schema);
-    const parentTypes = new Map();
+    const parentTypes = new Map<gql.FieldNode, gql.GraphQLCompositeType | null | undefined>();
     gql.visit(parsed, gql.visitWithTypeInfo(typeInfo, {
       Field(node) { parentTypes.set(node, typeInfo.getParentType()); },
     }));
@@ -466,8 +562,9 @@ function suggestionActions(bundle, snapshot, diagnostics, calls) {
       if (node.kind !== gql.Kind.FIELD || !node.name?.loc) continue;
       const replacement = deprecatedReplacement(warning.message);
       const parent = parentTypes.get(node);
-      const definition = parent?.getFields?.()[replacement];
-      if (!replacement || replacement === node.name.value || !definition || definition.deprecationReason != null) continue;
+      if (!replacement || replacement === node.name.value || !parent || !("getFields" in parent)) continue;
+      const definition = parent.getFields()[replacement];
+      if (!definition || definition.deprecationReason != null) continue;
       const range = editableRange(bundle, call.call, node.name.loc, snapshot);
       if (range && diagnosticMatches(diagnostics, "graphql.deprecation", range, warning.message)) {
         result.push({ title: `Replace deprecated field '${node.name.value}' with '${replacement}'`, range, replacement });
@@ -477,10 +574,10 @@ function suggestionActions(bundle, snapshot, diagnostics, calls) {
   return unique(result);
 }
 
-function extractFragmentPlan(bundle, snapshot, selection, directives) {
+function extractFragmentPlan(bundle: Bundle, snapshot: Snapshot, selection: Span, directives: Directives): SourceEdit[] | null {
   if (!boundary(snapshot.text, selection.start) || !boundary(snapshot.text, selection.end) ||
       selection.start >= selection.end) return null;
-  const trivia = text => /^(?:[\s,\uFEFF]|#[^\r\n]*(?:\r\n|\r|\n|$))*$/.test(text);
+  const trivia = (text: string) => /^(?:[\s,\uFEFF]|#[^\r\n]*(?:\r\n|\r|\n|$))*$/.test(text);
   const plans = [];
   for (const call of bundle.response.calls) {
     const context = call.extract;
@@ -500,16 +597,16 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
     const allowed = new Set([...CLIENT_DIRECTIVES, ...directives(bundle, call)]);
     if (validationIssues(schema, ast, fragments, allowed).errors.length) continue;
     const info = new gql.TypeInfo(schema);
-    const matches = [];
+    const matches: { selected: gql.SelectionNode[]; parent: gql.GraphQLCompositeType; spreads: Set<string> }[] = [];
     gql.visit(ast, gql.visitWithTypeInfo(info, {
       SelectionSet(node) {
-        const selected = node.selections.filter(item => start <= item.loc.start && item.loc.end <= end);
-        const overlapping = node.selections.filter(item => item.loc.start < end && start < item.loc.end);
+        const selected = node.selections.filter(item => start <= item.loc!.start && item.loc!.end <= end);
+        const overlapping = node.selections.filter(item => item.loc!.start < end && start < item.loc!.end);
         if (!selected.length || selected.length !== overlapping.length ||
             selected.some(item => item.kind !== gql.Kind.FIELD) ||
-            !trivia(call.source.slice(start, selected[0].loc.start)) ||
-            !trivia(call.source.slice(selected.at(-1).loc.end, end))) return;
-        const spreads = new Set();
+            !trivia(call.source.slice(start, selected[0].loc!.start)) ||
+            !trivia(call.source.slice(selected.at(-1)!.loc!.end, end))) return;
+        const spreads = new Set<string>();
         for (const item of selected) gql.visit(item, { FragmentSpread(spread) { spreads.add(spread.name.value); } });
         const parent = info.getParentType();
         if (gql.isCompositeType(parent)) matches.push({ selected, parent, spreads });
@@ -517,7 +614,7 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
     }));
     if (matches.length !== 1) continue;
     const { selected, parent, spreads } = matches[0];
-    const span = { start: selected[0].loc.start, end: selected.at(-1).loc.end };
+    const span = { start: selected[0].loc!.start, end: selected.at(-1)!.loc!.end };
     const host = editableRange(bundle, call, span, snapshot);
     if (!host || host.start < callRange.start || host.end > callRange.end) continue;
     const names = new Set();
@@ -538,7 +635,7 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
       name = `${base}${suffix++}`;
     } while (true);
     const calls = new Map(bundle.response.calls.map(item => [documentKey(item.identity), item]));
-    const exposesFragment = (reference, name) => {
+    const exposesFragment = (reference: FragmentReference, name: string) => {
       const pending = [calls.get(documentKey(reference.target))];
       const visited = new Set();
       while (pending.length) {
@@ -587,8 +684,8 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
           range.start === targetRange.start && range.end === targetRange.end;
         if (!inline && !/^[_A-Za-z][_0-9A-Za-z]*(?:\.[_A-Za-z][_0-9A-Za-z]*)*$/.test(expression)) return null;
         return { range, target, expression };
-      }).sort((a, b) => a.range.start - b.range.start);
-      if (dependencies.some(item => !item)) continue;
+      }).sort((a, b) => a!.range.start - b!.range.start);
+      if (!dependencies.every(item => item !== null)) continue;
       for (const dependency of dependencies) {
         const key = `${dependency.range.start}:${dependency.range.end}`;
         if (inlineBindings.has(key)) continue;
@@ -654,9 +751,9 @@ function extractFragmentPlan(bundle, snapshot, selection, directives) {
 }
 
 /** All analysis and freshness authority is injected; this module never starts Python. */
-function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirectives = () => [], mapSnapshot = value => value }) {
+function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirectives = () => [], mapSnapshot = value => value }: LanguageOptions) {
   if (![analyze, isCurrent, isTrusted].every((item) => typeof item === "function")) throw new Error("Analysis, trust and freshness callbacks are required");
-  async function load(snapshot, token) {
+  async function load(snapshot: Snapshot, token?: CancellationToken) {
     if (!isTrusted() || cancelled(token)) return null;
     const bundle = await analyze(snapshot, token);
     if (bundle) snapshot = mapSnapshot(snapshot, bundle);
@@ -665,11 +762,11 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
       !await isCurrent(bundle, snapshot, token) || cancelled(token) || !isTrusted()) return null;
     return bundle;
   }
-  async function finish(bundle, snapshot, token, value, fallback) {
+  async function finish<T>(bundle: Bundle, snapshot: Snapshot, token: CancellationToken | undefined, value: T, fallback: T) {
     if (cancelled(token) || !isTrusted() || !await isCurrent(bundle, snapshot, token)) return fallback;
     return !cancelled(token) && isTrusted() ? value : fallback;
   }
-  async function at(snapshot, offset, token, action, fallback) {
+  async function at<T>(snapshot: Snapshot, offset: number, token: CancellationToken | undefined, action: (bundle: Bundle, call: Call, schema: gql.GraphQLSchema, decoded: number, snapshot: Snapshot) => T, fallback: NoInfer<T>) {
     try {
       const bundle = await load(snapshot, token);
       if (!bundle) return fallback;
@@ -684,7 +781,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
     } catch { return fallback; }
   }
   return {
-    async complete(snapshot, offset, token) {
+    async complete(snapshot: Snapshot, offset: number, token?: CancellationToken) {
       return at(snapshot, offset, token, (bundle, call, schema, decoded, snapshot) => {
         const span = wordRange(call.source, decoded);
         const range = editableRange(bundle, call, span, snapshot);
@@ -711,7 +808,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
             range }));
       }, []);
     },
-    async hover(snapshot, offset, token) {
+    async hover(snapshot: Snapshot, offset: number, token?: CancellationToken) {
       return at(snapshot, offset, token, (bundle, call, schema, decoded, snapshot) => {
         const contents = hoverInformation(schema, call.source, decoded);
         if (!contents || (Array.isArray(contents) && !contents.length)) return null;
@@ -720,7 +817,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         return origins.length === 1 ? { contents, range: origins[0].range } : null;
       }, null);
     },
-    async definition(snapshot, offset, token) {
+    async definition(snapshot: Snapshot, offset: number, token?: CancellationToken) {
       return at(snapshot, offset, token, (bundle, call, schema, decoded, snapshot) => {
         let ast;
         try { ast = gql.parse(new gql.Source(call.source, documentKey(call.identity))); }
@@ -735,17 +832,17 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
           });
       }, []);
     },
-    async references(snapshot, offset, includeDeclaration, token) {
+    async references(snapshot: Snapshot, offset: number, includeDeclaration: boolean, token?: CancellationToken) {
       return at(snapshot, offset, token, (bundle, call, _schema, decoded) => {
         const calls = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item]));
         const asts = new Map();
         const symbol = fragmentSymbolAt(bundle, call, decoded, calls, asts);
         if (!symbol) return [];
         return unique(fragmentOccurrences(bundle, symbol, includeDeclaration, calls, asts)
-          .map((item) => hostFragmentOccurrence(bundle, item)).filter(Boolean));
+          .map((item) => hostFragmentOccurrence(bundle, item)).filter(item => item !== null));
       }, []);
     },
-    async prepareRename(snapshot, offset, token) {
+    async prepareRename(snapshot: Snapshot, offset: number, token?: CancellationToken) {
       return at(snapshot, offset, token, (bundle, call, _schema, decoded) => {
         const symbol = fragmentSymbolAt(bundle, call, decoded);
         if (!symbol) return null;
@@ -756,7 +853,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
           ? { range: item.range, positionRange: item.positionRange, placeholder: item.name } : null;
       }, null);
     },
-    async rename(snapshot, offset, newName, token) {
+    async rename(snapshot: Snapshot, offset: number, newName: string, token?: CancellationToken) {
       if (!/^[_A-Za-z][_0-9A-Za-z]*$/.test(newName)) return null;
       return at(snapshot, offset, token, (bundle, call, _schema, decoded) => {
         const calls = new Map(bundle.response.calls.map((item) => [documentKey(item.identity), item]));
@@ -765,7 +862,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         if (!symbol) return null;
         const [project, schema, contextToken] = symbol.context;
         const targetKey = documentKey(symbol.target.owner.identity);
-        const targetPosition = symbol.target.node.name.loc.start;
+        const targetPosition = symbol.target.node.name.loc!.start;
         for (const candidate of bundle.response.calls) {
           const context = schemaContext(candidate);
           if (!context || context[0] !== project || context[1] !== schema || context[2] !== contextToken) continue;
@@ -773,20 +870,20 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
           if (!ast) continue;
           const definitions = fragmentNodes(bundle, candidate, ast, calls, asts);
           const targetPresent = definitions.some((item) => documentKey(item.owner.identity) === targetKey &&
-            item.node.name.loc.start === targetPosition);
+            item.node.name.loc!.start === targetPosition);
           const collision = definitions.some((item) => item.node.name.value === newName &&
-            (documentKey(item.owner.identity) !== targetKey || item.node.name.loc.start !== targetPosition));
+            (documentKey(item.owner.identity) !== targetKey || item.node.name.loc!.start !== targetPosition));
           if (targetPresent && collision) return null;
         }
         const occurrences = fragmentOccurrences(bundle, symbol, true, calls, asts);
         const edits = occurrences.map((item) => hostFragmentOccurrence(bundle, item));
-        if (!edits.length || edits.some((item) => !item)) return null;
+        if (!edits.length || !edits.every(item => item !== null)) return null;
         const uniqueEdits = unique(edits);
         return uniqueEdits.length === edits.length
           ? uniqueEdits.map(({ module, range, positionRange, sourceText }) => ({ module, range, positionRange, sourceText, replacement: newName })) : null;
       }, null);
     },
-    async extractFragment(snapshot, selection, token) {
+    async extractFragment(snapshot: Snapshot, selection: Span, token?: CancellationToken) {
       try {
         const bundle = await load(snapshot, token);
         if (!bundle) return null;
@@ -795,7 +892,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         return await finish(bundle, snapshot, token, plan, null);
       } catch { return null; }
     },
-    async symbols(snapshot, token) {
+    async symbols(snapshot: Snapshot, token?: CancellationToken) {
       try {
         const bundle = await load(snapshot, token);
         if (!bundle) return [];
@@ -809,8 +906,8 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
           if (!ast) continue;
           const callRange = call.identity.call_range.utf16;
           for (const node of ast.definitions) {
-            if (!node.name?.loc || ![gql.Kind.OPERATION_DEFINITION, gql.Kind.FRAGMENT_DEFINITION].includes(node.kind)) continue;
-            const origins = toHost(bundle, call, node.loc);
+            if ((node.kind !== gql.Kind.OPERATION_DEFINITION && node.kind !== gql.Kind.FRAGMENT_DEFINITION) || !node.name?.loc) continue;
+            const origins = toHost(bundle, call, node.loc!);
             const names = toHost(bundle, call, node.name.loc);
             if (names.length !== 1 || names[0].module.uri !== snapshot.uri ||
               names[0].module.version !== snapshot.version || origins.some((item) =>
@@ -825,7 +922,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
             seen.add(symbolKey);
             result.push({
               name: node.name.value,
-              detail: kind === "fragment" ? `fragment on ${node.typeCondition.name.value}` : node.operation,
+              detail: node.kind === gql.Kind.FRAGMENT_DEFINITION ? `fragment on ${node.typeCondition.name.value}` : node.operation,
               kind,
               range: definitionRange,
               selectionRange,
@@ -835,7 +932,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         return await finish(bundle, snapshot, token, unique(result), []);
       } catch { return []; }
     },
-    async codeActions(snapshot, diagnostics, token) {
+    async codeActions(snapshot: Snapshot, diagnostics: readonly DiagnosticInput[], token?: CancellationToken): Promise<QuickFix[]> {
       try {
         const bundle = await load(snapshot, token);
         if (!bundle) return [];
@@ -867,8 +964,8 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
             range: item.insertion.utf16,
             replacement: item.positional ? `${JSON.stringify(item.expected_id)}, ` : `id=${JSON.stringify(item.expected_id)}, `,
           }));
-        let semantic = [];
-        if (diagnostics.some((item) => ["graphql.validation", "graphql.deprecation"].includes(item.code))) {
+        let semantic: QuickFix[] = [];
+        if (diagnostics.some(item => item.code === "graphql.validation" || item.code === "graphql.deprecation")) {
           const validated = [];
           for (const call of bundle.response.calls) {
             const schema = schemaFor(bundle, call);
@@ -887,12 +984,12 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
         return await finish(bundle, snapshot, token, [...stale, ...insertions, ...semantic, ...removals], []);
       } catch { return []; }
     },
-    async diagnostics(snapshot, token) {
+    async diagnostics(snapshot: Snapshot, token?: CancellationToken) {
       try {
         const bundle = await load(snapshot, token);
         if (!bundle) return [];
         snapshot = mapSnapshot(snapshot, bundle);
-        const result = bundle.response.diagnostics
+        const result: FeatureDiagnostic[] = bundle.response.diagnostics
           .filter((item) => item.module.uri === snapshot.uri && item.module.version === snapshot.version && item.code !== "invalid-fragments")
           .map((item) => ({ range: item.range.utf16, message: item.message,
             severity: ["unused-colocated-fragment", "52005"].includes(item.code) ? 2 : 1,
@@ -918,7 +1015,7 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
             continue;
           }
           const { errors, warnings } = validationIssues(schema, ast, fragmentRegistry(bundle, call), allowed);
-          for (const [issues, severity, code] of [[errors, 1, "graphql.validation"], [warnings, 2, "graphql.deprecation"]]) {
+          for (const [issues, severity, code] of [[errors, 1, "graphql.validation"], [warnings, 2, "graphql.deprecation"]] as const) {
             for (const error of issues) {
               for (const node of error.nodes ?? []) {
                 for (const origin of nodeLocation(bundle, highlightNode(node))) {
@@ -944,41 +1041,44 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
   };
 }
 
-function registerLanguageFeatures(vscode, options) {
+function registerLanguageFeatures(vscode: typeof import("vscode"), options: RegistrationOptions) {
   let disposed = false;
-  const generations = new Map();
+  const generations = new Map<string, number>();
   const service = createLanguageFeatures({ ...options,
     isCurrent: async (...args) => !disposed && await options.isCurrent(...args) && !disposed,
   });
   const guardedEditCommand = `graphqlDesk.applyGuardedEdit.${++guardedEditCommandSequence}`;
   const selector = [{ language: "python", scheme: "file" }, { language: "python", scheme: "untitled" }];
-  const snapshot = options.snapshot ?? ((document) => ({ uri: document.uri.toString(), version: document.version, text: document.getText() }));
-  const range = (document, span) => new vscode.Range(document.positionAt(span.start), document.positionAt(span.end));
+  const snapshot = options.snapshot ?? ((document: TextDocument) => ({ uri: document.uri.toString(), version: document.version, text: document.getText() }));
+  const range = (document: TextDocument, span: Span) => new vscode.Range(document.positionAt(span.start), document.positionAt(span.end));
   const collection = vscode.languages.createDiagnosticCollection("graphql-desk");
-  const markdown = (value) => {
+  const markdown = (value: MarkdownInput) => {
     const content = new vscode.MarkdownString(typeof value === "string" ? value : value.value ?? "");
     content.isTrusted = false;
     content.supportHtml = false;
     return content;
   };
   const handles = [collection,
-    vscode.commands.registerCommand(guardedEditCommand, async params => {
-      const { uri, version, range: span, expected, replacement } = params ?? {};
-      if (disposed || typeof uri !== "string" || !Number.isInteger(version) || !span ||
-          !Number.isInteger(span.start) || !Number.isInteger(span.end) || typeof expected !== "string" ||
-          typeof replacement !== "string") return false;
+    vscode.commands.registerCommand(guardedEditCommand, async (params: unknown) => {
+      if (disposed || !params || typeof params !== "object") return false;
+      const { uri, version, range: span, expected, replacement } = params as Record<string, unknown>;
+      if (typeof uri !== "string" || typeof version !== "number" || !Number.isInteger(version) ||
+          !span || typeof span !== "object" || !("start" in span) || !("end" in span) ||
+          typeof span.start !== "number" || !Number.isInteger(span.start) ||
+          typeof span.end !== "number" || !Number.isInteger(span.end) ||
+          typeof expected !== "string" || typeof replacement !== "string") return false;
+      const { start, end } = span;
       const document = vscode.workspace.textDocuments.find(item => item.uri.toString() === uri);
       if (!document || document.isClosed || document.version !== version) return false;
       const text = document.getText();
-      if (span.start < 0 || span.end < span.start || span.end > text.length ||
-          text.slice(span.start, span.end) !== expected) return false;
+      if (start < 0 || end < start || end > text.length || text.slice(start, end) !== expected) return false;
       const editor = vscode.window.visibleTextEditors.find(item => item.document === document);
       if (!editor) return false;
       let accepted = false;
       const applied = await editor.edit(edit => {
         if (disposed || document.isClosed || document.version !== version ||
-            document.getText().slice(span.start, span.end) !== expected) return;
-        edit.replace(range(document, span), replacement);
+            document.getText().slice(start, end) !== expected) return;
+        edit.replace(range(document, { start, end }), replacement);
         accepted = true;
       });
       return accepted && applied;
@@ -1003,11 +1103,12 @@ function registerLanguageFeatures(vscode, options) {
         return new vscode.Hover((Array.isArray(item.contents) ? item.contents : [item.contents]).map(markdown), range(document, item.range));
       },
     }),
+    // VS Code accepts plain line/character pairs for Range endpoints at runtime.
     vscode.languages.registerDefinitionProvider(selector, {
       async provideDefinition(document, position, token) {
         const items = await service.definition(snapshot(document), document.offsetAt(position), token);
         return items.map((item) => new vscode.Location(options.resolveUri ? options.resolveUri(item.module.uri) : vscode.Uri.parse(item.module.uri),
-          new vscode.Range(item.positionRange.start, item.positionRange.end)));
+          new vscode.Range(item.positionRange.start as Position, item.positionRange.end as Position)));
       },
     }),
     vscode.languages.registerReferenceProvider(selector, {
@@ -1015,7 +1116,7 @@ function registerLanguageFeatures(vscode, options) {
         const items = await service.references(snapshot(document), document.offsetAt(position),
           Boolean(context.includeDeclaration), token);
         return items.map((item) => new vscode.Location(options.resolveUri ? options.resolveUri(item.module.uri) : vscode.Uri.parse(item.module.uri),
-          new vscode.Range(item.positionRange.start, item.positionRange.end)));
+          new vscode.Range(item.positionRange.start as Position, item.positionRange.end as Position)));
       },
     }),
     vscode.languages.registerDocumentSymbolProvider(selector, {
@@ -1032,7 +1133,7 @@ function registerLanguageFeatures(vscode, options) {
         const selection = selectedRange && { start: document.offsetAt(selectedRange.start), end: document.offsetAt(selectedRange.end) };
         const current = () => !cancelled(token) && document.version === version && !document.isClosed;
         const diagnostics = context.diagnostics.filter((item) =>
-          ["graphql-desk.persisted-hash-mismatch", "graphql-desk.persisted-id-missing",
+          typeof item.code === "string" && ["graphql-desk.persisted-hash-mismatch", "graphql-desk.persisted-id-missing",
             "graphql.validation", "graphql.deprecation", "graphql-desk.52005"].includes(item.code));
         const items = diagnostics.map((item) => ({
           code: item.code,
@@ -1070,15 +1171,15 @@ function registerLanguageFeatures(vscode, options) {
     }),
   ];
   return {
-    async prepareRename(document, position, token) {
+    async prepareRename(document: TextDocument, position: Position, token?: CancellationToken) {
       if (disposed || cancelled(token)) return null;
       return service.prepareRename(snapshot(document), document.offsetAt(position), token);
     },
-    async rename(document, position, newName, token) {
+    async rename(document: TextDocument, position: Position, newName: string, token?: CancellationToken) {
       if (disposed || cancelled(token)) return null;
       return service.rename(snapshot(document), document.offsetAt(position), newName, token);
     },
-    async extractFragment(document, selection, token) {
+    async extractFragment(document: TextDocument, selection: Span, token?: CancellationToken) {
       if (disposed || cancelled(token)) return null;
       const source = snapshot(document);
       const plan = await service.extractFragment(source, selection, token);
@@ -1088,7 +1189,7 @@ function registerLanguageFeatures(vscode, options) {
           item.module.uri !== plan[0].module.uri)) return null;
       return plan.map(item => ({ ...item, module: { ...item.module, uri: document.uri.toString() } }));
     },
-    async refresh(document, token) {
+    async refresh(document: TextDocument, token?: CancellationToken) {
       if (disposed) return;
       const uri = document.uri.toString();
       const generation = (generations.get(uri) ?? 0) + 1;
@@ -1103,10 +1204,10 @@ function registerLanguageFeatures(vscode, options) {
         return diagnostic;
       }));
     },
-    close(uri) { generations.set(uri.toString(), (generations.get(uri.toString()) ?? 0) + 1); collection.delete(uri); },
+    close(uri: Uri) { generations.set(uri.toString(), (generations.get(uri.toString()) ?? 0) + 1); collection.delete(uri); },
     dispose() { disposed = true; generations.clear(); handles.forEach((handle) => handle.dispose()); },
   };
 }
 
-module.exports = { createLanguageFeatures, registerLanguageFeatures, toHost, toDecoded, positionAt, boundary, documentKey,
+export = { createLanguageFeatures, registerLanguageFeatures, toHost, toDecoded, positionAt, boundary, documentKey,
   };
