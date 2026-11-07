@@ -5,9 +5,17 @@ from dataclasses import replace
 
 from graphql import build_schema
 
-from graphql_desk.document_validation import validate_indexed_document
+from graphql_desk.document_validation import (
+    validate_indexed_document,
+    validate_registered_document,
+)
 from graphql_desk.fragments import FragmentIndex, SchemaContext, index_fragments
-from graphql_desk.source_graph import ModuleSnapshot, ProjectBindings, resolve_project
+from graphql_desk.source_graph import (
+    DocumentIdentity,
+    ModuleSnapshot,
+    ProjectBindings,
+    resolve_project,
+)
 
 
 class DocumentValidationTests(unittest.TestCase):
@@ -59,6 +67,23 @@ class DocumentValidationTests(unittest.TestCase):
         parts = [source[item.range.start : item.range.end] for item in diagnostics]
         self.assertEqual("".join(parts), r"miss\x69ng")
         self.assertNotIn('" "', "".join(parts))
+
+        owners = {
+            DocumentIdentity(item.call.module, item.call.range): item
+            for item in self.index.documents
+        }
+        self.assertEqual(
+            validate_registered_document(
+                self.context, self.document, owners=owners, modules=self.modules
+            ),
+            diagnostics,
+        )
+        owner = DocumentIdentity(self.document.call.module, self.document.call.range)
+        owners[owner] = replace(self.document, context_token="stale")
+        with self.assertRaisesRegex(ValueError, "absent from its owner registry"):
+            validate_registered_document(
+                self.context, self.document, owners=owners, modules=self.modules
+            )
 
     def test_fields_arguments_and_variable_errors_use_shared_policy(self) -> None:
         for text, message in (

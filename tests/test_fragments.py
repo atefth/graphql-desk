@@ -179,6 +179,20 @@ class FragmentTests(unittest.TestCase):
             "from fragments import card as ui_card",
         )
 
+        (imported,) = sources.document_imports
+        for owner in (
+            replace(imported.module, project="other"),
+            replace(imported.module, uri="file:///p/old/main.py"),
+            replace(imported.module, version=2),
+        ):
+            with self.subTest(owner=owner):
+                mismatched = replace(
+                    sources, document_imports=(replace(imported, module=owner),)
+                )
+                self.assertEqual(
+                    unused_colocated_fragment_diagnostics(mismatched, index), ()
+                )
+
         used = module(
             "main",
             "from fragments import card as ui_card\n"
@@ -421,6 +435,31 @@ class FragmentTests(unittest.TestCase):
                     [item.call.binding for item in result.documents], ["good"]
                 )
                 self.assertTrue(result.diagnostics)
+
+    def test_fragment_errors_keep_python_anchor_and_syntax_excerpt(self) -> None:
+        for source, message in (
+            ("fragment F on Missing { id }", "Unknown type 'Missing'."),
+            (
+                "fragment F on User {\n id\n",
+                "GraphQL request:2:4\n1 | fragment F on User {\n2 |  id\n  |    ^",
+            ),
+        ):
+            with self.subTest(source=source):
+                invocation = f"graphql({source!r})"
+                snapshot = module("q", f"# 😀\nq={invocation}", version=4)
+                sources = self.resolve(snapshot)
+                (call,) = sources.calls
+                result = index_fragments(sources, schemas=self.schemas)
+                (diagnostic,) = result.diagnostics
+                self.assertEqual(diagnostic.code, "invalid-fragments")
+                self.assertEqual(
+                    (diagnostic.module, diagnostic.range), (call.module, call.range)
+                )
+                self.assertEqual(
+                    snapshot.source[diagnostic.range.start : diagnostic.range.end],
+                    invocation,
+                )
+                self.assertIn(message, diagnostic.message)
 
     def test_operation_targets_and_selection_are_explicit(self) -> None:
         sources = self.resolve(
