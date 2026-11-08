@@ -727,6 +727,42 @@ class EditorSnapshotTests(unittest.TestCase):
                 workspace=self.root, candidates=(alias,), generation=2
             )
 
+    def test_inputs_retargeted_after_selection_are_rejected_before_read(self) -> None:
+        identity = cast(Callable[[Path], Path], getattr(editor_snapshot, "_identity"))
+        read = getattr(editor_snapshot, "_read")
+
+        for kind, selected_name, foreign_text in (
+            ("source", "src/q.py", "# outside the selected source root\n"),
+            ("schema", "schema.graphql", "type Query { unexpected: String }"),
+        ):
+            with self.subTest(kind=kind):
+                workspace = self.project(kind + "/", _BASE + 'source_roots=["src"]\n')
+                source = self.write(kind + "/src/q.py", _QUERY)
+                selected = workspace / selected_name
+                foreign = self.write("foreign" + selected.suffix, foreign_text)
+                alias = selected.with_suffix(".link")
+                try:
+                    alias.symlink_to(foreign)
+                except OSError as error:
+                    self.skipTest(f"Host does not permit symlink fixtures: {error}")
+
+                def retarget(path: Path) -> Path:
+                    if path == selected and alias.is_symlink():
+                        alias.replace(selected)
+                    return identity(path)
+
+                with (
+                    patch.object(editor_snapshot, "_identity", side_effect=retarget),
+                    patch.object(editor_snapshot, "_read", wraps=read) as observe_read,
+                    self.assertRaisesRegex(ValueError, "changed during snapshot"),
+                ):
+                    acquire_editor_snapshot(
+                        workspace=workspace, candidates=(source,), generation=1
+                    )
+                self.assertNotIn(call(selected), observe_read.call_args_list)
+                self.assertNotIn(call(foreign), observe_read.call_args_list)
+                self.assertTrue(selected.is_symlink())
+
     def test_generation_and_buffer_versions_require_actual_integers(self) -> None:
         self.project()
         source = self.write("q.py", _QUERY)
