@@ -799,6 +799,10 @@ function activate(context) {
       else clearInvalidatedDiagnostics(folderRoot);
     } catch (error) {
       output.appendLine(`Managed stub publication failed: ${String(error)}`);
+      if (!result.isCurrent()) {
+        retryStaleAnalysis(ticket, token, recoveryAttempt, "analysis-snapshot-stale-during-publish");
+        return;
+      }
       traceSkip("managed-stub-publish-failed");
       status.text = "GraphQL Desk: managed typing unavailable";
       status.show();
