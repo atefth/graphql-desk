@@ -5,7 +5,7 @@ const path = require("node:path");
 const { randomUUID, createHash } = require("node:crypto");
 const { TextDecoder } = require("node:util");
 const { parse, parseTree, modify, applyEdits } = require("jsonc-parser");
-const { generationFiles } = require("./analysisGenerations");
+const { generationFiles, MAX_GENERATION_MANIFEST_BYTES } = require("./analysisGenerations");
 const { createManagedStubPath, managedStateKeys, isManagedGeneration, updateManagedState } = require("./managedStubPath");
 
 const MANAGED_PATH = ".graphql-desk/live-typings";
@@ -633,7 +633,7 @@ function readFileSafe(vscode, workspace, file) {
   return readFileSnapshot(workspace, file);
 }
 
-function readFileSnapshot(workspace, file) {
+function readFileSnapshot(workspace, file, maxBytes = MAX_CONFIG_BYTES) {
   let current = workspace;
   const parts = path.relative(workspace, file).split(path.sep).filter(Boolean);
   if (!parts.length || path.isAbsolute(path.relative(workspace, file)) || path.relative(workspace, file).startsWith(`..${path.sep}`)) {
@@ -644,11 +644,11 @@ function readFileSnapshot(workspace, file) {
     current = path.join(current, part);
     const stat = safeIdentity(current, index < parts.length - 1, true);
     if (index === parts.length - 1) {
-      if (stat.size > MAX_CONFIG_BYTES) throw new Error("Pyright config is too large; preserved");
+      if (stat.size > maxBytes) throw new Error("Pyright config is too large; preserved");
       const descriptor = fs.openSync(current, "r");
       try {
         const opened = fs.fstatSync(descriptor, { bigint: true });
-        if (!sameConfigIdentity(stat, opened) || !opened.isFile() || opened.size > MAX_CONFIG_BYTES) throw new Error("Pyright config changed while opening; preserved");
+        if (!sameConfigIdentity(stat, opened) || !opened.isFile() || opened.size > maxBytes) throw new Error("Pyright config changed while opening; preserved");
         const bytes = Buffer.alloc(Number(opened.size));
         const count = fs.readSync(descriptor, bytes, 0, bytes.length, 0);
         if (count !== bytes.length || !sameConfigIdentity(opened, fs.fstatSync(descriptor, { bigint: true })) ||
@@ -1223,6 +1223,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   }
 
   let recoveredRollbackConfig;
+  let checkRecoveredBase;
   if (saved?.version === 3 && saved.phase === "rotate") {
     const pending = genericOwner;
     const previous = saved.currentStubPath;
@@ -1232,8 +1233,10 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       pending.currentPresent === true && saved.pythonStubPath.current === previous &&
       (pending.current === previous || pending.current === rollbackTarget);
     const target = settledRollback ? rollbackTarget : pending?.current;
+    const rollbackToBase = settledRollback && target === MANAGED_PATH;
+    const proofSetting = rollbackToBase ? previous : target;
     if ((!pending?.pending && !settledRollback) || typeof target !== "string" ||
-        !isManagedGeneration(workspace, target, MANAGED_PATH)) {
+        !isManagedGeneration(workspace, proofSetting, MANAGED_PATH)) {
       throw new Error("Interrupted Pylance generation rotation is incomplete; preserved");
     }
     const latest = await inspectLatest();
@@ -1242,6 +1245,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
       pythonStubPath: { ...saved.pythonStubPath, current: target, pending: undefined } };
     let recoveryCurrent = ownerCurrent;
     let repairOwnerMemento;
+    let recoveredBaseOwnerIdentity;
     if (settledRollback) {
       // The original selection can be settled when its rollback reaches disk.
       const diskOwner = JSON.stringify(persisted?.value);
@@ -1254,20 +1258,85 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
           managedSearchAliases(latest)) {
         throw new Error("Interrupted Pylance rollback ownership changed; preserved");
       }
-      const directory = path.resolve(workspace, target);
+      const directory = path.resolve(workspace, proofSetting);
       const proof = generationFiles(vscode, workspace, directory);
+      let checkBaseLayout;
+      if (rollbackToBase) {
+        const generations = path.dirname(directory);
+        const base = path.dirname(generations);
+        const baseKey = normalized(base);
+        const ancestors = [workspace, path.dirname(base), base, generations]
+          .map(folder => [folder, safeIdentity(folder, true, true)]);
+        const layoutError = "Interrupted Pylance rollback managed base changed; preserved";
+        const scan = (folder, limit, admit) => {
+          const entries = fs.opendirSync(folder);
+          try {
+            for (let count = 0; ; count += 1) {
+              const entry = entries.readSync();
+              if (!entry) return;
+              if (count === limit || !admit(entry.name)) throw new Error(layoutError);
+            }
+          } finally { entries.closeSync(); }
+        };
+        const exactEntries = (folder, names) => {
+          const expected = new Set(names);
+          scan(folder, expected.size, name => expected.delete(name));
+          if (expected.size) throw new Error(layoutError);
+        };
+        const registered = () => workspaceState?.get?.(generationKeys.generationStateKey);
+        const siblings = new Map();
+        let remaining = MAX_GENERATION_MANIFEST_BYTES;
+        scan(generations, MAX_OWNER_DIRECTORY_ENTRIES, name => {
+          if (name === proof.manifest.id) return true;
+          const fingerprint = registered()?.[name];
+          if (!/^g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(name) || !validHash(fingerprint)) return false;
+          const sibling = path.join(generations, name);
+          const identity = safeIdentity(sibling, true, true);
+          const manifest = path.join(sibling, "complete.json");
+          const snapshot = readFileSnapshot(workspace, manifest, remaining);
+          if (snapshot.hash !== fingerprint) return false;
+          remaining -= Number(snapshot.identity.size);
+          siblings.set(name, { sibling, identity, manifest, snapshot, fingerprint });
+          return true;
+        });
+        checkBaseLayout = () => {
+          if (ancestors.some(([folder, identity]) => !sameDirectory(identity, safeIdentity(folder, true, true)))) {
+            throw new Error(layoutError);
+          }
+          safeIdentity(ownerFile(workspace), false, true);
+          const entries = [OWNER_FILE, "generations"];
+          const stage = ownerWriteState.pending;
+          // Only the current owner writer may add its verified staging file.
+          if (stage?.active === true && stage.published === false &&
+              stage.file === ownerFile(workspace) && path.dirname(stage.temporary) === base) {
+            entries.push(path.basename(stage.temporary));
+          }
+          exactEntries(base, entries);
+          exactEntries(generations, [proof.manifest.id, ...siblings.keys()]);
+          for (const [name, entry] of siblings) {
+            if (registered()?.[name] !== entry.fingerprint ||
+                !sameDirectory(entry.identity, safeIdentity(entry.sibling, true, true)) ||
+                !sameConfigIdentity(entry.snapshot.identity, safeIdentity(entry.manifest, false, true))) {
+              throw new Error(layoutError);
+            }
+          }
+          if (vscode.workspace.textDocuments?.some(document => {
+            if (!document.isDirty || !["file", "untitled"].includes(document.uri.scheme) ||
+                !path.isAbsolute(document.uri.fsPath ?? "")) return false;
+            const file = normalized(document.uri.fsPath);
+            return file === baseKey || file.startsWith(baseKey + path.sep);
+          })) throw new Error(layoutError);
+        };
+      }
       let expectedOwner = JSON.stringify(workspaceState?.get?.(key));
       const ownerIdentity = safeIdentity(ownerFile(workspace), false, true);
+      if (rollbackToBase) recoveredBaseOwnerIdentity = ownerIdentity;
       let selection = JSON.stringify(pending);
       recoveryCurrent = () => {
-        const current = readFileSafe(vscode, workspace, latest.file);
         if (ownerCurrent() !== true || JSON.stringify(workspaceState?.get?.(generationKeys.stateKey)) !== selection ||
-            inspected.format === "toml" && fs.existsSync(path.join(workspace, "pyrightconfig.json")) ||
             managedSearchAliases(latest) ||
-            current.hash !== latest.hash || !sameConfigIdentity(current.identity, latest.identity) ||
-            !sameDirectory(current.workspaceIdentity, latest.snapshot.workspaceIdentity) ||
             workspaceState?.get?.(generationKeys.generationStateKey)?.[proof.manifest.id] !== proof.manifestFingerprint ||
-            !isManagedGeneration(workspace, target, MANAGED_PATH)) {
+            !isManagedGeneration(workspace, proofSetting, MANAGED_PATH)) {
           throw new Error("Interrupted Pylance rollback proof changed; preserved");
         }
         const verified = proof.verify();
@@ -1277,7 +1346,16 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
             [...proof.directories].some(([file, value]) => !verified.directories.has(file) || !same(verified.directories.get(file), value))) {
           throw new Error("Interrupted Pylance rollback proof changed; preserved");
         }
-        return configurationCurrent();
+        checkBaseLayout?.();
+        configurationCurrent();
+        // Recheck the native selection after inspecting the generation and immediately before the next recovery step.
+        const current = readFileSafe(vscode, workspace, latest.file);
+        if (projectConfigFile(workspace) !== latest.file || current.hash !== latest.hash ||
+            !sameConfigIdentity(current.identity, latest.identity) ||
+            !sameDirectory(current.workspaceIdentity, latest.snapshot.workspaceIdentity)) {
+          throw new Error("Interrupted Pylance rollback proof changed; preserved");
+        }
+        return true;
       };
       const checkOwner = () => {
         if (dirtyFile(vscode, ownerFile(workspace)) ||
@@ -1317,11 +1395,26 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     saved = settledOwner;
     pythonOwner = saved.pythonStubPath;
     if (repairOwnerMemento) await repairOwnerMemento();
-    else await persistOwner(saved, recoveryCurrent);
+    else {
+      const publication = await persistOwner(saved, recoveryCurrent);
+      if (rollbackToBase) recoveredBaseOwnerIdentity = publication.stage.identity;
+    }
+    if (rollbackToBase) {
+      const owner = JSON.stringify(settledOwner);
+      checkRecoveredBase = () => {
+        if (!sameConfigIdentity(recoveredBaseOwnerIdentity, safeIdentity(ownerFile(workspace), false, true)) ||
+            readPersistentOwner(workspace)?.hash !== ownerHash ||
+            JSON.stringify(workspaceState?.get?.(key)) !== owner) {
+          throw new Error("Interrupted Pylance rollback owner changed; preserved");
+        }
+        recoveryCurrent();
+      };
+    }
   }
 
   if (saved?.version === 3 && saved.phase === "active") {
     let latest = await inspectLatest();
+    checkRecoveredBase?.();
     if (recoveredRollbackConfig && (latest.hash !== recoveredRollbackConfig.hash ||
         !sameConfigIdentity(latest.identity, recoveredRollbackConfig.identity) ||
         !sameDirectory(latest.snapshot.workspaceIdentity, recoveredRollbackConfig.snapshot.workspaceIdentity))) {
@@ -1398,14 +1491,16 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
 
   if (!saved || saved.version !== 3 || saved.phase !== "active") throw new Error("GraphQL Desk Pyright stubPath setup is incomplete; preserved");
   const activeConfig = await inspectLatest();
+  checkRecoveredBase?.();
   activeConfigHash = activeConfig.hash;
   const preflight = ensureWorkspaceRoot(workspace, Boolean(saved?.version === 2 || saved?.version === 3));
   let currentSetting = saved.currentStubPath;
   let currentPresent = true;
   // Publish ownership before awaiting the generation root. The controller may
   // check an in-flight snapshot while the root is being initialized.
-  onOwnership(inspected.format === "toml" ? inspected.file : null, currentSetting,
+  const notifyOwnership = () => onOwnership(inspected.format === "toml" ? inspected.file : null, currentSetting,
     saved.originalStubPath, saved.originalStubPathPresent);
+  if (!checkRecoveredBase) notifyOwnership();
   const assertEffectiveOwner = async (requireCustomCoverage = true) => {
     const latest = await inspectLatest();
     if (managedSearchAliases(latest)) throw new Error("Pyright search paths alias the reserved GraphQL Desk path; ownership preserved");
@@ -1512,6 +1607,10 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     isDirty: () => vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === "file" &&
       normalized(document.uri.fsPath) === normalized(inspected.file)),
   });
+  if (checkRecoveredBase) {
+    checkRecoveredBase();
+    notifyOwnership();
+  }
   const packageRootExists = (rootPath, topPackage) => {
     let currentPath = path.parse(rootPath).root;
     const relative = path.relative(currentPath, rootPath);

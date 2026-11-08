@@ -692,4 +692,4 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
   };
 }
 
-module.exports = { createAnalysisGenerations, generationFiles, validOperationManifest };
+module.exports = { createAnalysisGenerations, generationFiles, validOperationManifest, MAX_GENERATION_MANIFEST_BYTES };
