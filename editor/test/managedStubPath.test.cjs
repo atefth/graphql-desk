@@ -631,6 +631,13 @@ test("reuses a workspace-local custom stubPath and refuses external or dirty set
   const reused = await createManagedStubPath(local.vscode, local.folder);
   assert.equal(reused.root, path.join(local.workspace, "typings"));
   assert.equal(local.values["analysis.stubPath"], "typings");
+  assert.equal(reused.customSettingCurrent(), true);
+  local.vscode.workspace.textDocuments.push({ uri: { scheme: "file", fsPath: local.settingsPath }, isDirty: true });
+  assert.equal(reused.customSettingCurrent(), false);
+  local.vscode.workspace.textDocuments.length = 0;
+  local.values["analysis.stubPath"] = "other-stubs";
+  assert.equal(reused.customSettingCurrent(), false);
+  assert.equal(local.updates.length, 0);
   reused.cleanup();
 
   const external = await fixture(t, path.join(os.tmpdir(), "custom-stubs"));
@@ -647,6 +654,7 @@ test("preserves an explicitly blank stubPath and uses Pylance's default typings 
   const f = await fixture(t, "");
   const managed = await createManagedStubPath(f.vscode, f.folder);
   assert.equal(managed.root, path.join(f.workspace, "typings"));
+  assert.equal(managed.customSettingCurrent(), true);
   assert.equal(f.updates.length, 0);
   managed.cleanup();
 });

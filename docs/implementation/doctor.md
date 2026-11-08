@@ -88,6 +88,11 @@ generation or verifying that its existing selection has identical inputs and
 outputs. Doctor rechecks the owned setting, generation directory and manifest
 identities, and complete artifact hashes without writing files. A missing
 witness leaves ownership unavailable, and a quarantine generation cannot attest
-to the current precise bridge. Custom roots with in-place publication currently
-have no generation witness. Pylance version metadata remains separate from
-evidence that the checker consumed the published types.
+to the current precise bridge. For an explicit workspace-local stub path, Doctor
+verifies the complete in-place publication through its live output handles and
+checks that the effective settings and native Pyright route still select it.
+For workspace-settings routes, a possible parent Pyright configuration leaves
+selection unverified. Doctor checks only whether those candidate paths exist.
+Per-file nearest-configuration mode also leaves the root-level proof unverified.
+Pylance version metadata remains separate from evidence that the checker
+consumed the published types.

@@ -91,15 +91,17 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
     return config.get("analysis.stubPath", "") === expected;
   };
   const ownershipError = () => `Pylance stubPath ownership changed; preserved (expected ${JSON.stringify(setting)}, actual ${JSON.stringify(config.inspect?.("analysis.stubPath"))})`;
+  const dirtySettings = () => {
+    const target = path.join(workspace, ".vscode", "settings.json");
+    const workspaceFile = vscode.workspace.workspaceFile?.scheme === "file" ? vscode.workspace.workspaceFile.fsPath : null;
+    return vscode.workspace.textDocuments?.some(document => document.isDirty &&
+      document.uri.scheme === "file" && document.uri.fsPath &&
+      (normalized(document.uri.fsPath) === normalized(target) || (workspaceFile && normalized(document.uri.fsPath) === normalized(workspaceFile))));
+  };
   if (!setting && explicitlyConfigured && options.forceOwned !== true) {
     setting = "typings";
   } else if (!setting && options.forceOwned !== true) {
-    const target = path.join(workspace, ".vscode", "settings.json");
-    const workspaceFile = vscode.workspace.workspaceFile?.scheme === "file" ? vscode.workspace.workspaceFile.fsPath : null;
-    const dirty = vscode.workspace.textDocuments?.some(document => document.isDirty &&
-      document.uri.scheme === "file" && document.uri.fsPath &&
-      (normalized(document.uri.fsPath) === normalized(target) || (workspaceFile && normalized(document.uri.fsPath) === normalized(workspaceFile))));
-    if (dirty) throw new Error("Dirty workspace settings; preserved");
+    if (dirtySettings()) throw new Error("Dirty workspace settings; preserved");
     setting = "";
     ownsSetting = true;
     baseSetting = ".graphql-desk/typings";
@@ -151,6 +153,9 @@ async function createManagedStubPath(vscode, folder, workspaceState, options = {
       get ownsSetting() { return ownsSetting; },
       get selectedSetting() { return setting; },
       routingSettingsCurrent() { return settingsSnapshot() === expectedSettings; },
+      customSettingCurrent() {
+        return !ownsSetting && Boolean(explicitlyConfigured) && settingsSnapshot() === expectedSettings && !dirtySettings();
+      },
       revokeForRouting,
       waitForGenerationSelection() { return selectionQueue; },
       checkSettingOwnership(check = () => true) {

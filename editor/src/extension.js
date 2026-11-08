@@ -11,7 +11,7 @@ const { registerLanguageFeatures } = require("./languageFeatures");
 const { createRenameLanguageClient } = require("./renameLanguageClient");
 const { registerHighlighting } = require("./highlighting");
 const { createManagedStubPath } = require("./managedStubPath");
-const { createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
+const { analysisPackageAbsent, createOwnedAnalysisArtifacts } = require("./ownedAnalysisArtifacts");
 const { createAnalysisGenerations } = require("./analysisGenerations");
 const { collectEditorDoctor } = require("./doctor");
 const { createManagedProjectConfig, inspectProjectConfigRoute, acknowledgePendingConfigWrite } = require("./projectPyrightConfig");
@@ -261,22 +261,53 @@ async function artifactsWithRetry(controller, snapshot, token, onFailure, canRet
   return controller.artifacts(snapshot, token, captureFailure);
 }
 
-async function verifyDoctorPublication(managed, publisher, publication, folderRoot, isCurrent) {
+async function verifyDoctorPublication(managed, publisher, publication, folderRoot, isCurrent, observe = () => {}) {
   const unavailable = { ownership: false, current: false };
   // On-disk manifests alone cannot establish this session's native ownership.
   if (!managed || !publication || typeof publisher?.verification !== "function" ||
       typeof managed.checkSettingOwnership !== "function" || !isCurrent()) return unavailable;
   let result = unavailable;
+  let verifiedCurrent = () => false;
   const owned = await managed.checkSettingOwnership(() => {
     if (!isCurrent()) return false;
+    const setting = managed.selectedSetting;
     const verified = publisher.verification(managed);
-    if (!verified || typeof managed.selectedSetting !== "string" ||
-        path.resolve(verified.directory) !== path.resolve(folderRoot, managed.selectedSetting)) return false;
+    if (!verified || typeof setting !== "string" ||
+        path.resolve(verified.directory) !== path.resolve(folderRoot, setting)) return false;
     result = { ownership: true, current: verified.manifest.inputFingerprint === publication.inputFingerprint &&
       typeof verified.analysisId === "string" && verified.analysisId === publication.analysisId };
-    return isCurrent();
+    verifiedCurrent = () => {
+      try { return isCurrent() && managed.selectedSetting === setting && managed.stillOwnsSetting(); }
+      catch { return false; }
+    };
+    return verifiedCurrent();
   });
-  return owned === true && isCurrent() ? result : unavailable;
+  if (owned !== true || !verifiedCurrent()) return unavailable;
+  observe(verifiedCurrent);
+  return result;
+}
+
+async function verifyInPlaceDoctorPublication(managed, publication, outputs, folderRoot, inspectRoute, isCurrent, observe = () => {}) {
+  const unavailable = { ownership: false, current: false };
+  const proof = publication?.inPlace;
+  const current = () => isCurrent() && publication.inPlace === proof && managed.customSettingCurrent();
+  if (!proof || proof.managed !== managed || !current()) return unavailable;
+  const route = await inspectRoute();
+  if (!route.workspaceSettingsCurrent() || !current()) return unavailable;
+  const prefix = `${folderRoot}\0${managed.root}\0`;
+  for (const [name, files] of proof.groups) {
+    const handle = outputs.get(prefix + name);
+    if (handle ? !handle.verifyExact(files) : files.length > 0 || !analysisPackageAbsent(managed.root, name)) {
+      return unavailable;
+    }
+  }
+  for (const [key, handle] of outputs) {
+    if (key.startsWith(prefix) && !proof.groups.has(key.slice(prefix.length)) && !handle.verifyExact([])) return unavailable;
+  }
+  const verified = () => current() && route.workspaceSettingsCurrent();
+  if (!verified()) return unavailable;
+  observe(verified);
+  return { ownership: true, current: true };
 }
 
 function presentDoctorReport(vscode, report, folder, isCurrent, output) {
@@ -644,6 +675,8 @@ function activate(context) {
         await publisher.publish(packages, `quarantine-${Date.now()}`, isCurrent, managed,
           previous.inputFingerprint, previous.savedSourceFingerprint, nextManifest);
       } else {
+        const published = latestArtifacts.get(folderRoot);
+        if (published) published.inPlace = null;
         for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !packages.has(key.split("\0")[2])) {
           await handle.publish([], isCurrent);
         }
@@ -656,7 +689,7 @@ function activate(context) {
       }
       if (isCurrent()) {
         latestArtifacts.set(folderRoot, { ...previous, selectedSetting: managed.selectedSetting,
-          operationManifest: nextManifest, projects: nextProjects });
+          operationManifest: nextManifest, projects: nextProjects, inPlace: null });
         setInvalidatedDiagnostics(folderRoot, reply?.ok ? quarantinedOwners : operationManifest.flatMap(group => group.operations));
       }
     } catch (error) {
@@ -768,6 +801,8 @@ function activate(context) {
         changedArtifacts = published || changedArtifacts;
       } else {
         if (disposing || disposed) return;
+        const published = latestArtifacts.get(folderRoot);
+        if (published) published.inPlace = null;
         for (const [key, handle] of outputs) if (key.startsWith(`${folderRoot}\0${managed.root}\0`) && !groups.has(key.split("\0")[2])) {
           if (disposing || disposed) return;
           changedArtifacts = (await handle.publish([], isCurrent)) || changedArtifacts;
@@ -783,12 +818,15 @@ function activate(context) {
             changedArtifacts = true;
           } else if (handle) changedArtifacts = (await handle.publish(files, isCurrent)) || changedArtifacts;
         }
+        if (!isCurrent()) { traceSkip("analysis-snapshot-stale-after-publish"); return; }
       }
       if (changedArtifacts && !managed.ownsSetting && !managed.projectConfig && typingChanged) schedulePylanceRestart();
       latestArtifacts.set(folderRoot, { managedRoot: managed.root, selectedSetting: managed.selectedSetting,
         operationManifest, projects: result.projects.map(({ project, generated_package, provenance, files }) =>
           ({ project, generated_package, provenance, files })),
         parserOverlay: result.parser_overlay,
+        ...(!managed.ownsSetting && !managed.projectConfig && result.projects.some(project => project.files.length)
+          ? { inPlace: { managed, groups } } : {}),
         ...(artifactTypingFingerprint === undefined ? {} : { typingFingerprint: artifactTypingFingerprint }),
         inputFingerprint: result.input_fingerprint, savedSourceFingerprint: result.saved_source_fingerprint, analysisId: result.id });
       updateFactoryDiagnostics(folderRoot, result.projects.flatMap(project => project.diagnostics));
@@ -915,25 +953,38 @@ function activate(context) {
       folders.length === 1 ? folders[0] : await vscode.window.showWorkspaceFolderPick();
     const ticket = generation;
     const observation = folder && await controller.doctor({ uri: folder.uri.toString() });
+    let publicationCurrent = () => true;
     const report = await collectEditorDoctor(vscode, {
       folder,
       workerHealth: async () => observation?.report,
       isCurrent: async () => !disposing && !disposed && ticket === generation &&
         observation !== null && observation !== undefined && await observation.isCurrent(),
       verifyPublication: async () => {
+        publicationCurrent = () => true;
         const folderRoot = path.resolve(folder.uri.fsPath);
         await waitForRootReconfigurations(roots);
         const promise = roots.get(folderRoot);
         const managed = promise && await promise;
         const publication = latestArtifacts.get(folderRoot);
+        let settingsRoute;
         const current = () => !disposing && !disposed && ticket === generation &&
           roots.get(folderRoot) === promise && latestArtifacts.get(folderRoot) === publication &&
-          publication?.analysisId === observation?.id;
+          publication?.analysisId === observation?.id && (!settingsRoute || settingsRoute.workspaceSettingsCurrent()) &&
+          vscode.workspace.getConfiguration("python", document?.uri.scheme === "file" ? document.uri : folder.uri)
+            .get("analysis.useNearestConfiguration", false) !== true;
+        const inspectRoute = () => inspectProjectConfigRoute(vscode, folder, (target, text, action, managedPath, ownership) =>
+          controller.editPyrightConfig(target, text, action, managedPath, ownership));
+        if (managed && !managed.ownsSetting && !managed.projectConfig) {
+          return verifyInPlaceDoctorPublication(managed, publication, outputs, folderRoot, inspectRoute, current,
+            verified => { publicationCurrent = verified; });
+        }
+        if (managed && !managed.projectConfig) settingsRoute = await inspectRoute();
         return verifyDoctorPublication(managed, managed && generations.get(`${folderRoot}\0${managed.root}`),
-          publication, folderRoot, current);
+          publication, folderRoot, current, verified => { publicationCurrent = verified; });
       },
     });
-    return presentDoctorReport(vscode, report, folder, () => !disposing && !disposed && ticket === generation, output);
+    return presentDoctorReport(vscode, report, folder,
+      () => !disposing && !disposed && ticket === generation && publicationCurrent(), output);
   });
   const recoverConfig = vscode.commands.registerCommand("graphqlDesk.reviewConfigRecovery", async () => {
     const folders = (vscode.workspace.workspaceFolders ?? []).filter(folder => folder.uri.scheme === "file");
@@ -984,5 +1035,5 @@ function activate(context) {
   refreshVisible(null, true);
 }
 async function deactivate() { await active?.dispose(); active = undefined; }
-module.exports = { activate, deactivate, acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, dispatchConfigurationChange, drainPublications, operationDependencyImpact, presentDoctorReport, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, verifyDoctorPublication, waitForRootReconfigurations };
+module.exports = { activate, deactivate, acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, dispatchConfigurationChange, drainPublications, operationDependencyImpact, presentDoctorReport, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, verifyDoctorPublication, verifyInPlaceDoctorPublication, waitForRootReconfigurations };
 

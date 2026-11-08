@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, dispatchConfigurationChange, operationDependencyImpact, presentDoctorReport, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, verifyDoctorPublication, waitForRootReconfigurations } = require("../src/extension");
+const { acquireManagedRoot, analysisRequestIsCurrent, artifactsWithRetry, dispatchConfigurationChange, operationDependencyImpact, presentDoctorReport, reconfigureWorkspaceRoots, serializeStubPathChange, typingFingerprint, verifyDoctorPublication, verifyInPlaceDoctorPublication, waitForRootReconfigurations } = require("../src/extension");
 const { createManagedStubPath } = require("../src/managedStubPath");
 
 for (const workspaceScheme of [null, "file", "untitled", "becomes-untitled"]) {
@@ -162,7 +162,8 @@ test("doctor's final command handoff discards a report revoked after its awaited
 test("doctor ownership needs the live publisher's exact selected proof and current inputs", async () => {
   const workspace = path.resolve("doctor-project");
   const publication = { inputFingerprint: "current-input", analysisId: "current-analysis" };
-  const managed = { selectedSetting: ".graphql-desk/typings/stable", checkSettingOwnership: async check => check() };
+  const managed = { selectedSetting: ".graphql-desk/typings/stable",
+    checkSettingOwnership: async check => check(), stillOwnsSetting: () => true };
   const publisher = { verification: () => ({ directory: path.join(workspace, managed.selectedSetting),
     manifest: { inputFingerprint: "current-input" }, analysisId: "current-analysis" }) };
   const verify = (owner = managed, source = publisher, current = () => true) =>
@@ -183,7 +184,56 @@ test("doctor ownership needs the live publisher's exact selected proof and curre
   let live = true;
   assert.deepEqual(await verify(managed, { verification: () => { live = false; return publisher.verification(); } }, () => live),
     { ownership: false, current: false });
+  const moved = { ...managed, async checkSettingOwnership(check) {
+    const verified = check();
+    this.selectedSetting = "other-generation";
+    return verified;
+  } };
+  assert.deepEqual(await verify(moved), { ownership: false, current: false });
   await assert.rejects(verify(managed, { verification() { throw new Error("foreign file changed"); } }), /foreign file changed/);
+});
+
+test("Doctor verifies all in-place output only while its publication and custom route remain current", async t => {
+  const folderRoot = fs.mkdtempSync(path.join(os.tmpdir(), "graphql-desk-doctor-custom-"));
+  t.after(() => fs.rmSync(folderRoot, { recursive: true, force: true }));
+  const managed = { root: path.join(folderRoot, "custom-stubs"), customSettingCurrent: () => true };
+  fs.mkdirSync(managed.root);
+  const key = `${folderRoot}\0${managed.root}\0`;
+  const project = [{ relative_path: "generated/default.pyi", text: "selected: str\n" }];
+  const overlay = [{ relative_path: "graphql_desk-stubs/py.typed", text: "partial\n" }];
+  const proof = { managed, groups: new Map([["generated", project], ["graphql_desk-stubs", overlay], ["empty.schema", []]]) };
+  const publication = { inPlace: proof };
+  const output = files => ({ verifyExact: actual => actual === files || !actual.length && !files.length });
+  const outputs = new Map([[key + "generated", output(project)], [key + "graphql_desk-stubs", output(overlay)],
+    [key + "retired", output([])], ["unrelated", output(project)]]);
+  const route = { workspaceSettingsCurrent: () => true };
+  const ready = { ownership: true, current: true };
+  const unavailable = { ownership: false, current: false };
+  let reportCurrent;
+  const verify = (inspect = async () => route) =>
+    verifyInPlaceDoctorPublication(managed, publication, outputs, folderRoot, inspect, () => true,
+      current => { reportCurrent = current; });
+  assert.deepEqual(await verify(), ready);
+  assert.equal(reportCurrent(), true);
+  const stale = path.join(managed.root, "empty", "schema", "default.pyi");
+  fs.mkdirSync(path.dirname(stale), { recursive: true });
+  fs.writeFileSync(stale, "stale");
+  assert.deepEqual(await verify(), unavailable);
+  assert.equal(fs.readFileSync(stale, "utf8"), "stale");
+  fs.unlinkSync(stale);
+  fs.rmdirSync(path.dirname(stale));
+  outputs.delete(key + "graphql_desk-stubs");
+  assert.deepEqual(await verify(), unavailable);
+  outputs.set(key + "graphql_desk-stubs", output(overlay));
+  outputs.set(key + "retired", output(project));
+  assert.deepEqual(await verify(), unavailable);
+  outputs.set(key + "retired", output([]));
+  assert.deepEqual(await verify(async () => ({ workspaceSettingsCurrent: () => false })), unavailable);
+  assert.deepEqual(await verify(async () => {
+    publication.inPlace = null;
+    return route;
+  }), unavailable);
+  assert.equal(reportCurrent(), false, "a previously successful proof cannot authorize a report after supersession");
 });
 
 test("superseded typing tickets cannot recover or publish generated types", () => {
