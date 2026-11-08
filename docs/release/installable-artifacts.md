@@ -1,10 +1,8 @@
 # Installable artifact checks
 
-Issue [#78](https://github.com/atefth/graphql-desk/issues/78) requires evidence from
-the artifacts users install. This first slice checks the Python wheel and source
-distribution. It does not approve a release, implement VSIX packaging, or establish
-the complete platform support matrix. The owner selected MIT on 2026-11-06;
-distribution acceptance and publication remain separate.
+These checks build and inspect the Python wheel, source distribution, and VS Code
+extension archive. They also check fresh installs from the artifacts. Release
+acceptance and publication remain separate. [Issue #78](https://github.com/atefth/graphql-desk/issues/78)
 
 ## Maintained package inputs
 
@@ -130,6 +128,36 @@ proof installations remain offline. No standalone build into `dist` is needed.
 The focused unit tests use synthetic archives and mocked official build/install
 commands; passing those tests alone is not evidence of an offline install.
 
+## VS Code extension archive
+
+The verifier uses Microsoft’s `@vscode/vsce` packer from the separate
+`editor/packaging` lock. It stages regular tracked application inputs, builds
+the TypeScript with the editor’s locked compiler, and verifies the VSIX against
+the staged JavaScript, MIT grant, reviewed notices, and locked Node runtime
+packages. Python, Pylance, and VS Code are installed separately. The packer and
+compiler stay in the build environment. [VS Code packaging documentation](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#packaging-extensions)
+
+Use Node 22, the project’s locked Python environment, and the provisioned VS Code
+1.141.0 and 1.142.0 executables. In PowerShell, set the existing cache and the
+paths to the two downloaded executables, then run the verifier from the repo.
+
+```powershell
+$env:NPM_CONFIG_CACHE = Join-Path (Get-Location) '.graphql-desk-local/cache/npm'
+./.venv/Scripts/python.exe -B -m scripts.check_vsix --provision --code $code141 --code $code142
+./.venv/Scripts/python.exe -B -m scripts.check_vsix --code $code141 --code $code142
+```
+
+The first invocation provisions the locked npm cache and audits both dependency
+graphs. Each proof install uses npm’s offline mode and a local VSIX. The verifier
+creates disposable user-data, extensions, and shared-data directories for each
+VS Code version and checks the installed files and version. On POSIX, use
+`.venv/bin/python` and the matching `bin/code` executables. The task directory is
+removed after verification. The provisioned npm cache stays available for later
+runs.
+
+The CLI checks installability and installed contents. Extension-host activation
+and OS-level network isolation still require separate acceptance runs.
+
 ## Remaining release acceptance
 
 The local Windows replay with CPython 3.13.7 and uv 0.8.19 passed against reviewed candidate
@@ -182,11 +210,9 @@ Existing local `dist` outputs were stale and are not release evidence: one wheel
 declared an older GraphQL-core pin and lacked tomlkit; an old source archive
 included `.venv-alt`. They were preserved rather than reused or overwritten.
 
-VSIX creation still needs official `@vscode/vsce` tooling, an explicit packaged
-file/runtime closure, notice inspection, and a clean-profile install/activation
-of that actual archive. No custom ZIP packer or globally installed extensions
-count. Python, Pylance and VS Code are separately installed tools, not bundled
-dependencies. Project licensing and publication remain owner-controlled.
+VSIX acceptance still needs activation of the actual installed extension against
+the separately installed Python wheel, plus native tool and workspace-trust
+checks. Project licensing and publication remain owner-controlled.
 
 The supported contract targets CPython 3.10–3.14, VS Code 1.141/1.142, Windows 11
 x64, Ubuntu 24.04 x64 and macOS 14 arm64. Current CI's Windows Server 2025 and

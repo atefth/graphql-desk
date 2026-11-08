@@ -215,6 +215,26 @@ jobs:
         working-directory: editor
       - run: xvfb-run -a node test/run-host.cjs 1.142.0 activation
         working-directory: editor
+      - name: Verify fresh installs from the VSIX
+        env:
+          NPM_CONFIG_CACHE: ${{ github.workspace }}/.tmp/vsix-npm-cache
+        run: |
+          mkdir -p "$NPM_CONFIG_CACHE"
+          pinned_cli() {
+            node -e '
+              const { downloadAndUnzipVSCode, resolveCliPathFromVSCodeExecutablePath } =
+                require("./editor/node_modules/@vscode/test-electron");
+              downloadAndUnzipVSCode({
+                version: process.argv[1],
+                cachePath: require("node:path").resolve("editor/.cache/vscode-test"),
+                reporter: { report() {}, error(error) { console.error(error); } },
+              }).then(executable => process.stdout.write(resolveCliPathFromVSCodeExecutablePath(executable)))
+                .catch(error => { console.error(error); process.exitCode = 1; });
+            ' "$1"
+          }
+          code_141=$(pinned_cli 1.141.0)
+          code_142=$(pinned_cli 1.142.0)
+          .venv/bin/python -B -m scripts.check_vsix --provision --code "$code_141" --code "$code_142"
       - run: npm audit
         working-directory: editor
 
