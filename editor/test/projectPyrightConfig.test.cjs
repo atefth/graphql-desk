@@ -2556,6 +2556,80 @@ test("normal release drains a real rollback before journaling and survives inter
   await reopened.release();
 });
 
+for (const scenario of ["needs-mirror", "settled", "durable-active", "foreign-setting", "changed-artifact", "changed-paths", "replaced-artifact"]) test(`cold recovery checks a rollback interrupted after the native config write: ${scenario}`, async t => {
+  const h = await normalReleaseGeneration(t, true);
+  const crash = h.state.snapshot();
+  const owner = h.state.get(stateKey(h.f.root));
+  const selection = h.state.get(h.keys.stateKey);
+  assert.equal(owner.phase, "rotate");
+  assert.equal(selection.pending, undefined);
+  assert.equal(selection.current, owner.currentStubPath);
+  assert.equal(h.f.pythonStubPath, owner.currentStubPath);
+  const target = owner.pythonStubPath.pending;
+  const file = path.join(h.f.root, "pyproject.toml");
+  assert.ok(fs.readFileSync(file, "utf8").includes(`stubPath = "${target}"`));
+
+  h.interrupt();
+  assert.match((await h.publishing).error.message, /interrupted pending Python rollback/);
+  h.resume();
+  h.f.configFile.restart();
+  const recoveredState = stateStore();
+  for (const [key, value] of crash) await recoveredState.update(key, value);
+  const ownerPath = path.join(h.managed.root, "project-config-owner.json");
+  const artifactPath = path.join(h.f.root, target, "example_generated", "default.pyi");
+  let durableIdentity;
+  let artifactIdentity;
+  if (["settled", "durable-active"].includes(scenario)) {
+    await h.f.vscode.workspace.getConfiguration().update("analysis.stubPath", target);
+    await recoveredState.update(h.keys.stateKey, { base: MANAGED_PATH, current: target, currentPresent: true });
+    if (scenario === "durable-active") {
+      fs.writeFileSync(ownerPath, JSON.stringify({ ...owner, phase: "active", currentStubPath: target,
+        pythonStubPath: { ...owner.pythonStubPath, current: target, pending: undefined } }));
+      durableIdentity = fs.lstatSync(ownerPath, { bigint: true });
+    }
+  } else if (scenario === "foreign-setting") {
+    await h.f.vscode.workspace.getConfiguration().update("analysis.stubPath", "later-user-stubs");
+  } else if (scenario === "changed-artifact") {
+    fs.writeFileSync(artifactPath, "USER DATA\n");
+  } else if (scenario === "changed-paths") {
+    const changed = fs.readFileSync(file, "utf8").replace(/,\s*"custom-stubs"/, "");
+    assert.notEqual(changed, fs.readFileSync(file, "utf8"));
+    fs.writeFileSync(file, changed);
+  } else if (scenario === "replaced-artifact") {
+    const config = h.f.vscode.workspace.getConfiguration();
+    const update = config.update;
+    config.update = async (...args) => {
+      await update(...args);
+      if (args[1] === target) {
+        const old = path.join(h.f.root, "old-proof.pyi");
+        fs.renameSync(artifactPath, old);
+        fs.writeFileSync(artifactPath, fs.readFileSync(old), { flag: "wx" });
+        artifactIdentity = fs.lstatSync(artifactPath, { bigint: true });
+      }
+    };
+  }
+  if (["foreign-setting", "changed-artifact", "changed-paths", "replaced-artifact"].includes(scenario)) {
+    const stateBefore = recoveredState.snapshot();
+    const configBefore = fs.readFileSync(file);
+    const pythonBefore = h.f.pythonStubPath;
+    await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, recoveredState, h.f.worker), /changed|preserved/);
+    assert.deepEqual(recoveredState.snapshot(), stateBefore);
+    assert.deepEqual(fs.readFileSync(file), configBefore);
+    assert.equal(h.f.pythonStubPath, scenario === "replaced-artifact" ? target : pythonBefore);
+    if (scenario === "replaced-artifact") assert.equal(fs.lstatSync(artifactPath, { bigint: true }).ino, artifactIdentity.ino);
+    return;
+  }
+  const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, recoveredState, h.f.worker);
+  assert.equal(reopened.selectedSetting, target);
+  assert.equal(h.f.pythonStubPath, target);
+  assert.equal(recoveredState.get(stateKey(h.f.root)).phase, "active");
+  assert.deepEqual(recoveredState.get(h.keys.stateKey), { base: MANAGED_PATH, current: target, currentPresent: true });
+  if (durableIdentity) assert.equal(fs.lstatSync(ownerPath, { bigint: true }).ino, durableIdentity.ino);
+  await reopened.release();
+  assert.equal(fs.readFileSync(file, "utf8"), h.original);
+  assert.equal(h.f.pythonStubPath, "python-custom-stubs");
+});
+
 for (const boundary of ["verify", "finish"]) test(`normal release recovers a settled partial rollback interrupted at ${boundary}`, async t => {
   const h = await normalReleaseGeneration(t, true);
   h.interrupt();

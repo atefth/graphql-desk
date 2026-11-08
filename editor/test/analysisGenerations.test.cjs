@@ -164,6 +164,31 @@ test("rejects a runtime artifact without its stub before selecting a generation"
   assert.equal(f.publisher.current(f.managed).length, 0);
 });
 
+test("rejects an aggregate artifact count over 4096 before creating staging output", async t => {
+  const f = fixture(t);
+  const pairs = packageName => Array.from({ length: 1024 }, (_, index) =>
+    [".py", ".pyi"].map(extension => ({ relative_path: `${packageName}/d${index}${extension}`, text: "" }))).flat();
+  const packages = new Map([["alpha", pairs("alpha")], ["beta", pairs("beta")]]);
+  const generations = path.join(f.root, "generations");
+  let stagingAttempts = 0;
+  f.managed.recordStaging = async () => {
+    stagingAttempts++;
+    throw new Error("Stopped before writing a boundary-sized generation");
+  };
+
+  await assert.rejects(publish(f, packages, "at-limit", () => true, fingerprint(packages), []),
+    /Stopped before writing a boundary-sized generation/);
+  assert.equal(stagingAttempts, 1);
+  packages.get("beta").push({ relative_path: "beta/extra.pyi", text: "" });
+  await assert.rejects(publish(f, packages, "over-limit", () => true, fingerprint(packages), []),
+    /Too many generation artifacts/);
+  assert.equal(stagingAttempts, 1, "only the boundary-sized generation reaches staging");
+  assert.deepEqual(f.managed.stagingEntries(), {});
+  assert.deepEqual(fs.readdirSync(generations), []);
+  assert.equal(f.managed.selectedSetting, ".graphql-desk/typings");
+  assert.equal(fs.readFileSync(path.join(f.root, "user.txt"), "utf8"), "keep");
+});
+
 test("deduplicates only when both captured inputs and generated stubs match", async t => {
   const f = fixture(t);
   const input1 = createHash("sha256").update("source/schema/config 1").digest("hex");
