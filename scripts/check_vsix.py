@@ -9,11 +9,17 @@ import shutil
 import stat
 import subprocess
 import zipfile
+from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
 from typing import Any
 from xml.etree import ElementTree
 
-from scripts.check_distributions import check_repository_path, task_directory
+from scripts.check_distributions import (
+    check_repository_path,
+    checked_distributions,
+    task_directory,
+)
+from scripts.check_installed_editor import activation_environment, check_activation
 from scripts.check_runtime_licenses import check_release_inventory
 
 VSCODE_VERSIONS = ("1.141.0", "1.142.0")
@@ -390,12 +396,17 @@ def main() -> None:
         type=Path,
         action="append",
         required=True,
-        help="Provisioned VS Code Code.exe on Windows or bin/code elsewhere",
+        help="Provisioned VS Code CLI, or desktop executable with --activate",
     )
     parser.add_argument(
         "--provision",
         action="store_true",
         help="Prime and audit the locked npm cache online before the offline proof",
+    )
+    parser.add_argument(
+        "--activate",
+        action="store_true",
+        help="Run trusted and restricted editor hosts with the checked wheel",
     )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -407,7 +418,14 @@ def main() -> None:
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     if node is None or npm is None:
         raise ValueError("Provision Node and npm before checking the VSIX")
-    with task_directory(root) as task:
+    with ExitStack() as tasks:
+        python = (
+            tasks.enter_context(checked_distributions(root)) if args.activate else None
+        )
+        # Unix sockets inherit the activation profile's absolute path.
+        task = tasks.enter_context(
+            task_directory(root, prefix="a-") if args.activate else task_directory(root)
+        )
         editor = task / "editor"
         tools = task / "packaging"
         for name in ("package.json", "package-lock.json"):
@@ -504,8 +522,45 @@ def main() -> None:
         )
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         for index, code in enumerate(args.code):
-            version = _install(code, archive, task / f"install-{index}", offline)
-            print(f"VS Code {version} verified fresh local VSIX install", flush=True)
+            if python is None:
+                version = _install(code, archive, task / f"install-{index}", offline)
+                print(
+                    f"VS Code {version} verified fresh local VSIX install", flush=True
+                )
+                continue
+            desktop = code.resolve(strict=True)
+            cli = desktop
+            if os.name != "nt":
+                electron = root / "editor/node_modules/@vscode/test-electron"
+                check_repository_path(root, electron)
+                cli = Path(
+                    _run(
+                        node,
+                        "-e",
+                        "const [tool, desktop] = process.argv.slice(1);"
+                        "process.stdout.write(require(tool)"
+                        ".resolveCliPathFromVSCodeExecutablePath(desktop));",
+                        str(electron),
+                        str(desktop),
+                        cwd=task,
+                        env=offline,
+                    ).strip()
+                )
+            for trusted in (True, False):
+                mode = "trusted" if trusted else "restricted"
+                case = task / f"{index}{'t' if trusted else 'r'}"
+                case_env = activation_environment(case, offline)
+                version = _install(cli, archive, case, case_env)
+                print(f"VS Code {version} checking {mode} activation", flush=True)
+                check_activation(
+                    root,
+                    desktop,
+                    python,
+                    case,
+                    case_env,
+                    version,
+                    trusted=trusted,
+                )
         if hashlib.sha256(archive.read_bytes()).hexdigest() != digest:
             raise ValueError("VSIX changed during install verification")
         print(f"VSIX SHA-256 {digest}", flush=True)

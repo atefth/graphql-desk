@@ -350,11 +350,13 @@ def check_core_sdist(path: Path, repository: Path) -> None:
 
 
 @contextmanager
-def task_directory(root: Path) -> Generator[Path]:
+def task_directory(
+    root: Path, *, prefix: str = "distribution-check-"
+) -> Generator[Path]:
     parent = root / ".tmp"
     check_repository_path(root, parent)
     parent.mkdir(exist_ok=True)
-    path = Path(tempfile.mkdtemp(prefix="distribution-check-", dir=parent))
+    path = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
     original = path.stat()
     try:
         yield path
@@ -371,8 +373,8 @@ def run(*arguments: str, cwd: Path, environment: dict[str, str]) -> None:
     subprocess.run(arguments, cwd=cwd, env=environment, check=True)
 
 
-def main() -> None:
-    root = Path(__file__).resolve().parents[1]
+@contextmanager
+def checked_distributions(root: Path) -> Generator[Path]:
     cache = os.environ.get("UV_CACHE_DIR")
     if not cache:
         raise ValueError("Set a repository-owned UV_CACHE_DIR before uv sync")
@@ -405,6 +407,8 @@ def main() -> None:
         run(
             "uv",
             "export",
+            "--python",
+            sys.executable,
             "--offline",
             "--locked",
             "--no-dev",
@@ -462,6 +466,7 @@ def main() -> None:
         if len(rebuilt_wheels) != 1:
             raise ValueError("Expected one source-rebuilt wheel")
         wheels += rebuilt_wheels
+        interpreter = "Scripts/python.exe" if os.name == "nt" else "bin/python"
         for index, wheel in enumerate(wheels):
             check_core_wheel(wheel, root)
             target = work / f"install-{index}"
@@ -475,9 +480,7 @@ def main() -> None:
                 cwd=work,
                 environment=environment,
             )
-            python = target / (
-                "Scripts/python.exe" if os.name == "nt" else "bin/python"
-            )
+            python = target / interpreter
             run(
                 "uv",
                 "pip",
@@ -554,6 +557,13 @@ def main() -> None:
                 }
             )
         )
+
+        yield work / "install-0" / interpreter
+
+
+def main() -> None:
+    with checked_distributions(Path(__file__).resolve().parents[1]):
+        pass
 
 
 if __name__ == "__main__":
