@@ -1961,7 +1961,7 @@ if TYPE_CHECKING:
                 )
         self.assertFalse(self.worker.handle({"op": []})["ok"])
 
-    def test_capture_resolves_shared_config_ancestors_once(self) -> None:
+    def test_capture_checks_config_ancestors_only_for_non_sources(self) -> None:
         nested = self.root / "nested"
         nested.mkdir()
         sources = (self.source, nested / "one.py", nested / "two.py")
@@ -1981,14 +1981,21 @@ if TYPE_CHECKING:
             "documents": [self.document(nested_config)],
             "buffers": [self.buffer(nested_config, '[project]\nname="nested"\n')],
         }
-        for capture, expected in ((request, 1), (config_request, len(sources))):
+        for capture, source_reads, config_reads in (
+            (request, 1, 0),
+            (config_request, 2, len(sources)),
+        ):
             with patch.object(
                 editor_worker, "_canonical", wraps=getattr(editor_worker, "_canonical")
             ) as resolve:
                 self.assertTrue(self.worker.handle(capture)["ok"])
-            self.assertEqual(resolve.call_args_list.count(call(self.config)), expected)
+            self.assertEqual(
+                resolve.call_args_list.count(call(self.config)), config_reads
+            )
             for source in sources[:2]:
-                self.assertEqual(resolve.call_args_list.count(call(source)), 2)
+                self.assertEqual(
+                    resolve.call_args_list.count(call(source)), source_reads
+                )
 
         unrelated = nested / "unrequested.py"
         invalid: tuple[dict[str, object], ...] = (
@@ -2023,6 +2030,39 @@ if TYPE_CHECKING:
             )
         self.assertEqual(result, {"ok": False, "error": "editor-request-failed"})
         self.assertEqual(resolve.call_args_list.count(call(self.config)), 2)
+
+    def test_candidate_retarget_during_config_buffer_check_is_rejected(self) -> None:
+        second = self.root / "second.py"
+        second.write_text("# second source\n", encoding="utf8")
+        alias = self.root / "alias.py"
+        pending = self.root / "alias.link"
+        try:
+            alias.symlink_to(self.source)
+            pending.symlink_to(second)
+        except OSError:
+            self.skipTest("File symlink creation unavailable")
+        canonical = cast(Callable[[Path], Path], getattr(editor_worker, "_canonical"))
+
+        def retarget(path: Path) -> Path:
+            observed = canonical(path)
+            if path == alias and pending.is_symlink():
+                pending.replace(alias)
+            return observed
+
+        with patch.object(editor_worker, "_canonical", side_effect=retarget):
+            result = self.worker.handle(
+                {
+                    "op": "prepare",
+                    **self.capture(),
+                    "candidates": [str(alias)],
+                    "documents": [self.document(self.config)],
+                    "buffers": [
+                        self.buffer(self.config, self.config.read_text(encoding="utf8"))
+                    ],
+                }
+            )
+        self.assertEqual(result, {"ok": False, "error": "editor-request-failed"})
+        self.assertEqual(alias.resolve(), second)
 
     def test_canonical_schema_aliases_and_conflicting_metadata(self) -> None:
         alias = self.base / "alias.graphql"

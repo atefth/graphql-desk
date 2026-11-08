@@ -767,22 +767,22 @@ def _capture(item: dict[str, object]) -> _Capture:
     ) != len(documents):
         raise ValueError("Conflicting document identities")
     buffers = tuple(_buffer(value) for value in _array(item["buffers"]))
-    allowed = {_canonical(path) for path in candidates}
+    canonical_candidates = tuple(_canonical(path) for path in candidates)
+    allowed = set(canonical_candidates)
     base = _canonical(workspace)
-    # Recheck ancestor aliases when they can add an open document's capability.
-    share_ancestors = all(doc.canonical in allowed for doc in documents)
-    checked_ancestors: set[Path] = set()
-    for path in candidates:
-        parent = _canonical(path).parent
-        if not parent.is_relative_to(base):
-            raise ValueError("Candidate escapes workspace")
-        while parent not in checked_ancestors:
-            allowed.add(_canonical(parent / "pyproject.toml"))
-            if share_ancestors:
-                checked_ancestors.add(parent)
-            if parent == base:
-                break
-            parent = parent.parent
+    if any(not path.parent.is_relative_to(base) for path in canonical_candidates):
+        raise ValueError("Candidate escapes workspace")
+    # Config ancestors can only authorize text for a non-source open document.
+    if any(doc.canonical not in allowed for doc in documents):
+        for path, canonical in zip(candidates, canonical_candidates, strict=True):
+            if _canonical(path) != canonical:
+                raise ValueError("Candidate changed while checking open buffers")
+            parent = canonical.parent
+            while True:
+                allowed.add(_canonical(parent / "pyproject.toml"))
+                if parent == base:
+                    break
+                parent = parent.parent
     _check_buffers(buffers, documents)
     if any(_canonical(buffer.path) not in allowed for buffer in buffers):
         raise ValueError("Unrequested buffer text")
