@@ -35,10 +35,11 @@ worker; `verifyPublication` verifies actual owned artifacts and effective import
 selection against that session's publication; `isCurrent` revalidates that same
 source, buffer, configuration, schema, credential, and interpreter observation.
 The caller must return true only after its existing native snapshot/currentness
-checks and final live-session guards pass. The composer checks currentness before
-collection, after each awaited provider, and immediately before returning a
-report; trust and workspace membership are checked around each awaited
-currentness check. No result is cached or written to disk.
+checks and live-session guards pass. The composer revalidates the worker capture
+before and after collecting health and verifying publication. After the last
+worker check, it rechecks successful ownership, then checks trust, workspace
+membership and active versions before returning. No result is cached or written
+to disk.
 
 Only the live host supplies VS Code and active GraphQL Desk, Python, and Pylance
 extension versions, through their public metadata. An installed Pyright or mypy
@@ -82,7 +83,11 @@ the report, before displaying or returning successful observations.
 
 The editor accepts generated ownership only from a live publisher verification
 capability plus the effective selected setting and matching analysis/input
-identity. The legacy generation publisher has no such retained native proof, so
-its ownership remains unavailable and its bridge report degraded. The stable
-publisher under #355 supplies that capability once activated and independently
-verified. This command's availability does not close #65 or prove live typing.
+identity. The generation publisher records a session witness after selecting a
+generation or verifying that its existing selection has identical inputs and
+outputs. Doctor rechecks the owned setting, generation directory and manifest
+identities, and complete artifact hashes without writing files. A missing
+witness leaves ownership unavailable, and a quarantine generation cannot attest
+to the current precise bridge. Custom roots with in-place publication currently
+have no generation witness. Pylance version metadata remains separate from
+evidence that the checker consumed the published types.

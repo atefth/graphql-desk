@@ -263,16 +263,17 @@ async function artifactsWithRetry(controller, snapshot, token, onFailure, canRet
 
 async function verifyDoctorPublication(managed, publisher, publication, folderRoot, isCurrent) {
   const unavailable = { ownership: false, current: false };
-  // Legacy manifests alone cannot establish this session's native ownership.
+  // On-disk manifests alone cannot establish this session's native ownership.
   if (!managed || !publication || typeof publisher?.verification !== "function" ||
       typeof managed.checkSettingOwnership !== "function" || !isCurrent()) return unavailable;
   let result = unavailable;
   const owned = await managed.checkSettingOwnership(() => {
     if (!isCurrent()) return false;
-    const verified = publisher.verification();
-    if (typeof managed.selectedSetting !== "string" ||
+    const verified = publisher.verification(managed);
+    if (!verified || typeof managed.selectedSetting !== "string" ||
         path.resolve(verified.directory) !== path.resolve(folderRoot, managed.selectedSetting)) return false;
-    result = { ownership: true, current: verified.manifest.inputFingerprint === publication.inputFingerprint };
+    result = { ownership: true, current: verified.manifest.inputFingerprint === publication.inputFingerprint &&
+      typeof verified.analysisId === "string" && verified.analysisId === publication.analysisId };
     return isCurrent();
   });
   return owned === true && isCurrent() ? result : unavailable;

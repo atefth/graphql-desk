@@ -161,15 +161,19 @@ test("doctor's final command handoff discards a report revoked after its awaited
 
 test("doctor ownership needs the live publisher's exact selected proof and current inputs", async () => {
   const workspace = path.resolve("doctor-project");
-  const publication = { inputFingerprint: "current-input" };
+  const publication = { inputFingerprint: "current-input", analysisId: "current-analysis" };
   const managed = { selectedSetting: ".graphql-desk/typings/stable", checkSettingOwnership: async check => check() };
   const publisher = { verification: () => ({ directory: path.join(workspace, managed.selectedSetting),
-    manifest: { inputFingerprint: "current-input" } }) };
+    manifest: { inputFingerprint: "current-input" }, analysisId: "current-analysis" }) };
   const verify = (owner = managed, source = publisher, current = () => true) =>
     verifyDoctorPublication(owner, source, publication, workspace, current);
   assert.deepEqual(await verify(), { ownership: true, current: true });
   assert.deepEqual(await verify(managed, { verification: () => ({ ...publisher.verification(),
     manifest: { inputFingerprint: "old-input" } }) }), { ownership: true, current: false });
+  assert.deepEqual(await verify(managed, { verification: () => ({ directory: path.join(workspace, managed.selectedSetting),
+    manifest: { inputFingerprint: "current-input" }, analysisId: "quarantine-1" }) }), { ownership: true, current: false });
+  assert.deepEqual(await verify(managed, { verification: () => ({ ...publisher.verification(),
+    analysisId: undefined }) }), { ownership: true, current: false });
   for (const [owner, source, current] of [
     [managed, {}, () => true],
     [{ ...managed, checkSettingOwnership: async () => false }, publisher, () => true],

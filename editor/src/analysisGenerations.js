@@ -195,6 +195,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
   if (!inside(workspace, root) || root === workspace) throw new Error("Analysis generation root must be inside its workspace");
   const generationsRoot = path.join(root, "generations");
   let publicationQueue = Promise.resolve();
+  let selectedProof;
   const initialRoot = fs.lstatSync(root);
   if (initialRoot.isSymbolicLink() || !initialRoot.isDirectory()) throw new Error("Analysis generation root is not safe");
   const workspaceStat = fs.lstatSync(workspace);
@@ -233,6 +234,25 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
           return current.isSymbolicLink() || !current.isDirectory() || !same(original, current);
         }) || !same(workspaceStat, fs.lstatSync(workspace)) || !same(initialRoot, fs.lstatSync(root)) ||
         !same(parentIdentity, fs.lstatSync(generationsRoot))) throw new Error("Analysis generation root changed; preserved");
+  }
+
+  function rememberSelection({ directory, manifestFingerprint, identity, manifestIdentity }, analysisId) {
+    selectedProof = { directory, manifestFingerprint, identity, manifestIdentity, analysisId: analysisId ?? null };
+  }
+
+  function verification(managed) {
+    const proof = selectedProof;
+    if (!proof || !managed.ownsSetting || typeof managed.selectedSetting !== "string" ||
+        path.resolve(workspace, managed.selectedSetting) !== proof.directory ||
+        !managed.ownsGeneration(proof.directory, proof.manifestFingerprint)) return null;
+    verifyRoot();
+    const directory = fs.lstatSync(proof.directory);
+    if (directory.isSymbolicLink() || !directory.isDirectory() || !same(directory, proof.identity)) return null;
+    const checked = generationFiles(vscode, workspace, proof.directory);
+    if (checked.manifestFingerprint !== proof.manifestFingerprint || !same(checked.identity, proof.identity) ||
+        !same(checked.manifestIdentity, proof.manifestIdentity)) return null;
+    return { directory: proof.directory, manifest: { inputFingerprint: checked.manifest.inputFingerprint },
+      analysisId: proof.analysisId };
   }
 
   function hasDirtyDocument(file) {
@@ -517,7 +537,10 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
         existing[0]?.manifest.savedSourceFingerprint === savedSourceFingerprint &&
         existing[0]?.manifest.artifactFingerprint === outputFingerprint &&
         JSON.stringify(existing[0]?.manifest.operationManifest) === JSON.stringify(operationManifest) &&
-        path.resolve(workspace, managed.selectedSetting) === existing[0].directory) return false;
+        path.resolve(workspace, managed.selectedSetting) === existing[0].directory) {
+      if (isCurrent() === true) rememberSelection(existing[0], analysisId);
+      return false;
+    }
     // Leftover directories are never adopted, but their names still reserve their sequence.
     const diskSequences = fs.readdirSync(generationsRoot).map(name => {
       const match = /^g-(\d+)-[0-9a-f-]{36}$/.exec(name);
@@ -609,6 +632,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
       if (isCurrent() !== true) return false;
       const selected = await managed.selectGeneration(directory, isCurrent, verified);
       if (!selected) return false;
+      if (isCurrent() === true) rememberSelection(verified, analysisId);
       const obsolete = currentGenerations(managed).slice(2);
       for (const old of obsolete) {
         try {
@@ -664,6 +688,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     publish: (...args) => serialize(() => publishNow(...args)),
     recover: (...args) => serialize(() => recoverNow(...args)),
     current: managed => currentGenerations(managed),
+    verification,
   };
 }
 

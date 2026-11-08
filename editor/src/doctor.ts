@@ -101,8 +101,17 @@ async function collectEditorDoctor(vscode: DoctorHost, { folder, workerHealth, v
     if (!["configuration", "project-ownership"].every(name => checks.some(item => item.name === name))) {
       checks.push(check("configuration", "unavailable", "The worker did not verify effective project configuration and ownership."));
     }
-    const publication = await verifyPublication(folder);
+    const firstPublication = await verifyPublication(folder);
     if (!await current()) return unavailable("Editor inputs changed during artifact verification; run Doctor again.");
+    const versions = liveVersions(vscode);
+    if (!await current()) return unavailable("Editor state changed before the report completed; run Doctor again.");
+    // Worker freshness checks await external I/O, so verify successful ownership again afterward.
+    const publication = exactKeys(firstPublication, ["ownership", "current"]) &&
+      firstPublication.ownership === true && typeof firstPublication.current === "boolean" ?
+      await verifyPublication(folder) : firstPublication;
+    if (!trusted(vscode) || !present() || JSON.stringify(liveVersions(vscode)) !== JSON.stringify(versions)) {
+      return unavailable("Editor state or extensions changed during diagnosis; run Doctor again.");
+    }
     const verified = exactKeys(publication, ["ownership", "current"]) &&
       typeof publication.ownership === "boolean" && typeof publication.current === "boolean";
     checks.push(check("generated-ownership", verified && publication.ownership ? "ready" : "unavailable",
@@ -112,13 +121,7 @@ async function collectEditorDoctor(vscode: DoctorHost, { folder, workerHealth, v
       verified && publication.ownership && publication.current ?
         "This editor session selected a verified generation matching its current captured inputs." :
         "No verified current publication is selected; refresh GraphQL Desk and run Doctor again."));
-    const versions = liveVersions(vscode);
     checks.push(...versionChecks(versions));
-    // The authority callbacks may await; no cached success crosses the final check.
-    if (!await current()) return unavailable("Editor state changed before the report completed; run Doctor again.");
-    if (JSON.stringify(liveVersions(vscode)) !== JSON.stringify(versions)) {
-      return unavailable("Editor extensions changed during diagnosis; run Doctor again.");
-    }
     return { checks, runtime, versions,
       exitCode: Number(checks.some(item => item.status !== "ready")) };
   } catch {

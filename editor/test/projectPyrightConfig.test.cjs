@@ -617,6 +617,7 @@ test("project owner advances both standalone aliases through setup, rotation and
   assert.equal(await managed.recordGeneration(generation, verification.manifestFingerprint), true);
   assert.equal(await managed.selectGeneration(generation, () => true, verification), true);
   assert.equal(managed.routingSettingsCurrent(), true);
+  assert.equal(await managed.checkSettingOwnership(() => false), false, "the live proof callback can reject an owned setting");
   assert.equal(f.vscode.workspace.getConfiguration().inspect().globalValue, "global-user-stubs");
   await managed.release();
   assert.equal(f.pythonStubPath, undefined);

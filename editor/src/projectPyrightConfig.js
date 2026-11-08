@@ -1526,9 +1526,9 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     get selectedSetting() { return managed.selectedSetting; },
     configurationFile: inspected.file,
     routingSettingsCurrent() { return JSON.stringify(pythonSettings.snapshot()) === expectedPythonSnapshot; },
-    checkSettingOwnership() {
+    checkSettingOwnership(check = () => true) {
       return managed.checkSettingOwnership(() => configStillEffective() &&
-        (pythonSettings.effective() || "") === (pythonOwner.current || ""));
+        (pythonSettings.effective() || "") === (pythonOwner.current || "") && check());
     },
     stillOwnsSetting() {
       return configStillEffective() && managed.stillOwnsSetting() &&
