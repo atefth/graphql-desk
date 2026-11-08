@@ -91,7 +91,14 @@ Windows console, using the system temporary directory or filesystem root outside
 the supplied workspace path. If neither is outside, construction rejects.
 
 `request(message, {signal})` permits one active wire request; concurrent calls
-reject immediately without a queue. Request/reply frames retain the 8 MiB limit.
+reject immediately without a queue. Individual request and reply frames retain
+the 8 MiB limit. A successful oversized analysis can use up to 16 ordered gzip
+pages of up to 4 MiB each when decoded. Both source-map encodings index their
+original module identity through the captured table on the wire. The reader
+checks the table against the request snapshot, restores the original identities,
+and validates the complete reply before returning it. Other reply types retain
+single-frame delivery. Larger indexed replies fail closed. Paging shares the
+same deadline as a single reply.
 Reply decoding rejects invalid UTF-8, duplicate keys, nonfinite numbers, unexpected
 top-level shapes and mismatched analysis IDs. Errors, stderr, process exit,
 timeout or abort terminate the process and return only a generic error. The next
