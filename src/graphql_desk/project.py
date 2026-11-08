@@ -41,14 +41,34 @@ def _canonical(path: Path) -> Path:
 class CapturedProjectConfigs:
     """Reuse parsed configuration facts during one closed capture lookup pass."""
 
-    def __init__(self, texts: Mapping[Path, str | None]) -> None:
+    def __init__(
+        self, texts: Mapping[Path, str | None], *, reuse_lookup_paths: bool = False
+    ) -> None:
         self._texts: dict[Path, str | None] = {}
         self._parsed: dict[tuple[Path, _ConfigScope], ProjectConfig | None] = {}
+        self._lookup_paths: dict[str, Path] | None = {} if reuse_lookup_paths else None
         for path, text in texts.items():
             identity = _canonical(path)
             if identity in self._texts and self._texts[identity] != text:
                 raise ValueError("Conflicting captured configuration aliases")
             self._texts[identity] = text
+
+    def resolve_lookup_path(self, path: Path) -> Path:
+        paths = self._lookup_paths
+        if paths is None:
+            return _canonical(path)
+        # Windows Path keys fold case even on case-sensitive directories.
+        name = os.fspath(path)
+        if name not in paths:
+            paths[name] = _canonical(path)
+        return paths[name]
+
+    def verify_lookup_paths(self) -> None:
+        if self._lookup_paths is not None and any(
+            _canonical(Path(path)) != identity
+            for path, identity in self._lookup_paths.items()
+        ):
+            raise ValueError("Project lookup path changed during source selection")
 
     def load(self, canonical_path: Path, scope: _ConfigScope) -> ProjectConfig | None:
         key = (canonical_path, scope)
@@ -104,22 +124,23 @@ def find_project(
     Captured values are authoritative input facts, not current file-type claims.
     """
     captured = _captured_configs(config_texts)
-    current = _canonical(directory)
-    boundary = _canonical(workspace) if workspace is not None else None
+    resolve = _canonical if captured is None else captured.resolve_lookup_path
+    current = resolve(directory)
+    boundary = resolve(workspace) if workspace is not None else None
     if current.is_file():
         raise ValueError("Project search requires a directory")
     if boundary is not None and not current.is_relative_to(boundary):
         raise ValueError("Project search escapes its workspace")
     while True:
         candidate = current / "pyproject.toml"
-        resolved = _canonical(candidate)
+        resolved = resolve(candidate)
         if boundary is not None and not resolved.is_relative_to(boundary):
             raise ValueError("Project configuration escapes its workspace")
         if captured is not None or resolved.is_file():
             scope = (
                 selected_config.source_scope
                 if selected_config is not None
-                and resolved == _canonical(selected_config.path)
+                and resolved == resolve(selected_config.path)
                 else "project"
             )
             config = _load_config(resolved, scope, captured)

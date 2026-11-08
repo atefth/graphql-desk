@@ -2,11 +2,14 @@
 
 import tempfile
 import unittest
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from typing import cast
 from unittest.mock import call, patch
 
 import graphql_desk.project as project
+import graphql_desk.source_selection as source_selection
 from graphql_desk.config import (
     ProjectConfig,
     load_project_config,
@@ -248,19 +251,52 @@ class SourceSelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             select_project_sources(config, (parent, child))
 
-    def test_project_selection_resolves_each_config_candidate_once(self) -> None:
+    def test_project_lookup_resolutions_are_shared_by_same_directory_sources(
+        self,
+    ) -> None:
         config = self.config()
-        paths = (self.file("one.py"), self.file("two.py"))
+        paths = tuple(self.file(f"q{index}.py") for index in range(8))
         with patch.object(
             project, "_canonical", wraps=getattr(project, "_canonical")
         ) as resolve:
+            select_project_sources(config, paths[:1], config_texts={config.path: _BASE})
+            single = resolve.call_args_list.count(call(config.path))
+            resolve.reset_mock()
             selected = select_project_sources(
                 config, paths, config_texts={config.path: _BASE}
             )
         self.assertEqual(tuple(item.path for item in selected), paths)
-        # One resolution to capture the config, one to validate the owner, and
-        # one during each nearest-project lookup.
-        self.assertEqual(resolve.call_args_list.count(call(config.path)), 4)
+        self.assertGreater(single, 0)
+        self.assertEqual(resolve.call_args_list.count(call(config.path)), single)
+
+    def test_closed_selection_rejects_config_retarget_between_sources(self) -> None:
+        initial = self.file("initial.toml")
+        replacement = self.file("replacement.toml")
+        selected = self.root / "pyproject.toml"
+        pending = self.root / "pyproject.link"
+        self.symlink(selected, initial)
+        self.symlink(pending, replacement)
+        config = self.config()
+        paths = (self.file("one.py"), self.file("two.py"))
+        module_name = cast(
+            Callable[[Path], tuple[str, bool]], getattr(source_selection, "_module")
+        )
+
+        def retarget(relative: Path) -> tuple[str, bool]:
+            if pending.is_symlink():
+                pending.replace(selected)
+            return module_name(relative)
+
+        with (
+            patch.object(source_selection, "_module", side_effect=retarget),
+            self.assertRaisesRegex(ValueError, "Project lookup path changed"),
+        ):
+            select_project_sources(
+                config,
+                paths,
+                config_texts={initial: _BASE, replacement: _BASE},
+            )
+        self.assertEqual(selected.resolve(), replacement)
 
     def test_entrypoints_unknown_excluded_and_ambiguous(self) -> None:
         config = self.config('entrypoints=["pkg/q.py"]\n')

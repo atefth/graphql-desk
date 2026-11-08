@@ -9,6 +9,7 @@ const { spawn: spawnProcess } = require("node:child_process");
 const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const { PassThrough, Writable } = require("node:stream");
+const { gzipSync } = require("node:zlib");
 const { createAnalysisWorker, MAX_FRAME_BYTES } = require("../src/analysisWorker");
 
 // Same caller-selected interpreter convention as the existing Python fixture helper.
@@ -117,6 +118,140 @@ function setup(t, fake, options = {}) {
   t.after(() => worker.dispose());
   return { worker, workspace };
 }
+
+const analysisPageBytes = 4 * 1024 * 1024;
+const analysisPage = (index, count, bytes) =>
+  JSON.stringify(["gzip-analysis-page", index, count, gzipSync(bytes).toString("base64")]) + "\n";
+const analyze = { op: "analyze", id: "job", schema_buffers: [] };
+const jsonLine = value => JSON.stringify(value) + "\n";
+
+function indexedAnalysisFixture() {
+  const { bundle } = require("./featureFixtures.cjs");
+  const complete = { ok: true, id: "job", unavailable_schemas: [], remote_schemas: [],
+    ...bundle("from graphql_desk import gql\nfrom query_text import QUERY\nquery = gql(QUERY)\n", {
+      modules: [{ project: "p", module: "query_text", uri: "file:///workspace/query_text.py", version: 7,
+        source: "from typing import Final\r\nQUERY: Final = '# 😀\\nquery Viewer { user { id } }'\r\n", is_package: false }],
+    }) };
+  const indexed = structuredClone(complete);
+  const [call] = indexed.response.calls;
+  assert.notDeepEqual(call.map.codepoint, call.map.utf16);
+  for (const atoms of Object.values(call.map)) for (const atom of atoms) {
+    assert.deepEqual(atom.host.module, indexed.response.modules[1]);
+    atom.host.module = 1;
+  }
+  return { complete, indexed };
+}
+
+test("analysis pages restore both imported provenance maps and reject interrupted jobs", async t => {
+  const { complete, indexed } = indexedAnalysisFixture();
+  const fake = fakeSpawn();
+  const { worker, workspace } = setup(t, fake);
+  const request = { ...message(workspace), ...analyze };
+  const single = worker.request(request);
+  fake.children[0].stdout.write(analysisPage(0, 1, jsonLine(indexed)));
+  assert.deepEqual(await single, complete);
+
+  const padding = " ".repeat(MAX_FRAME_BYTES);
+  complete.request.modules[0].source += padding;
+  indexed.request.modules[0].source += padding;
+  const body = Buffer.from(jsonLine(indexed));
+  const frames = Array.from({ length: 3 }, (_, index) =>
+    analysisPage(index, 3, body.subarray(index * analysisPageBytes, (index + 1) * analysisPageBytes)));
+  const controller = new AbortController();
+  const interrupted = worker.request(request, { signal: controller.signal });
+  fake.children[0].stdout.write(frames[0]);
+  controller.abort();
+  await assert.rejects(interrupted, generic);
+
+  let completed = false;
+  const retry = worker.request(request).then(value => { completed = true; return value; });
+  fake.children[0].stdout.write(frames[1]);
+  fake.children[1].stdout.write(frames[0] + frames[1].slice(0, 31));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(completed, false);
+  fake.children[1].stdout.write(frames[1].slice(31) + frames[2]);
+  assert.deepEqual(await retry, complete);
+});
+
+test("analysis pages accept a large escaped string without treating string content as JSON structure", async t => {
+  const { complete, indexed } = indexedAnalysisFixture();
+  const marker = "GRAPHQL_DESK_LARGE_ESCAPE_MARKER";
+  const prefix = complete.request.modules[0].source + '# quote: " backslashes: \\\\ and fake {"ok":false}\n# ';
+  complete.request.modules[0].source = prefix + "é".repeat(5_000_000);
+  indexed.request.modules[0].source = prefix + marker;
+  complete.request.modules[1].source += "# ends in \\";
+  indexed.request.modules[1].source = complete.request.modules[1].source;
+  const body = Buffer.from(jsonLine(indexed).replace(marker, "\\u00e9".repeat(5_000_000)));
+  const count = Math.ceil(body.length / analysisPageBytes);
+  const frames = Array.from({ length: count }, (_, index) =>
+    analysisPage(index, count, body.subarray(index * analysisPageBytes, (index + 1) * analysisPageBytes)));
+  const fake = fakeSpawn(child => child.stdout.write(frames.join("")));
+  const { worker, workspace } = setup(t, fake);
+  assert.deepEqual(await worker.request({ ...message(workspace), ...analyze }), complete);
+});
+
+test("analysis pages check the deadline before decompressing, parsing and publishing", async t => {
+  const { indexed } = indexedAnalysisFixture();
+  const frame = analysisPage(0, 1, jsonLine(indexed));
+  for (const cutoff of [2, 3, 4]) {
+    let reads = 0;
+    const clock = t.mock.method(performance, "now", () => ++reads >= cutoff ? 11 : 0);
+    try {
+      const fake = fakeSpawn(child => child.stdout.write(frame));
+      const { worker, workspace } = setup(t, fake, { timeoutMs: 10 });
+      await assert.rejects(worker.request({ ...message(workspace), ...analyze }), generic);
+      assert.equal(reads, cutoff);
+      assert.equal(fake.children[0].killed, true);
+    } finally { clock.mock.restore(); }
+  }
+});
+
+test("analysis pages reject invalid envelopes and provenance before publication", async t => {
+  const { complete, indexed } = indexedAnalysisFixture();
+  const line = jsonLine(indexed);
+  const single = analysisPage(0, 1, line);
+  const space = Buffer.alloc(analysisPageBytes, 32);
+  const first = analysisPage(0, 2, space);
+  const change = mutate => {
+    const copy = structuredClone(indexed);
+    mutate(copy, copy.response.calls[0].map);
+    return analysisPage(0, 1, jsonLine(copy));
+  };
+  const malformed = [
+    [single, { op: "prepare" }],
+    [single + single],
+    [analysisPage(0, 17, line)],
+    [analysisPage(1, 2, line)],
+    [first + first],
+    [first + analysisPage(1, 3, line)],
+    [first + jsonLine(complete)],
+    [analysisPage(0, 2, line)],
+    [analysisPage(0, 1, Buffer.alloc(analysisPageBytes + 1, 32))],
+    [jsonLine(["gzip-analysis-page", 0, 1, JSON.parse(single)[3] + " "])],
+    ...[line.slice(0, -1), line + "\n", Buffer.from([0xff, 10]), '{"ok":true,' + line.slice(1),
+      '{"\\u006fk":true,' + line.slice(1), 'null\n', line.replace('"ok":true', '"ok":1e999')].map(bytes =>
+      [analysisPage(0, 1, bytes)]),
+    [change(value => { value.id = "stale"; })],
+    [change(value => { value.response.modules[1] = value.response.modules[0]; })],
+    [change(value => { value.response.modules[1].version += 1; })],
+    ...["module", "uri"].map(key => [change(value => {
+      const alias = value.response.modules[0][key];
+      value.response.modules[1][key] = alias;
+      value.request.modules[1][key] = alias;
+    })]),
+    [change((_value, map) => { map.codepoint[0].host.module = -1; })],
+    [change((_value, map) => { map.utf16[0].host.module = 2; })],
+    [change((_value, map) => { map.utf16[0].host.module = 0; })],
+    [change((_value, map) => { map.utf16[0].host.range.end = -1; })],
+    [change((_value, map) => { map.utf16.pop(); })],
+  ];
+  for (const [frames, override] of malformed) {
+    const fake = fakeSpawn(child => child.stdout.write(frames));
+    const { worker, workspace } = setup(t, fake);
+    await assert.rejects(worker.request({ ...message(workspace), ...(override ?? analyze) }), generic);
+    assert.equal(fake.children[0].killed, true);
+  }
+});
 
 test("doctor accepts only bounded health for its current analyzed job", async t => {
   const report = { checks: [{ name: "configuration", status: "ready", message: "Captured configuration is ready.", project: null }],

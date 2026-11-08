@@ -1,5 +1,7 @@
 """Real read-only worker protocol, schema capture and stale-job boundaries."""
 
+import base64
+import gzip
 import io
 import json
 import os
@@ -1959,7 +1961,7 @@ if TYPE_CHECKING:
                 )
         self.assertFalse(self.worker.handle({"op": []})["ok"])
 
-    def test_capture_resolves_shared_config_ancestors_once(self) -> None:
+    def test_capture_checks_config_ancestors_only_for_non_sources(self) -> None:
         nested = self.root / "nested"
         nested.mkdir()
         sources = (self.source, nested / "one.py", nested / "two.py")
@@ -1979,14 +1981,21 @@ if TYPE_CHECKING:
             "documents": [self.document(nested_config)],
             "buffers": [self.buffer(nested_config, '[project]\nname="nested"\n')],
         }
-        for capture, expected in ((request, 1), (config_request, len(sources))):
+        for capture, source_reads, config_reads in (
+            (request, 1, 0),
+            (config_request, 2, len(sources)),
+        ):
             with patch.object(
                 editor_worker, "_canonical", wraps=getattr(editor_worker, "_canonical")
             ) as resolve:
                 self.assertTrue(self.worker.handle(capture)["ok"])
-            self.assertEqual(resolve.call_args_list.count(call(self.config)), expected)
+            self.assertEqual(
+                resolve.call_args_list.count(call(self.config)), config_reads
+            )
             for source in sources[:2]:
-                self.assertEqual(resolve.call_args_list.count(call(source)), 2)
+                self.assertEqual(
+                    resolve.call_args_list.count(call(source)), source_reads
+                )
 
         unrelated = nested / "unrequested.py"
         invalid: tuple[dict[str, object], ...] = (
@@ -2021,6 +2030,39 @@ if TYPE_CHECKING:
             )
         self.assertEqual(result, {"ok": False, "error": "editor-request-failed"})
         self.assertEqual(resolve.call_args_list.count(call(self.config)), 2)
+
+    def test_candidate_retarget_during_config_buffer_check_is_rejected(self) -> None:
+        second = self.root / "second.py"
+        second.write_text("# second source\n", encoding="utf8")
+        alias = self.root / "alias.py"
+        pending = self.root / "alias.link"
+        try:
+            alias.symlink_to(self.source)
+            pending.symlink_to(second)
+        except OSError:
+            self.skipTest("File symlink creation unavailable")
+        canonical = cast(Callable[[Path], Path], getattr(editor_worker, "_canonical"))
+
+        def retarget(path: Path) -> Path:
+            observed = canonical(path)
+            if path == alias and pending.is_symlink():
+                pending.replace(alias)
+            return observed
+
+        with patch.object(editor_worker, "_canonical", side_effect=retarget):
+            result = self.worker.handle(
+                {
+                    "op": "prepare",
+                    **self.capture(),
+                    "candidates": [str(alias)],
+                    "documents": [self.document(self.config)],
+                    "buffers": [
+                        self.buffer(self.config, self.config.read_text(encoding="utf8"))
+                    ],
+                }
+            )
+        self.assertEqual(result, {"ok": False, "error": "editor-request-failed"})
+        self.assertEqual(alias.resolve(), second)
 
     def test_canonical_schema_aliases_and_conflicting_metadata(self) -> None:
         alias = self.base / "alias.graphql"
@@ -2192,7 +2234,12 @@ if TYPE_CHECKING:
         data = b"".join((json.dumps(item) + "\n").encode() for item in messages)
         writer = io.BytesIO()
         with (
-            patch("graphql_desk.editor_worker.MAX_LINE_BYTES", 2048),
+            patch.multiple(
+                editor_worker,
+                MAX_LINE_BYTES=2048,
+                ANALYSIS_PAGE_BYTES=1024,
+                MAX_ANALYSIS_PAGES=4,
+            ),
             patch("graphql_desk.editor_worker.uuid4", return_value=identity),
         ):
             serve(io.BytesIO(data), writer)
@@ -2205,6 +2252,109 @@ if TYPE_CHECKING:
             )
         self.assertTrue(all(len(line) + 1 <= 2048 for line in lines))
         self.assertNotIn(b"x" * 100, writer.getvalue())
+
+    def test_only_oversized_successful_analysis_uses_exact_indexed_pages(self) -> None:
+        module = {
+            "project": "p",
+            "module": "q",
+            "uri": "file:///workspace/café.py",
+            "version": 7,
+        }
+        codepoint = {"start": 0, "end": 1}
+        utf16 = {"start": 0, "end": 2}
+        reply = {
+            "ok": True,
+            "response": {
+                "modules": [module],
+                "calls": [
+                    {
+                        "map": {
+                            name: [
+                                {
+                                    "decoded": span,
+                                    "host": {"module": module, "range": span},
+                                    "linear": True,
+                                }
+                            ]
+                            for name, span in (
+                                ("codepoint", codepoint),
+                                ("utf16", utf16),
+                            )
+                        }
+                    }
+                ],
+            },
+            "text": " café 😀\r\n" * 100,
+        }
+        raw = (json.dumps(reply, ensure_ascii=True) + "\n").encode("ascii")
+        indexed = json.loads(raw)
+        for atoms in indexed["response"]["calls"][0]["map"].values():
+            atoms[0]["host"]["module"] = 0
+        compact = (
+            json.dumps(indexed, ensure_ascii=True, separators=(",", ":")) + "\n"
+        ).encode("ascii")
+        page_bytes = 512
+        page_count = (len(compact) + page_bytes - 1) // page_bytes
+        bad_owner = json.loads(raw)
+        bad_owner["response"]["calls"][0]["map"]["utf16"][0]["host"]["module"][
+            "version"
+        ] = 8
+        self.assertGreater(len(raw), 2048)
+        for op, result, frame_limit, page_limit, accepted in (
+            ("analyze", reply, 2048, page_count, True),
+            ("analyze", reply, 2048, page_count - 1, False),
+            ("artifacts", reply, 2048, page_count, False),
+            ("analyze", {**reply, "ok": False}, 2048, page_count, False),
+            ("analyze", bad_owner, 2048, page_count, False),
+            ("analyze", reply, len(raw), page_count, True),
+        ):
+            with self.subTest(
+                op=op, frame_limit=frame_limit, page_limit=page_limit, accepted=accepted
+            ):
+                reader = io.BytesIO((json.dumps({"op": op}) + "\n").encode())
+                writer = io.BytesIO()
+                with (
+                    patch.object(EditorWorker, "handle", return_value=result),
+                    patch.object(EditorWorker, "invalidate") as invalidate,
+                    patch.multiple(
+                        editor_worker,
+                        MAX_LINE_BYTES=frame_limit,
+                        ANALYSIS_PAGE_BYTES=page_bytes,
+                        MAX_ANALYSIS_PAGES=page_limit,
+                    ),
+                ):
+                    serve(reader, writer)
+                if not accepted:
+                    self.assertEqual(
+                        writer.getvalue(),
+                        b'{"ok": false, "error": "editor-request-failed"}\n',
+                    )
+                    invalidate.assert_called_once_with()
+                    continue
+                invalidate.assert_not_called()
+                if len(raw) <= frame_limit:
+                    self.assertEqual(writer.getvalue(), raw)
+                    continue
+                frames = writer.getvalue().splitlines(keepends=True)
+                self.assertEqual(len(frames), page_count)
+                restored = bytearray()
+                for index, frame in enumerate(frames):
+                    self.assertLessEqual(len(frame), frame_limit)
+                    tag, number, count, encoded = json.loads(frame)
+                    self.assertEqual(
+                        (tag, number, count), ("gzip-analysis-page", index, page_count)
+                    )
+                    compressed = base64.b64decode(encoded, validate=True)
+                    self.assertEqual(base64.b64encode(compressed).decode(), encoded)
+                    page = gzip.decompress(compressed)
+                    self.assertEqual(
+                        len(page), min(page_bytes, len(compact) - index * page_bytes)
+                    )
+                    restored.extend(page)
+                self.assertEqual(restored, compact)
+                self.assertEqual(
+                    (json.dumps(reply, ensure_ascii=True) + "\n").encode("ascii"), raw
+                )
 
     def test_private_capture_repr_hides_fallback_credentials(self) -> None:
         capture = self.capture()

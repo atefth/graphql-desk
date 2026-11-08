@@ -1,5 +1,7 @@
 """Trusted-caller editor worker; only explicit config staging writes files."""
 
+import base64
+import gzip
 import hashlib
 import json
 import math
@@ -59,6 +61,8 @@ from .source_graph import (
 from .testing_helpers import render_testing_helper_artifacts
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
+ANALYSIS_PAGE_BYTES = 4 * 1024 * 1024
+MAX_ANALYSIS_PAGES = 16
 MAX_PYRIGHT_CONFIG_BYTES = 1024 * 1024
 LIVE_STUB_ROOT = ".graphql-desk/live-typings"
 LIVE_GENERATION_STUB_PATH = re.compile(
@@ -763,22 +767,22 @@ def _capture(item: dict[str, object]) -> _Capture:
     ) != len(documents):
         raise ValueError("Conflicting document identities")
     buffers = tuple(_buffer(value) for value in _array(item["buffers"]))
-    allowed = {_canonical(path) for path in candidates}
+    canonical_candidates = tuple(_canonical(path) for path in candidates)
+    allowed = set(canonical_candidates)
     base = _canonical(workspace)
-    # Recheck ancestor aliases when they can add an open document's capability.
-    share_ancestors = all(doc.canonical in allowed for doc in documents)
-    checked_ancestors: set[Path] = set()
-    for path in candidates:
-        parent = _canonical(path).parent
-        if not parent.is_relative_to(base):
-            raise ValueError("Candidate escapes workspace")
-        while parent not in checked_ancestors:
-            allowed.add(_canonical(parent / "pyproject.toml"))
-            if share_ancestors:
-                checked_ancestors.add(parent)
-            if parent == base:
-                break
-            parent = parent.parent
+    if any(not path.parent.is_relative_to(base) for path in canonical_candidates):
+        raise ValueError("Candidate escapes workspace")
+    # Config ancestors can only authorize text for a non-source open document.
+    if any(doc.canonical not in allowed for doc in documents):
+        for path, canonical in zip(candidates, canonical_candidates, strict=True):
+            if _canonical(path) != canonical:
+                raise ValueError("Candidate changed while checking open buffers")
+            parent = canonical.parent
+            while True:
+                allowed.add(_canonical(parent / "pyproject.toml"))
+                if parent == base:
+                    break
+                parent = parent.parent
     _check_buffers(buffers, documents)
     if any(_canonical(buffer.path) not in allowed for buffer in buffers):
         raise ValueError("Unrequested buffer text")
@@ -1734,12 +1738,108 @@ def _float(value: str) -> float:
     return result
 
 
+def _encode_analysis_pages(result: dict[str, object]) -> tuple[bytes, ...]:
+    def identity(value: object) -> tuple[str, str, str, int]:
+        module = _object(value, {"project", "module", "uri", "version"})
+        return (
+            _string(module["project"]),
+            _string(module["module"]),
+            _string(module["uri"]),
+            _version(module["version"]),
+        )
+
+    response = result.get("response")
+    if not isinstance(response, dict):
+        return ()
+    response = cast(dict[str, object], response)
+    try:
+        modules = _array(response.get("modules"))
+        calls = _array(response.get("calls"))
+        indexes = {identity(module): index for index, module in enumerate(modules)}
+        if len(indexes) != len(modules):
+            return ()
+
+        def index_call(value: object) -> dict[str, object]:
+            if not isinstance(value, dict):
+                raise ValueError("Invalid analysis call")
+            call = cast(dict[str, object], value)
+            maps = _object(call.get("map"), {"codepoint", "utf16"})
+            indexed: dict[str, list[dict[str, object]]] = {}
+            for encoding, atoms in maps.items():
+                indexed[encoding] = []
+                for item in _array(atoms):
+                    atom = _object(item, {"decoded", "host", "linear"})
+                    host = _object(atom["host"], {"module", "range"})
+                    owner = indexes.get(identity(host["module"]))
+                    if owner is None:
+                        raise ValueError("Unknown analysis map owner")
+                    indexed[encoding].append(
+                        {**atom, "host": {**host, "module": owner}}
+                    )
+            return {**call, "map": indexed}
+
+        compact = bytearray()
+        limit = ANALYSIS_PAGE_BYTES * MAX_ANALYSIS_PAGES
+        encoder = json.JSONEncoder(ensure_ascii=True, separators=(",", ":"))
+
+        def add(data: bytes) -> None:
+            if len(compact) + len(data) >= limit:
+                raise ValueError("Oversized analysis reply")
+            compact.extend(data)
+
+        def encode_fields(fields: dict[str, object], *, nested: bool = False) -> None:
+            add(b"{")
+            for index, (key, value) in enumerate(fields.items()):
+                if index:
+                    add(b",")
+                add(encoder.encode(key).encode("ascii") + b":")
+                if not nested and key == "response":
+                    encode_fields(response, nested=True)
+                elif nested and key == "calls":
+                    add(b"[")
+                    for call_index, call in enumerate(calls):
+                        if call_index:
+                            add(b",")
+                        add(encoder.encode(index_call(call)).encode("ascii"))
+                    add(b"]")
+                else:
+                    add(encoder.encode(value).encode("ascii"))
+            add(b"}")
+
+        encode_fields(result)
+    except (ValueError, RecursionError):
+        return ()
+
+    compact.append(10)
+    size = ANALYSIS_PAGE_BYTES
+    count = (len(compact) + size - 1) // size
+    content = memoryview(compact)
+    frames: list[bytes] = []
+    for index in range(count):
+        payload = base64.b64encode(
+            gzip.compress(
+                content[index * size : (index + 1) * size], compresslevel=1, mtime=0
+            )
+        )
+        frame = (
+            f'["gzip-analysis-page",{index},{count},"'.encode("ascii")
+            + payload
+            + b'"]\n'
+        )
+        if len(frame) > MAX_LINE_BYTES:
+            return ()
+        frames.append(frame)
+    return tuple(frames)
+
+
 def serve(
     reader: BinaryIO, writer: BinaryIO, *, config_workspace: Path | None = None
 ) -> None:
     """Read bounded UTF-8 lines; synchronous cancellation requires caller shutdown."""
     worker = EditorWorker(config_workspace=config_workspace)
     while line := reader.readline(MAX_LINE_BYTES + 1):
+        value: object = None
+        result: dict[str, object]
         try:
             if len(line) > MAX_LINE_BYTES:
                 while not line.endswith(b"\n"):
@@ -1760,10 +1860,23 @@ def serve(
             worker.invalidate()
             result = {"ok": False, "error": "editor-request-failed"}
         encoded = (json.dumps(result, ensure_ascii=True) + "\n").encode("utf-8")
-        if len(encoded) > MAX_LINE_BYTES:
+        frames: tuple[bytes, ...]
+        if len(encoded) <= MAX_LINE_BYTES:
+            frames = (encoded,)
+        else:
+            del encoded
+            frames = (
+                _encode_analysis_pages(result)
+                if isinstance(value, dict)
+                and cast(dict[str, object], value).get("op") == "analyze"
+                and result.get("ok") is True
+                else ()
+            )
+        if not frames:
             worker.invalidate()
-            encoded = b'{"ok": false, "error": "editor-request-failed"}\n'
-        writer.write(encoded)
+            frames = (b'{"ok": false, "error": "editor-request-failed"}\n',)
+        for frame in frames:
+            writer.write(frame)
         writer.flush()
 
 

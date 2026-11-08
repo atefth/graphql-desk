@@ -5,10 +5,13 @@ const { createHash } = require("node:crypto");
 const os = require("node:os");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
+const { gunzipSync } = require("node:zlib");
 const { validOperationManifest } = require("./analysisGenerations");
 const { validWorkerHealth } = require("./doctor");
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+const ANALYSIS_PAGE_BYTES = 4 * 1024 * 1024;
+const MAX_ANALYSIS_PAGES = 16;
 const LIVE_STUB_ROOT = ".graphql-desk/live-typings";
 const generationStubPath = value => typeof value === "string" &&
   /^\.graphql-desk\/live-typings\/generations\/g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
@@ -19,6 +22,10 @@ const configFailurePhases = new Set(["create-empty", "read-empty-security", "pre
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const keys = (value, expected) => object(value) && Object.keys(value).sort().join(",") === [...expected].sort().join(",");
 const string = value => typeof value === "string" && value.length > 0;
+const span = value => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 &&
+  Number.isSafeInteger(value.end) && value.end >= value.start;
+const moduleIdentity = value => keys(value, ["project", "module", "uri", "version"]) &&
+  [value.project, value.module, value.uri].every(string) && Number.isSafeInteger(value.version) && value.version >= 0;
 
 function parseFrame(buffer) {
   const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer);
@@ -28,23 +35,95 @@ function parseFrame(buffer) {
   });
   // JSON.parse otherwise silently replaces duplicate object keys.
   const stack = [];
-  for (const match of text.matchAll(/"(?:[^"\\]|\\.)*"|[{}\[\]]/g)) {
+  const structural = /["{}\[\]]/g;
+  for (let match = structural.exec(text); match; match = structural.exec(text)) {
     const token = match[0];
     if (token === "{") stack.push(new Set());
     else if (token === "[") stack.push(null);
     else if (token === "}" || token === "]") stack.pop();
     else {
-      let end = match.index + token.length;
-      while (/\s/.test(text[end] ?? "") && end < text.length) end += 1;
-      if (text[end] === ":") {
+      // Scan whole strings without regex recursion on long escaped content.
+      let quote = text.indexOf('"', structural.lastIndex);
+      while (quote !== -1) {
+        let backslashes = 0;
+        for (let index = quote - 1; text.charCodeAt(index) === 92; index -= 1) backslashes += 1;
+        if (backslashes % 2 === 0) break;
+        quote = text.indexOf('"', quote + 1);
+      }
+      if (quote === -1) throw failure();
+      structural.lastIndex = quote + 1;
+      let separator = structural.lastIndex;
+      while (separator < text.length && /\s/.test(text[separator])) separator += 1;
+      if (text[separator] === ":") {
         const seen = stack.at(-1);
-        const key = JSON.parse(token);
+        const key = JSON.parse(text.slice(match.index, quote + 1));
         if (!seen || seen.has(key)) throw failure();
         seen.add(key);
       }
     }
   }
   return result;
+}
+
+function parseAnalysisReply(decoded) {
+  if (decoded.indexOf(10) !== decoded.length - 1) throw failure();
+  const reply = parseFrame(decoded);
+  const { modules, calls } = reply?.response ?? {};
+  const captured = reply?.request?.modules;
+  if (!Array.isArray(modules) || !Array.isArray(calls) || !Array.isArray(captured) ||
+      modules.length !== captured.length || !captured.every(item =>
+        keys(item, ["project", "module", "uri", "version", "source", "is_package"]) &&
+        typeof item.source === "string" && typeof item.is_package === "boolean")) throw failure();
+  const identity = value => JSON.stringify([value.project, value.module, value.uri, value.version]);
+  const expected = new Set(captured.map(identity));
+  const names = new Set();
+  const uris = new Set();
+  for (const module of modules) {
+    if (!moduleIdentity(module) || !expected.delete(identity(module))) throw failure();
+    const name = JSON.stringify([module.project, module.module]);
+    if (names.has(name) || uris.has(module.uri)) throw failure();
+    names.add(name);
+    uris.add(module.uri);
+  }
+  const validAtom = atom => keys(atom, ["decoded", "host", "linear"]) && span(atom.decoded) &&
+    keys(atom.host, ["module", "range"]) && span(atom.host.range) && typeof atom.linear === "boolean" &&
+    Number.isSafeInteger(atom.host.module) && atom.host.module >= 0 && atom.host.module < modules.length;
+  for (const call of calls) {
+    if (!keys(call?.map, ["codepoint", "utf16"])) throw failure();
+    const { codepoint, utf16 } = call.map;
+    if (!Array.isArray(codepoint) || !Array.isArray(utf16) || codepoint.length !== utf16.length) throw failure();
+    for (const [index, atom] of codepoint.entries()) {
+      const converted = utf16[index];
+      if (!validAtom(atom) || !validAtom(converted) || atom.host.module !== converted.host.module ||
+          atom.linear !== converted.linear) throw failure();
+      atom.host.module = converted.host.module = modules[atom.host.module];
+    }
+  }
+  return reply;
+}
+
+function checkAnalysisDeadline(active) {
+  if (performance.now() >= active.deadline) throw failure();
+}
+
+function parseAnalysisPage(frame, active) {
+  const [tag, index, count, encoded] = frame;
+  if (active.request.op !== "analyze" || tag !== "gzip-analysis-page" || frame.length !== 4 ||
+      !Number.isSafeInteger(count) || count < 1 || count > MAX_ANALYSIS_PAGES ||
+      typeof encoded !== "string") throw failure();
+  const pages = active.replyPages ??= { count, chunks: [] };
+  if (count !== pages.count || index !== pages.chunks.length || index >= count) throw failure();
+  const compressed = Buffer.from(encoded, "base64");
+  if (compressed.toString("base64") !== encoded) throw failure();
+  checkAnalysisDeadline(active);
+  const decoded = gunzipSync(compressed, { maxOutputLength: ANALYSIS_PAGE_BYTES });
+  if (!decoded.length || index + 1 < count && decoded.length !== ANALYSIS_PAGE_BYTES) throw failure();
+  pages.chunks.push(decoded);
+  if (pages.chunks.length < count) return null;
+  const reply = Buffer.concat(pages.chunks);
+  pages.chunks.length = 0;
+  checkAnalysisDeadline(active);
+  return parseAnalysisReply(reply);
 }
 
 function validReply(reply, request) {
@@ -122,16 +201,12 @@ function validReply(reply, request) {
     : reply.current === true && keys(reply, ["ok", "id", "current", "report"]) && validWorkerHealth(reply.report));
   if (request.op === "current") return keys(reply, ["ok", "current"]) && typeof reply.current === "boolean";
   if (request.op === "analyze") {
-    const span = value => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 &&
-      Number.isSafeInteger(value.end) && value.end >= value.start;
-    const module = value => keys(value, ["project", "module", "uri", "version"]) &&
-      [value.project, value.module, value.uri].every(string) && Number.isSafeInteger(value.version) && value.version >= 0;
     const sourceRange = value => keys(value, ["codepoint", "utf16"]) && span(value.codepoint) && span(value.utf16);
     const persisted = value => keys(value, ["module", "range", "id_range", "id", "expected_id", "id_is_literal"]) &&
-      module(value.module) && sourceRange(value.range) && sourceRange(value.id_range) &&
+      moduleIdentity(value.module) && sourceRange(value.range) && sourceRange(value.id_range) &&
       string(value.id) && string(value.expected_id) && typeof value.id_is_literal === "boolean";
     const persistedInsertion = value => keys(value, ["module", "range", "insertion", "expected_id", "positional"]) &&
-      module(value.module) && sourceRange(value.range) && sourceRange(value.insertion) &&
+      moduleIdentity(value.module) && sourceRange(value.range) && sourceRange(value.insertion) &&
       typeof value.positional === "boolean" &&
       value.insertion.codepoint.start === value.insertion.codepoint.end &&
       value.insertion.utf16.start === value.insertion.utf16.end &&
@@ -149,8 +224,8 @@ function validReply(reply, request) {
     const sameModule = (left, right) => left.project === right.project && left.module === right.module &&
       left.uri === right.uri && left.version === right.version;
     const unusedSelection = value => keys(value, ["diagnostic", "document", "range"]) &&
-      keys(value.document, ["module", "call_range"]) && module(value.document.module) && sourceRange(value.document.call_range) &&
-      keys(value.diagnostic, ["module", "code", "message", "range"]) && module(value.diagnostic.module) &&
+      keys(value.document, ["module", "call_range"]) && moduleIdentity(value.document.module) && sourceRange(value.document.call_range) &&
+      keys(value.diagnostic, ["module", "code", "message", "range"]) && moduleIdentity(value.diagnostic.module) &&
       value.diagnostic.code === "52005" && string(value.diagnostic.message) && sourceRange(value.diagnostic.range) &&
       sameModule(value.diagnostic.module, value.document.module) && span(value.range) && value.range.end > value.range.start &&
       reply.response.diagnostics.some(item => JSON.stringify(item) === JSON.stringify(value.diagnostic)) &&
@@ -168,9 +243,9 @@ function validReply(reply, request) {
         reply.response.schemas, reply.response.calls, reply.response.persisted,
         reply.response.persisted_id_insertions, reply.response.unused_selections, reply.response.diagnostics,
         reply.unavailable_schemas].every(Array.isArray) && reply.response.persisted.every(item =>
-          persisted(item) && reply.response.modules.some(source => module(source) && sameModule(source, item.module))) &&
-      reply.response.persisted_id_insertions.every(item => persistedInsertion(item) &&
-        reply.response.modules.some(source => module(source) && sameModule(source, item.module))) &&
+          persisted(item) && reply.response.modules.some(source => moduleIdentity(source) && sameModule(source, item.module))) &&
+        reply.response.persisted_id_insertions.every(item => persistedInsertion(item) &&
+        reply.response.modules.some(source => moduleIdentity(source) && sameModule(source, item.module))) &&
       reply.response.unused_selections.every(unusedSelection);
   }
   if (request.op === "artifacts") {
@@ -345,7 +420,13 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
           if (newline === -1) break;
           const active = pending;
           if (!active || !trusted()) throw failure();
-          const reply = parseFrame(Buffer.concat(parts, bytes));
+          let reply = parseFrame(Buffer.concat(parts, bytes));
+          parts.length = 0;
+          bytes = 0;
+          if (Array.isArray(reply)) {
+            reply = parseAnalysisPage(reply, active);
+            if (reply === null) continue;
+          } else if (active.replyPages) throw failure();
           if (active.request.op === "config_file" && active.request.action === "stage" &&
               keys(reply, ["ok", "error", "config_phase", "native_code"]) && reply.ok === false &&
               reply.error === "editor-request-failed" && configFailurePhases.has(reply.config_phase) &&
@@ -357,8 +438,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
             return;
           }
           if (!validReply(reply, active.request)) throw failure();
-          parts.length = 0;
-          bytes = 0;
+          if (active.replyPages) checkAnalysisDeadline(active);
           pending = null;
           active.cleanup();
           active.resolve(reply);
@@ -449,9 +529,10 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
       try {
         const result = await new Promise((resolve, reject) => {
           const abort = () => stop();
+          const deadline = performance.now() + timeoutMs;
           const timer = setTimeout(abort, timeoutMs);
           const cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); };
-          pending = { resolve, reject, cleanup, request: message };
+          pending = { resolve, reject, cleanup, request: message, deadline };
           signal?.addEventListener("abort", abort, { once: true });
           if (signal?.aborted) { stop(); return; }
           process.stdin.write(encoded, error => { if (error && child === process) stop(); });

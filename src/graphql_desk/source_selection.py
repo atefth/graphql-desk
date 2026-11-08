@@ -130,9 +130,18 @@ def select_project_sources(
     config/schema versions still require lifecycle checks. A supplied closed
     config_texts map also governs every nearest-owner lookup.
     """
-    # Share parsed facts only inside this capture; resolve owners for every source.
+    # Recheck reused path identities before returning the closed selection.
     captured = (
-        CapturedProjectConfigs(config_texts) if config_texts is not None else None
+        CapturedProjectConfigs(
+            config_texts, reuse_lookup_paths=config.source_scope == "project"
+        )
+        if config_texts is not None
+        else None
+    )
+    owner_identity = (
+        captured.resolve_lookup_path
+        if captured is not None and config.source_scope == "project"
+        else _identity
     )
     validate_project_ownership((config,))
     root = _resolved(config.root)
@@ -215,7 +224,9 @@ def select_project_sources(
             selected_config=config if config.source_scope == "explicit_cli" else None,
             config_texts=captured,
         )
-        if owner is not None and _identity(owner.path) != _identity(config.path):
+        if owner is not None and owner_identity(owner.path) != owner_identity(
+            config.path
+        ):
             continue
         base = eligible[0]
         name, is_package = _module(path.relative_to(base))
@@ -234,6 +245,8 @@ def select_project_sources(
         for entry in entry_matches:
             if any(path.relative_to(b).as_posix() == entry for b in eligible):
                 entry_matches[entry].add(identity)
+    if captured is not None:
+        captured.verify_lookup_paths()
     if validate_entrypoints and any(
         len(paths) != 1 for paths in entry_matches.values()
     ):
