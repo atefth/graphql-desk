@@ -302,7 +302,7 @@ function validReply(reply: unknown, request: WorkerRequest) {
     const span = (value: unknown): value is Span => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 && Number.isSafeInteger(value.end) && value.end >= value.start;
     const module = (value: unknown): value is ModuleIdentity => keys(value, ["project", "module", "uri", "version"]) && [value.project, value.module, value.uri].every(string) && Number.isSafeInteger(value.version) && value.version >= 0;
     const provenanceIdentity = (value: unknown): value is { module: ModuleIdentity } => keys(value, ["module", "codepoint", "utf16"]) && module(value.module) && span(value.codepoint) && span(value.utf16);
-    const schemaDependency = (item: unknown): item is { coordinate: string; fingerprint: string } => keys(item, ["coordinate", "fingerprint"]) && string(item.coordinate) && item.coordinate.length <= 2048 && /^[a-f0-9]{64}$/.test(item.fingerprint as string);
+    const schemaDependency = (item: unknown): item is { coordinate: string } => keys(item, ["coordinate", "fingerprint"]) && string(item.coordinate) && item.coordinate.length <= 2048 && /^[a-f0-9]{64}$/.test(item.fingerprint as string);
     const configDependency = (item: unknown): item is { kind: string; name: string; value: unknown } => keys(item, ["kind", "name", "value"]) &&
       string(item.name) && item.name.length <= 512 && ((["scalar-input", "scalar-output", "enum-mapping"].includes(item.kind as string) &&
         (item.value === null || typeof item.value === "string" && item.value.length <= 4096)) ||
