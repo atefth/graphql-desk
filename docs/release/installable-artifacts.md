@@ -215,8 +215,17 @@ with both pinned VS Code versions. The check starts fresh trusted and
 restricted profiles using the local VSIX and the separately checked Python
 wheel. Trusted mode requires schema diagnostics and completion from the
 installed worker. Restricted mode requires lexical highlighting, zero GraphQL
-workers, and an unchanged fixture. Full native Pylance and OS-enforced egress
-acceptance remain separate release checks.
+workers, and an unchanged fixture.
+
+The Ubuntu job prepares the locked uv and npm caches and downloads the pinned
+editors online. Wheel and VSIX builds, fresh installs, and packaged activation
+then run once as the ordinary runner user in a Linux network namespace with
+only loopback, no capabilities, and privilege escalation disabled. A direct
+TCP connection to the public npm registry must succeed outside the namespace
+and be unreachable at the same address inside it before verification starts.
+The job fails if it cannot establish that boundary. The macOS and Windows
+checks use offline tooling options and still need OS-enforced egress evidence.
+Full native Pylance acceptance remains separate.
 
 The release contract targets CPython 3.10–3.14, VS Code 1.141/1.142, Windows 11
 x64, Ubuntu 24.04 x64 and macOS 15 Arm64. Windows 11 editor checks require a
