@@ -18,6 +18,7 @@ editor/src/analysisWorker.js
 editor/src/doctor.js
 editor/src/highlighting.js
 editor/src/languageFeatures.js
+editor/src/managedStubPath.js
 editor/src/minimatchCompatibility.js
 editor/src/ownedAnalysisArtifacts.js
 editor/src/ownedAnalysisStub.js
