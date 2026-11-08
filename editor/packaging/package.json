@@ -1,0 +1,13 @@
+{
+  "name": "graphql-desk-vsix-tool",
+  "version": "0.0.0",
+  "private": true,
+  "devDependencies": {
+    "@vscode/vsce": "4.1.0"
+  },
+  "overrides": {
+    "@vscode/vsce": {
+      "minimatch": "11.0.5"
+    }
+  }
+}
