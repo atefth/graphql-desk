@@ -2,7 +2,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
-const { realpathSync } = require("node:fs");
+const { realpathSync, writeFileSync } = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { createHash } = require("node:crypto");
@@ -2554,6 +2554,58 @@ test("credentials changing during explicit network refresh cannot publish the ol
   assert.ok(bundle); assert.equal(bundle.request.schemas.length, 0);
 });
 
+
+test("diagnostics checks closed disk changes once after calculation, including when it fails", async t => {
+  const fixture = await setup(t);
+  const schema = path.join(fixture.root, "schema.graphql");
+  const oldSchema = "type Query { old: String }";
+  const newSchema = "type Query { missing: String }";
+  await fs.writeFile(schema, oldSchema);
+  fixture.main.text = 'from graphql_desk import gql\nq=gql("{ old missing }")\n';
+  fixture.main.version += 1;
+  fixture.main.isDirty = true;
+
+  let analyses = 0;
+  let currentChecks = 0;
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, request(message) {
+      if (message.op === "analyze") analyses += 1;
+      if (message.op === "current") currentChecks += 1;
+      return worker.request(message);
+    } };
+  } });
+  t.after(() => controller.dispose());
+  const snapshot = controller.snapshot(fixture.main);
+  let nextSchema;
+  let failCalculation = false;
+  const features = createLanguageFeatures({ ...controller, clientDirectives(bundle, call) {
+    if (nextSchema) {
+      writeFileSync(schema, nextSchema);
+      nextSchema = undefined;
+      if (failCalculation) throw new Error("diagnostic calculation failed");
+    }
+    return controller.clientDirectives(bundle, call);
+  } });
+  const currentFields = async () => (await features.diagnostics(snapshot))
+    .filter(item => item.code === "graphql.validation")
+    .map(item => snapshot.text.slice(item.range.start, item.range.end));
+
+  assert.deepEqual(await currentFields(), ["missing"]);
+  assert.deepEqual([analyses, currentChecks], [1, 1]);
+  nextSchema = newSchema;
+  assert.deepEqual(await features.diagnostics(snapshot), []);
+  assert.deepEqual([analyses, currentChecks], [1, 2]);
+  assert.deepEqual(await currentFields(), ["old"]);
+  assert.deepEqual([analyses, currentChecks], [2, 3]);
+
+  nextSchema = oldSchema;
+  failCalculation = true;
+  assert.deepEqual(await features.diagnostics(snapshot), []);
+  assert.deepEqual([analyses, currentChecks], [2, 4]);
+  assert.deepEqual(await currentFields(), ["missing"]);
+  assert.deepEqual([analyses, currentChecks], [3, 5]);
+});
 
 test("a missed closed disk edit clears failed freshness so the very next analysis has fresh diagnostics", async t => {
   const fixture = await setup(t);

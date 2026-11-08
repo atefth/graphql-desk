@@ -762,13 +762,13 @@ function extractFragmentPlan(bundle: Bundle, snapshot: Snapshot, selection: Span
 /** All analysis and freshness authority is injected; this module never starts Python. */
 function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirectives = () => [], mapSnapshot = value => value }: LanguageOptions) {
   if (![analyze, isCurrent, isTrusted].every((item) => typeof item === "function")) throw new Error("Analysis, trust and freshness callbacks are required");
-  async function load(snapshot: Snapshot, token?: CancellationToken) {
+  async function load(snapshot: Snapshot, token?: CancellationToken, { deferCurrent = false } = {}) {
     if (!isTrusted() || cancelled(token)) return null;
     const bundle = await analyze(snapshot, token);
     if (bundle) snapshot = mapSnapshot(snapshot, bundle);
     if (!bundle || cancelled(token) || !isTrusted() || bundle.request.request_id !== bundle.response.request_id ||
       !bundle.request.modules.some((item) => item.uri === snapshot.uri && item.version === snapshot.version && item.source === snapshot.text) ||
-      !await isCurrent(bundle, snapshot, token) || cancelled(token) || !isTrusted()) return null;
+      (!deferCurrent && !await isCurrent(bundle, snapshot, token)) || cancelled(token) || !isTrusted()) return null;
     return bundle;
   }
   async function finish<T>(bundle: Bundle, snapshot: Snapshot, token: CancellationToken | undefined, value: T, fallback: T) {
@@ -997,9 +997,10 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
       } catch { return []; }
     },
     async diagnostics(snapshot: Snapshot, token?: CancellationToken) {
+      const bundle = await load(snapshot, token, { deferCurrent: true }).catch(() => null);
+      if (!bundle) return [];
+      let diagnostics: FeatureDiagnostic[] = [];
       try {
-        const bundle = await load(snapshot, token);
-        if (!bundle) return [];
         snapshot = mapSnapshot(snapshot, bundle);
         const result: FeatureDiagnostic[] = bundle.response.diagnostics
           .filter((item) => item.module.uri === snapshot.uri && item.module.version === snapshot.version && item.code !== "invalid-fragments")
@@ -1050,8 +1051,9 @@ function createLanguageFeatures({ analyze, isCurrent, isTrusted, clientDirective
               code: "graphql-desk.invalid-fragments", source: "GraphQL Desk" });
           }
         }
-        return await finish(bundle, snapshot, token, unique(result), []);
-      } catch { return []; }
+        diagnostics = unique(result);
+      } catch { /* A failed calculation still needs to discard stale captures. */ }
+      return finish(bundle, snapshot, token, diagnostics, []).catch(() => []);
     },
   };
 }
