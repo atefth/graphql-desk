@@ -11,12 +11,17 @@ from .source_maps import convert_offset
 
 
 def extraction_contexts(
-    source: str, factory_bindings: tuple[FactoryBinding, ...] = ()
+    source: str,
+    factory_bindings: tuple[FactoryBinding, ...] = (),
+    *,
+    tree: ast.Module | None = None,
 ) -> dict[tuple[int, int], dict[str, object]]:
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError, UnicodeError, RecursionError):
-        return {}
+    """Inspect source using its already verified, read-only tree when supplied."""
+    if tree is None:
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError, UnicodeError, RecursionError):
+            return {}
 
     lines = re.split(r"(?<=\n)|(?<=\r)(?!\n)", source)
     starts = [0]
@@ -49,6 +54,7 @@ def extraction_contexts(
     def bound(name: str) -> None:
         bindings[name] = bindings.get(name, 0) + 1
 
+    nodes: list[ast.AST] = []
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Call)
@@ -56,6 +62,7 @@ def extraction_contexts(
             and node.func.id in {"exec", "eval"}
         ):
             return {}
+        nodes.append(node)
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             bound(node.id)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -101,9 +108,7 @@ def extraction_contexts(
                 }:
                     builtin_reflection_aliases.setdefault(name, set()).add(alias.name)
 
-    parents = {
-        child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)
-    }
+    parents = {child: node for node in nodes for child in ast.iter_child_nodes(node)}
     alias_groups = (
         sys_aliases,
         sys_modules_aliases,
@@ -115,7 +120,7 @@ def extraction_contexts(
     )
     while True:
         added_alias = False
-        for node in ast.walk(tree):
+        for node in nodes:
             targets: tuple[ast.expr, ...] = ()
             assignment_value: ast.expr | None = None
             if isinstance(node, ast.Assign):
@@ -185,7 +190,7 @@ def extraction_contexts(
 
     dynamic_module_access = False
     dynamic_namespace_access = False
-    for node in ast.walk(tree):
+    for node in nodes:
         if isinstance(node, ast.Call) and (
             isinstance(node.func, ast.Name)
             and node.func.id in dynamic_code_aliases
@@ -254,7 +259,7 @@ def extraction_contexts(
         return {}
 
     escaped_modules: set[str] = set()
-    for node in ast.walk(tree):
+    for node in nodes:
         if not isinstance(node, ast.Name) or node.id not in module_imports:
             continue
         attribute = parents.get(node)

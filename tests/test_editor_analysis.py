@@ -244,6 +244,29 @@ class EditorAnalysisTests(unittest.TestCase):
         )
         self.assertEqual(warm, cold)
 
+    def test_refactor_contexts_share_only_current_validated_python_trees(self) -> None:
+        source = "from graphql_desk import gql\nq=gql('{ user { id } }')\n"
+        payload = request(source)
+        modules = array(payload["modules"])
+        modules.append(module("other", source.replace("q=", "other=")))
+        resolver = IncrementalResolver()
+        analyze_editor_snapshot(payload, resolver=resolver)
+
+        updated = "# unsaved 😀\r\n" + source
+        modules[0] = module("main", updated, version=2)
+        with patch("ast.parse", wraps=ast.parse) as parse_python:
+            warm = analyze_editor_snapshot(payload, resolver=resolver)
+        self.assertEqual(
+            [
+                call.args[0]
+                for call in parse_python.call_args_list
+                if call.kwargs.get("mode", "exec") == "exec"
+            ],
+            [updated],
+        )
+        self.assertEqual(warm, analyze_editor_snapshot(payload))
+        self.assertTrue(all(object_(call)["extract"] for call in array(warm["calls"])))
+
     def test_unused_selection_facts_require_unconsumed_result_paths(self) -> None:
         prefix = (
             "from graphql_desk import gql\n"

@@ -537,21 +537,29 @@ def analyze_editor_snapshot_details(
         except (ValueError, TypeError, RecursionError):
             return None
 
-    snapshots = {
-        ModuleDependency(item.project, item.module, item.uri, item.version): item.source
-        for item in modules
-    }
     mappings = tuple(
         zip(
             sources.calls, build_source_maps(sources.calls, tuple(modules)), strict=True
         )
     )
-    refactor_contexts = {
-        module: extraction_contexts(
-            snapshots[module], projects[module.project].factories
+    refactor_modules = {call.module for call, _ in mappings}
+    snapshots: dict[ModuleDependency, str] = {}
+    refactor_contexts: dict[
+        ModuleDependency, dict[tuple[int, int], dict[str, object]]
+    ] = {}
+    for snapshot in modules:
+        dependency = ModuleDependency(
+            snapshot.project, snapshot.module, snapshot.uri, snapshot.version
         )
-        for module in {call.module for call, _ in mappings}
-    }
+        snapshots[dependency] = snapshot.source
+        if dependency in refactor_modules:
+            refactor_contexts[dependency] = extraction_contexts(
+                snapshot.source,
+                projects[snapshot.project].factories,
+                tree=resolver.validated_tree(snapshot)
+                if resolver is not None
+                else None,
+            )
     points: dict[ModuleDependency, set[int]] = {item: set() for item in snapshots}
 
     def require(module: ModuleDependency, span: Span) -> None:
