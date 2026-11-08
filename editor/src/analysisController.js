@@ -734,9 +734,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         }
         if (operation === "doctor") return { ...reply, isCurrent: () => isCurrent(cached.bundle, value, token) };
         return { ...reply, isCurrent: () => trusted() && !token?.isCancellationRequested &&
-          epoch === cached.ticket && states.get(state.root) === state &&
-          state.cached?.signature === cached.signature &&
-          state.cached?.revisionSignature === cached.revisionSignature };
+          epoch === cached.ticket && states.get(state.root) === state && state.cached === cached };
       }, operation).finally(() => {
         cancellation?.dispose();
         if (state.artifactsAbort === abort) state.artifactsAbort = null;

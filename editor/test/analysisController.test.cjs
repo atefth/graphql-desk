@@ -2388,6 +2388,28 @@ test("same-input provider analysis does not stale an equivalent generated typing
   assert.equal(generated.isCurrent(), true, "an equivalent analysis preserves artifact eligibility");
 });
 
+test("a rebuilt analysis cannot revive artifacts after a failed current check", async t => {
+  const fixture = await setup(t);
+  const controller = createAnalysisController(fixture.vscode, { workerFactory: options => {
+    const worker = createAnalysisWorker(options);
+    return { ...worker, request(message, requestOptions) {
+      if (message.op === "current") return Promise.resolve({ ok: true, current: false });
+      return worker.request(message, requestOptions);
+    } };
+  } });
+  t.after(() => controller.dispose());
+
+  const snapshot = controller.snapshot(fixture.main);
+  const analysis = await controller.analyze(snapshot);
+  const generated = await controller.artifacts(snapshot);
+  assert.ok(generated?.isCurrent());
+  assert.equal(await controller.isCurrent(analysis, snapshot), false);
+  assert.equal(generated.isCurrent(), false);
+  assert.ok(await controller.analyze(snapshot));
+  assert.equal(generated.isCurrent(), false, "publication must retry with newly verified artifacts");
+  assert.ok((await controller.artifacts(snapshot))?.isCurrent());
+});
+
 test("an invalidated queued analysis is skipped before worker dispatch", async t => {
   const fixture = await setup(t);
   let release;
