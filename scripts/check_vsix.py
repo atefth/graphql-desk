@@ -395,13 +395,18 @@ def main() -> None:
         "--code",
         type=Path,
         action="append",
-        required=True,
         help="Provisioned VS Code CLI, or desktop executable with --activate",
     )
-    parser.add_argument(
+    provisioning = parser.add_mutually_exclusive_group()
+    provisioning.add_argument(
         "--provision",
         action="store_true",
         help="Prime and audit the locked npm cache online before the offline proof",
+    )
+    provisioning.add_argument(
+        "--provision-only",
+        action="store_true",
+        help="Prime and audit the locked npm cache without building packages",
     )
     parser.add_argument(
         "--activate",
@@ -409,6 +414,11 @@ def main() -> None:
         help="Run trusted and restricted editor hosts with the checked wheel",
     )
     args = parser.parse_args()
+    if args.provision_only:
+        if args.activate or args.code:
+            parser.error("--provision-only does not take an editor or --activate")
+    elif not args.code:
+        parser.error("--code is required to verify a VSIX")
     root = Path(__file__).resolve().parents[1]
     cache = Path(os.environ.get("NPM_CONFIG_CACHE", ""))
     check_repository_path(root, cache)
@@ -477,12 +487,13 @@ def main() -> None:
             raise ValueError(f"Use the pinned Node 22 toolchain, got {version}")
         print(f"Build Node {version}", flush=True)
         install = (npm, "ci", "--ignore-scripts", "--no-fund", "--no-audit")
-        if args.provision:
+        if args.provision or args.provision_only:
             for directory in (editor, tools):
                 _run(*install, cwd=directory, env=env)
                 print(_run(npm, "audit", cwd=directory, env=env).strip(), flush=True)
-        # The CLI consumes a local VSIX. Dead proxies help catch incidental requests
-        # but do not enforce OS-level network isolation.
+        if args.provision_only:
+            return
+        # Dead proxies catch incidental requests. The Ubuntu CI step enforces isolation.
         proxy = "http://127.0.0.1:9"
         offline = {
             **env,

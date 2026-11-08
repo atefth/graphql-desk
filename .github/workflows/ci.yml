@@ -245,7 +245,22 @@ jobs:
           uv pip install --python .venv --reinstall --require-hashes --no-deps -r runtime-requirements.txt
           code_141=$(node editor/test/provision-vscode.cjs 1.141.0)
           code_142=$(node editor/test/provision-vscode.cjs 1.142.0)
-          xvfb-run -a .venv/bin/python -B -m scripts.check_vsix --provision --activate --code "$code_141" --code "$code_142"
+          .venv/bin/python -B -m scripts.check_vsix --provision-only
+          control=$(.venv/bin/python -B -m scripts.check_offline_network observe)
+          read -r runner_net registry_ip <<< "$control"
+          echo "Online npm registry TCP control passed for $registry_ip port 443"
+          runner_uid=$(id -u)
+          runner_gid=$(id -g)
+          /usr/bin/sudo -n /usr/bin/unshare --net -- /usr/bin/setpriv \
+            --reuid "$runner_uid" --regid "$runner_gid" --clear-groups \
+            --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs \
+            -- /usr/bin/env -i HOME="$HOME" PATH="$PATH" LANG=C.UTF-8 \
+            TMPDIR="$GITHUB_WORKSPACE/.tmp" UV_CACHE_DIR="$UV_CACHE_DIR" \
+            NPM_CONFIG_CACHE="$NPM_CONFIG_CACHE" \
+            "$PWD/.venv/bin/python" -B -m scripts.check_offline_network run \
+            "$runner_net" "$registry_ip" "$runner_uid" "$runner_gid" \
+            /usr/bin/xvfb-run -a "$PWD/.venv/bin/python" -B -m scripts.check_vsix \
+            --activate --code "$code_141" --code "$code_142"
       - run: npm audit
         working-directory: editor
 
