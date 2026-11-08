@@ -824,7 +824,19 @@ async function inspectProjectConfigRoute(vscode, folder, worker) {
       sameDirectory(current.workspaceIdentity, inspected.snapshot.workspaceIdentity);
   };
   if (!isCurrent()) throw new Error("Pyright routing inputs changed during inspection; preserved");
-  return { file: inspected.found ? inspected.file : null, isCurrent };
+  const workspaceSettingsCurrent = () => {
+    try {
+      if (inspected.found || !isCurrent()) return false;
+      // Pylance may use a parent config even when the workspace setting is explicit.
+      for (let directory = inspected.workspace; path.dirname(directory) !== directory;) {
+        directory = path.dirname(directory);
+        safeIdentity(directory, true);
+        if (projectConfigFile(directory)) return false;
+      }
+      return true;
+    } catch { return false; }
+  };
+  return { file: inspected.found ? inspected.file : null, isCurrent, workspaceSettingsCurrent };
 }
 
 async function updateProjectConfig(vscode, folder, action, worker, ownership = {}, managedPath = MANAGED_PATH, onOwnedWrite, configFile, isCurrent = () => true, targetFile) {
@@ -1490,9 +1502,8 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     },
   };
   const configStillEffective = () => {
-    if (inspected.format === "jsonc" ? !fs.existsSync(inspected.file) :
-      fs.existsSync(path.join(workspace, "pyrightconfig.json")) || !fs.existsSync(inspected.file)) return false;
-    try { return readFileSafe(vscode, workspace, inspected.file).hash === activeConfigHash; }
+    try { return projectConfigFile(workspace) === inspected.file &&
+      readFileSafe(vscode, workspace, inspected.file).hash === activeConfigHash; }
     catch { return false; }
   };
   const managed = await createManagedStubPath(vscode, folder, workspaceState, {
@@ -1526,9 +1537,9 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     get selectedSetting() { return managed.selectedSetting; },
     configurationFile: inspected.file,
     routingSettingsCurrent() { return JSON.stringify(pythonSettings.snapshot()) === expectedPythonSnapshot; },
-    checkSettingOwnership() {
+    checkSettingOwnership(check = () => true) {
       return managed.checkSettingOwnership(() => configStillEffective() &&
-        (pythonSettings.effective() || "") === (pythonOwner.current || ""));
+        (pythonSettings.effective() || "") === (pythonOwner.current || "") && check());
     },
     stillOwnsSetting() {
       return configStillEffective() && managed.stillOwnsSetting() &&

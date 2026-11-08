@@ -617,6 +617,7 @@ test("project owner advances both standalone aliases through setup, rotation and
   assert.equal(await managed.recordGeneration(generation, verification.manifestFingerprint), true);
   assert.equal(await managed.selectGeneration(generation, () => true, verification), true);
   assert.equal(managed.routingSettingsCurrent(), true);
+  assert.equal(await managed.checkSettingOwnership(() => false), false, "the live proof callback can reject an owned setting");
   assert.equal(f.vscode.workspace.getConfiguration().inspect().globalValue, "global-user-stubs");
   await managed.release();
   assert.equal(f.pythonStubPath, undefined);
@@ -2117,6 +2118,49 @@ test("routing inspection rejects a dangling or redirected config candidate rathe
     return stat;
   });
   await assert.rejects(inspectProjectConfigRoute(f.vscode, f.folder, f.worker), /safe file/);
+});
+
+test("Doctor workspace-setting proof rejects a possible parent config without reading it", async t => {
+  const f = fixture(t, { toml: '[tool.graphql-desk]\nschema="schema.graphql"\n' });
+  const candidates = new Set();
+  for (let directory = f.root; path.dirname(directory) !== directory;) {
+    directory = path.dirname(directory);
+    for (const name of ["pyrightconfig.json", "pyproject.toml"]) candidates.add(path.join(directory, name));
+  }
+  const possible = path.join(path.dirname(f.root), "pyrightconfig.json");
+  const lstat = fs.lstatSync;
+  const read = fs.readFileSync;
+  let parentAppeared = false;
+  t.mock.method(fs, "lstatSync", (filename, ...args) => {
+    if (!candidates.has(filename)) return lstat(filename, ...args);
+    if (filename === possible && parentAppeared) return { isSymbolicLink: () => true };
+    throw Object.assign(new Error("Missing fixture candidate"), { code: "ENOENT" });
+  });
+  t.mock.method(fs, "readFileSync", (filename, ...args) => {
+    assert.equal(candidates.has(filename), false, "outside-workspace candidate contents are private");
+    return read(filename, ...args);
+  });
+  const route = await inspectProjectConfigRoute(f.vscode, f.folder, f.worker);
+  assert.equal(route.workspaceSettingsCurrent(), true);
+  parentAppeared = true;
+  assert.equal(route.workspaceSettingsCurrent(), false);
+  assert.equal(route.isCurrent(), true, "the guarded workspace-root routing contract stays separate");
+});
+
+test("an owned TOML setting stops proving ownership when a dangling JSON config appears", async t => {
+  const f = fixture(t, { toml: '[tool.pyright]\nstubPath="user-stubs"\n' });
+  const state = stateStore();
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker);
+  assert.equal(await managed.checkSettingOwnership(), true);
+  const file = path.join(f.root, "pyrightconfig.json");
+  const toml = path.join(f.root, "pyproject.toml");
+  const before = fs.readFileSync(toml);
+  fs.symlinkSync(path.join(f.root, "missing-config"), file, process.platform === "win32" ? "junction" : "dir");
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(await managed.checkSettingOwnership(() => assert.fail("A displaced route cannot attest artifacts")), false);
+  assert.equal(managed.stillOwnsSetting(), false);
+  assert.deepEqual(fs.readFileSync(toml), before);
+  assert.equal(fs.lstatSync(file).isSymbolicLink(), true);
 });
 
 for (const jsonWins of [false, true]) {

@@ -91,6 +91,28 @@ const markerBytes = (id, files, token = "11111111-1111-4111-8111-111111111111") 
 const markerPath = (root, id) => path.join(root, "generations", `${id}.staging.json`);
 const markerTemporaryName = ".graphql-desk-11111111-1111-4111-8111-111111111111-marker-22222222-2222-4222-8222-222222222222.tmp";
 
+test("doctor proves only an exact generation selected for this session's analysis", async t => {
+  const f = fixture(t);
+  assert.equal(f.publisher.verification(f.managed), null);
+  const packages = files("str");
+  assert.equal(await publish(f, packages, "analysis-1"), true);
+  const directory = path.resolve(f.workspace, f.managed.selectedSetting);
+  assert.deepEqual(f.publisher.verification(f.managed), {
+    directory, manifest: { inputFingerprint: fingerprint(packages) }, analysisId: "analysis-1",
+  });
+  const restarted = createAnalysisGenerations(f.vscode, f.workspace, f.root);
+  assert.equal(restarted.verification(f.managed), null, "saved ownership alone does not prove a live analysis");
+  assert.equal(await publish({ ...f, publisher: restarted }, packages, "analysis-2"), false);
+  assert.equal(restarted.verification(f.managed).analysisId, "analysis-2",
+    "reproving equivalent current artifacts binds a new analysis without writing a generation");
+  assert.equal(path.resolve(f.workspace, f.managed.selectedSetting), directory);
+  assert.equal(restarted.verification({ ...f.managed, selectedSetting: f.root }), null);
+  const artifact = path.join(directory, "graphql_desk_generated", "default.pyi");
+  fs.writeFileSync(artifact, "foreign edit\n");
+  assert.throws(() => restarted.verification(f.managed), /Generation artifact changed/);
+  assert.equal(fs.readFileSync(artifact, "utf8"), "foreign edit\n");
+});
+
 test("publishes immutable complete generations and recovers the latest verified one", async t => {
   const f = fixture(t);
   assert.equal(await publish(f, files("str"), "analysis-1"), true);

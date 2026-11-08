@@ -150,3 +150,26 @@ test("extensions changing during final currentness verification cannot leave sta
   };
   assert.equal((await collectEditorDoctor(f.vscode, f.options)).exitCode, 1);
 });
+
+test("Doctor rechecks selected ownership after the final worker freshness check", async () => {
+  const f = fixture();
+  let checks = 0;
+  let ownsSelection = true;
+  f.options.isCurrent = async () => {
+    if (++checks === 4) ownsSelection = false;
+    return true;
+  };
+  f.options.verifyPublication = async () => ({ ownership: ownsSelection, current: ownsSelection });
+  const report = await collectEditorDoctor(f.vscode, f.options);
+  assert.equal(report.exitCode, 1);
+  assert.equal(report.checks.find(item => item.name === "generated-ownership").status, "unavailable");
+});
+
+test("Doctor cannot promote a malformed initial ownership proof", async () => {
+  const f = fixture();
+  let calls = 0;
+  f.options.verifyPublication = async () => ({ ownership: true, current: ++calls === 1 ? "invalid" : true });
+  const report = await collectEditorDoctor(f.vscode, f.options);
+  assert.equal(report.exitCode, 1);
+  assert.equal(calls, 1);
+});

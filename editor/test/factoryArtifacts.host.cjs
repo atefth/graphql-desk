@@ -205,13 +205,16 @@ exports.run = async () => {
     }, "generated result and variable types");
     results.pylance = { ...results.pylance, ...observed };
     assert.ok(ready, JSON.stringify(observed));
-    const doctor = await vscode.commands.executeCommand("graphqlDesk.doctor");
-    assert.equal(doctor.exitCode, 1, "legacy publication lacks an authoritative live ownership witness");
-    for (const name of ["configuration", "project-ownership", "active-editor", "active-python-extension", "active-checker"]) {
+    let doctor;
+    const doctorReady = await until(async () => {
+      doctor = await vscode.commands.executeCommand("graphqlDesk.doctor");
+      return doctor.exitCode === 0;
+    }, "Doctor verifies the selected live generation");
+    assert.ok(doctorReady, JSON.stringify(doctor));
+    for (const name of ["configuration", "project-ownership", "active-editor", "active-python-extension", "active-checker",
+      "generated-ownership", "live-bridge"]) {
       assert.equal(doctor.checks.find(item => item.name === name)?.status, "ready", JSON.stringify(doctor));
     }
-    assert.equal(doctor.checks.find(item => item.name === "generated-ownership")?.status, "unavailable");
-    assert.equal(doctor.checks.find(item => item.name === "live-bridge")?.status, "degraded");
     assert.equal(fsSync.realpathSync.native(doctor.runtime.executable).toLowerCase(),
       fsSync.realpathSync.native(process.env.GRAPHQL_DESK_PYTHON).toLowerCase());
     results.doctor = { exitCode: doctor.exitCode, checks: doctor.checks, versions: doctor.versions };

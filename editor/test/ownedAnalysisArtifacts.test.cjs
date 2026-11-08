@@ -24,6 +24,77 @@ const original = [
   { relative_path: "graphql_desk_generated/default_ast.pyi", text: "class Exact: ...\n" },
 ];
 
+test("read-only publication proof requires exact owned files and preserves foreign content", t => {
+  const f = fixture(t);
+  const handle = f.make(original);
+  const file = path.join(f.root, original[0].relative_path);
+  const bytes = fs.readFileSync(file);
+  assert.equal(handle.verifyExact(original), true);
+  assert.equal(handle.verifyExact(original.slice(1)), false);
+  assert.equal(handle.verifyExact(original.map(item => ({ ...item, text: "neutral\n" }))), false);
+  f.vscode.workspace.textDocuments.push({ uri: f.vscode.Uri.file(file), isDirty: true });
+  assert.throws(() => handle.verifyExact(original), /user edits/);
+  f.vscode.workspace.textDocuments.length = 0;
+  const foreign = path.join(path.dirname(file), "foreign.pyi");
+  fs.writeFileSync(foreign, "user data");
+  assert.throws(() => handle.verifyExact(original), /Foreign analysis package/);
+  assert.equal(fs.readFileSync(foreign, "utf8"), "user data");
+  fs.unlinkSync(foreign);
+  const open = fs.openSync;
+  fs.openSync = (filename, flags, ...args) => {
+    if (filename === file && flags === "r") {
+      fs.openSync = open;
+      fs.renameSync(file, file + ".old");
+      fs.writeFileSync(file, bytes);
+    }
+    return open(filename, flags, ...args);
+  };
+  try { assert.throws(() => handle.verifyExact(original), /changed externally/); }
+  finally { fs.openSync = open; }
+  assert.deepEqual(fs.readFileSync(file), bytes);
+});
+
+test("read-only publication proof refuses a redirected dotted package ancestor", t => {
+  const f = fixture(t);
+  const parent = path.join(f.root, "nested");
+  const parked = path.join(f.root, "parked");
+  fs.mkdirSync(parent);
+  const files = [{ relative_path: "nested/generated/default.pyi", text: "selected: str\n" }];
+  const handle = createOwnedAnalysisArtifacts(f.vscode, f.workspace, f.root, "nested.generated", files);
+  assert.equal(handle.verifyExact(files), true);
+  fs.renameSync(parent, parked);
+  fs.symlinkSync(parked, parent, process.platform === "win32" ? "junction" : "dir");
+  assert.throws(() => handle.verifyExact(files), /symbolic link/i);
+});
+
+test("read-only publication proof rejects foreign directories adopted by a prior writer", t => {
+  const f = fixture(t);
+  fs.mkdirSync(path.join(f.root, "graphql_desk_generated", "foreign"), { recursive: true });
+  const handle = f.make(original);
+  assert.throws(() => handle.verifyExact(original), /Foreign analysis package/);
+});
+
+test("read-only publication proof rejects a same-size rewrite during its read", t => {
+  const f = fixture(t);
+  const handle = f.make(original);
+  const file = path.join(f.root, original[0].relative_path);
+  const inode = fs.statSync(file).ino;
+  const changed = fs.readFileSync(file, "utf8").replace("selected: str", "selected: int");
+  const read = fs.readSync;
+  fs.readSync = (fd, ...args) => {
+    const count = read(fd, ...args);
+    if (fs.fstatSync(fd).ino === inode) {
+      fs.readSync = read;
+      fs.writeFileSync(file, changed);
+      fs.utimesSync(file, 1, 1);
+    }
+    return count;
+  };
+  try { assert.throws(() => handle.verifyExact(original), /changed externally/); }
+  finally { fs.readSync = read; }
+  assert.equal(fs.readFileSync(file, "utf8"), changed);
+});
+
 test("a removed workspace rejects publication but cleans up its verified session files", async t => {
   const f = fixture(t);
   const handle = f.make(original);

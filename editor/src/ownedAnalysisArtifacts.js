@@ -37,8 +37,8 @@ function isOwnedAnalysisArtifact(bytes, generatedPackage, relativePath) {
   })).digest("hex");
   return match[1] === fingerprint;
 }
-function identity(file) {
-  const stat = fs.lstatSync(file);
+function identity(file, options) {
+  const stat = fs.lstatSync(file, options);
   if (stat.isSymbolicLink()) throw new Error("Analysis path is a symbolic link");
   return stat;
 }
@@ -46,6 +46,22 @@ function packageParts(value) {
   if (value === "graphql_desk-stubs") return [value];
   return typeof value === "string" && value.split(".").every(part => /^[A-Za-z_][A-Za-z_0-9]*$/.test(part))
     ? value.split(".") : null;
+}
+
+function analysisPackageAbsent(root, generatedPackage) {
+  const parts = packageParts(generatedPackage);
+  if (!parts || !identity(root).isDirectory()) return false;
+  let current = root;
+  for (const part of parts) {
+    current = path.join(current, part);
+    try {
+      if (!identity(current).isDirectory()) return false;
+    } catch (error) {
+      if (error.code === "ENOENT") return true;
+      throw error;
+    }
+  }
+  return false;
 }
 function artifactEntries(files, generatedPackage) {
   if (!Array.isArray(files) || files.length > MAX_FILES) throw new Error("Invalid analysis artifact set");
@@ -169,31 +185,66 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
     });
     artifactEntries(actual, generatedPackage);
   }
-  function checkOwned(file, record, partial = false) {
+  function checkOwned(file, record, partial = false, exactRead = false) {
     checkDirty(file);
     const stat = identity(file);
-    if (!stat.isFile() || !same(record.identity, stat)) throw new Error("Analysis artifact changed externally; preserved");
-    const bytes = fs.readFileSync(file);
+    if (!stat.isFile() || !same(record.identity, stat) ||
+        (partial ? stat.size > record.bytes.length : stat.size !== record.bytes.length)) {
+      throw new Error("Analysis artifact changed externally; preserved");
+    }
+    let bytes;
+    if (exactRead) {
+      const before = identity(file, { bigint: true });
+      const unchanged = candidate => candidate.isFile() && same(before, candidate) &&
+        candidate.size === before.size && candidate.mtimeNs === before.mtimeNs && candidate.ctimeNs === before.ctimeNs;
+      if (!before.isFile() || Number(before.dev) !== stat.dev || Number(before.ino) !== stat.ino ||
+          Number(before.size) !== stat.size) throw new Error("Analysis artifact changed externally; preserved");
+      const descriptor = fs.openSync(file, "r");
+      try {
+        bytes = Buffer.allocUnsafe(stat.size);
+        if (!unchanged(fs.fstatSync(descriptor, { bigint: true })) ||
+            fs.readSync(descriptor, bytes, 0, bytes.length, 0) !== bytes.length ||
+            !unchanged(fs.fstatSync(descriptor, { bigint: true })) || !unchanged(identity(file, { bigint: true }))) {
+          throw new Error("Analysis artifact changed externally; preserved");
+        }
+      } finally { fs.closeSync(descriptor); }
+    } else bytes = fs.readFileSync(file);
     if (!(partial
       ? bytes.length <= record.bytes.length && record.bytes.subarray(0, bytes.length).equals(bytes)
       : record.bytes.equals(bytes))) throw new Error("Analysis artifact changed externally; preserved");
   }
-  function verify(extraFiles = new Set()) {
-    checkDirectories();
-    for (const [relativePath, record] of expected) {
-      checkOwned(target(relativePath), record);
-    }
-    const actual = new Set();
-    function visit(directory, prefix = "") {
-      for (const name of fs.readdirSync(directory)) {
-        const entry = path.join(directory, name);
-        const stat = identity(entry);
-        if (stat.isDirectory()) visit(entry, prefix ? `${prefix}/${name}` : name);
-        else actual.add(prefix ? `${prefix}/${name}` : name);
+  function verify(extraFiles = new Set(), exactDirectories) {
+    if (exactDirectories) {
+      environment();
+      for (const directory of exactDirectories) {
+        const stat = directoryStats.get(directory);
+        if (!stat || !same(stat, identity(directory))) throw new Error("Analysis package changed externally; preserved");
       }
+      let parent = root;
+      for (const part of packageNames.slice(0, -1)) {
+        parent = path.join(parent, part);
+        if (!identity(parent).isDirectory()) throw new Error("Analysis parent is not a directory");
+      }
+    } else checkDirectories();
+    for (const [relativePath, record] of expected) {
+      checkOwned(target(relativePath), record, false, Boolean(exactDirectories));
+    }
+    function visit(directory, prefix = "") {
+      const entries = fs.opendirSync(directory);
+      try {
+        for (let item; (item = entries.readSync()); ) {
+          const entry = path.join(directory, item.name);
+          const relative = prefix ? `${prefix}/${item.name}` : item.name;
+          if (identity(entry).isDirectory()) {
+            if (exactDirectories && !exactDirectories.has(entry)) throw new Error("Foreign analysis package entries; preserved");
+            visit(entry, relative);
+          } else if (!expected.has(relative) && !extraFiles.has(relative)) {
+            throw new Error("Foreign analysis package entries; preserved");
+          }
+        }
+      } finally { entries.closeSync(); }
     }
     if (directoryStats.has(packageRoot)) visit(packageRoot);
-    for (const file of actual) if (!expected.has(file) && !extraFiles.has(file)) throw new Error("Foreign analysis package entries; preserved");
   }
   function writeExclusive(file, bytes) {
     checkDirectories();
@@ -327,6 +378,20 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
   let queue = Promise.resolve();
   const serialize = action => { const result = queue.then(action); queue = result.catch(() => {}); return result; };
   return {
+    verifyExact(files) {
+      if (closing || stopped) return false;
+      const wanted = artifactEntries(files, generatedPackage);
+      if (wanted.size !== expected.size) return false;
+      if (!wanted.size) {
+        environment();
+        return analysisPackageAbsent(root, generatedPackage);
+      }
+      for (const [relativePath, text] of wanted) {
+        if (!expected.get(relativePath)?.bytes.equals(renderOwnedAnalysisArtifact(generatedPackage, relativePath, text))) return false;
+      }
+      verify(undefined, new Set([...wanted.keys()].flatMap(directoriesFor)));
+      return true;
+    },
     publish(nextFiles, isCurrent) {
       return serialize(async () => {
         if (closing || stopped) return false;
@@ -449,4 +514,4 @@ function createOwnedAnalysisArtifacts(vscode, workspaceRoot, stubRoot, generated
   };
 }
 
-module.exports = { createOwnedAnalysisArtifacts, renderOwnedAnalysisArtifact, isOwnedAnalysisArtifact };
+module.exports = { analysisPackageAbsent, createOwnedAnalysisArtifacts, renderOwnedAnalysisArtifact, isOwnedAnalysisArtifact };
