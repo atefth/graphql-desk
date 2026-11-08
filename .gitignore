@@ -14,6 +14,7 @@ editor/node_modules/
 editor/.vscode-test/
 editor/.cache/
 editor/.tmp/
+editor/src/analysisWorker.js
 editor/src/doctor.js
 editor/src/highlighting.js
 editor/src/languageFeatures.js

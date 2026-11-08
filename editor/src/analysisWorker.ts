@@ -1,40 +1,88 @@
-"use strict";
 
-const { spawn: spawnProcess } = require("node:child_process");
-const { createHash } = require("node:crypto");
-const os = require("node:os");
-const path = require("node:path");
-const { TextDecoder } = require("node:util");
-const { gunzipSync } = require("node:zlib");
-const { validOperationManifest } = require("./analysisGenerations");
-const { validWorkerHealth } = require("./doctor");
+const { spawn: spawnProcess }: typeof import("node:child_process") = require("node:child_process");
+const { createHash }: typeof import("node:crypto") = require("node:crypto");
+import os = require("node:os");
+import path = require("node:path");
+const { TextDecoder }: typeof import("node:util") = require("node:util");
+const { gunzipSync }: typeof import("node:zlib") = require("node:zlib");
+const { validOperationManifest }: { validOperationManifest: (value: unknown) => boolean } = require("./analysisGenerations");
+const { validWorkerHealth }: { validWorkerHealth: (value: unknown) => boolean } = require("./doctor");
+
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+
+type WireRecord = Record<string, unknown>;
+type WorkerRequest = WireRecord & { workspace: string } & (
+  { op: "pyright_config"; ownership: WireRecord } |
+  { op: "prepare" | "analyze" | "current" | "refresh" | "artifacts" | "doctor" | "quarantine" | "config_file" }
+);
+type Span = { start: number; end: number };
+type ModuleIdentity = { project: string; module: string; uri: string; version: number };
+type SourceRange = { codepoint: Span; utf16: Span };
+type AnalysisWireRequest = { modules: unknown[] };
+type AnalysisWireResponse = { modules: unknown[]; persisted: unknown[]; persisted_id_insertions: unknown[];
+  unused_selections: unknown[]; diagnostics: unknown[];
+  calls: ({ identity?: { module: ModuleIdentity; call_range: unknown }; source?: unknown } | null)[] };
+type QuarantineProject = { project: string; generated_package: string; files: { relative_path: string }[] };
+type ArtifactProvenance = {
+  owner: { module: ModuleIdentity };
+  dependencies: ModuleIdentity[];
+  mapping_dependencies: "unknown" | ModuleIdentity[];
+  direct_fragments: { module: ModuleIdentity }[] | null;
+  definition_owners: { module: ModuleIdentity }[] | null;
+  canonical_owner: { module: ModuleIdentity } | null;
+  declaration_path: string | null;
+  source_exports: { relative_path: string }[];
+};
+type IndexedAtom = { decoded: Span; host: { module: number; range: Span }; linear: boolean };
+type ReplyPages = { count: number; chunks: Buffer[] };
+type Pending = {
+  resolve(value: unknown): void;
+  reject(error: Error): void;
+  cleanup(): void;
+  request: WorkerRequest;
+  deadline: number;
+  replyPages?: ReplyPages;
+};
+type WorkerOptions = {
+  python: string;
+  workspace: string;
+  isTrusted: () => boolean;
+  timeoutMs?: number;
+  configFiles?: boolean;
+  spawn?: typeof spawnProcess;
+};
+
+// A safe integer check also establishes the value is a number.
+declare const Number: Omit<NumberConstructor, "isSafeInteger"> & {
+  isSafeInteger(value: unknown): value is number;
+};
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const ANALYSIS_PAGE_BYTES = 4 * 1024 * 1024;
 const MAX_ANALYSIS_PAGES = 16;
 const LIVE_STUB_ROOT = ".graphql-desk/live-typings";
-const generationStubPath = value => typeof value === "string" &&
+const generationStubPath = (value: unknown) => typeof value === "string" &&
   /^\.graphql-desk\/live-typings\/generations\/g-\d+-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
 const failure = () => new Error("GraphQL Desk worker request failed");
 class ConfigStageFailure extends Error {}
 const configFailurePhases = new Set(["create-empty", "read-empty-security", "preserve-owner", "copy-dacl",
   "compare-dacl", "recheck-empty", "write-content", "verify-stage"]);
-const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
-const keys = (value, expected) => object(value) && Object.keys(value).sort().join(",") === [...expected].sort().join(",");
-const string = value => typeof value === "string" && value.length > 0;
-const span = value => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 &&
+const object = (value: unknown): value is WireRecord => value !== null && typeof value === "object" && !Array.isArray(value);
+const keys = <K extends string>(value: unknown, expected: readonly K[]): value is Record<K, unknown> => object(value) && Object.keys(value).sort().join(",") === [...expected].sort().join(",");
+const string = (value: unknown): value is string => typeof value === "string" && value.length > 0;
+const span = (value: unknown): value is Span => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 &&
   Number.isSafeInteger(value.end) && value.end >= value.start;
-const moduleIdentity = value => keys(value, ["project", "module", "uri", "version"]) &&
+const moduleIdentity = (value: unknown): value is ModuleIdentity => keys(value, ["project", "module", "uri", "version"]) &&
   [value.project, value.module, value.uri].every(string) && Number.isSafeInteger(value.version) && value.version >= 0;
 
-function parseFrame(buffer) {
+function parseFrame(buffer: Buffer): unknown {
   const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer);
-  const result = JSON.parse(text, (_key, value) => {
+  const result: unknown = JSON.parse(text, (_key: string, value: unknown) => {
     if (typeof value === "number" && !Number.isFinite(value)) throw failure();
     return value;
   });
   // JSON.parse otherwise silently replaces duplicate object keys.
-  const stack = [];
+  const stack: (Set<string> | null)[] = [];
   const structural = /["{}\[\]]/g;
   for (let match = structural.exec(text); match; match = structural.exec(text)) {
     const token = match[0];
@@ -56,7 +104,7 @@ function parseFrame(buffer) {
       while (separator < text.length && /\s/.test(text[separator])) separator += 1;
       if (text[separator] === ":") {
         const seen = stack.at(-1);
-        const key = JSON.parse(text.slice(match.index, quote + 1));
+        const key: string = JSON.parse(text.slice(match.index, quote + 1));
         if (!seen || seen.has(key)) throw failure();
         seen.add(key);
       }
@@ -65,16 +113,16 @@ function parseFrame(buffer) {
   return result;
 }
 
-function parseAnalysisReply(decoded) {
+function parseAnalysisReply(decoded: Buffer): unknown {
   if (decoded.indexOf(10) !== decoded.length - 1) throw failure();
-  const reply = parseFrame(decoded);
+  const reply = parseFrame(decoded) as { response?: { modules?: unknown; calls?: unknown }; request?: { modules?: unknown } } | null;
   const { modules, calls } = reply?.response ?? {};
   const captured = reply?.request?.modules;
   if (!Array.isArray(modules) || !Array.isArray(calls) || !Array.isArray(captured) ||
       modules.length !== captured.length || !captured.every(item =>
         keys(item, ["project", "module", "uri", "version", "source", "is_package"]) &&
         typeof item.source === "string" && typeof item.is_package === "boolean")) throw failure();
-  const identity = value => JSON.stringify([value.project, value.module, value.uri, value.version]);
+  const identity = (value: WireRecord | ModuleIdentity) => JSON.stringify([value.project, value.module, value.uri, value.version]);
   const expected = new Set(captured.map(identity));
   const names = new Set();
   const uris = new Set();
@@ -85,7 +133,7 @@ function parseAnalysisReply(decoded) {
     names.add(name);
     uris.add(module.uri);
   }
-  const validAtom = atom => keys(atom, ["decoded", "host", "linear"]) && span(atom.decoded) &&
+  const validAtom = (atom: unknown): atom is IndexedAtom => keys(atom, ["decoded", "host", "linear"]) && span(atom.decoded) &&
     keys(atom.host, ["module", "range"]) && span(atom.host.range) && typeof atom.linear === "boolean" &&
     Number.isSafeInteger(atom.host.module) && atom.host.module >= 0 && atom.host.module < modules.length;
   for (const call of calls) {
@@ -96,17 +144,17 @@ function parseAnalysisReply(decoded) {
       const converted = utf16[index];
       if (!validAtom(atom) || !validAtom(converted) || atom.host.module !== converted.host.module ||
           atom.linear !== converted.linear) throw failure();
-      atom.host.module = converted.host.module = modules[atom.host.module];
+      (atom.host as { module: number | ModuleIdentity }).module = (converted.host as { module: number | ModuleIdentity }).module = modules[atom.host.module];
     }
   }
   return reply;
 }
 
-function checkAnalysisDeadline(active) {
+function checkAnalysisDeadline(active: Pending) {
   if (performance.now() >= active.deadline) throw failure();
 }
 
-function parseAnalysisPage(frame, active) {
+function parseAnalysisPage(frame: unknown[], active: Pending): unknown {
   const [tag, index, count, encoded] = frame;
   if (active.request.op !== "analyze" || tag !== "gzip-analysis-page" || frame.length !== 4 ||
       !Number.isSafeInteger(count) || count < 1 || count > MAX_ANALYSIS_PAGES ||
@@ -126,14 +174,14 @@ function parseAnalysisPage(frame, active) {
   return parseAnalysisReply(reply);
 }
 
-function validReply(reply, request) {
+function validReply(reply: unknown, request: WorkerRequest) {
   if (!object(reply) || reply.ok !== true) return false;
   if (request.op === "config_file") {
-    const token = value => typeof value === "string" && /^[a-f0-9]{32}$/.test(value);
+    const token = (value: unknown) => typeof value === "string" && /^[a-f0-9]{32}$/.test(value);
     if (request.action === "stage") return keys(reply, ["ok", "token", "receipt", "original_hash", "staged_hash"]) &&
       token(reply.token) && string(reply.receipt) && reply.receipt.length <= 32768 &&
       /^[A-Za-z0-9+/]+={0,2}$/.test(reply.receipt) && reply.original_hash === request.expected_hash &&
-      reply.staged_hash === createHash("sha256").update(request.text, "utf8").digest("hex");
+      reply.staged_hash === createHash("sha256").update(request.text as string, "utf8").digest("hex");
     return keys(reply, ["ok", "token"]) && token(reply.token) &&
       (request.action === "resume" || reply.token === request.token);
   }
@@ -153,10 +201,10 @@ function validReply(reply, request) {
     const extended = Object.hasOwn(request, "remote_revisions");
     const expected = ["ok", "id", "local_schemas", "remote_schemas", "required_buffers", "configuration_diagnostics"];
     if (extended) expected.push("project_preferences", "remote_revisions");
-    const names = value => Array.isArray(value) && value.every(string) && new Set(value).size === value.length;
-    const position = value => keys(value, ["line", "character"]) && Number.isSafeInteger(value.line) && value.line >= 0 &&
+    const names = (value: unknown) => Array.isArray(value) && value.every(string) && new Set(value).size === value.length;
+    const position = (value: unknown): value is { line: number; character: number } => keys(value, ["line", "character"]) && Number.isSafeInteger(value.line) && value.line >= 0 &&
       Number.isSafeInteger(value.character) && value.character >= 0;
-    const configurationDiagnostic = value => keys(value, ["uri", "version", "code", "message", "range"]) &&
+    const configurationDiagnostic = (value: unknown) => keys(value, ["uri", "version", "code", "message", "range"]) &&
       string(value.uri) && value.uri.startsWith("file:") && (value.version === null || (Number.isSafeInteger(value.version) && value.version >= 0)) &&
       value.code === "graphql-desk.configuration" && string(value.message) &&
       keys(value.range, ["start", "end"]) && position(value.range.start) && position(value.range.end) &&
@@ -177,18 +225,18 @@ function validReply(reply, request) {
   }
   if (request.op === "refresh") return keys(reply, ["ok", "id", "project", "schema_name", "status", "last_good", "error"]) &&
     string(reply.id) && reply.id !== request.id && reply.project === request.project && reply.schema_name === request.schema_name &&
-    ["ready", "stale", "unavailable"].includes(reply.status) && reply.last_good === (reply.status === "stale") &&
+    ["ready", "stale", "unavailable"].includes(reply.status as string) && reply.last_good === (reply.status === "stale") &&
     reply.error === (reply.status === "ready" ? null : "schema-refresh-failed");
   if (request.op === "quarantine") {
     if (!keys(reply, ["ok", "id", "projects"]) || reply.id !== request.id || !Array.isArray(reply.projects) ||
-        reply.projects.length !== request.projects.length) return false;
-    const byProject = new Map(request.projects.map(project => [project.project, project]));
+        reply.projects.length !== (request.projects as QuarantineProject[]).length) return false;
+    const byProject = new Map((request.projects as QuarantineProject[]).map(project => [project.project, project]));
     const seenProjects = new Set();
     return reply.projects.every(project => {
       if (!keys(project, ["project", "generated_package", "files"]) || !string(project.project) ||
           !Array.isArray(project.files) || !byProject.has(project.project) || seenProjects.has(project.project)) return false;
       seenProjects.add(project.project);
-      const source = byProject.get(project.project);
+      const source = byProject.get(project.project)!;
       return project.generated_package === source.generated_package && project.files.length === source.files.length &&
         new Set(project.files.map(file => file?.relative_path)).size === project.files.length &&
         project.files.every(file => keys(file, ["relative_path", "text"]) &&
@@ -201,70 +249,70 @@ function validReply(reply, request) {
     : reply.current === true && keys(reply, ["ok", "id", "current", "report"]) && validWorkerHealth(reply.report));
   if (request.op === "current") return keys(reply, ["ok", "current"]) && typeof reply.current === "boolean";
   if (request.op === "analyze") {
-    const sourceRange = value => keys(value, ["codepoint", "utf16"]) && span(value.codepoint) && span(value.utf16);
-    const persisted = value => keys(value, ["module", "range", "id_range", "id", "expected_id", "id_is_literal"]) &&
+    const sourceRange = (value: unknown): value is SourceRange => keys(value, ["codepoint", "utf16"]) && span(value.codepoint) && span(value.utf16);
+    const persisted = (value: unknown): value is { module: ModuleIdentity } => keys(value, ["module", "range", "id_range", "id", "expected_id", "id_is_literal"]) &&
       moduleIdentity(value.module) && sourceRange(value.range) && sourceRange(value.id_range) &&
       string(value.id) && string(value.expected_id) && typeof value.id_is_literal === "boolean";
-    const persistedInsertion = value => keys(value, ["module", "range", "insertion", "expected_id", "positional"]) &&
+    const persistedInsertion = (value: unknown): value is { module: ModuleIdentity } => keys(value, ["module", "range", "insertion", "expected_id", "positional"]) &&
       moduleIdentity(value.module) && sourceRange(value.range) && sourceRange(value.insertion) &&
       typeof value.positional === "boolean" &&
       value.insertion.codepoint.start === value.insertion.codepoint.end &&
       value.insertion.utf16.start === value.insertion.utf16.end &&
       value.range.codepoint.start <= value.insertion.codepoint.start && value.insertion.codepoint.end <= value.range.codepoint.end &&
       value.range.utf16.start <= value.insertion.utf16.start && value.insertion.utf16.end <= value.range.utf16.end &&
-      /^sha256:[0-9a-f]{64}$/.test(value.expected_id) && reply.request.modules.some(source =>
+      /^sha256:[0-9a-f]{64}$/.test(value.expected_id as string) && (reply.request as AnalysisWireRequest).modules.some(source =>
         keys(source, ["project", "module", "uri", "version", "source", "is_package"]) &&
         [source.project, source.module, source.uri].every(string) && Number.isSafeInteger(source.version) &&
         source.version >= 0 && typeof source.source === "string" && typeof source.is_package === "boolean" &&
-        sameModule(source, value.module) &&
+        sameModule(source, value.module as ModuleIdentity) &&
         (value.positional
-          ? value.insertion.utf16.start > 0 && source.source[value.insertion.utf16.start - 1] === "("
-          : value.insertion.utf16.start <= source.source.length - "document".length &&
-            source.source.slice(value.insertion.utf16.start, value.insertion.utf16.start + "document".length) === "document"));
-    const sameModule = (left, right) => left.project === right.project && left.module === right.module &&
+          ? (value.insertion as SourceRange).utf16.start > 0 && source.source[(value.insertion as SourceRange).utf16.start - 1] === "("
+          : (value.insertion as SourceRange).utf16.start <= source.source.length - "document".length &&
+            source.source.slice((value.insertion as SourceRange).utf16.start, (value.insertion as SourceRange).utf16.start + "document".length) === "document"));
+    const sameModule = (left: ModuleIdentity | WireRecord, right: ModuleIdentity | WireRecord) => left.project === right.project && left.module === right.module &&
       left.uri === right.uri && left.version === right.version;
-    const unusedSelection = value => keys(value, ["diagnostic", "document", "range"]) &&
+    const unusedSelection = (value: unknown) => keys(value, ["diagnostic", "document", "range"]) &&
       keys(value.document, ["module", "call_range"]) && moduleIdentity(value.document.module) && sourceRange(value.document.call_range) &&
       keys(value.diagnostic, ["module", "code", "message", "range"]) && moduleIdentity(value.diagnostic.module) &&
       value.diagnostic.code === "52005" && string(value.diagnostic.message) && sourceRange(value.diagnostic.range) &&
       sameModule(value.diagnostic.module, value.document.module) && span(value.range) && value.range.end > value.range.start &&
-      reply.response.diagnostics.some(item => JSON.stringify(item) === JSON.stringify(value.diagnostic)) &&
-      reply.response.calls.some(call => call?.identity && sameModule(call.identity.module, value.document.module) &&
-        sourceRange(call.identity.call_range) && JSON.stringify(call.identity.call_range) === JSON.stringify(value.document.call_range) &&
-        typeof call.source === "string" && value.range.end <= call.source.length);
+      (reply.response as AnalysisWireResponse).diagnostics.some(item => JSON.stringify(item) === JSON.stringify(value.diagnostic)) &&
+      (reply.response as AnalysisWireResponse).calls.some(call => call?.identity && sameModule(call.identity.module, (value.document as { module: ModuleIdentity }).module) &&
+        sourceRange(call.identity.call_range) && JSON.stringify(call.identity.call_range) === JSON.stringify((value.document as { call_range: SourceRange }).call_range) &&
+        typeof call.source === "string" && (value.range as Span).end <= call.source.length);
     return keys(reply, ["ok", "id", "request", "response", "unavailable_schemas", "remote_schemas"]) && reply.id === request.id &&
       Array.isArray(reply.remote_schemas) && reply.remote_schemas.every(item =>
         keys(item, ["project", "schema_name", "status"]) && string(item.project) && string(item.schema_name) &&
-        ["ready", "stale", "unavailable"].includes(item.status)) &&
+        ["ready", "stale", "unavailable"].includes(item.status as string)) &&
       keys(reply.request, ["request_id", "modules", "bindings", "schemas"]) &&
       keys(reply.response, ["request_id", "modules", "schemas", "calls", "persisted", "persisted_id_insertions", "unused_selections", "diagnostics"]) &&
       string(reply.request.request_id) && reply.request.request_id === reply.response.request_id &&
       [reply.request.modules, reply.request.bindings, reply.request.schemas, reply.response.modules,
         reply.response.schemas, reply.response.calls, reply.response.persisted,
         reply.response.persisted_id_insertions, reply.response.unused_selections, reply.response.diagnostics,
-        reply.unavailable_schemas].every(Array.isArray) && reply.response.persisted.every(item =>
-          persisted(item) && reply.response.modules.some(source => moduleIdentity(source) && sameModule(source, item.module))) &&
-        reply.response.persisted_id_insertions.every(item => persistedInsertion(item) &&
-        reply.response.modules.some(source => moduleIdentity(source) && sameModule(source, item.module))) &&
-      reply.response.unused_selections.every(unusedSelection);
+        reply.unavailable_schemas].every(Array.isArray) && (reply.response.persisted as unknown[]).every(item =>
+          persisted(item) && (reply.response as AnalysisWireResponse).modules.some(source => moduleIdentity(source) && sameModule(source, item.module))) &&
+        (reply.response.persisted_id_insertions as unknown[]).every(item => persistedInsertion(item) &&
+        (reply.response as AnalysisWireResponse).modules.some(source => moduleIdentity(source) && sameModule(source, item.module))) &&
+      (reply.response.unused_selections as unknown[]).every(unusedSelection);
   }
   if (request.op === "artifacts") {
     if (keys(reply, ["ok", "id", "current"])) return string(reply.id) && reply.id === request.id && reply.current === false;
-    const identifier = value => typeof value === "string" && /^[\p{ID_Start}_][\p{ID_Continue}_]*$/u.test(value);
-    const span = value => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 && Number.isSafeInteger(value.end) && value.end >= value.start;
-    const module = value => keys(value, ["project", "module", "uri", "version"]) && [value.project, value.module, value.uri].every(string) && Number.isSafeInteger(value.version) && value.version >= 0;
-    const provenanceIdentity = value => keys(value, ["module", "codepoint", "utf16"]) && module(value.module) && span(value.codepoint) && span(value.utf16);
-    const schemaDependency = item => keys(item, ["coordinate", "fingerprint"]) && string(item.coordinate) && item.coordinate.length <= 2048 && /^[a-f0-9]{64}$/.test(item.fingerprint);
-    const configDependency = item => keys(item, ["kind", "name", "value"]) &&
-      string(item.name) && item.name.length <= 512 && ((["scalar-input", "scalar-output", "enum-mapping"].includes(item.kind) &&
+    const identifier = (value: unknown): value is string => typeof value === "string" && /^[\p{ID_Start}_][\p{ID_Continue}_]*$/u.test(value);
+    const span = (value: unknown): value is Span => keys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 && Number.isSafeInteger(value.end) && value.end >= value.start;
+    const module = (value: unknown): value is ModuleIdentity => keys(value, ["project", "module", "uri", "version"]) && [value.project, value.module, value.uri].every(string) && Number.isSafeInteger(value.version) && value.version >= 0;
+    const provenanceIdentity = (value: unknown): value is { module: ModuleIdentity } => keys(value, ["module", "codepoint", "utf16"]) && module(value.module) && span(value.codepoint) && span(value.utf16);
+    const schemaDependency = (item: unknown): item is { coordinate: string; fingerprint: string } => keys(item, ["coordinate", "fingerprint"]) && string(item.coordinate) && item.coordinate.length <= 2048 && /^[a-f0-9]{64}$/.test(item.fingerprint as string);
+    const configDependency = (item: unknown): item is { kind: string; name: string; value: unknown } => keys(item, ["kind", "name", "value"]) &&
+      string(item.name) && item.name.length <= 512 && ((["scalar-input", "scalar-output", "enum-mapping"].includes(item.kind as string) &&
         (item.value === null || typeof item.value === "string" && item.value.length <= 4096)) ||
-        (["disable-masking", "client-directive"].includes(item.kind) && typeof item.value === "boolean"));
-    const provenance = value => keys(value, ["owner", "selector", "operation_name", "operation_kind", "schema_identity", "context_token", "binding", "status", "declaration_path", "declaration_symbol", "source_exports", "dependencies", "direct_fragments", "definition_owners", "canonical_owner", "selector_known", "source_dependencies_known", "mapping_dependencies", "schema_dependencies", "config_dependencies"]) &&
+        (["disable-masking", "client-directive"].includes(item.kind as string) && typeof item.value === "boolean"));
+    const provenance = (value: unknown): value is ArtifactProvenance => keys(value, ["owner", "selector", "operation_name", "operation_kind", "schema_identity", "context_token", "binding", "status", "declaration_path", "declaration_symbol", "source_exports", "dependencies", "direct_fragments", "definition_owners", "canonical_owner", "selector_known", "source_dependencies_known", "mapping_dependencies", "schema_dependencies", "config_dependencies"]) &&
       provenanceIdentity(value.owner) && (value.selector === null || string(value.selector)) && (value.operation_name === null || string(value.operation_name)) &&
-      (value.operation_kind === null || ["query", "mutation", "subscription", "fragment"].includes(value.operation_kind)) &&
+      (value.operation_kind === null || ["query", "mutation", "subscription", "fragment"].includes(value.operation_kind as string)) &&
       (value.schema_identity === null || (Array.isArray(value.schema_identity) && value.schema_identity.length === 2 && value.schema_identity.every(string))) &&
       (value.context_token === null || string(value.context_token)) && (value.binding === null || string(value.binding)) &&
-      ["precise", "unavailable", "rejected"].includes(value.status) &&
+      ["precise", "unavailable", "rejected"].includes(value.status as string) &&
       (value.declaration_path === null || (string(value.declaration_path) && !value.declaration_path.includes("\\") && !path.posix.isAbsolute(value.declaration_path) && value.declaration_path.split("/").every(part => part && part !== "." && part !== ".."))) &&
       (value.declaration_symbol === null || identifier(value.declaration_symbol)) &&
       Array.isArray(value.source_exports) && value.source_exports.every(item => keys(item, ["relative_path", "symbol", "alias"]) && string(item.relative_path) && !item.relative_path.includes("\\") && !path.posix.isAbsolute(item.relative_path) && item.relative_path.split("/").every(part => part && part !== "." && part !== "..") && identifier(item.symbol) && identifier(item.alias)) &&
@@ -276,15 +324,15 @@ function validReply(reply, request) {
       (value.mapping_dependencies === "unknown" || Array.isArray(value.mapping_dependencies) && value.mapping_dependencies.length <= 16384 && value.mapping_dependencies.every(module)) &&
       (value.schema_dependencies === "unknown" || Array.isArray(value.schema_dependencies) && value.schema_dependencies.length <= 16384 && value.schema_dependencies.every(schemaDependency) &&
         new Set(value.schema_dependencies.map(item => item.coordinate)).size === value.schema_dependencies.length &&
-        value.schema_dependencies.every((item, index) => index === 0 || value.schema_dependencies[index - 1].coordinate < item.coordinate)) &&
+        value.schema_dependencies.every((item, index) => index === 0 || (value.schema_dependencies as { coordinate: string }[])[index - 1].coordinate < item.coordinate)) &&
       (value.config_dependencies === "unknown" || Array.isArray(value.config_dependencies) && value.config_dependencies.length <= 4096 && value.config_dependencies.every(configDependency) &&
         new Set(value.config_dependencies.map(item => `${item.kind}\0${item.name}`)).size === value.config_dependencies.length &&
         value.config_dependencies.every((item, index) => {
           if (index === 0) return true;
-          const previous = value.config_dependencies[index - 1];
+          const previous = (value.config_dependencies as { kind: string; name: string }[])[index - 1];
           return previous.kind < item.kind || previous.kind === item.kind && previous.name < item.name;
         }));
-    const validProvenance = project => {
+    const validProvenance = (project: { project: string; generated_package: string; provenance: unknown; files: Array<{ relative_path: string }> }) => {
       if (!Array.isArray(project.provenance) || !project.provenance.every(provenance)) return false;
       const prefix = `${project.generated_package.replaceAll(".", "/")}/`;
       const files = new Set(project.files.map(file => file.relative_path));
@@ -300,12 +348,12 @@ function validReply(reply, request) {
             value.source_exports.every(item => item.relative_path.startsWith(`${prefix}sources/`) && files.has(item.relative_path));
         });
     };
-    const diagnostic = value => keys(value, ["module", "code", "message", "range"]) && module(value.module) && string(value.code) && string(value.message) &&
+    const diagnostic = (value: unknown): value is { module: ModuleIdentity } => keys(value, ["module", "code", "message", "range"]) && module(value.module) && string(value.code) && string(value.message) &&
       keys(value.range, ["codepoint", "utf16"]) && span(value.range.codepoint) && span(value.range.utf16);
-    const file = value => keys(value, ["relative_path", "text"]) && typeof value.text === "string" && string(value.relative_path) &&
+    const file = (value: unknown): value is { relative_path: string; text: string } => keys(value, ["relative_path", "text"]) && typeof value.text === "string" && string(value.relative_path) &&
       !value.relative_path.includes("\\") && !value.relative_path.includes("\0") && !path.posix.isAbsolute(value.relative_path) && !path.win32.isAbsolute(value.relative_path) &&
       /\.pyi?$/.test(value.relative_path) && value.relative_path.replace(/\.pyi?$/, "").split("/").every(identifier);
-    const parserOverlay = value => Array.isArray(value) && value.length === 5 &&
+    const parserOverlay = (value: unknown) => Array.isArray(value) && value.length === 5 &&
       value[0]?.relative_path === "graphql_desk-stubs/typed_document.pyi" && typeof value[0]?.text === "string" &&
       value[1]?.relative_path === "graphql_desk-stubs/fragment_refs.pyi" && typeof value[1]?.text === "string" &&
       value[2]?.relative_path === "graphql_desk-stubs/__init__.pyi" && typeof value[2]?.text === "string" &&
@@ -315,13 +363,13 @@ function validReply(reply, request) {
       typeof reply.input_fingerprint === "string" && /^[a-f0-9]{64}$/.test(reply.input_fingerprint) &&
       typeof reply.saved_source_fingerprint === "string" && /^[a-f0-9]{64}$/.test(reply.saved_source_fingerprint) && Array.isArray(reply.projects) &&
       parserOverlay(reply.parser_overlay) &&
-      Array.isArray(reply.unavailable_schemas) && reply.unavailable_schemas.every(value => Array.isArray(value) && value.length === 2 && value.every(string) && reply.projects.some(project => project?.project === value[0])) &&
+      Array.isArray(reply.unavailable_schemas) && reply.unavailable_schemas.every(value => Array.isArray(value) && value.length === 2 && value.every(string) && (reply.projects as (WireRecord | null)[]).some(project => project?.project === value[0])) &&
       new Set(reply.unavailable_schemas.map(value => JSON.stringify(value))).size === reply.unavailable_schemas.length &&
       new Set(reply.projects.map(project => project?.project)).size === reply.projects.length && reply.projects.every(project =>
         keys(project, ["project", "generated_package", "files", "diagnostics", "provenance"]) && string(project.project) && string(project.generated_package) && project.generated_package.split(".").every(identifier) &&
-        Array.isArray(project.files) && project.files.every(value => file(value) && value.relative_path.startsWith(project.generated_package.replaceAll(".", "/") + "/")) && new Set(project.files.map(file => file.relative_path.toLowerCase())).size === project.files.length &&
+        Array.isArray(project.files) && project.files.every(value => file(value) && value.relative_path.startsWith((project.generated_package as string).replaceAll(".", "/") + "/")) && new Set(project.files.map(file => file.relative_path.toLowerCase())).size === project.files.length &&
         Array.isArray(project.diagnostics) && project.diagnostics.every(value => diagnostic(value) && value.module.project === project.project) &&
-        validProvenance(project));
+        validProvenance(project as Parameters<typeof validProvenance>[0]));
   }
   return false;
 }
@@ -330,17 +378,17 @@ function validReply(reply, request) {
  * The caller owns complete captures, latest-job publication guards and trust events.
  * invalidate() terminates busy work and permits a fresh process; dispose() is final.
  */
-function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000, configFiles = false, spawn = spawnProcess }) {
+function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000, configFiles = false, spawn = spawnProcess }: WorkerOptions) {
   if (!string(python) || !path.isAbsolute(python) || !string(workspace) || !path.isAbsolute(workspace) ||
       typeof isTrusted !== "function" || typeof configFiles !== "boolean" || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2147483647) throw failure();
-  const outside = candidate => {
+  const outside = (candidate: string) => {
     const relative = path.relative(path.resolve(workspace), candidate);
     return relative && (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative));
   };
   const cwd = [os.tmpdir(), path.parse(path.resolve(workspace)).root].find(outside);
   if (!cwd) throw failure();
-  let child = null;
-  let pending = null;
+  let child: ChildProcessWithoutNullStreams | null = null;
+  let pending: Pending | null = null;
   let epoch = 0;
   let disposed = false;
   const trusted = () => { try { return isTrusted() === true; } catch { return false; } };
@@ -394,7 +442,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
       cwd, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
     });
     child = process;
-    const parts = [];
+    const parts: Buffer[] = [];
     let bytes = 0;
     const failed = () => { if (child === process) stop(); };
     process.on("error", failed);
@@ -429,7 +477,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
           } else if (active.replyPages) throw failure();
           if (active.request.op === "config_file" && active.request.action === "stage" &&
               keys(reply, ["ok", "error", "config_phase", "native_code"]) && reply.ok === false &&
-              reply.error === "editor-request-failed" && configFailurePhases.has(reply.config_phase) &&
+              reply.error === "editor-request-failed" && configFailurePhases.has(reply.config_phase as string) &&
               Number.isSafeInteger(reply.native_code) && reply.native_code >= 0 && reply.native_code <= 65535) {
             pending = null;
             active.cleanup();
@@ -448,10 +496,10 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
     return process;
   }
   return {
-    async request(message, { signal } = {}) {
+    async request(message: WorkerRequest, { signal }: { signal?: AbortSignal } = {}) {
       if (pending) throw failure();
       if (disposed || !trusted() || signal?.aborted) { stop(); throw failure(); }
-      let encoded;
+      let encoded: Buffer;
       try {
         if (!object(message) || !["prepare", "analyze", "current", "refresh", "artifacts", "doctor", "quarantine", "pyright_config", "config_file"].includes(message.op) ||
             message.workspace !== workspace) throw failure();
@@ -460,7 +508,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
           const base = ["op", "workspace", "action"];
           if (message.action === "stage") {
             if (!keys(message, [...base, "file", "temporary", "expected_hash", "text"]) ||
-                !["pyrightconfig.json", "pyproject.toml"].includes(message.file) ||
+                !["pyrightconfig.json", "pyproject.toml"].includes(message.file as string) ||
                 typeof message.temporary !== "string" || !path.isAbsolute(message.temporary) ||
                 !/^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.relative(workspace, message.temporary)) ||
                 typeof message.expected_hash !== "string" || !/^[a-f0-9]{64}$/.test(message.expected_hash) ||
@@ -468,18 +516,18 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
           } else if (message.action === "resume") {
             if (!keys(message, [...base, "receipt"]) || !string(message.receipt) || message.receipt.length > 32768 ||
                 !/^[A-Za-z0-9+/]+={0,2}$/.test(message.receipt)) throw failure();
-          } else if (!["verify", "verify_discard", "discard", "finish"].includes(message.action) || !keys(message, [...base, "token"]) ||
+          } else if (!["verify", "verify_discard", "discard", "finish"].includes(message.action as string) || !keys(message, [...base, "token"]) ||
               typeof message.token !== "string" || !/^[a-f0-9]{32}$/.test(message.token)) throw failure();
         } else if (message.op === "pyright_config") {
           if (!keys(message, ["op", "workspace", "text", "action", "managed_path", "ownership"]) || typeof message.text !== "string" ||
-              Buffer.byteLength(message.text, "utf8") > 1024 * 1024 || !["inspect", "add", "remove", "set_stub_path", "restore_stub_path", "prepare_stub_path", "release_stub_path"].includes(message.action) ||
+              Buffer.byteLength(message.text, "utf8") > 1024 * 1024 || !["inspect", "add", "remove", "set_stub_path", "restore_stub_path", "prepare_stub_path", "release_stub_path"].includes(message.action as string) ||
               (message.action === "set_stub_path" ? !generationStubPath(message.managed_path) : message.managed_path !== LIVE_STUB_ROOT) || !object(message.ownership) ||
               Object.keys(message.ownership).some(key => !["topLevel", "executionEnvironmentRoots", "expected_stub_path_present", "expected_stub_path",
                 "restore_stub_path_present", "restore_stub_path", "custom_stub_path", "custom_stub_path_added", "remove_extra_paths_key",
                 "original_stub_path_present", "original_stub_path", "remove_managed_paths", "legacy_top_level", "legacy_execution_environment_roots"].includes(key)) ||
               typeof message.ownership.topLevel !== "boolean" || !Array.isArray(message.ownership.executionEnvironmentRoots) ||
               !message.ownership.executionEnvironmentRoots.every(string) ||
-              ["set_stub_path", "restore_stub_path", "prepare_stub_path", "release_stub_path"].includes(message.action) &&
+              ["set_stub_path", "restore_stub_path", "prepare_stub_path", "release_stub_path"].includes(message.action as string) &&
                 typeof message.ownership.expected_stub_path_present !== "boolean") throw failure();
         } else if (message.op === "quarantine") {
           const projects = message.projects;
@@ -494,7 +542,7 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
           let total = 0;
           for (const project of projects) {
             if (!keys(project, ["project", "generated_package", "files", "provenance"]) || !Array.isArray(project.files) || project.files.length > 4096) throw failure();
-            const prefix = `${project.generated_package.replaceAll(".", "/")}/`;
+            const prefix = `${(project.generated_package as string).replaceAll(".", "/")}/`;
             for (const file of project.files) {
               if (!keys(file, ["relative_path", "text"]) || typeof file.relative_path !== "string" || !file.relative_path.startsWith(prefix) ||
                   !file.relative_path.endsWith(".pyi") || file.relative_path.includes("\\") || file.relative_path.includes("\0") ||
@@ -523,11 +571,11 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
         encoded = Buffer.from(JSON.stringify(wireMessage) + "\n", "utf8");
         if (encoded.length > MAX_FRAME_BYTES) throw failure();
       } catch { stop(); throw failure(); }
-      let process;
+      let process: ChildProcessWithoutNullStreams;
       try { process = child ?? start(); } catch { stop(); throw failure(); }
       const ticket = epoch;
       try {
-        const result = await new Promise((resolve, reject) => {
+        const result = await new Promise<unknown>((resolve, reject) => {
           const abort = () => stop();
           const deadline = performance.now() + timeoutMs;
           const timer = setTimeout(abort, timeoutMs);
@@ -549,4 +597,4 @@ function createAnalysisWorker({ python, workspace, isTrusted, timeoutMs = 10000,
   };
 }
 
-module.exports = { createAnalysisWorker, MAX_FRAME_BYTES };
+export = { createAnalysisWorker, MAX_FRAME_BYTES };
