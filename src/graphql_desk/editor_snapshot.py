@@ -759,6 +759,9 @@ def acquire_editor_snapshot(
 
     def contents(path: Path) -> tuple[str, int]:
         key = _identity(path)
+        # Callers pass selected, resolved paths. A new target was never selected.
+        if key != Path(os.path.normcase(str(path))):
+            raise ValueError("Inputs changed during snapshot acquisition")
         buffer = open_files.get(key)
         if buffer is not None:
             observations[(path, "text")] = _Observation(
@@ -931,7 +934,7 @@ def acquire_editor_snapshot(
                     }
                 )
                 continue
-            schema_path = _path(schema.origin.local_path)
+            schema_path = schema.origin.local_path
             suffix = schema_path.suffix.lower()
             if suffix not in {".graphql", ".gql", ".sdl", ".json"}:
                 raise ValueError("Unsupported local schema format")

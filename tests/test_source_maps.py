@@ -2,7 +2,9 @@
 
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
+from graphql_desk import source_maps
 from graphql_desk.source import Span
 from graphql_desk.source_graph import (
     ModuleSnapshot,
@@ -210,11 +212,16 @@ class SourceMapTests(unittest.TestCase):
         first, first_call, first_module = mapped("'a'")
         second_module = snapshot("second", "from graphql_desk import gql\nq=gql('b')")
         (second_call,) = resolve_project((second_module,)).calls
-        calls = (second_call, first_call)
+        calls = (second_call, first_call, second_call)
         modules = (first_module, second_module)
+        second = build_source_map(second_call, modules)
+        with patch.object(
+            source_maps, "_tokens", wraps=getattr(source_maps, "_tokens")
+        ) as tokenize_source:
+            self.assertEqual(build_source_maps(calls, modules), (second, first, second))
         self.assertEqual(
-            build_source_maps(calls, modules),
-            (build_source_map(second_call, modules), first),
+            [invocation.args for invocation in tokenize_source.call_args_list],
+            [(second_module.source,), (first_module.source,), (second_module.source,)],
         )
         with self.assertRaisesRegex(ValueError, "stale"):
             build_source_maps(calls, (replace(first_module, version=2), second_module))
@@ -222,6 +229,53 @@ class SourceMapTests(unittest.TestCase):
             build_source_maps(
                 calls, (*modules, replace(second_module, module="same_uri"))
             )
+
+    def test_batch_reuses_tokens_without_skipping_literal_range_checks(self) -> None:
+        module = snapshot(
+            "main",
+            "from graphql_desk import gql\r\n"
+            "first = gql('''# \U0001f40d\r\n{ user { id } }''')\r\n"
+            "second = gql('''# \U0001f600\r\n{ user { name } }''')\r\n",
+        )
+        modules = (module,)
+        calls = resolve_project(modules).calls
+        self.assertEqual(len(calls), 2)
+        with patch.object(
+            source_maps, "_tokens", wraps=getattr(source_maps, "_tokens")
+        ) as tokenize_source:
+            batched = build_source_maps(calls, modules)
+        tokenize_source.assert_called_once_with(module.source)
+        self.assertEqual(
+            batched, tuple(build_source_map(call, modules) for call in calls)
+        )
+
+        for mapping, char in zip(batched, ("\U0001f40d", "\U0001f600"), strict=True):
+            offset = mapping.text.index(char)
+            (origin,) = mapping.to_host(Span(offset, offset + 1))
+            self.assertEqual(module.source[origin.range.start : origin.range.end], char)
+            (newline,) = mapping.to_host(Span(offset + 1, offset + 2))
+            self.assertEqual(
+                module.source[newline.range.start : newline.range.end], "\r\n"
+            )
+            self.assertEqual(
+                convert_offset(module.source, origin.range.end)
+                - convert_offset(module.source, origin.range.start),
+                2,
+            )
+
+        first, second = calls
+        (contribution,) = second.contributions
+        malformed = replace(
+            second,
+            contributions=(
+                replace(
+                    contribution,
+                    range=Span(contribution.range.start + 1, contribution.range.end),
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "not a string literal"):
+            build_source_maps((first, malformed), modules)
 
     def test_coordinate_encodings(self) -> None:
         text = "a😀é"

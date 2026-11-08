@@ -11,7 +11,9 @@ import io
 import re
 import tokenize
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Literal
 
 from .source import Span
@@ -329,18 +331,19 @@ def build_source_map(
     call: ResolvedCall | ResolvedParseCall, modules: tuple[ModuleSnapshot, ...]
 ) -> SourceMap:
     """Verify provenance and decode literal tokens without executing project code."""
-    return _build_source_map(call, _snapshot_index(modules))
+    return _build_source_map(call, _snapshot_index(modules), _tokens)
 
 
 def build_source_maps(
     calls: tuple[ResolvedCall | ResolvedParseCall, ...],
     modules: tuple[ModuleSnapshot, ...],
 ) -> tuple[SourceMap, ...]:
-    """Build maps in call order using a single validated snapshot index."""
+    """Build maps in order, sharing verified snapshot and token positions."""
     if not calls:
         return ()
     snapshots = _snapshot_index(modules)
-    return tuple(_build_source_map(call, snapshots) for call in calls)
+    tokenize_source = lru_cache(maxsize=1)(_tokens)
+    return tuple(_build_source_map(call, snapshots, tokenize_source) for call in calls)
 
 
 def _snapshot_index(
@@ -361,6 +364,7 @@ def _snapshot_index(
 def _build_source_map(
     call: ResolvedCall | ResolvedParseCall,
     snapshots: dict[tuple[str, str], ModuleSnapshot],
+    tokenize_source: Callable[[str], tuple[tuple[int, Span], ...]],
 ) -> SourceMap:
     required = {
         call.module,
@@ -390,7 +394,7 @@ def _build_source_map(
         source = selected[contribution.module]
         _check(contribution.range, len(source))
         if contribution.module not in tokens:
-            tokens[contribution.module] = _tokens(source)
+            tokens[contribution.module] = tokenize_source(source)
         contained = [
             (kind, span)
             for kind, span in tokens[contribution.module]
