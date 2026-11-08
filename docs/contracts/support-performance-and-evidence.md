@@ -4,10 +4,14 @@ Planning decisions for PLAN-07/08, 2026-10-19. These define future acceptance; t
 
 ## Initial support and dependency decisions
 
+On 2026-11-08 the owner selected macOS 15 Arm64 as the minimum after GitHub
+Actions retired its macOS 14 runners. Native packaged-editor acceptance still
+applies on the new minimum. [Runner retirement announcement](https://github.com/actions/runner-images/issues/15226)
+
 | Surface | Adopted planning baseline | Rationale and acceptance |
 |---|---|---|
 | Python | CPython 3.10–3.14; reference fixture 3.11.13 | Retains prior 3.10 intent. Use standard `typing` plus `typing_extensions` where target lacks an API. CI valid/invalid typing and wheel/install/import on each minor; unsupported versions fail install clearly. |
-| OS | Windows 11 x64, Ubuntu 24.04 x64, macOS 14 arm64 | Planned release matrix, not yet verified support. Native paths/newlines, filesystem ownership and editor lifecycle must pass on all three. Other OS/architectures remain unclaimed pending tests, without dropping product capabilities. |
+| OS | Windows 11 x64, Ubuntu 24.04 x64, macOS 15 Arm64 | Initial release test matrix. Native paths/newlines, filesystem ownership and editor lifecycle must pass on all three. Other OS and architecture combinations remain unverified. |
 | VS Code | Desktop 1.141.0 and 1.142.0 initial pinned acceptance matrix | Pylance spike reports 1.141.0; clean editor spike reports isolated 1.142.0. Set eventual extension engine minimum 1.141.0; test the declared range before release and update pins deliberately. Remote SSH/WSL/container mode uses a workspace extension host and must pass path/URI tests before claimed supported. Browser-only VS Code cannot run the proposed Node/Python processes and is not an initial platform promise. |
 | Python tooling | Pyright 1.1.414, Pylance 2026.4.1, Python extension 2026.10.0; mypy 2.4.0 separately | Exact observed baselines. Library-level mypy compatibility is checked separately; it is not the live editor path. Test current pinned pair and candidate upgrades in CI before changing support. Pylance is user-installed under Microsoft's terms; never bundle/copy its binary into the extension. |
 | Python semantic substrate | `graphql-core==3.3.1`; `typing_extensions==4.16.0` when needed | Authoritative PyPI metadata fetched: Python >=3.10 / MIT, and >=3.9 / PSF-2.0 respectively. Choose graphql-core for standard semantics, not as a complete type generator. Breaking GraphQL.js changes may arrive in a graphql-core minor; retain exact dependency lock in implementation. Revalidate pinned gql.tada semantics against it. |

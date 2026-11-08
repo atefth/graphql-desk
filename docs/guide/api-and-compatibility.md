@@ -98,7 +98,7 @@ abstract/nullable/absence cases and raw structural-input limits.
 Package metadata requires Python >=3.10; the planned initial test matrix is
 CPython 3.10–3.14. Pinned editor acceptance targets VS Code desktop 1.141.0 and
 1.142.0 with the specified Python/Pylance pair. The planned OS matrix is Windows
-11 x64, Ubuntu 24.04 x64 and macOS 14 arm64. CI Windows Server smoke coverage is
+11 x64, Ubuntu 24.04 x64 and macOS 15 Arm64. CI Windows Server smoke coverage is
 not Windows 11 editor acceptance. A local example passing is not proof of every
 minor, host platform, wheel install or Marketplace distribution.
 

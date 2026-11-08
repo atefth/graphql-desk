@@ -214,11 +214,12 @@ VSIX acceptance still needs activation of the actual installed extension against
 the separately installed Python wheel, plus native tool and workspace-trust
 checks. Project licensing and publication remain owner-controlled.
 
-The supported contract targets CPython 3.10–3.14, VS Code 1.141/1.142, Windows 11
-x64, Ubuntu 24.04 x64 and macOS 14 arm64. Current CI's Windows Server 2025 and
-macOS 15 lanes do not by themselves establish Windows 11/macOS 14 acceptance;
-remote SSH, WSL and container path/URI evidence also remains outstanding. For
-packaged-editor checks, updates must be disabled in the fresh profile's user
+The release contract targets CPython 3.10–3.14, VS Code 1.141/1.142, Windows 11
+x64, Ubuntu 24.04 x64 and macOS 15 Arm64. The macOS 15 lane needs packaged-editor
+activation evidence. Windows Server 2025 smoke coverage cannot substitute for
+Windows 11 editor checks. Remote SSH, WSL and container path/URI checks remain open.
+
+For packaged-editor checks, updates must be disabled in the fresh profile's user
 settings using the installed schema (`extensions.autoUpdate: "off"` in 1.142),
 and all four tool versions verified again at the end. Existing older host modes
 that only check initial versions do not establish that final-version guarantee.
