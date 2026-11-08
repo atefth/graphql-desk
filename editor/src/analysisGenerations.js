@@ -488,6 +488,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     verifyRoot();
     const existing = currentGenerations(managed);
     const groups = [...packages].filter(([, files]) => files.length).sort(([a], [b]) => a.localeCompare(b));
+    if (groups.reduce((count, [, files]) => count + files.length, 0) > MAX_FILES) throw new Error("Too many generation artifacts");
     let totalInputBytes = 0;
     const paths = new Set();
     const outputFiles = [];
@@ -666,4 +667,4 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
   };
 }
 
-module.exports = { createAnalysisGenerations, validOperationManifest };
+module.exports = { createAnalysisGenerations, generationFiles, validOperationManifest };

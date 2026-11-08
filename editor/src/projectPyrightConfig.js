@@ -5,6 +5,7 @@ const path = require("node:path");
 const { randomUUID, createHash } = require("node:crypto");
 const { TextDecoder } = require("node:util");
 const { parse, parseTree, modify, applyEdits } = require("jsonc-parser");
+const { generationFiles } = require("./analysisGenerations");
 const { createManagedStubPath, managedStateKeys, isManagedGeneration, updateManagedState } = require("./managedStubPath");
 
 const MANAGED_PATH = ".graphql-desk/live-typings";
@@ -1209,32 +1210,113 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     return createManagedProjectConfig(vscode, folder, workspaceState, worker, { onOwnedWrite: originalOnOwnedWrite, onOwnership, configFile, ownerCurrent });
   }
 
+  let recoveredRollbackConfig;
   if (saved?.version === 3 && saved.phase === "rotate") {
-    const pending = workspaceState?.get?.(generationKeys.stateKey);
-    if (!pending?.pending || !isManagedGeneration(workspace, pending.current, MANAGED_PATH)) {
+    const pending = genericOwner;
+    const previous = saved.currentStubPath;
+    const rollbackTarget = saved.pythonStubPath.pending;
+    const settledRollback = pending?.base === MANAGED_PATH &&
+      Object.keys(pending).sort().join(",") === "base,current,currentPresent" &&
+      pending.currentPresent === true && saved.pythonStubPath.current === previous &&
+      (pending.current === previous || pending.current === rollbackTarget);
+    const target = settledRollback ? rollbackTarget : pending?.current;
+    if ((!pending?.pending && !settledRollback) || typeof target !== "string" ||
+        !isManagedGeneration(workspace, target, MANAGED_PATH)) {
       throw new Error("Interrupted Pylance generation rotation is incomplete; preserved");
     }
     const latest = await inspectLatest();
-    if (![pending.previous, pending.current].includes(latest.stubPath)) {
-      throw new Error("Pyright stubPath changed during interrupted rotation; preserved");
-    }
     const pythonCurrent = pythonSettings.effective() || "";
-    if (![saved.pythonStubPath.current, saved.pythonStubPath.pending, pending.current].includes(pythonCurrent)) {
-      throw new Error("Pylance stubPath changed during interrupted rotation; preserved");
-    }
-    const target = pending.current;
-    if (latest.stubPath !== target) await updateProjectConfig(vscode, folder, "set_stub_path", worker,
-      { expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath }, target, onOwnedWrite, configFile, configurationCurrent);
-    if (pythonCurrent !== target) await setPythonStubPath(target, pythonCurrent);
-    saved = { ...saved, phase: "active", currentStubPath: target,
+    const settledOwner = { ...saved, phase: "active", currentStubPath: target,
       pythonStubPath: { ...saved.pythonStubPath, current: target, pending: undefined } };
+    let recoveryCurrent = ownerCurrent;
+    let repairOwnerMemento;
+    if (settledRollback) {
+      // The original selection can be settled when its rollback reaches disk.
+      const diskOwner = JSON.stringify(persisted?.value);
+      const ownerAlreadySettled = pending.current === target && pythonCurrent === target &&
+        diskOwner === JSON.stringify(settledOwner);
+      if (!latest.hasStubPath || latest.stubPath !== target || previous === target ||
+          ![previous, target].includes(pythonCurrent) || pending.current === target && pythonCurrent !== target ||
+          !persisted || !ownerAlreadySettled && diskOwner !== JSON.stringify(saved) ||
+          saved.customStubPathAdded && !customPathPresent(latest) || !customEnvironmentPathsPresent(latest) ||
+          managedSearchAliases(latest)) {
+        throw new Error("Interrupted Pylance rollback ownership changed; preserved");
+      }
+      const directory = path.resolve(workspace, target);
+      const proof = generationFiles(vscode, workspace, directory);
+      let expectedOwner = JSON.stringify(workspaceState?.get?.(key));
+      const ownerIdentity = safeIdentity(ownerFile(workspace), false, true);
+      let selection = JSON.stringify(pending);
+      recoveryCurrent = () => {
+        const current = readFileSafe(vscode, workspace, latest.file);
+        if (ownerCurrent() !== true || JSON.stringify(workspaceState?.get?.(generationKeys.stateKey)) !== selection ||
+            inspected.format === "toml" && fs.existsSync(path.join(workspace, "pyrightconfig.json")) ||
+            managedSearchAliases(latest) ||
+            current.hash !== latest.hash || !sameConfigIdentity(current.identity, latest.identity) ||
+            !sameDirectory(current.workspaceIdentity, latest.snapshot.workspaceIdentity) ||
+            workspaceState?.get?.(generationKeys.generationStateKey)?.[proof.manifest.id] !== proof.manifestFingerprint ||
+            !isManagedGeneration(workspace, target, MANAGED_PATH)) {
+          throw new Error("Interrupted Pylance rollback proof changed; preserved");
+        }
+        const verified = proof.verify();
+        if (verified.manifestFingerprint !== proof.manifestFingerprint ||
+            !same(verified.identity, proof.identity) || !same(verified.manifestIdentity, proof.manifestIdentity) ||
+            [...proof.files].some(([file, value]) => !verified.files.has(file) || !same(verified.files.get(file).identity, value.identity)) ||
+            [...proof.directories].some(([file, value]) => !verified.directories.has(file) || !same(verified.directories.get(file), value))) {
+          throw new Error("Interrupted Pylance rollback proof changed; preserved");
+        }
+        return configurationCurrent();
+      };
+      const checkOwner = () => {
+        if (dirtyFile(vscode, ownerFile(workspace)) ||
+            !sameConfigIdentity(safeIdentity(ownerFile(workspace), false, true), ownerIdentity) ||
+            readPersistentOwner(workspace)?.hash !== persisted.hash ||
+            JSON.stringify(workspaceState?.get?.(key)) !== expectedOwner) {
+          throw new Error("Interrupted Pylance rollback owner changed; preserved");
+        }
+        return recoveryCurrent();
+      };
+      if (pythonCurrent === target) pythonOwner = { ...pythonOwner, current: target };
+      checkOwner();
+      if (pythonCurrent !== target) await setPythonStubPath(target, pythonCurrent);
+      if (pending.current !== target) {
+        const settled = { base: MANAGED_PATH, current: target, currentPresent: true };
+        await updateManagedState(workspaceState, generationKeys.stateKey, settled, checkOwner);
+        selection = JSON.stringify(settled);
+      }
+      checkOwner();
+      if (ownerAlreadySettled) repairOwnerMemento = async () => {
+        await updateManagedState(workspaceState, key, settledOwner, checkOwner);
+        expectedOwner = JSON.stringify(settledOwner);
+        checkOwner();
+      };
+      recoveredRollbackConfig = latest;
+    } else {
+      if (![pending.previous, target].includes(latest.stubPath)) {
+        throw new Error("Pyright stubPath changed during interrupted rotation; preserved");
+      }
+      if (![saved.pythonStubPath.current, saved.pythonStubPath.pending, target].includes(pythonCurrent)) {
+        throw new Error("Pylance stubPath changed during interrupted rotation; preserved");
+      }
+      if (latest.stubPath !== target) await updateProjectConfig(vscode, folder, "set_stub_path", worker,
+        { expectedStubPathPresent: latest.hasStubPath, expectedStubPath: latest.stubPath }, target, onOwnedWrite, configFile, configurationCurrent);
+      if (pythonCurrent !== target) await setPythonStubPath(target, pythonCurrent);
+    }
+    saved = settledOwner;
     pythonOwner = saved.pythonStubPath;
-    await persistOwner(saved, ownerCurrent);
+    if (repairOwnerMemento) await repairOwnerMemento();
+    else await persistOwner(saved, recoveryCurrent);
   }
 
   if (saved?.version === 3 && saved.phase === "active") {
     let latest = await inspectLatest();
+    if (recoveredRollbackConfig && (latest.hash !== recoveredRollbackConfig.hash ||
+        !sameConfigIdentity(latest.identity, recoveredRollbackConfig.identity) ||
+        !sameDirectory(latest.snapshot.workspaceIdentity, recoveredRollbackConfig.snapshot.workspaceIdentity))) {
+      throw new Error("Pyright config changed after interrupted rollback recovery; preserved");
+    }
     if (managedSearchAliases(latest)) {
+      if (recoveredRollbackConfig) throw new Error("Pyright search paths changed after interrupted rollback recovery; preserved");
       latest = await updateProjectConfig(vscode, folder, "remove_stale_generations", worker, {}, MANAGED_PATH, onOwnedWrite, configFile, configurationCurrent);
     }
     if (latest.stubPath !== saved.currentStubPath || !latest.hasStubPath ||
