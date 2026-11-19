@@ -2824,6 +2824,7 @@ search=graphql('query Search($filter:Filter!){search(filter:$filter)}')
                 "(book_fields,))\n"
                 'duplicate=graphql("query Book($id:ID!){book(id:$id){id ...Fields}}",'
                 "(book_fields,))\n"
+                'second=graphql("query Second{book(id:1){...Fields}}",(book_fields,))\n'
                 'other=graphql("query A{greeting} query B{alias:greeting}",'
                 'operation="B")\n'
                 "R=TypeVar('R')\nV=TypeVar('V')\n"
@@ -2871,6 +2872,16 @@ search=graphql('query Search($filter:Filter!){search(filter:$filter)}')
         artifacts = self.generate(modules)
         self.assertEqual(artifacts.diagnostics, ())
         self.assertEqual(artifacts, self.generate(modules))
+        factory = next(
+            f.text for f in artifacts.files if f.relative_path == "generated/main.pyi"
+        )
+        owners = [
+            line.split(" import ")[0]
+            for line in factory.splitlines()
+            if line.startswith("from generated._documents.")
+        ]
+        self.assertEqual(len(owners), 5)  # Two fragments and three distinct operations.
+        self.assertEqual(len(set(owners)), len(owners))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.write(root, artifacts, modules)
