@@ -14,8 +14,13 @@ from graphql import (
 
 from .fragments import DefinitionFact, FragmentIndex, IndexedDocument, SchemaContext
 from .source import Span
-from .source_graph import DocumentIdentity, GraphDiagnostic, ModuleSnapshot
-from .source_maps import SourceMap, build_source_map
+from .source_graph import (
+    DocumentIdentity,
+    GraphDiagnostic,
+    ModuleSnapshot,
+    ResolvedCall,
+)
+from .source_maps import SourceMap, SourceMapBuilder, build_source_map
 from .validation import validate_deprecations, validate_document
 
 _Executable = OperationDefinitionNode | FragmentDefinitionNode
@@ -75,7 +80,10 @@ def validate_registered_document(
         context,
         document,
         owners=owners,
-        original_owner=partial(_parse_original_owner, modules=modules),
+        original_owner=partial(
+            _parse_original_owner,
+            source_map=partial(build_source_map, modules=modules),
+        ),
         client_directives=client_directives,
         include_deprecations=include_deprecations,
     )
@@ -85,10 +93,15 @@ def registered_document_validator(
     context: SchemaContext,
     *,
     owners: Mapping[DocumentIdentity, IndexedDocument],
-    modules: tuple[ModuleSnapshot, ...],
+    modules: tuple[ModuleSnapshot, ...] | SourceMapBuilder,
     client_directives: tuple[str, ...],
 ) -> Callable[[IndexedDocument], tuple[GraphDiagnostic, ...]]:
-    """Keep original imported definitions for one synchronous factory build."""
+    """Keep fragment originals for one build, using snapshots or their bound mapper."""
+    source_map = (
+        modules.build
+        if isinstance(modules, SourceMapBuilder)
+        else partial(build_source_map, modules=modules)
+    )
     referenced = {
         ref.target for owner in owners.values() for ref in owner.call.fragments
     }
@@ -100,7 +113,7 @@ def registered_document_validator(
         previous = retained.get(identity)
         if previous is not None and previous[0] is owner:
             return previous[1]
-        original = _parse_original_owner(identity, owner, modules=modules)
+        original = _parse_original_owner(identity, owner, source_map=source_map)
         if identity in referenced:
             retained[identity] = owner, original
         return original
@@ -122,9 +135,9 @@ def _parse_original_owner(
     identity: DocumentIdentity,
     owner: IndexedDocument,
     *,
-    modules: tuple[ModuleSnapshot, ...],
+    source_map: Callable[[ResolvedCall], SourceMap],
 ) -> _OriginalOwner:
-    mapping = build_source_map(owner.call, modules)
+    mapping = source_map(owner.call)
     source = Source(owner.call.source, name=owner.call.module.uri)
     originals = parse(source)
     local: dict[DefinitionFact, _Executable] = {}

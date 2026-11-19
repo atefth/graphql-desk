@@ -61,6 +61,7 @@ from .source_graph import (
 from .testing_helpers import render_testing_helper_artifacts
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
+MAX_EDITOR_STUB_BYTES = 1024 * 1024
 ANALYSIS_PAGE_BYTES = 4 * 1024 * 1024
 MAX_ANALYSIS_PAGES = 16
 MAX_PYRIGHT_CONFIG_BYTES = 1024 * 1024
@@ -1360,6 +1361,7 @@ class EditorWorker:
                         index,
                         modules=(*project_modules, *mapping_modules),
                         project_id=project,
+                        editor_stub_bytes=MAX_EDITOR_STUB_BYTES,
                     )
                 )
                 generated_files = {
