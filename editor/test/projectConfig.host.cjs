@@ -4,6 +4,29 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const vscode = require("vscode");
+const workerModule = require("../src/analysisWorker");
+const createWorker = workerModule.createAnalysisWorker;
+const interruptedArtifacts = [];
+let failuresRemaining = 0;
+workerModule.createAnalysisWorker = options => new Proxy(createWorker(options), { get(target, property) {
+  if (property === "request") return async (message, requestOptions) => {
+    if (message.op === "artifacts" && failuresRemaining > 0) {
+      failuresRemaining -= 1;
+      const pending = target.request(message, requestOptions);
+      target.invalidate();
+      try { await pending; }
+      catch (error) {
+        interruptedArtifacts.push({ id: message.id,
+          changedSchema: message.schema_buffers?.some(schema => schema.text.includes("selected: Boolean")) === true });
+        throw error;
+      }
+      assert.fail("An interrupted artifact request must fail");
+    }
+    return target.request(message, requestOptions);
+  };
+  const value = Reflect.get(target, property, target);
+  return typeof value === "function" ? value.bind(target) : value;
+} });
 
 async function until(action, accept, description, timeout = 45000) {
   const deadline = Date.now() + timeout;
@@ -183,6 +206,31 @@ async function run() {
     await fs.writeFile(resultPath, JSON.stringify(evidence, null, 2));
     return;
   }
+  const settingsFile = path.join(workspace, ".vscode", "settings.json");
+  const settingsBefore = JSON.parse(await fs.readFile(settingsFile, "utf8"));
+  delete settingsBefore["python.analysis.stubPath"];
+  const originalSource = await fs.readFile(file);
+  const originalSchema = await fs.readFile(schemaFile);
+  const lowerToml = projectToml ? null : await fs.readFile(path.join(workspace, "pyproject.toml"));
+  const neighbor = path.join(workspace, ".graphql-desk", "keep.txt");
+  const originalNeighbor = await fs.readFile(neighbor);
+  const schemaDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(schemaFile));
+  const schemaText = schemaDocument.getText();
+  const offset = schemaText.indexOf("selected: String");
+  assert.notEqual(offset, -1);
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(schemaDocument.uri, new vscode.Range(schemaDocument.positionAt(offset + "selected: ".length),
+    schemaDocument.positionAt(offset + "selected: String".length)), "Boolean");
+  failuresRemaining = 2;
+  assert.equal(await vscode.workspace.applyEdit(edit), true);
+  await until(async () => interruptedArtifacts, requests => requests.length === 2 && requests.every(item => item.changedSchema),
+    "Both artifact attempts fail for the unsaved schema before deactivation");
+  const failedGeneration = await until(generation, value => value?.setting !== current.setting &&
+    value.pythonSetting === value.setting && value.generationAnalysisId?.startsWith("quarantine-") &&
+    value.operationStatuses?.some(operation => operation.operation === "Pick" && operation.status === "unavailable") &&
+    /Never|NoReturn|Unknown|object/.test(value.text), "Failed analysis leaves unavailable typing selected before deactivation");
+  const dirtySchema = schemaDocument.getText();
+  assert.equal(schemaDocument.isDirty, true);
   await require("../src/extension").deactivate();
   await until(async () => config(), value => value.stubPath === "custom-stubs" && value.extraPaths?.join("\0") === "vendor",
     "Deactivation restores the user's project config");
@@ -195,7 +243,24 @@ async function run() {
   evidence.projectConfigBeforeCleanup = beforeCleanupConfig;
   evidence.projectConfigAfterCleanup = config();
   evidence.preservedExtraPaths = config().extraPaths;
+  const settingsAfter = JSON.parse(await fs.readFile(settingsFile, "utf8"));
+  delete settingsAfter["python.analysis.stubPath"];
+  assert.deepEqual(settingsAfter, settingsBefore, "Failure cleanup preserves unrelated workspace settings");
+  assert.deepEqual(await fs.readFile(file), originalSource, "Failure cleanup preserves saved Python source");
+  assert.deepEqual(await fs.readFile(schemaFile), originalSchema, "Failure cleanup preserves the saved schema");
+  assert.deepEqual(await fs.readFile(neighbor), originalNeighbor, "Failure cleanup preserves neighboring user data");
+  if (lowerToml) assert.deepEqual(await fs.readFile(path.join(workspace, "pyproject.toml")), lowerToml,
+    "Failure cleanup preserves the lower-priority TOML config exactly");
+  assert.equal(schemaDocument.getText(), dirtySchema, "Failure cleanup preserves the unsaved schema edit");
+  assert.equal(schemaDocument.isDirty, true);
+  evidence.failureRestoration = { interruptedArtifacts, selectedGeneration: failedGeneration.setting,
+    unavailableType: failedGeneration.text, restoredPythonStubPath: await pythonStubPath(),
+    dirtySchemaPreserved: true, savedFilesPreserved: true, unrelatedSettingsPreserved: true,
+    lowerPriorityTomlPreserved: lowerToml !== null };
   await fs.writeFile(resultPath, JSON.stringify(evidence, null, 2));
 }
 
-module.exports = { run };
+module.exports = { async run() {
+  try { await run(); }
+  finally { workerModule.createAnalysisWorker = createWorker; }
+} };
