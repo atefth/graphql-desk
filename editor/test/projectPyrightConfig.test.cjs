@@ -2766,6 +2766,79 @@ for (const mismatched of [false, true]) test(`durable forward intent ${mismatche
   assert.deepEqual(cold.get(h.keys.stateKey), { base: MANAGED_PATH, current: target, currentPresent: true });
 });
 
+for (const mismatched of [false, true]) test(`cold rollback after forward settlement fails ${mismatched ? "rejects a mismatched selection" : "honors its committed native target"}`, async t => {
+  const h = await normalReleaseGeneration(t);
+  const previous = h.f.pythonStubPath;
+  const config = h.f.vscode.workspace.getConfiguration();
+  const update = config.update;
+  const updateState = h.state.update;
+  let entered, rejectUpdate;
+  const started = new Promise(resolve => { entered = resolve; });
+  const held = new Promise((resolve, reject) => { rejectUpdate = reject; });
+  config.update = async (...args) => {
+    if (args[1] === previous) { entered(); await held; }
+    return update(...args);
+  };
+  t.after(() => { rejectUpdate(new Error("test cleanup")); config.update = update; });
+  let interruptedSettlement = false;
+  h.state.update = async (key, value) => {
+    if (!interruptedSettlement && key === h.keys.stateKey && value?.current?.includes("/g-2-") && value.pending !== true) {
+      interruptedSettlement = true;
+      throw new Error("interrupted generic settlement");
+    }
+    return updateState(key, value);
+  };
+  const publisher = createAnalysisGenerations(h.f.vscode, h.f.root, h.managed.root);
+  const groups = new Map([["example_generated", [
+    { relative_path: "example_generated/default.py", text: 'value = "runtime"\n' },
+    { relative_path: "example_generated/default.pyi", text: "value: str | None\n" },
+  ]]]);
+  const publishing = publisher.publish(groups, "interrupted-forward-settlement", () => true, h.managed,
+    "c".repeat(64), "d".repeat(64), []).then(value => ({ value }), error => ({ error }));
+  await Promise.race([started, publishing.then(() => assert.fail("the rollback Python update must be held"))]);
+  const file = path.join(h.f.root, "pyproject.toml");
+  const native = fs.readFileSync(file);
+  const ownerPath = path.join(h.managed.root, "project-config-owner.json");
+  const durable = fs.readFileSync(ownerPath);
+  const owner = JSON.parse(durable);
+  assert.equal(interruptedSettlement, true);
+  assert.equal(owner.phase, "rotate");
+  assert.equal(owner.pythonStubPath.pending, previous);
+  assert.equal(h.f.pythonStubPath, owner.currentStubPath);
+  assert.deepEqual(h.state.get(h.keys.stateKey), { base: MANAGED_PATH, current: owner.currentStubPath,
+    previous, previousPresent: true, pending: true });
+  assert.equal(/^stubPath\s*=\s*"([^"]*)"/m.exec(native.toString("utf8"))[1], previous);
+  const crash = h.state.snapshot();
+  rejectUpdate(new Error("interrupted rollback Python mirror"));
+  assert.ok((await publishing).error);
+  config.update = update;
+  h.f.configFile.restart();
+  const cold = stateStore();
+  for (const [key, value] of crash) await cold.update(key, value);
+  const reports = [];
+  if (mismatched) {
+    await cold.update(h.keys.stateKey, { ...cold.get(h.keys.stateKey), previous: "later-user-stubs" });
+    const stateBefore = cold.snapshot();
+    const callsBefore = h.f.configFile.calls.length;
+    await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, cold, h.f.worker,
+      { onOwnership: (_file, value) => reports.push(value) }), /Interrupted Pylance generation rotation is incomplete; preserved/);
+    assert.deepEqual(cold.snapshot(), stateBefore);
+    assert.deepEqual(fs.readFileSync(file), native);
+    assert.deepEqual(fs.readFileSync(ownerPath), durable);
+    assert.equal(h.f.pythonStubPath, owner.currentStubPath);
+    assert.equal(h.f.configFile.calls.length, callsBefore);
+    assert.deepEqual(reports, []);
+    return;
+  }
+  const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, cold, h.f.worker,
+    { onOwnership: (_file, value) => reports.push(value) });
+  assert.equal(reopened.selectedSetting, previous, "Cold recovery must honor the explicit rollback target");
+  assert.equal(h.f.pythonStubPath, previous);
+  assert.deepEqual(fs.readFileSync(file), native, "A committed native rollback must not be rewritten forward");
+  assert.deepEqual(reports, [previous], "The revoked forward generation must not be reattested");
+  assert.deepEqual(cold.get(h.keys.stateKey), { base: MANAGED_PATH, current: previous, currentPresent: true });
+});
+
 test("pre-native rollback checks native identity after its final settled-owner read", async t => {
   const h = await normalReleaseGeneration(t, true, { beforeNative: "paired" });
   const crash = h.state.snapshot();

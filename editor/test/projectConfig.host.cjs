@@ -4,6 +4,37 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const vscode = require("vscode");
+const workerModule = require("../src/analysisWorker");
+const projectConfigModule = require("../src/projectPyrightConfig");
+const { isManagedGeneration } = require("../src/managedStubPath");
+const createProjectConfig = projectConfigModule.createManagedProjectConfig;
+let fixtureState;
+projectConfigModule.createManagedProjectConfig = (api, folder, state, ...rest) => {
+  fixtureState = state;
+  return createProjectConfig(api, folder, state, ...rest);
+};
+const createWorker = workerModule.createAnalysisWorker;
+const interruptedArtifacts = [];
+let failuresRemaining = 0;
+workerModule.createAnalysisWorker = options => new Proxy(createWorker(options), { get(target, property) {
+  if (property === "request") return async (message, requestOptions) => {
+    if (message.op === "artifacts" && failuresRemaining > 0) {
+      failuresRemaining -= 1;
+      const pending = target.request(message, requestOptions);
+      target.invalidate();
+      try { await pending; }
+      catch (error) {
+        interruptedArtifacts.push({ id: message.id,
+          changedSchema: message.schema_buffers?.some(schema => schema.text.includes("selected: Boolean")) === true });
+        throw error;
+      }
+      assert.fail("An interrupted artifact request must fail");
+    }
+    return target.request(message, requestOptions);
+  };
+  const value = Reflect.get(target, property, target);
+  return typeof value === "function" ? value.bind(target) : value;
+} });
 
 async function until(action, accept, description, timeout = 45000) {
   const deadline = Date.now() + timeout;
@@ -13,12 +44,32 @@ async function until(action, accept, description, timeout = 45000) {
     if (accept(value)) return value;
     await new Promise(resolve => setTimeout(resolve, 100));
   } while (Date.now() < deadline);
+  let ownership;
+  try {
+    const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
+    const base = projectConfigModule.MANAGED_PATH;
+    const disk = await fs.readFile(path.join(workspace, base, "project-config-owner.json"), "utf8")
+      .then(JSON.parse, error => { if (error.code !== "ENOENT") throw error; });
+    const owner = record => record && { phase: record.phase, current: record.currentStubPath,
+      python: record.pythonStubPath?.current, target: record.pythonStubPath?.pending };
+    const key = prefix => fixtureState?.keys().find(name => name.startsWith(prefix) && name.includes(":project-"));
+    const record = prefix => { const name = key(prefix); return name && fixtureState.get(name); };
+    const selection = record("managed-analysis-stub:");
+    const ledger = record("managed-analysis-generations:") ?? {};
+    const stored = fixtureState?.get(projectConfigModule.stateKey(workspace));
+    const settings = [disk?.currentStubPath, disk?.pythonStubPath?.pending, stored?.currentStubPath,
+      stored?.pythonStubPath?.pending, selection?.previous, selection?.current];
+    const generations = [...new Set(settings.filter(setting => typeof setting === "string"))].map(setting => ({
+      setting, complete: isManagedGeneration(workspace, setting, base), registered: Object.hasOwn(ledger, path.basename(setting)),
+    }));
+    ownership = { disk: owner(disk), stored: owner(stored), selection, generations };
+  } catch (error) { ownership = { readError: String(error) }; }
   try {
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify({
       outcome: "project-config-host-failed",
       error: description,
       progress: { phase: process.env.GRAPHQL_DESK_RESTART_PHASE, suite: process.env.GRAPHQL_DESK_TEST_SUITE,
-        lastGeneration: value },
+        ownership, lastGeneration: value },
     }, null, 2));
   } catch (error) { console.error(`Project-config failure evidence could not be saved: ${String(error)}`); }
   assert.fail(`${description}: ${JSON.stringify(value)?.slice(0, 5000)}`);
@@ -133,12 +184,15 @@ async function run() {
   let initialType = null;
   let refreshedType = null;
   let current;
+  const precisePick = value => value?.operationStatuses?.some(item => item.operation === "Pick" && item.status === "precise") &&
+    value.pythonSetting === value.setting;
+  const nullablePick = value => precisePick(value) && value.text?.includes("None") && value.generatedStub?.includes("None");
   if (phase === "before-restart") {
     const configured = await until(generation, value => value?.generatedStubExists && value.operationCount > 0,
       "GraphQL Desk publishes a complete operation generation and resolves the generated package path", 45000);
     assert.equal(configured.consumerImport, "from graphql_desk_generated.default import graphql");
     await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
-    const first = await until(generation, value => value?.text?.includes("String") && !value.text.includes("None"),
+    const first = await until(generation, value => precisePick(value) && value.text?.includes("String") && !value.text.includes("None"),
       "Pylance infers the non-null project-config result after its managed settings refresh");
     assert.ok(first.generatedStub.includes("selected"), `The generated operation result contains selected: ${JSON.stringify(first)}`);
     assert.ok(first.graphqlDefinitions.some(item => item.uri?.endsWith("graphql_desk_generated/default.py")),
@@ -152,12 +206,12 @@ async function run() {
     const before = await fs.readFile(schemaFile, "utf8");
     assert.match(before, /selected: String!/);
     await fs.writeFile(schemaFile, before.replace("selected: String!", "selected: String"), "utf8");
-    current = await until(generation, value => value?.setting !== first.setting && value.text?.includes("None") && value.pythonSetting === value.setting,
+    current = await until(generation, value => value?.setting !== first.setting && nullablePick(value),
       "Pylance refreshes live from a nullable schema edit and selects the same completed generation as Pyright");
     assert.equal(await pythonStubPath(), current.setting, "Pylance setting rotates with the completed project generation");
     refreshedType = current.text;
   } else {
-    current = await until(generation, value => value?.text?.includes("None"),
+    current = await until(generation, nullablePick,
       "Pylance recovers the selected project-config generation after a VS Code restart");
     initialType = current.text;
     refreshedType = current.text;
@@ -183,6 +237,31 @@ async function run() {
     await fs.writeFile(resultPath, JSON.stringify(evidence, null, 2));
     return;
   }
+  const settingsFile = path.join(workspace, ".vscode", "settings.json");
+  const settingsBefore = JSON.parse(await fs.readFile(settingsFile, "utf8"));
+  delete settingsBefore["python.analysis.stubPath"];
+  const originalSource = await fs.readFile(file);
+  const originalSchema = await fs.readFile(schemaFile);
+  const lowerToml = projectToml ? null : await fs.readFile(path.join(workspace, "pyproject.toml"));
+  const neighbor = path.join(workspace, ".graphql-desk", "keep.txt");
+  const originalNeighbor = await fs.readFile(neighbor);
+  const schemaDocument = await vscode.workspace.openTextDocument(vscode.Uri.file(schemaFile));
+  const schemaText = schemaDocument.getText();
+  const offset = schemaText.indexOf("selected: String");
+  assert.notEqual(offset, -1);
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(schemaDocument.uri, new vscode.Range(schemaDocument.positionAt(offset + "selected: ".length),
+    schemaDocument.positionAt(offset + "selected: String".length)), "Boolean");
+  failuresRemaining = 2;
+  assert.equal(await vscode.workspace.applyEdit(edit), true);
+  await until(async () => interruptedArtifacts, requests => requests.length === 2 && requests.every(item => item.changedSchema),
+    "Both artifact attempts fail for the unsaved schema before deactivation");
+  const failedGeneration = await until(generation, value => value?.setting !== current.setting &&
+    value.pythonSetting === value.setting && value.generationAnalysisId?.startsWith("quarantine-") &&
+    value.operationStatuses?.some(operation => operation.operation === "Pick" && operation.status === "unavailable") &&
+    /Never|NoReturn|Unknown|object/.test(value.text), "Failed analysis leaves unavailable typing selected before deactivation");
+  const dirtySchema = schemaDocument.getText();
+  assert.equal(schemaDocument.isDirty, true);
   await require("../src/extension").deactivate();
   await until(async () => config(), value => value.stubPath === "custom-stubs" && value.extraPaths?.join("\0") === "vendor",
     "Deactivation restores the user's project config");
@@ -195,7 +274,27 @@ async function run() {
   evidence.projectConfigBeforeCleanup = beforeCleanupConfig;
   evidence.projectConfigAfterCleanup = config();
   evidence.preservedExtraPaths = config().extraPaths;
+  const settingsAfter = JSON.parse(await fs.readFile(settingsFile, "utf8"));
+  delete settingsAfter["python.analysis.stubPath"];
+  assert.deepEqual(settingsAfter, settingsBefore, "Failure cleanup preserves unrelated workspace settings");
+  assert.deepEqual(await fs.readFile(file), originalSource, "Failure cleanup preserves saved Python source");
+  assert.deepEqual(await fs.readFile(schemaFile), originalSchema, "Failure cleanup preserves the saved schema");
+  assert.deepEqual(await fs.readFile(neighbor), originalNeighbor, "Failure cleanup preserves neighboring user data");
+  if (lowerToml) assert.deepEqual(await fs.readFile(path.join(workspace, "pyproject.toml")), lowerToml,
+    "Failure cleanup preserves the lower-priority TOML config exactly");
+  assert.equal(schemaDocument.getText(), dirtySchema, "Failure cleanup preserves the unsaved schema edit");
+  assert.equal(schemaDocument.isDirty, true);
+  evidence.failureRestoration = { interruptedArtifacts, selectedGeneration: failedGeneration.setting,
+    unavailableType: failedGeneration.text, restoredPythonStubPath: await pythonStubPath(),
+    dirtySchemaPreserved: true, savedFilesPreserved: true, unrelatedSettingsPreserved: true,
+    lowerPriorityTomlPreserved: lowerToml !== null };
   await fs.writeFile(resultPath, JSON.stringify(evidence, null, 2));
 }
 
-module.exports = { run };
+module.exports = { async run() {
+  try { await run(); }
+  finally {
+    workerModule.createAnalysisWorker = createWorker;
+    projectConfigModule.createManagedProjectConfig = createProjectConfig;
+  }
+} };
