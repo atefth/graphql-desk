@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from graphql import build_schema
+from graphql import build_schema, extend_schema, parse
 
 from graphql_desk.config import ProjectConfig, ScalarMapping, parse_project_config
 from graphql_desk.factory_generation import (
@@ -148,6 +148,91 @@ if TYPE_CHECKING:
         self.assertIn("generated/_documents/beta/d0.pyi", paths)
         self.assertIn("generated/sources/first/shared.pyi", paths)
         self.assertIn("generated/sources/second/shared.pyi", paths)
+
+    def test_oversized_editor_factory_keeps_exact_source_and_fragment_types(
+        self,
+    ) -> None:
+        config, contexts, modules, _ = self.multi_schema()
+        alpha, beta = contexts
+        contexts = (
+            replace(
+                alpha,
+                schema=extend_schema(
+                    alpha.schema, parse("enum GraphqlDeskSourceLiteral { ORIGINAL }")
+                ),
+            ),
+            beta,
+        )
+        # Only alpha crosses the editor budget, including UTF-8 query comments.
+        long_query = "# " + "π" * 1800 + r"\nquery A"
+        main = replace(
+            modules[0], source=modules[0].source.replace("query A", long_query)
+        )
+        modules = (main, *modules[1:])
+        resolved = resolve_project(
+            modules, bindings=(project_bindings(config, project_id="p"),)
+        )
+        index = index_fragments(
+            resolved, schemas={("p", item.schema_name): item for item in contexts}
+        )
+        saved = generate_project_factory_artifacts(
+            config, contexts, index, modules=modules, project_id="p"
+        )
+        before = {item.relative_path: item.text for item in saved.files}
+        budget = len(before["generated/alpha.pyi"].encode()) - 1
+        self.assertEqual(
+            generate_project_factory_artifacts(
+                config,
+                contexts,
+                index,
+                modules=modules,
+                project_id="p",
+                editor_stub_bytes=1,
+            ),
+            saved,
+        )
+        self.assertEqual(
+            generate_project_factory_artifacts(
+                config,
+                contexts,
+                index,
+                modules=modules,
+                project_id="p",
+                editor_stub_bytes=budget + 1,
+            ),
+            saved,
+        )
+        edited = generate_project_factory_artifacts(
+            config,
+            contexts,
+            index,
+            modules=modules,
+            project_id="p",
+            editor_stub_bytes=budget,
+        )
+        self.assertEqual(edited.diagnostics, ())
+        self.assertEqual(edited.provenance, saved.provenance)
+        after = {item.relative_path: item.text for item in edited.files}
+        self.assertEqual(before.keys(), after.keys())
+        self.assertLessEqual(len(after["generated/alpha.pyi"].encode()), budget)
+        self.assertEqual(before["generated/beta.pyi"], after["generated/beta.pyi"])
+        self.assertEqual(
+            {path: text for path, text in before.items() if path.endswith(".py")},
+            {path: text for path, text in after.items() if path.endswith(".py")},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write(root, edited, modules)
+            invalid = (
+                "from generated.alpha import graphql as alpha\n"
+                "from main import beta_fields, execute\n"
+                "from generated.sources.main import AlphaQueryVariables\n"
+                f"doc=alpha('{long_query} {{item {{id ...Fields @local}}}}',"
+                "(beta_fields,))\n"
+                "execute(doc,AlphaQueryVariables())\n"
+            )
+            (root / "invalid.py").write_text(invalid, encoding="utf8")
+            self.check(root, {"invalid.py": {5}})
 
     def test_unmask_transitive_conditional_abstract_results_per_schema(self) -> None:
         config, _, _, _ = self.multi_schema()

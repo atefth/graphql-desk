@@ -761,6 +761,7 @@ def _generate_factory_artifacts(
     enums: tuple[tuple[str, str], ...] = (),
     client_directives: tuple[str, ...] = (),
     disable_masking: bool = False,
+    editor_stub_bytes: int | None = None,
 ) -> _SchemaArtifacts:
     """Generate one schema's retained runtime/stub files without writing them.
 
@@ -801,7 +802,7 @@ def _generate_factory_artifacts(
     active: set[DocumentIdentity] = set()
     signatures: dict[tuple[str, str | None, tuple[str, ...]], DocumentIdentity] = {}
     canonical_owners: dict[DocumentIdentity, DocumentIdentity] = {}
-    overloads: list[str] = []
+    overload_parameters: list[tuple[DocumentIdentity, str]] = []
     error_call = documents[0].call if documents else None
     document_aliases: dict[tuple[str, str], str] = {}
     exports: list[_SourceExport] = []
@@ -1267,13 +1268,11 @@ def _generate_factory_artifacts(
                 if operation_name is not None:
                     selector = f"__graphql_desk_Literal[{operation_name!r}, None]"
                 selector += " = None"
-            overloads.append(
-                "    @__graphql_desk_overload\n"
-                "    def __call__(self, source: "
-                f"__graphql_desk_Literal[{document.call.source!r}], "
+            parameters = (
                 f"fragments: {fragments}{default}, *, "
                 f"operation: {selector}) -> {return_alias}: ...\n"
             )
+            overload_parameters.append((identity, parameters))
         path = f"{base}/{context.schema_name}"
         packages(path + ".py")
         put(
@@ -1299,7 +1298,7 @@ def _generate_factory_artifacts(
             "Literal as __graphql_desk_Literal, "
             "overload as __graphql_desk_overload"
         )
-        stub = (
+        header = (
             schema_text
             + (
                 "\n# Dynamic/nonmatching calls expose AST metadata only.\n"
@@ -1312,7 +1311,9 @@ def _generate_factory_artifacts(
                 f"from {module} import {symbol} as {alias}\n"
                 for (module, symbol), alias in document_aliases.items()
             )
-            + "\nclass __graphql_desk_UnresolvedDocument(__graphql_desk_Protocol):\n"
+        )
+        protocols = (
+            "\nclass __graphql_desk_UnresolvedDocument(__graphql_desk_Protocol):\n"
             "    @property\n"
             "    def ast(self) -> __graphql_desk_DocumentNode: ...\n"
             "    @property\n"
@@ -1333,10 +1334,9 @@ def _generate_factory_artifacts(
             "    '__graphql_desk_PersistedType', bound="
             "__graphql_desk_PersistedDocument)\n\n"
             "class __graphql_desk_Factory(__graphql_desk_Protocol):\n"
-            + "\n".join(overloads)
         )
-        stub += (
-            ("    @__graphql_desk_overload\n" if overloads else "")
+        footer = (
+            ("    @__graphql_desk_overload\n" if overload_parameters else "")
             + fallback
             + "\n"
             + "    def persisted(self, id: str, document: "
@@ -1346,6 +1346,45 @@ def _generate_factory_artifacts(
             + render_scalar_method(context.schema, scalars=scalars, enums=enums)
             + "\ngraphql: __graphql_desk_Factory\n"
         )
+
+        def render_factory(owner_aliases: dict[str, str] | None = None) -> str:
+            imports: list[str] = []
+            overloads: list[str] = []
+            symbol = "GraphqlDeskSourceLiteral"
+            while symbol in context.schema.type_map:
+                symbol += "Generated"
+            for identity, parameters in overload_parameters:
+                annotation = f"__graphql_desk_Literal[{owners[identity].call.source!r}]"
+                if owner_aliases is not None:
+                    module, _, _ = declarations[identity]
+                    owner_path = module.replace(".", "/") + ".pyi"
+                    owner_aliases[owner_path] = (
+                        "\nfrom typing import Literal as __graphql_desk_Literal\n"
+                        f"{symbol} = {annotation}\n"
+                    )
+                    annotation = f"__graphql_desk_Source{len(overloads)}"
+                    imports.append(f"from {module} import {symbol} as {annotation}\n")
+                overloads.append(
+                    "    @__graphql_desk_overload\n"
+                    f"    def __call__(self, source: {annotation}, {parameters}"
+                )
+            return header + "".join(imports) + protocols + "\n".join(overloads) + footer
+
+        stub = render_factory()
+        if (
+            editor_stub_bytes is not None
+            and len(stub.encode("utf-8")) > editor_stub_bytes
+        ):
+            owner_aliases: dict[str, str] = {}
+            compact = render_factory(owner_aliases)
+            if len(compact.encode("utf-8")) <= editor_stub_bytes and all(
+                len(files[owner].encode("utf-8")) + len(alias.encode("utf-8"))
+                <= editor_stub_bytes
+                for owner, alias in owner_aliases.items()
+            ):
+                for owner_path, alias in owner_aliases.items():
+                    files[owner_path] += alias
+                stub = compact
         put(path + ".pyi", stub)
     except (ValueError, RecursionError, KeyError) as error:
         if documents:
@@ -2034,6 +2073,7 @@ def generate_project_factory_artifacts(
     *,
     modules: tuple[ModuleSnapshot, ...],
     project_id: str,
+    editor_stub_bytes: int | None = None,
 ) -> FactoryArtifacts:
     """Assemble all configured schemas atomically from trusted captured facts.
 
@@ -2098,6 +2138,7 @@ def generate_project_factory_artifacts(
             enums=settings[name].enums,
             client_directives=config.client_directives,
             disable_masking=settings[name].disable_masking,
+            editor_stub_bytes=editor_stub_bytes,
         )
         for name in sorted(settings)
     )
