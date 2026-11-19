@@ -18,6 +18,7 @@ from graphql_desk.editor_analysis import (
 )
 from graphql_desk.field_usage import FieldUsageOptions, field_usage_diagnostics
 from graphql_desk.persisted import editor_sha256_id
+from graphql_desk.schema_loading import load_from_introspection, load_from_sdl
 from graphql_desk.source_graph import IncrementalResolver, ModuleSnapshot
 
 
@@ -83,20 +84,53 @@ class EditorAnalysisTests(unittest.TestCase):
         previous = analyze_editor_snapshot_details(payload)
         schema = object_(array(payload["schemas"])[0])
         schema["version"] = 3
-        same_text = analyze_editor_snapshot_details(
-            payload, previous_fragments=previous.fragment_reuse
-        )
+        with patch(
+            "graphql_desk.editor_analysis.load_from_sdl", wraps=load_from_sdl
+        ) as load:
+            same_text = analyze_editor_snapshot_details(
+                payload, previous_fragments=previous.fragment_reuse
+            )
+        load.assert_not_called()
         self.assertEqual(same_text.response, analyze_editor_snapshot(payload))
 
         schema["text"] = "type Person { id: ID! } type Query { user: Person }"
         cold = analyze_editor_snapshot_details(payload)
-        warm = analyze_editor_snapshot_details(
-            payload, previous_fragments=same_text.fragment_reuse
-        )
+        with patch(
+            "graphql_desk.editor_analysis.load_from_sdl", wraps=load_from_sdl
+        ) as load:
+            warm = analyze_editor_snapshot_details(
+                payload, previous_fragments=same_text.fragment_reuse
+            )
+        load.assert_called_once_with(schema["text"])
         self.assertEqual(warm.response, cold.response)
         self.assertEqual(warm.index, cold.index)
         self.assertEqual(warm.index.documents, ())
         self.assertIn("Unknown type 'User'", warm.index.diagnostics[0].message)
+
+    def test_introspection_reuse_preserves_current_metadata(self) -> None:
+        payload = request()
+        schema = object_(array(payload["schemas"])[0])
+        schema["format"] = "introspection"
+        schema["text"] = json.dumps(
+            introspection_from_schema(build_schema("type Query { user: String }"))
+        )
+        previous = analyze_editor_snapshot_details(payload)
+        schema["version"] = 5
+        with patch(
+            "graphql_desk.editor_analysis.load_from_introspection",
+            wraps=load_from_introspection,
+        ) as load:
+            warm = analyze_editor_snapshot_details(
+                payload, previous_fragments=previous.fragment_reuse
+            )
+            load.assert_not_called()
+            schema["token"] = "new-introspection-revision"
+            updated = analyze_editor_snapshot_details(
+                payload, previous_fragments=warm.fragment_reuse
+            )
+            load.assert_called_once()
+        self.assertEqual(object_(array(warm.response["schemas"])[0])["version"], 5)
+        self.assertEqual(updated.response, analyze_editor_snapshot(payload))
 
     def test_fragment_extraction_uses_only_composition_capable_factories(self) -> None:
         for source, factory, expected in (
@@ -243,6 +277,29 @@ class EditorAnalysisTests(unittest.TestCase):
             "52005", [object_(item)["code"] for item in array(cold["diagnostics"])]
         )
         self.assertEqual(warm, cold)
+
+    def test_refactor_contexts_share_only_current_validated_python_trees(self) -> None:
+        source = "from graphql_desk import gql\nq=gql('{ user { id } }')\n"
+        payload = request(source)
+        modules = array(payload["modules"])
+        modules.append(module("other", source.replace("q=", "other=")))
+        resolver = IncrementalResolver()
+        analyze_editor_snapshot(payload, resolver=resolver)
+
+        updated = "# unsaved 😀\r\n" + source
+        modules[0] = module("main", updated, version=2)
+        with patch("ast.parse", wraps=ast.parse) as parse_python:
+            warm = analyze_editor_snapshot(payload, resolver=resolver)
+        self.assertEqual(
+            [
+                call.args[0]
+                for call in parse_python.call_args_list
+                if call.kwargs.get("mode", "exec") == "exec"
+            ],
+            [updated],
+        )
+        self.assertEqual(warm, analyze_editor_snapshot(payload))
+        self.assertTrue(all(object_(call)["extract"] for call in array(warm["calls"])))
 
     def test_unused_selection_facts_require_unconsumed_result_paths(self) -> None:
         prefix = (
