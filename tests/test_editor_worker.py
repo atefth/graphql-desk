@@ -21,6 +21,7 @@ from graphql import GraphQLSchema, build_schema, introspection_from_schema, pars
 import graphql_desk.editor_worker as editor_worker
 from graphql_desk.config import SchemaOrigin
 from graphql_desk.editor_worker import MAX_LINE_BYTES, EditorWorker, serve
+from graphql_desk.schema_loading import load_from_sdl
 from tests import test_factory_generation as factory_tests
 from tests.test_schema_url import endpoint
 
@@ -35,18 +36,30 @@ class EditorWorkerTests(unittest.TestCase):
 
         second = self.prepare(capture)
         self.assertNotEqual(second, first)
-        with patch("graphql_desk.fragments.parse", wraps=parse) as parse_graphql:
+        with (
+            patch("graphql_desk.fragments.parse", wraps=parse) as parse_graphql,
+            patch(
+                "graphql_desk.editor_analysis.load_from_sdl", wraps=load_from_sdl
+            ) as load_schema,
+        ):
             self.assertTrue(self.analyze(capture, second)["ok"])
         parse_graphql.assert_not_called()
+        load_schema.assert_not_called()
         stale = self.worker.handle(
             {"op": "current", **capture, "id": first, "schema_buffers": []}
         )
         self.assertFalse(stale["ok"])
 
         third = self.prepare(capture)
-        with patch("graphql_desk.fragments.parse", wraps=parse) as parse_graphql:
+        with (
+            patch("graphql_desk.fragments.parse", wraps=parse) as parse_graphql,
+            patch(
+                "graphql_desk.editor_analysis.load_from_sdl", wraps=load_from_sdl
+            ) as load_schema,
+        ):
             self.assertTrue(self.analyze(capture, third)["ok"])
         parse_graphql.assert_called_once()
+        load_schema.assert_called_once()
 
     def test_pyright_config_edit_preserves_toml_comments_and_existing_paths(
         self,
