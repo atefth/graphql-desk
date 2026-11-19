@@ -223,13 +223,40 @@ then run once as the ordinary runner user in a Linux network namespace with
 only loopback, no capabilities, and privilege escalation disabled. A direct
 TCP connection to the public npm registry must succeed outside the namespace
 and be unreachable at the same address inside it before verification starts.
-The job fails if it cannot establish that boundary. The macOS and Windows
-checks use offline tooling options and still need OS-enforced egress evidence.
+On the macOS 15 Arm64 runner, provisioning and the direct registry control
+also run first. The package checks and both installed editors then run under
+a per-process macOS profile that denies outbound IP connections. The check
+requires a permission error at the same public address before launching the
+verifier. Local Unix sockets remain available to the editors. Windows still
+uses offline tooling options and needs OS-enforced egress evidence.
 Full native Pylance acceptance remains separate.
 
 The release contract targets CPython 3.10–3.14, VS Code 1.141/1.142, Windows 11
 x64, Ubuntu 24.04 x64 and macOS 15 Arm64. Windows 11 editor checks require a
 native Windows 11 host. Remote SSH, WSL and container path/URI checks remain open.
+
+### Other editors and remote hosts
+
+The extension uses a Node entry point and starts a Python worker on the
+workspace host. Browser-only VS Code cannot run this package. A browser
+connected to a remote Node host can use a workspace extension, but GraphQL
+Desk still needs installed-package tests on that host. There, a `file:` URI
+can name a file on the remote machine. [VS Code web extensions](https://code.visualstudio.com/api/extension-guides/web-extensions)
+and [remote extensions](https://code.visualstudio.com/api/advanced-topics/remote-extensions).
+
+At revision `458def2`, an independent stdio client on Node 22.17.1
+initialized the fragment rename server. The server advertised incremental
+text synchronization and rename with prepare support. Rename requires a client
+that implements the GraphQL Desk planning requests. With those callbacks
+missing, prepare returned null. A fixture implementing them received one
+versioned edit for a current document and none for stale or closed documents.
+The controller also preserved synthetic remote and virtual URIs and launched
+zero analysis workers for those inputs.
+
+Another editor would need its own integration for Python typing, diagnostics,
+completion and hover. Support for SSH, WSL and containers requires testing
+real workspace paths, interpreter selection, unsaved typing and cleanup in
+each host. The stdio and URI checks cover the adapter boundary only.
 
 For packaged-editor checks, updates must be disabled in the fresh profile's user
 settings using the installed schema (`extensions.autoUpdate: "off"` in 1.142),
