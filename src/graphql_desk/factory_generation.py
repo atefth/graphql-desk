@@ -61,7 +61,12 @@ from .source_graph import (
     ModuleSnapshot,
     resolve_type_symbols,
 )
-from .source_maps import Position, build_source_map, position_to_offset
+from .source_maps import (
+    Position,
+    SourceMapBuilder,
+    build_source_map,
+    position_to_offset,
+)
 from .testing import render_unsafe_result_helper
 
 ast_from_value: Any = getattr(graphql_utilities, "ast_from_value")
@@ -881,8 +886,12 @@ def _generate_factory_artifacts(
                 generation_dependencies.update(resolution.dependencies)
         if "graphql" in context.schema.type_map:
             raise ValueError("Schema aliases collide with generated factory exports")
+        source_maps = SourceMapBuilder(modules)
         validate_originals = registered_document_validator(
-            context, owners=owners, modules=modules, client_directives=client_directives
+            context,
+            owners=owners,
+            modules=source_maps,
+            client_directives=client_directives,
         )
         rejected: set[DocumentIdentity] = set()
         for document in documents:
@@ -911,7 +920,7 @@ def _generate_factory_artifacts(
                     dependency_source.version,
                 ) != (dependency.uri, dependency.version):
                     raise ValueError("Indexed dependency source snapshot differs")
-            build_source_map(call, modules)
+            source_maps.build(call)
             diagnostics.extend(
                 _precision_diagnostics(document, snapshot, annotation_symbols)
             )

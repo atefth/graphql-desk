@@ -341,9 +341,22 @@ def build_source_maps(
     """Build maps in order, sharing verified snapshot and token positions."""
     if not calls:
         return ()
-    snapshots = _snapshot_index(modules)
-    tokenize_source = lru_cache(maxsize=1)(_tokens)
-    return tuple(_build_source_map(call, snapshots, tokenize_source) for call in calls)
+    builder = SourceMapBuilder(modules)
+    return tuple(builder.build(call) for call in calls)
+
+
+class SourceMapBuilder:
+    """Share snapshot lookup and one token stream within a synchronous producer."""
+
+    def __init__(self, modules: tuple[ModuleSnapshot, ...]) -> None:
+        self._modules = tuple(modules)
+        self._snapshots: dict[tuple[str, str], ModuleSnapshot] | None = None
+        self._tokenize = lru_cache(maxsize=1)(_tokens)
+
+    def build(self, call: ResolvedCall | ResolvedParseCall) -> SourceMap:
+        if self._snapshots is None:
+            self._snapshots = _snapshot_index(self._modules)
+        return _build_source_map(call, self._snapshots, self._tokenize)
 
 
 def _snapshot_index(

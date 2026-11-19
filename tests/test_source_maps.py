@@ -1,6 +1,8 @@
 """Exact literal origins, boundaries and protocol coordinate conversions."""
 
+import gc
 import unittest
+import weakref
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -15,6 +17,7 @@ from graphql_desk.source_graph import (
 from graphql_desk.source_maps import (
     Position,
     SourceMap,
+    SourceMapBuilder,
     build_source_map,
     build_source_maps,
     convert_offset,
@@ -38,6 +41,38 @@ def mapped(expression: str) -> tuple[SourceMap, ResolvedCall, ModuleSnapshot]:
 
 
 class SourceMapTests(unittest.TestCase):
+    def test_producer_builder_reuses_tokens_but_rechecks_each_call(self) -> None:
+        expected, call, module = mapped("'a\\n\\x62'")
+        other = snapshot("other", "from graphql_desk import gql\nq=gql('other')")
+        (other_call,) = resolve_project((other,)).calls
+        references: list[weakref.ReferenceType[SourceMap]] = []
+        with patch.object(
+            source_maps, "_tokens", wraps=getattr(source_maps, "_tokens")
+        ) as tokens:
+            builder = SourceMapBuilder((module, other))
+            for current in (call, call, other_call, other_call, call):
+                mapping = builder.build(current)
+                if current is call:
+                    self.assertEqual(mapping, expected)
+                references.append(weakref.ref(mapping))
+            self.assertEqual(
+                tokens.call_count, 3, "Only the last module's tokens are retained"
+            )
+            with self.assertRaisesRegex(ValueError, "stale"):
+                builder.build(replace(call, module=replace(call.module, version=2)))
+            with self.assertRaisesRegex(ValueError, "Contribution text"):
+                builder.build(
+                    replace(
+                        call,
+                        contributions=(replace(call.contributions[0], text="wrong"),),
+                    )
+                )
+        del mapping
+        gc.collect()
+        self.assertTrue(all(reference() is None for reference in references))
+        with self.assertRaisesRegex(ValueError, "Duplicate module"):
+            SourceMapBuilder((module, replace(other, uri=module.uri))).build(call)
+
     def test_parser_facts_use_the_same_versioned_literal_map(self) -> None:
         module = snapshot(
             "main", "from graphql_desk import parse\nq=parse('a' + '\\x62')"
