@@ -165,7 +165,12 @@ jobs:
           mkdir -p "$NPM_CONFIG_CACHE"
           code_141=$(node editor/test/provision-vscode.cjs 1.141.0)
           code_142=$(node editor/test/provision-vscode.cjs 1.142.0)
-          .venv/bin/python -B -m scripts.check_vsix --provision --activate --code "$code_141" --code "$code_142"
+          .venv/bin/python -B -m scripts.check_vsix --provision-only
+          registry_ip=$(.venv/bin/python -B -m scripts.check_offline_network observe)
+          echo "Online npm registry TCP control passed for $registry_ip port 443"
+          /usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip "*:*"))' \
+            "$PWD/.venv/bin/python" -B -m scripts.check_offline_network run-macos "$registry_ip" \
+            "$PWD/.venv/bin/python" -B -m scripts.check_vsix --activate --code "$code_141" --code "$code_142"
       - name: Evaluate the isolated optional saved-model generator
         if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.13' && needs.changes.outputs.saved_generator_changed == 'true'
         env:
