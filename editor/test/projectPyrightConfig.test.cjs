@@ -2534,49 +2534,307 @@ test("a user-owned execution-environment path is not adopted", async t => {
   assert.equal(fs.readFileSync(path.join(f.root, "pyrightconfig.json"), "utf8"), config);
 });
 
-async function normalReleaseGeneration(t, partialRollback = false) {
+async function normalReleaseGeneration(t, partialRollback = false, { firstSelection = false, retainGeneration = false, beforeNative = null } = {}) {
   const original = '[tool.pyright]\nstubPath = "custom-stubs"\nextraPaths = ["vendor"]\n';
   const f = fixture(t, { toml: original, pythonStubPath: "python-custom-stubs", standaloneAliases: true });
   const state = stateStore();
   let disposing = false;
-  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, f.worker, { ownerCurrent: () => !disposing });
+  let pauseNativeRollback;
+  const worker = beforeNative === "paired" ? (...args) =>
+    ["set_stub_path", "restore_stub_path"].includes(args[2]) &&
+      args[4]?.expectedStubPath?.includes(firstSelection ? "/g-1-" : "/g-2-") && pauseNativeRollback
+      ? pauseNativeRollback() : f.worker(...args) : f.worker;
+  const managed = await createManagedProjectConfig(f.vscode, f.folder, state, worker, { ownerCurrent: () => !disposing });
   const publisher = createAnalysisGenerations(f.vscode, f.root, managed.root);
   const groups = type => new Map([["example_generated", [
     { relative_path: "example_generated/default.py", text: 'value = "runtime"\n' },
     { relative_path: "example_generated/default.pyi", text: `value: ${type}\n` },
   ]]]);
-  assert.equal(await publisher.publish(groups("str"), "normal-release-first", () => true, managed,
+  if (!firstSelection) assert.equal(await publisher.publish(groups("str"), "normal-release-first", () => true, managed,
     "a".repeat(64), "b".repeat(64), []), true);
   const keys = managedStateKeys(f.root, `:project-${createHash("sha256").update("pyproject.toml").digest("hex").slice(0, 16)}`);
   const proofRecords = () => [state.get(keys.generationStateKey), state.get(keys.stagingStateKey)].map(value => JSON.stringify(value));
   if (!partialRollback) return { f, state, managed, keys, original, proofRecords };
+  const updateState = state.update;
+  if (retainGeneration) {
+    let keep = true;
+    state.update = async (key, value) => {
+      await updateState(key, value);
+      if (key === keys.stateKey && value?.current?.includes("/g-1-") && value.pending !== true) keep = false;
+    };
+    assert.equal(await publisher.publish(groups("str"), "retained", () => keep, managed,
+      "a".repeat(64), "b".repeat(64), []), false);
+    assert.equal(f.pythonStubPath, MANAGED_PATH);
+    assert.equal(state.get(keys.stateKey).current, MANAGED_PATH);
+    assert.equal(Object.keys(state.get(keys.generationStateKey)).length, 1);
+  }
   const previous = f.pythonStubPath;
   const config = f.vscode.workspace.getConfiguration();
   const update = config.update;
   let entered, rejectUpdate;
   const started = new Promise(resolve => { entered = resolve; });
   const held = new Promise((resolve, reject) => { rejectUpdate = reject; });
-  config.update = async (...args) => {
+  if (!beforeNative) config.update = async (...args) => {
     if (args[1] === previous) { entered(); await held; }
     return update(...args);
   };
+  if (beforeNative === "paired") pauseNativeRollback = () => { entered(); return held; };
   t.after(() => { rejectUpdate(new Error("test cleanup")); config.update = update; });
   let current = true;
-  const updateState = state.update;
   state.update = async (key, value) => {
+    if (key === stateKey(f.root) && value?.phase === "rotate" &&
+        (beforeNative === "durable-only" && value.pythonStubPath.pending === previous ||
+          beforeNative === "forward-durable-only" && value.pythonStubPath.pending !== previous)) {
+      entered();
+      await held;
+    }
     await updateState(key, value);
-    if (key === keys.stateKey && value?.current?.includes("/g-2-") && value.pending !== true) current = false;
+    if (key === keys.stateKey && value?.current?.includes(firstSelection && !retainGeneration ? "/g-1-" : "/g-2-") && value.pending !== true) current = false;
   };
   const publishing = publisher.publish(groups("str | None"), "normal-release-second", () => current, managed,
     "c".repeat(64), "d".repeat(64), []).then(value => ({ value }), error => ({ error }));
   await started;
-  assert.notEqual(state.get(stateKey(f.root)).currentStubPath,
-    /^stubPath\s*=\s*"([^"]*)"/m.exec(fs.readFileSync(path.join(f.root, "pyproject.toml"), "utf8"))[1]);
+  const nativeSelection = /^stubPath\s*=\s*"([^"]*)"/m.exec(fs.readFileSync(path.join(f.root, "pyproject.toml"), "utf8"))[1];
+  if (beforeNative) assert.equal(nativeSelection, f.pythonStubPath);
+  else assert.notEqual(state.get(stateKey(f.root)).currentStubPath, nativeSelection);
   disposing = true;
   return { f, state, managed, keys, original, proofRecords, publishing,
-    interrupt() { rejectUpdate(new Error("interrupted pending Python rollback")); },
+    interrupt() { rejectUpdate(new Error(beforeNative ? "interrupted before native rollback" : "interrupted pending Python rollback")); },
     resume() { disposing = false; config.update = update; } };
 }
+
+for (const scenario of ["paired", "durable-only", "base-paired", "base-durable-only", "foreign-target", "foreign-source",
+  "unregistered-source", "mismatched-owner", "late-native", "late-target", "replaced-native"]) test(`cold recovery sees a rollback interrupted before the native config write: ${scenario}`, async t => {
+  const firstSelection = scenario.startsWith("base-");
+  const durableOnly = scenario.includes("durable-only") || scenario === "mismatched-owner";
+  const h = await normalReleaseGeneration(t, true, { firstSelection, beforeNative: durableOnly ? "durable-only" : "paired" });
+  const ownerKey = stateKey(h.f.root);
+  const file = path.join(h.f.root, "pyproject.toml");
+  const ownerPath = path.join(h.managed.root, "project-config-owner.json");
+  const oldState = h.state.snapshot();
+  const diskOwner = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
+  const source = diskOwner.currentStubPath;
+  const target = diskOwner.pythonStubPath.pending;
+  const proof = filename => {
+    const { dev, ino, mtimeNs, ctimeNs } = fs.lstatSync(filename, { bigint: true });
+    return { bytes: fs.readFileSync(filename), dev, ino, mtimeNs, ctimeNs };
+  };
+  const nativeBefore = proof(file);
+  const ownerBefore = proof(ownerPath);
+  const permissionCalls = h.f.configFile.calls.length;
+  assert.equal(diskOwner.phase, "rotate");
+  assert.match(source, firstSelection ? /\/g-1-/ : /\/g-2-/);
+  if (firstSelection) assert.equal(target, MANAGED_PATH);
+  else assert.match(target, /\/g-1-/);
+  assert.equal(h.f.pythonStubPath, source);
+  assert.equal(h.state.get(ownerKey).phase, durableOnly ? "active" : "rotate");
+  assert.deepEqual(h.state.get(h.keys.stateKey), { base: MANAGED_PATH, current: source, currentPresent: true });
+  h.interrupt();
+  assert.ok((await h.publishing).error);
+  h.resume();
+  h.f.configFile.restart();
+  assert.deepEqual(proof(file), nativeBefore);
+  assert.deepEqual(proof(ownerPath), ownerBefore);
+  assert.deepEqual(h.state.snapshot(), oldState);
+  const cold = stateStore();
+  for (const [key, value] of oldState) await cold.update(key, value);
+  const reports = [];
+  const mirrored = [];
+  h.f.onPythonSettingChange(value => { mirrored.push(value); });
+  const artifact = selected => path.join(h.f.root, selected, "example_generated", "default.pyi");
+  const callsBefore = h.f.configFile.calls.length;
+  if (scenario === "foreign-target") fs.writeFileSync(artifact(target), "user replacement\n");
+  if (scenario === "foreign-source") fs.writeFileSync(artifact(source), "user source replacement\n");
+  if (scenario === "unregistered-source") {
+    const registered = { ...cold.get(h.keys.generationStateKey) };
+    delete registered[path.basename(source)];
+    await cold.update(h.keys.generationStateKey, registered);
+  }
+  if (scenario === "mismatched-owner") await cold.update(ownerKey, { ...cold.get(ownerKey), customStubPath: "changed-user-stubs" });
+  const stateBefore = cold.snapshot();
+  const sourceBefore = proof(artifact(source));
+  const targetBefore = firstSelection ? null : proof(artifact(target));
+  const nativeUserBytes = nativeBefore.bytes.toString("utf8").replace(`stubPath = "${source}"`, 'stubPath = "later-user-stubs"');
+  let changedDuringProof = false;
+  if (scenario === "late-native" || scenario === "late-target") {
+    const read = fs.readFileSync;
+    t.mock.method(fs, "readFileSync", (filename, ...args) => {
+      const bytes = read(filename, ...args);
+      if (filename === artifact(target) && !changedDuringProof) {
+        changedDuringProof = true;
+        fs.writeFileSync(scenario === "late-native" ? file : artifact(target),
+          scenario === "late-native" ? nativeUserBytes : "late user target\n");
+      }
+      return bytes;
+    });
+  }
+  let replacedIdentity;
+  const onOwnedWrite = (_filename, _hash, operation) => {
+    if (scenario === "replaced-native" && operation?.phase === "commit") {
+      const bytes = fs.readFileSync(file);
+      fs.renameSync(file, path.join(h.f.root, "previous-native.toml"));
+      fs.writeFileSync(file, bytes, { flag: "wx" });
+      replacedIdentity = proof(file);
+    }
+  };
+  const failing = !["paired", "durable-only", "base-paired", "base-durable-only"].includes(scenario);
+  if (failing) {
+    await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, cold, h.f.worker,
+      { onOwnedWrite, onOwnership: (_file, value) => reports.push(value) }), /changed|preserved/);
+    if (scenario === "late-native") assert.equal(fs.readFileSync(file, "utf8"), nativeUserBytes);
+    else assert.deepEqual(proof(file), replacedIdentity ?? nativeBefore);
+    assert.deepEqual(proof(ownerPath), ownerBefore);
+    assert.deepEqual(cold.snapshot(), stateBefore);
+    assert.deepEqual(mirrored, []);
+    assert.deepEqual(reports, []);
+    assert.equal(h.f.configFile.calls.length, callsBefore + (scenario === "replaced-native" ? 3 : 0));
+    if (scenario === "late-native" || scenario === "late-target") assert.equal(changedDuringProof, true);
+  } else {
+    const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, cold, h.f.worker,
+      { onOwnership: (_file, value) => reports.push(value) });
+    assert.deepEqual(reports, [target], "Durable rollback intent must never reattest the revoked generation");
+    assert.equal(reopened.selectedSetting, target);
+    assert.equal(h.f.pythonStubPath, target);
+    assert.equal(fs.readFileSync(file, "utf8"), nativeBefore.bytes.toString("utf8")
+      .replace(`stubPath = "${source}"`, `stubPath = "${target}"`));
+    assert.deepEqual(h.f.configFile.calls.slice(permissionCalls).map(call => call.action), ["stage", "verify", "finish"]);
+    assert.deepEqual(mirrored, [target]);
+    const settled = { ...diskOwner, phase: "active", currentStubPath: target,
+      pythonStubPath: { ...diskOwner.pythonStubPath, current: target } };
+    delete settled.pythonStubPath.pending;
+    assert.deepEqual(JSON.parse(fs.readFileSync(ownerPath, "utf8")), settled);
+    assert.deepEqual(JSON.parse(JSON.stringify(cold.get(ownerKey))), settled);
+    assert.deepEqual(cold.get(h.keys.stateKey), { base: MANAGED_PATH, current: target, currentPresent: true });
+    assert.equal(cold.get(`${ownerKey}:pending-config-write`), undefined);
+    assert.equal(fs.readdirSync(h.f.root).some(name => name.endsWith(".tmp")), false);
+  }
+  assert.deepEqual(proof(artifact(source)), sourceBefore);
+  if (scenario === "late-target") assert.equal(fs.readFileSync(artifact(target), "utf8"), "late user target\n");
+  else if (targetBefore) assert.deepEqual(proof(artifact(target)), targetBefore);
+});
+
+for (const mismatched of [false, true]) test(`durable forward intent ${mismatched ? "rejects a mismatched selection" : "keeps the active source until fresh recovery"}`, async t => {
+  const h = await normalReleaseGeneration(t, true, { beforeNative: "forward-durable-only" });
+  const crash = h.state.snapshot();
+  const ownerKey = stateKey(h.f.root);
+  const owner = h.state.get(ownerKey);
+  const ownerPath = path.join(h.managed.root, "project-config-owner.json");
+  const diskOwner = fs.readFileSync(ownerPath);
+  const target = JSON.parse(diskOwner).pythonStubPath.pending;
+  assert.equal(owner.phase, "active");
+  assert.match(owner.currentStubPath, /\/g-1-/);
+  assert.match(target, /\/g-2-/);
+  assert.equal(h.state.get(h.keys.stateKey).pending, true);
+  h.interrupt();
+  assert.ok((await h.publishing).error);
+  h.resume();
+  h.f.configFile.restart();
+  const cold = stateStore();
+  for (const [key, value] of crash) await cold.update(key, value);
+  if (mismatched) await cold.update(h.keys.stateKey, { ...cold.get(h.keys.stateKey), previous: "later-user-stubs" });
+  const file = path.join(h.f.root, "pyproject.toml");
+  const native = fs.readFileSync(file);
+  const permissionCalls = h.f.configFile.calls.length;
+  const reports = [];
+  if (mismatched) {
+    const stateBefore = cold.snapshot();
+    await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, cold, h.f.worker,
+      { onOwnership: (_file, value) => reports.push(value) }), /owner records disagree; preserved/);
+    assert.deepEqual(cold.snapshot(), stateBefore);
+    assert.deepEqual(fs.readFileSync(file), native);
+    assert.deepEqual(fs.readFileSync(ownerPath), diskOwner);
+    assert.equal(h.f.pythonStubPath, owner.currentStubPath);
+    assert.deepEqual(reports, []);
+    assert.equal(h.f.configFile.calls.length, permissionCalls);
+    return;
+  }
+  const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, cold, h.f.worker,
+    { onOwnership: (_file, value) => reports.push(value) });
+  assert.equal(reopened.selectedSetting, owner.currentStubPath);
+  assert.equal(await reopened.checkSettingOwnership(), true);
+  assert.equal(h.f.pythonStubPath, owner.currentStubPath);
+  assert.deepEqual(reports, [owner.currentStubPath]);
+  assert.deepEqual(cold.snapshot(), crash);
+  assert.deepEqual(fs.readFileSync(file), native);
+  assert.deepEqual(fs.readFileSync(ownerPath), diskOwner);
+  assert.equal(h.f.configFile.calls.length, permissionCalls);
+  const publisher = createAnalysisGenerations(h.f.vscode, h.f.root, reopened.root);
+  assert.equal(await publisher.recover(reopened, () => true, "c".repeat(64), "d".repeat(64), []), true);
+  assert.equal(reopened.selectedSetting, target);
+  assert.equal(h.f.pythonStubPath, target);
+  assert.equal(cold.get(ownerKey).phase, "active");
+  assert.deepEqual(cold.get(h.keys.stateKey), { base: MANAGED_PATH, current: target, currentPresent: true });
+});
+
+test("pre-native rollback checks native identity after its final settled-owner read", async t => {
+  const h = await normalReleaseGeneration(t, true, { beforeNative: "paired" });
+  const crash = h.state.snapshot();
+  const owner = h.state.get(stateKey(h.f.root));
+  h.interrupt();
+  await h.publishing;
+  h.resume();
+  h.f.configFile.restart();
+  const cold = stateStore();
+  for (const [key, value] of crash) await cold.update(key, value);
+  const file = path.join(h.f.root, "pyproject.toml");
+  const ownerPath = path.join(h.managed.root, "project-config-owner.json");
+  const read = fs.readFileSync;
+  let ownerReads = 0;
+  let late;
+  let reports = 0;
+  t.mock.method(fs, "readFileSync", (filename, ...args) => {
+    const bytes = read(filename, ...args);
+    if (filename === ownerPath && args[0] === "utf8" && cold.get(stateKey(h.f.root)).phase === "active" && ++ownerReads === 3) {
+      late = read(file, "utf8").replace(`stubPath = "${owner.pythonStubPath.pending}"`, 'stubPath = "later-user-stubs"');
+      fs.writeFileSync(file, late);
+    }
+    return bytes;
+  });
+  await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, cold, h.f.worker,
+    { onOwnership: () => { reports += 1; } }), /Interrupted Pylance rollback proof changed/);
+  assert.equal(ownerReads, 3);
+  assert.equal(reports, 0);
+  assert.equal(h.f.pythonStubPath, owner.pythonStubPath.pending);
+  assert.equal(read(file, "utf8"), late);
+});
+
+test("pre-native rollback refuses an unmanaged source before reading its files", async t => {
+  const h = await normalReleaseGeneration(t, true, { beforeNative: "paired" });
+  h.interrupt();
+  await h.publishing;
+  h.resume();
+  h.f.configFile.restart();
+  const ownerKey = stateKey(h.f.root);
+  const source = "user-owned-stubs";
+  const ownerPath = path.join(h.managed.root, "project-config-owner.json");
+  const oldOwner = h.state.get(ownerKey);
+  const changedOwner = { ...oldOwner, currentStubPath: source, pythonStubPath: { ...oldOwner.pythonStubPath, current: source } };
+  fs.writeFileSync(ownerPath, JSON.stringify(changedOwner));
+  const file = path.join(h.f.root, "pyproject.toml");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(`stubPath = "${oldOwner.currentStubPath}"`, `stubPath = "${source}"`));
+  await h.f.vscode.workspace.getConfiguration().update("analysis.stubPath", source);
+  const cold = stateStore();
+  for (const [key, value] of h.state.snapshot()) await cold.update(key, value);
+  await cold.update(ownerKey, changedOwner);
+  await cold.update(h.keys.stateKey, { base: MANAGED_PATH, current: source, currentPresent: true });
+  const foreign = path.join(h.f.root, source);
+  fs.mkdirSync(foreign);
+  fs.writeFileSync(path.join(foreign, "complete.json"), "user data\n");
+  const before = [fs.readFileSync(file), fs.readFileSync(ownerPath), cold.snapshot(), h.f.configFile.calls.length];
+  const read = fs.readFileSync;
+  let foreignReads = 0;
+  let reports = 0;
+  t.mock.method(fs, "readFileSync", (filename, ...args) => {
+    if (typeof filename === "string" && filename.startsWith(foreign + path.sep)) foreignReads += 1;
+    return read(filename, ...args);
+  });
+  await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, cold, h.f.worker,
+    { onOwnership: () => { reports += 1; } }), /Interrupted Pylance rollback proof changed/);
+  assert.equal(foreignReads, 0);
+  assert.equal(reports, 0);
+  assert.equal(h.f.pythonStubPath, source);
+  assert.deepEqual([fs.readFileSync(file), fs.readFileSync(ownerPath), cold.snapshot(), h.f.configFile.calls.length], before);
+});
 
 test("normal release drains a real rollback before journaling and survives interrupted Python mirroring", async t => {
   const h = await normalReleaseGeneration(t, true);
@@ -2600,8 +2858,11 @@ test("normal release drains a real rollback before journaling and survives inter
   await reopened.release();
 });
 
-for (const scenario of ["needs-mirror", "settled", "durable-active", "foreign-setting", "changed-artifact", "changed-paths", "replaced-artifact"]) test(`cold recovery checks a rollback interrupted after the native config write: ${scenario}`, async t => {
-  const h = await normalReleaseGeneration(t, true);
+for (const scenario of ["needs-mirror", "settled", "durable-active", "foreign-setting", "changed-artifact", "changed-paths", "replaced-artifact",
+  "base-needs-mirror", "base-foreign-file", "base-retained", "base-late-edit", "base-unregistered",
+  "base-proof-native-change", "base-proof-native-precedence", "base-native-edit-during-final-owner-read"]) test(`cold recovery checks a rollback interrupted after the native config write: ${scenario}`, async t => {
+  const firstSelection = scenario.startsWith("base-");
+  const h = await normalReleaseGeneration(t, true, { firstSelection, retainGeneration: scenario === "base-retained" });
   const crash = h.state.snapshot();
   const owner = h.state.get(stateKey(h.f.root));
   const selection = h.state.get(h.keys.stateKey);
@@ -2610,6 +2871,7 @@ for (const scenario of ["needs-mirror", "settled", "durable-active", "foreign-se
   assert.equal(selection.current, owner.currentStubPath);
   assert.equal(h.f.pythonStubPath, owner.currentStubPath);
   const target = owner.pythonStubPath.pending;
+  if (firstSelection) assert.equal(target, MANAGED_PATH);
   const file = path.join(h.f.root, "pyproject.toml");
   assert.ok(fs.readFileSync(file, "utf8").includes(`stubPath = "${target}"`));
 
@@ -2621,6 +2883,16 @@ for (const scenario of ["needs-mirror", "settled", "durable-active", "foreign-se
   for (const [key, value] of crash) await recoveredState.update(key, value);
   const ownerPath = path.join(h.managed.root, "project-config-owner.json");
   const artifactPath = path.join(h.f.root, target, "example_generated", "default.pyi");
+  const foreignBaseFile = scenario === "base-foreign-file" ? path.join(h.managed.root, "foreign.pyi") : null;
+  const foreignBytes = Buffer.from("value: str\n");
+  if (foreignBaseFile) fs.writeFileSync(foreignBaseFile, foreignBytes, { flag: "wx" });
+  const nativeProof = () => {
+    const { dev, ino, mtimeNs, ctimeNs } = fs.lstatSync(file, { bigint: true });
+    return { bytes: fs.readFileSync(file), dev, ino, mtimeNs, ctimeNs, calls: h.f.configFile.calls.length };
+  };
+  const nativeBefore = firstSelection ? nativeProof() : null;
+  const mirrored = [];
+  if (firstSelection) h.f.onPythonSettingChange(value => { mirrored.push(value); });
   let durableIdentity;
   let artifactIdentity;
   if (["settled", "durable-active"].includes(scenario)) {
@@ -2652,7 +2924,7 @@ for (const scenario of ["needs-mirror", "settled", "durable-active", "foreign-se
       }
     };
   }
-  if (["foreign-setting", "changed-artifact", "changed-paths", "replaced-artifact"].includes(scenario)) {
+  if (foreignBaseFile || ["foreign-setting", "changed-artifact", "changed-paths", "replaced-artifact"].includes(scenario)) {
     const stateBefore = recoveredState.snapshot();
     const configBefore = fs.readFileSync(file);
     const pythonBefore = h.f.pythonStubPath;
@@ -2661,14 +2933,127 @@ for (const scenario of ["needs-mirror", "settled", "durable-active", "foreign-se
     assert.deepEqual(fs.readFileSync(file), configBefore);
     assert.equal(h.f.pythonStubPath, scenario === "replaced-artifact" ? target : pythonBefore);
     if (scenario === "replaced-artifact") assert.equal(fs.lstatSync(artifactPath, { bigint: true }).ino, artifactIdentity.ino);
+    if (foreignBaseFile) {
+      assert.deepEqual(nativeProof(), nativeBefore);
+      assert.deepEqual(mirrored, []);
+      assert.deepEqual(fs.readFileSync(foreignBaseFile), foreignBytes);
+    }
     return;
   }
+  if (scenario === "base-unregistered") {
+    const foreign = path.join(h.managed.root, "generations", "g-666-00000000-0000-0000-0000-000000000000");
+    fs.mkdirSync(foreign);
+    fs.writeFileSync(path.join(foreign, "complete.json"), "user data\n");
+    await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, recoveredState, h.f.worker), /preserved/);
+    assert.equal(fs.readFileSync(path.join(foreign, "complete.json"), "utf8"), "user data\n");
+    assert.deepEqual(nativeProof(), nativeBefore);
+    assert.deepEqual(mirrored, []);
+    return;
+  }
+  if (scenario === "base-proof-native-change" || scenario === "base-proof-native-precedence") {
+    const proofFile = path.join(h.f.root, owner.currentStubPath, "example_generated", "default.pyi");
+    const higherPriority = scenario === "base-proof-native-precedence";
+    const userFile = higherPriority ? path.join(h.f.root, "pyrightconfig.json") : file;
+    const userBytes = higherPriority ? '{"stubPath":"later-user-stubs"}\n' :
+      nativeBefore.bytes.toString("utf8").replace(`stubPath = "${MANAGED_PATH}"`, 'stubPath = "later-user-stubs"');
+    assert.notEqual(userBytes, nativeBefore.bytes.toString("utf8"));
+    const read = fs.readFileSync;
+    let reads = 0;
+    let reports = 0;
+    t.mock.method(fs, "readFileSync", (filename, ...args) => {
+      const bytes = read(filename, ...args);
+      if (filename === proofFile && ++reads === 2) fs.writeFileSync(userFile, userBytes);
+      return bytes;
+    });
+    const stateBefore = recoveredState.snapshot();
+    await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, recoveredState, h.f.worker, {
+      onOwnership: () => { reports += 1; },
+    }), /Interrupted Pylance rollback proof changed/);
+    assert.ok(reads >= 2);
+    assert.deepEqual(mirrored, [], "A concurrent native change must prevent the Python setting write");
+    assert.equal(h.f.pythonStubPath, owner.currentStubPath);
+    assert.equal(reports, 0);
+    assert.deepEqual(recoveredState.snapshot(), stateBefore);
+    assert.equal(h.f.configFile.calls.length, nativeBefore.calls);
+    assert.equal(read(userFile, "utf8"), userBytes);
+    if (higherPriority) assert.deepEqual(nativeProof(), nativeBefore);
+    return;
+  }
+  if (scenario === "base-native-edit-during-final-owner-read") {
+    const late = nativeBefore.bytes.toString("utf8").replace(`stubPath = "${MANAGED_PATH}"`, 'stubPath = "later-user-stubs"');
+    assert.notEqual(late, nativeBefore.bytes.toString("utf8"));
+    const read = fs.readFileSync;
+    let ownerReads = 0;
+    let reports = 0;
+    t.mock.method(fs, "readFileSync", (filename, ...args) => {
+      const bytes = read(filename, ...args);
+      if (filename === ownerPath && args[0] === "utf8" && recoveredState.get(stateKey(h.f.root)).phase === "active" &&
+          ++ownerReads === 3) {
+        // The last settled-owner read follows the managed handle's initialization.
+        fs.writeFileSync(file, late);
+      }
+      return bytes;
+    });
+    await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, recoveredState, h.f.worker, {
+      onOwnership: () => { reports += 1; },
+    }), /Interrupted Pylance rollback proof changed/);
+    assert.equal(ownerReads, 3);
+    assert.equal(reports, 0);
+    assert.equal(read(file, "utf8"), late);
+    assert.equal(h.f.configFile.calls.length, nativeBefore.calls);
+    assert.deepEqual(mirrored, [MANAGED_PATH], "The earlier, valid Python mirror remains settled");
+    return;
+  }
+  if (scenario === "base-late-edit") {
+    let armed = false;
+    let changed = false;
+    let reports = 0;
+    const late = nativeBefore.bytes.toString("utf8").replace(`stubPath = "${MANAGED_PATH}"`, 'stubPath = "later-user-stubs"');
+    assert.notEqual(late, nativeBefore.bytes.toString("utf8"));
+    const read = fs.readSync;
+    t.mock.method(fs, "readSync", (fd, buffer, ...args) => {
+      const count = read(fd, buffer, ...args);
+      if (armed && Buffer.isBuffer(buffer) && buffer.toString("utf8").startsWith("[tool.pyright]")) {
+        armed = false;
+        queueMicrotask(() => {
+          fs.writeFileSync(file, late);
+          changed = true;
+        });
+      }
+      return count;
+    });
+    const worker = async (...args) => {
+      const result = await h.f.worker(...args);
+      if (!changed && args[2] === "inspect" && recoveredState.get(stateKey(h.f.root)).phase === "active") armed = true;
+      return result;
+    };
+    await assert.rejects(createManagedProjectConfig(h.f.vscode, h.f.folder, recoveredState, worker, {
+      onOwnership: () => { reports += 1; },
+    }), /Interrupted Pylance rollback proof changed/);
+    assert.equal(changed, true);
+    assert.equal(reports, 0);
+    assert.equal(fs.readFileSync(file, "utf8"), late);
+    return;
+  }
+  const generations = path.join(h.managed.root, "generations");
+  const retained = scenario === "base-retained" ? fs.readdirSync(generations).sort() : null;
   const reopened = await createManagedProjectConfig(h.f.vscode, h.f.folder, recoveredState, h.f.worker);
+  if (retained) {
+    assert.match(retained[0], /^g-1-/);
+    assert.match(retained[1], /^g-2-/);
+    assert.equal(retained.length, 2);
+    assert.deepEqual(fs.readdirSync(generations).sort(), retained);
+    assert.equal(Object.keys(recoveredState.get(h.keys.generationStateKey)).length, 2);
+  }
   assert.equal(reopened.selectedSetting, target);
   assert.equal(h.f.pythonStubPath, target);
   assert.equal(recoveredState.get(stateKey(h.f.root)).phase, "active");
   assert.deepEqual(recoveredState.get(h.keys.stateKey), { base: MANAGED_PATH, current: target, currentPresent: true });
   if (durableIdentity) assert.equal(fs.lstatSync(ownerPath, { bigint: true }).ino, durableIdentity.ino);
+  if (firstSelection) {
+    assert.deepEqual(nativeProof(), nativeBefore, "Recovery must preserve the already-committed native config");
+    assert.deepEqual(mirrored, [MANAGED_PATH], "Only the Python setting needs mirroring");
+  }
   await reopened.release();
   assert.equal(fs.readFileSync(file, "utf8"), h.original);
   assert.equal(h.f.pythonStubPath, "python-custom-stubs");

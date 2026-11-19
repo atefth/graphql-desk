@@ -867,14 +867,7 @@ def _indexed_fragment_keys(
         raise ValueError("Indexed document schema identity or context token differs")
     keys: dict[str, str] | None = None
     if not disable_masking and fragment_index is not None:
-        if document not in fragment_index.documents:
-            raise ValueError("Indexed document is absent from fragment owner registry")
-        owners: dict[DocumentIdentity, IndexedDocument] = {}
-        for owner in fragment_index.documents:
-            identity = DocumentIdentity(owner.call.module, owner.call.range)
-            if identity in owners:
-                raise ValueError("Duplicate fragment owner identity")
-            owners[identity] = owner
+        owners = fragment_index.owners_for(document)
         keys = {}
         for fact in document.definitions:
             if fact.kind != "fragment":
