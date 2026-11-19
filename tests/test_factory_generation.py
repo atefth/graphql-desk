@@ -2711,6 +2711,87 @@ search=graphql('query Search($filter:Filter!){search(filter:$filter)}')
                 )
             self.assertEqual(observed, errors, pyright.stdout + pyright.stderr)
 
+    def test_factory_checks_map_snapshots_only_when_it_reaches_a_call(self) -> None:
+        from graphql_desk import source_maps
+
+        context = self.context()
+        module = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            1,
+            "from generated.main import graphql\nq=graphql('query Q{greeting}')",
+        )
+        with patch.object(
+            source_maps,
+            "_snapshot_index",
+            side_effect=ValueError("early map verification"),
+        ):
+            empty = generate_factory_artifacts(
+                context,
+                FragmentIndex((), ()),
+                modules=(module,),
+                project_id="p",
+                generated_package="generated",
+            )
+        self.assertEqual(empty, self.generate(()))
+        sources = resolve_project(
+            (module,),
+            bindings=(
+                ProjectBindings(
+                    "p",
+                    ("main",),
+                    factories=(FactoryBinding("generated.main", "graphql", "main"),),
+                ),
+            ),
+        )
+        index = index_fragments(sources, schemas={("p", "main"): context})
+        (document,) = index.documents
+        with patch.object(
+            source_maps,
+            "_snapshot_index",
+            side_effect=ValueError("early map verification"),
+        ):
+            invalid = generate_factory_artifacts(
+                context,
+                replace(index, documents=(replace(document, context_token="stale"),)),
+                modules=(module,),
+                project_id="p",
+                generated_package="generated",
+            )
+        self.assertEqual(invalid.files, ())
+        self.assertEqual(len(invalid.diagnostics), 1)
+        self.assertIn(
+            "Indexed document/source/schema identities differ",
+            invalid.diagnostics[0].message,
+        )
+        self.assertEqual(invalid.diagnostics[0].module, document.call.module)
+        self.assertEqual(invalid.diagnostics[0].range, document.call.range)
+
+    def test_factory_shares_one_module_token_stream_across_document_checks(
+        self,
+    ) -> None:
+        from graphql_desk import source_maps
+
+        module = ModuleSnapshot(
+            "p",
+            "main",
+            "file:///main.py",
+            1,
+            "from generated.main import graphql\n"
+            + "".join(
+                f"q{index}=graphql('query Q{index}{{greeting}}')\n"
+                for index in range(12)
+            ),
+        )
+        with patch.object(
+            source_maps, "_tokens", wraps=getattr(source_maps, "_tokens")
+        ) as tokens:
+            artifacts = self.generate((module,))
+        self.assertTrue(artifacts.files)
+        self.assertEqual(artifacts.diagnostics, ())
+        self.assertEqual(tokens.call_count, 1)
+
     def test_same_original_source_infers_fragment_operation_and_literal_ast(
         self,
     ) -> None:

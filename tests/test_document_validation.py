@@ -18,7 +18,7 @@ from graphql_desk.source_graph import (
     ProjectBindings,
     resolve_project,
 )
-from graphql_desk.source_maps import build_source_map
+from graphql_desk.source_maps import SourceMapBuilder, build_source_map
 from graphql_desk.validation import validate_document
 
 
@@ -100,9 +100,6 @@ class DocumentValidationTests(unittest.TestCase):
             )
             for item in self.index.documents
         )
-        validate = registered_document_validator(
-            self.context, owners=owners, modules=self.modules, client_directives=()
-        )
         with (
             patch(
                 "graphql_desk.document_validation.parse", wraps=parse
@@ -116,6 +113,9 @@ class DocumentValidationTests(unittest.TestCase):
                 wraps=validate_document,
             ) as validate_closure,
         ):
+            validate = registered_document_validator(
+                self.context, owners=owners, modules=self.modules, client_directives=()
+            )
             self.assertEqual(tuple(map(validate, self.index.documents)), expected)
         self.assertEqual(parse_graphql.call_count, 2)
         self.assertEqual(map_source.call_count, 2)
@@ -128,6 +128,28 @@ class DocumentValidationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "Decoded text does not match"):
             validate(self.document)
+
+    def test_producer_map_builder_preserves_imported_diagnostic_origins(self) -> None:
+        owners = {
+            DocumentIdentity(item.call.module, item.call.range): item
+            for item in self.index.documents
+        }
+        builder = SourceMapBuilder(self.modules)
+        validate = registered_document_validator(
+            self.context,
+            owners=owners,
+            modules=builder,
+            client_directives=(),
+        )
+        self.assertEqual(
+            validate(self.document),
+            validate_indexed_document(
+                self.context,
+                self.document,
+                fragment_index=self.index,
+                modules=self.modules,
+            ),
+        )
 
     def test_fields_arguments_and_variable_errors_use_shared_policy(self) -> None:
         for text, message in (
