@@ -96,3 +96,67 @@ selection unverified. Doctor checks only whether those candidate paths exist.
 Per-file nearest-configuration mode also leaves the root-level proof unverified.
 Pylance version metadata remains separate from evidence that the checker
 consumed the published types.
+
+## Reproduce the custom stub path check
+
+Start a trusted single-folder workspace with strict Pylance checking. Choose a
+directory whose parents contain neither `pyrightconfig.json` nor `pyproject.toml`.
+Select the Python environment with GraphQL Desk installed, set the workspace's
+`python.analysis.stubPath` to `custom-stubs`, and place a text file of your own
+in that folder. Use these three project files.
+
+`pyproject.toml`
+
+```toml
+[tool.graphql-desk]
+schema = "schema.graphql"
+schema_output = "graphql_desk_generated/default.pyi"
+```
+
+`schema.graphql`
+
+```graphql
+type Query { selected: String! count(limit: Int!): Int! }
+```
+
+`consumer.py`
+
+```python
+from typing import TypeVar
+
+from graphql_desk import TypedDocument
+from graphql_desk_generated.default import graphql
+
+R = TypeVar("R")
+V = TypeVar("V")
+
+def execute(document: TypedDocument[R, V], variables: V) -> R:
+    raise NotImplementedError
+
+doc = graphql("query Pick($limit: Int!) { selected count(limit: $limit) }")
+selected = execute(doc, {"limit": 1})["selected"]
+wrong = execute(doc, {"limit": "bad"})
+```
+
+Open the Python file. After publication, hover over `selected`, go to the
+definition of the imported `graphql`, and inspect the diagnostic on `wrong`.
+Run **GraphQL Desk: Doctor** from the command palette. Run `graphql-desk doctor`
+from the same workspace in a terminal for the standalone case.
+
+On Windows, the isolated extension-host runs at commit `a7b6d7f` observed the
+following results with VS Code 1.141.0 and 1.142.0, Pylance 2026.4.1, and Python
+3.13.7. Each host loaded the compiled extension from its extension directory.
+
+| Observation | Result on both editor versions |
+| --- | --- |
+| Pylance hover and definition | `selected: String`; factory definition inside `custom-stubs/graphql_desk_generated/default.py` |
+| Variable diagnostic | `reportArgumentType` on the string passed for the required integer |
+| Editor Doctor | Exit 0. Configuration, project and generated ownership, schema, active editor and checker, and live bridge all ready |
+| Doctor side effects | Zero workspace changes, ownership-state updates, or Pylance restarts during the command |
+| Extension deactivation | Original workspace contents, neighboring file, and custom setting preserved |
+
+In the terminal run, configuration and schema were ready. Doctor identified the
+selected Python, reported that the active editor, checker and bridge were
+unavailable, directed the operator to the editor command, and exited 1.
+The packaged release and large-project performance have separate acceptance
+issues. [Doctor acceptance](https://github.com/atefth/graphql-desk/issues/65)
