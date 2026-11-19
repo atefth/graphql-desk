@@ -16,8 +16,7 @@ type Operation = { owner: DocumentIdentity; selector: string | null; operation_n
   config_dependencies: "unknown" | ConfigDependency[] };
 type OperationManifest = { project: string; generated_package: string; operations: Operation[] }[];
 type FileDigest = { path: string; sha256: string };
-// Legacy staging guards use RegExp coercion; these fields remain unknown after that check.
-type StagingMarker = { owner: string; format: number; id: string; sequence: number; token: unknown; files: { path: string; sha256: unknown }[] };
+type StagingMarker = { owner: string; format: number; id: string; sequence: number; token: string; files: FileDigest[] };
 type GenerationManifest = { owner: string; format: number; id: string; sequence: number; analysisId?: unknown;
   inputFingerprint: string; savedSourceFingerprint?: string; artifactFingerprint: string; files: FileDigest[];
   operationManifest: OperationManifest };
@@ -73,21 +72,21 @@ const validArtifactPath = (value: unknown): value is string => typeof value === 
   (["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/typed_document.pyi", "graphql_desk-stubs/fragment_refs.pyi",
     "graphql_desk-stubs/testing.pyi", "graphql_desk-stubs/py.typed"].includes(value) ||
     value.split("/").every((part, index) => /^[A-Za-z_]\w*$/.test(part) || index === value.split("/").length - 1 && /^[A-Za-z_]\w*\.pyi?$/.test(part)) && /\.pyi?$/.test(value));
-function readStagingMarker(markerPath: string, id: string) {
+function readStagingMarker(markerPath: string, id: string): { marker: StagingMarker; bytes: Buffer; identity: fs.Stats; fingerprint: string } {
   const stat = fs.lstatSync(markerPath);
   if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 8 * 1024 * 1024) throw new Error("Invalid staging marker");
   const bytes = fs.readFileSync(markerPath);
-  const marker: StagingMarker = JSON.parse(bytes.toString("utf8"));
+  const marker: unknown = JSON.parse(bytes.toString("utf8"));
   const sequence = Number(/^g-(\d+)-/.exec(id)?.[1]);
   if (!exactKeys(marker, ["owner", "format", "id", "sequence", "token", "files"]) ||
       marker.owner !== "graphql-desk-analysis-staging" || marker.format !== STAGING_FORMAT || marker.id !== id ||
       !Number.isSafeInteger(sequence) || marker.sequence !== sequence ||
-      !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(marker.token as string) ||
+      typeof marker.token !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(marker.token) ||
       !Array.isArray(marker.files) || marker.files.length > MAX_FILES ||
-      marker.files.some(item => !exactKeys(item, ["path", "sha256"]) || !validArtifactPath(item.path) || !/^[a-f0-9]{64}$/.test(item.sha256 as string)) ||
+      marker.files.some(item => !exactKeys(item, ["path", "sha256"]) || !validArtifactPath(item.path) || typeof item.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(item.sha256)) ||
       new Set(marker.files.map(item => item.path)).size !== marker.files.length ||
-      marker.files.some((item, index) => index > 0 && marker.files[index - 1].path >= item.path)) throw new Error("Invalid staging marker");
-  return { marker, bytes, identity: stat, fingerprint: digest(bytes) };
+      marker.files.some((item, index) => index > 0 && (marker.files as FileDigest[])[index - 1].path >= item.path)) throw new Error("Invalid staging marker");
+  return { marker, bytes, identity: stat, fingerprint: digest(bytes) } as ReturnType<typeof readStagingMarker>;
 }
 const validSpan = (value: unknown): value is Span => exactKeys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 &&
   Number.isSafeInteger(value.end) && value.end >= value.start;

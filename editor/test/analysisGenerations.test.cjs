@@ -535,6 +535,26 @@ test("restart removes only an owned incomplete generation and its named partial 
   assert.equal(f.managed.ownsStaging(directory, createHash("sha256").update(bytes).digest("hex")), false);
 });
 
+for (const field of ["token", "sha256"]) test(`startup preserves an owned staging marker with a non-string ${field}`, async t => {
+  const f = fixture(t);
+  const id = "g-7-00000000-0000-0000-0000-000000000003";
+  const directory = path.join(f.root, "generations", id);
+  const token = "11111111-1111-4111-8111-111111111111";
+  const sha256 = "a".repeat(64);
+  const entries = [{ path: "graphql_desk_generated/default.pyi", sha256: field === "sha256" ? [sha256] : sha256 }];
+  const bytes = markerBytes(id, entries, field === "token" ? [token] : token);
+  const marker = markerPath(f.root, id);
+  const fingerprint = createHash("sha256").update(bytes).digest("hex");
+  fs.writeFileSync(marker, bytes);
+  await f.managed.recordStaging(directory, fingerprint, markerTemporaryName);
+
+  assert.equal(await recover(f.publisher, f.managed, files("str")), false);
+  assert.equal(fs.existsSync(marker), true, "malformed JSON must not authorize cleanup");
+  assert.deepEqual(fs.readFileSync(marker), bytes);
+  assert.equal(f.managed.ownsStaging(directory, fingerprint), true);
+  assert.equal(fs.existsSync(directory), false);
+});
+
 test("staging marker ordering is deterministic for case-distinct nested paths", async t => {
   const f = fixture(t);
   const id = "g-7-00000000-0000-0000-0000-000000000002";
