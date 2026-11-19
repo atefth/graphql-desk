@@ -1,9 +1,10 @@
-"""Prove the Ubuntu package verification command starts without network egress."""
+"""Check the runner's network boundary before verifying the release packages."""
 
 import argparse
 import errno
 import os
 import socket
+import sys
 from ipaddress import IPv4Address
 from pathlib import Path
 
@@ -29,7 +30,22 @@ def _connect(address: IPv4Address) -> None:
 def _observe() -> None:
     address = _public_address(socket.gethostbyname(REGISTRY))
     _connect(address)
-    print(os.readlink(NET_NAMESPACE), address)
+    if sys.platform == "darwin":
+        print(address)
+    else:
+        print(os.readlink(NET_NAMESPACE), address)
+
+
+def _require_blocked(address: IPv4Address, expected_errors: tuple[int, ...]) -> None:
+    try:
+        _connect(address)
+    except OSError as error:
+        if error.errno not in expected_errors:
+            raise
+    else:
+        raise ValueError(
+            "The npm registry remains reachable inside the network boundary"
+        )
 
 
 def _verify_isolation(
@@ -59,13 +75,7 @@ def _verify_isolation(
         raise ValueError("Package verification did not drop runner privileges")
     if [name for _, name in socket.if_nameindex()] != ["lo"]:
         raise ValueError("Package verification has a network interface beyond loopback")
-    try:
-        _connect(address)
-    except OSError as error:
-        if error.errno != errno.ENETUNREACH:
-            raise
-    else:
-        raise ValueError("The npm registry remains reachable inside the namespace")
+    _require_blocked(address, (errno.ENETUNREACH,))
     print(
         f"Verified isolated package run in {namespace} (was {original_namespace}) "
         f"as {uid}:{gid} with no capabilities "
@@ -84,13 +94,25 @@ def main() -> None:
     isolated.add_argument("uid", type=int)
     isolated.add_argument("gid", type=int)
     isolated.add_argument("command", nargs=argparse.REMAINDER)
+    macos = modes.add_parser("run-macos", help="Verify denied registry access on macOS")
+    macos.add_argument("address", type=_public_address)
+    macos.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.mode == "observe":
         _observe()
         return
     if not args.command or not os.path.isabs(args.command[0]):
         parser.error("An absolute verification command is required")
-    _verify_isolation(args.namespace, args.address, args.uid, args.gid)
+    if args.mode == "run-macos":
+        if sys.platform != "darwin" or os.geteuid() == 0:
+            parser.error("Use the non-root macOS runner inside its network profile")
+        _require_blocked(args.address, (errno.EACCES, errno.EPERM))
+        print(
+            f"macOS denied the direct registry connection to {args.address}:{PORT}",
+            flush=True,
+        )
+    else:
+        _verify_isolation(args.namespace, args.address, args.uid, args.gid)
     os.execv(args.command[0], args.command)
 
 

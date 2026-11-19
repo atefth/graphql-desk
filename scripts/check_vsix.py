@@ -493,7 +493,7 @@ def main() -> None:
                 print(_run(npm, "audit", cwd=directory, env=env).strip(), flush=True)
         if args.provision_only:
             return
-        # Dead proxies catch incidental requests. The Ubuntu CI step enforces isolation.
+        # Dead proxies catch incidental requests during local checks.
         proxy = "http://127.0.0.1:9"
         offline = {
             **env,
