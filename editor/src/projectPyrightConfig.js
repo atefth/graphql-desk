@@ -971,17 +971,20 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   }
   if (saved?.version === 3 && !validProjectOwner(saved)) throw new Error("GraphQL Desk Pyright config ownership changed; preserved");
   if (saved && ![2, 3].includes(saved.version)) throw new Error("GraphQL Desk Pyright config ownership changed; preserved");
+  const pendingSelectionIs = (selection, from, to) => typeof from === "string" && typeof to === "string" && from !== to &&
+    selection?.base === MANAGED_PATH && selection.pending === true && selection.previousPresent === true &&
+    Object.keys(selection).sort().join(",") === "base,current,pending,previous,previousPresent" &&
+    selection.previous === from && selection.current === to;
   if (saved?.phase === "active" && persisted?.value?.phase === "rotate") {
     const intent = persisted.value;
     const previous = { ...intent, phase: "active", pythonStubPath: { ...intent.pythonStubPath, pending: undefined } };
     const selection = workspaceState?.get?.(generationKeys.stateKey);
-    const rollback = selection?.base === MANAGED_PATH && selection.current === intent.currentStubPath && selection.currentPresent === true &&
-      Object.keys(selection).sort().join(",") === "base,current,currentPresent";
-    const forward = typeof intent.pythonStubPath?.pending === "string" && selection?.base === MANAGED_PATH &&
-      selection.pending === true && selection.previousPresent === true &&
-      Object.keys(selection).sort().join(",") === "base,current,pending,previous,previousPresent" &&
-      selection.previous === intent.currentStubPath && selection.current === intent.pythonStubPath?.pending &&
-      intent.pythonStubPath.current === intent.currentStubPath && selection.current !== selection.previous &&
+    const rollback = (selection?.base === MANAGED_PATH && selection.current === intent.currentStubPath && selection.currentPresent === true &&
+      Object.keys(selection).sort().join(",") === "base,current,currentPresent") ||
+      (intent.pythonStubPath?.current === intent.currentStubPath &&
+        pendingSelectionIs(selection, intent.pythonStubPath.pending, intent.currentStubPath));
+    const forward = intent.pythonStubPath?.current === intent.currentStubPath &&
+      pendingSelectionIs(selection, intent.currentStubPath, intent.pythonStubPath.pending) &&
       validHash(workspaceState?.get?.(generationKeys.generationStateKey)?.[path.basename(selection.current)]) &&
       isManagedGeneration(workspace, selection.current, MANAGED_PATH);
     if (!validProjectOwner(intent) || JSON.stringify(saved) !== JSON.stringify(previous) ||
@@ -1249,15 +1252,14 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
   if (saved?.version === 3 && saved.phase === "rotate") {
     const pending = genericOwner;
     const previous = saved.currentStubPath;
-    const rollbackTarget = saved.pythonStubPath.pending;
-    const settledRollback = pending?.base === MANAGED_PATH &&
-      Object.keys(pending).sort().join(",") === "base,current,currentPresent" &&
-      pending.currentPresent === true && saved.pythonStubPath.current === previous &&
-      (pending.current === previous || pending.current === rollbackTarget);
-    const target = settledRollback ? rollbackTarget : pending?.current;
-    const rollbackToBase = settledRollback && target === MANAGED_PATH;
+    const target = saved.pythonStubPath?.pending;
+    // The generic intent can still point forward when its settlement failed and the project writer rolled back.
+    const rollback = (pending?.base === MANAGED_PATH && Object.keys(pending).sort().join(",") === "base,current,currentPresent" &&
+      pending.currentPresent === true && (pending.current === previous || pending.current === target)) ||
+      pendingSelectionIs(pending, target, previous);
+    const rollbackToBase = rollback && target === MANAGED_PATH;
     const proofSetting = rollbackToBase ? previous : target;
-    if ((!pending?.pending && !settledRollback) || typeof target !== "string" ||
+    if (saved.pythonStubPath?.current !== previous || (!rollback && !pendingSelectionIs(pending, previous, target)) || typeof target !== "string" ||
         !isManagedGeneration(workspace, proofSetting, MANAGED_PATH)) {
       throw new Error("Interrupted Pylance generation rotation is incomplete; preserved");
     }
@@ -1268,7 +1270,7 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     let recoveryCurrent = ownerCurrent;
     let repairOwnerMemento;
     let recoveredRollbackOwnerIdentity;
-    if (settledRollback) {
+    if (rollback) {
       // The original selection can be settled when its rollback reaches disk.
       const diskOwner = JSON.stringify(persisted?.value);
       const ownerAlreadySettled = pending.current === target && pythonCurrent === target &&
@@ -1437,9 +1439,9 @@ async function createManagedProjectConfig(vscode, folder, workspaceState, worker
     if (repairOwnerMemento) await repairOwnerMemento();
     else {
       const publication = await persistOwner(saved, recoveryCurrent);
-      if (settledRollback) recoveredRollbackOwnerIdentity = publication.stage.identity;
+      if (rollback) recoveredRollbackOwnerIdentity = publication.stage.identity;
     }
-    if (settledRollback) {
+    if (rollback) {
       const owner = JSON.stringify(settledOwner);
       checkRecoveredRollback = () => {
         if (!sameConfigIdentity(recoveredRollbackOwnerIdentity, safeIdentity(ownerFile(workspace), false, true)) ||
