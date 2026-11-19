@@ -1,14 +1,76 @@
-"use strict";
+import type { CancellationToken, Disposable, TextDocument, Uri, WorkspaceFolder, TextDocumentContentChangeEvent } from "vscode";
 
-const path = require("node:path");
-const fs = require("node:fs");
-const { createHash, randomUUID } = require("node:crypto");
-const { createAnalysisWorker } = require("./analysisWorker");
+type Snapshot = { uri: string; version?: number; text?: string };
+type Span = { start: number; end: number };
+type Skip = (reason: string) => void;
+type ModuleIdentity = { project: string; module: string; uri: string; version: number };
+type AnalysisBundle = { request: { modules: ModuleIdentity[] }; unavailable_schemas: unknown[] };
+type RemoteRevision = { project: string; schema_name: string; revision: string };
+type RemoteTarget = { project: string; schema_name: string; environment_names: string[]; refresh_interval: number };
+type CapturedBuffer = { path: string; version: number; text: string; is_dirty: boolean };
+type CapturedRequest = { workspace: string; candidates: string[]; buffers: CapturedBuffer[];
+  documents: { id: string; path: string; version: number; is_dirty: boolean }[]; editor_fallback: unknown;
+  managed_pyright_config_path?: string; managed_pyright_stub_path?: string;
+  managed_pyright_previous_stub_path_present?: boolean; managed_pyright_previous_stub_path?: string | null };
+type Captured = { request: CapturedRequest; texts: Map<string, CapturedBuffer>; diskCandidates: Set<string> };
+type AnalysisRequest = CapturedRequest & { id: string; schema_buffers: CapturedBuffer[]; remote_revisions: RemoteRevision[] };
+type Prepared = { id: string; remote_schemas: RemoteTarget[]; remote_revisions: RemoteRevision[];
+  required_buffers: string[]; local_schemas: { path: string }[]; configuration_diagnostics: unknown[];
+  project_preferences: { project: string; client_directives: string[] }[] };
+// Replies expose only fields consumed here; other validated worker payloads stay opaque.
+type WorkerReplies = { prepare: Prepared; analyze: AnalysisBundle; current: { current: boolean };
+  refresh: { id: string; status: string }; artifacts: Record<string, unknown> & { current: boolean };
+  doctor: Record<string, unknown> & { current: boolean }; quarantine: unknown;
+  pyright_config: Record<string, unknown> & { ok: boolean }; config_file: Record<string, unknown> & { ok: boolean } };
+type WorkerOptions = { python: string; workspace: string; isTrusted: () => boolean; configFiles: boolean };
+type WorkerMessage<O extends keyof WorkerReplies> = { op: O; workspace: string } & Record<string, unknown>;
+type Worker = { request<O extends keyof WorkerReplies>(message: WorkerMessage<O>, options?: { signal: AbortSignal }): Promise<WorkerReplies[O]>;
+  invalidate(): void; dispose(): void };
+type Cached = { bundle: AnalysisBundle; request: AnalysisRequest; ticket: number;
+  preferences: Prepared["project_preferences"]; pollingPrepared: boolean; schemaPaths: string[]; signature: string; revisionSignature: string };
+type Pending = { key: string | symbol; action: () => unknown; kind: string; ticket: number; configRequest: boolean;
+  promise: Promise<unknown>; resolve(value: unknown): void; reject(reason?: unknown): void };
+type Poll = { target: RemoteTarget; interval: number; due: number };
+type StatListener = (current: fs.BigIntStats, previous: fs.BigIntStats) => void;
+type State = { root: string; folder: WorkspaceFolder; python: string; setting: string; worker: Worker;
+  running: boolean; pending: Map<string | symbol, Pending>; cached: Cached | null; artifactsAbort: AbortController | null;
+  targets: RemoteTarget[]; credentials: Map<string, { fingerprint: string; revision: string }>;
+  revisions: RemoteRevision[]; watches: Map<string, Disposable[]>; sourcePolls: Map<string, StatListener>;
+  sourceDiskCandidates?: Set<string>; polls: Map<string, Poll>; pollTimer: NodeJS.Timeout | null;
+  pollAbort: AbortController | null; polling: boolean; pollPaused: boolean };
+type SelectedEnvironment = { id: string; path: string };
+type ResolvedEnvironment = { executable?: { uri?: Uri } };
+type PythonEnvironments = { getActiveEnvironmentPath(uri: Uri): SelectedEnvironment | undefined;
+  resolveEnvironment(value: SelectedEnvironment): PromiseLike<ResolvedEnvironment | undefined>;
+  onDidChangeActiveEnvironmentPath(listener: (event: { resource?: Uri | { uri: Uri } }) => void): Disposable };
+type PythonAPI = { environments?: PythonEnvironments };
+type Interpreter = { key: string; folder: WorkspaceFolder; promise: Promise<ResolvedEnvironment | undefined> };
+type TemporaryConfig = { owner: string; hash: string; timer: NodeJS.Timeout | null; staging?: boolean };
+type ConfigOwnership = { topLevel?: boolean; executionEnvironmentRoots?: unknown[]; expectedStubPathPresent?: unknown;
+  expectedStubPath?: unknown; restoreStubPathPresent?: unknown; restoreStubPath?: unknown; customStubPath?: unknown;
+  customStubPathAdded?: unknown; removeExtraPathsKey?: unknown; originalStubPathPresent?: unknown;
+  originalStubPath?: unknown; removeManagedPaths?: unknown; legacyTopLevel?: unknown; legacyExecutionEnvironmentRoots?: unknown };
+type OwnedWrite = { phase?: string; previousHash?: string; temporaryPath?: string };
+type WorkspaceChange = Partial<TextDocument> & { document?: TextDocument; scheme?: string;
+  affectsConfiguration?(name: string): boolean; contentChanges?: readonly TextDocumentContentChangeEvent[] };
+type Subscription = (listener: (event: WorkspaceChange) => void) => Disposable;
+// Node accepts null as a no-op timer handle, used by the existing lifecycle.
+declare const clearTimeout: (timer: NodeJS.Timeout | null) => void;
+
+type ControllerHost = Pick<typeof import("vscode"), "workspace" | "window" | "Uri" | "RelativePattern" | "ProgressLocation" | "extensions">;
+type ControllerOptions = { workerFactory?: (options: WorkerOptions) => Worker; environment?: () => NodeJS.ProcessEnv;
+  changed?: (uri?: string | null, ranges?: Span[] | null) => void; report?: (message: string) => void;
+  status?: (message: string | null) => void; configurationDiagnostics?: (uri: string, diagnostics: unknown[]) => void; trace?: (message: string) => void };
+
+import path = require("node:path");
+import fs = require("node:fs");
+const { createHash, randomUUID }: typeof import("node:crypto") = require("node:crypto");
+const { createAnalysisWorker }: { createAnalysisWorker(options: WorkerOptions): Worker } = require("./analysisWorker");
 const activationFailed = Symbol("python-extension-activation-failed");
 const MAX_PENDING_GENERATION_REMOVALS = 8192;
 
-const key = target => JSON.stringify([target.project, target.schema_name]);
-const canonical = value => {
+const key = (target: { project: string; schema_name: string }) => JSON.stringify([target.project, target.schema_name]);
+const canonical = (value: string): string => {
   let result;
   try { result = fs.realpathSync.native(value); } catch {
     // Unsaved paths still inherit existing parent junctions and Windows short-name expansion.
@@ -18,16 +80,16 @@ const canonical = value => {
   }
   return process.platform === "win32" ? result.toLowerCase() : result;
 };
-const generationRemovalKey = value => {
+const generationRemovalKey = (value: string) => {
   const absolute = path.resolve(value);
   const location = path.join(canonical(path.dirname(absolute)), path.basename(absolute));
   return process.platform === "win32" ? location.toLowerCase() : location;
 };
-const inside = (root, value) => {
+const inside = (root: string, value: string) => {
   const relative = path.relative(root, value);
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 };
-function isVerifiedArtifact(filename, selectedStubRoot) {
+function isVerifiedArtifact(filename: string, selectedStubRoot: string) {
   if (!inside(selectedStubRoot, filename)) return false;
   let descriptor;
   try {
@@ -50,14 +112,14 @@ function isVerifiedArtifact(filename, selectedStubRoot) {
   } catch { return false; }
   finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
 }
-function isVerifiedGenerationFile(filename, generationRoot) {
+function isVerifiedGenerationFile(filename: string, generationRoot: string) {
   if (!inside(generationRoot, filename)) return false;
   let descriptor;
   try {
     const manifestPath = path.join(generationRoot, "complete.json");
     const stat = fs.lstatSync(manifestPath);
     if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 2 * 1024 * 1024) return false;
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    const manifest: { owner?: unknown; format?: unknown; files?: { path?: unknown; sha256?: unknown }[] } | null = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     if (manifest?.owner !== "graphql-desk-analysis-generation" || manifest.format !== 2 || !Array.isArray(manifest.files)) return false;
     const relative = path.relative(generationRoot, filename).split(path.sep).join("/");
     const entry = manifest.files.find(item => item?.path === relative);
@@ -71,7 +133,7 @@ function isVerifiedGenerationFile(filename, generationRoot) {
   } catch { return false; }
   finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
 }
-function artifactRootFor(filename, selectedStubRoot) {
+function artifactRootFor(filename: string, selectedStubRoot: string) {
   const managedRoot = path.basename(path.dirname(selectedStubRoot)) === "generations"
     ? path.resolve(selectedStubRoot, "..", "..") : selectedStubRoot;
   if (!inside(managedRoot, filename)) return null;
@@ -83,30 +145,30 @@ function artifactRootFor(filename, selectedStubRoot) {
 }
 
 /** Captures are finite capabilities; watchers only request earlier invalidation. */
-function createAnalysisController(vscode, { workerFactory = createAnalysisWorker, environment = () => process.env, changed = () => {}, report = () => {}, status = () => {}, configurationDiagnostics = () => {}, trace = () => {} } = {}) {
+function createAnalysisController(vscode: ControllerHost, { workerFactory = createAnalysisWorker, environment = () => process.env, changed = () => {}, report = () => {}, status = () => {}, configurationDiagnostics = () => {}, trace = () => {} }: ControllerOptions = {}) {
   let disposed = false;
   let epoch = 0;
-  const states = new Map();
-  const subscriptions = [];
-  const folderWatches = new Map();
-  const folderWatchRoots = new Map();
-  const ownedAnalysisPaths = new Set();
-  const ownedAnalysisDirectories = new Set();
-  const pendingGenerationRemovals = new Set();
-  const ownedProjectConfigHashes = new Map();
-  const pendingOwnedProjectConfigWrites = new Map();
-  const ownedProjectConfigTemporaryPaths = new Map();
-  const managedProjectTomlStubPaths = new Map();
-  const recentDiskInvalidations = new Map();
-  const interpreters = new Map();
-  let pythonApiPromise;
-  let pythonEnvironments;
-  const configuredPython = folder => vscode.workspace.getConfiguration("graphqlDesk", folder.uri).get("pythonPath", "");
-  function stopPolling(state) {
+  const states = new Map<string, State>();
+  const subscriptions: Disposable[] = [];
+  const folderWatches = new Map<string, Disposable[]>();
+  const folderWatchRoots = new Map<string, string>();
+  const ownedAnalysisPaths = new Set<string>();
+  const ownedAnalysisDirectories = new Set<string>();
+  const pendingGenerationRemovals = new Set<string>();
+  const ownedProjectConfigHashes = new Map<string, string>();
+  const pendingOwnedProjectConfigWrites = new Map<string, { previousHash: string; nextHash: string; temporaryPath: string }>();
+  const ownedProjectConfigTemporaryPaths = new Map<string, TemporaryConfig>();
+  const managedProjectTomlStubPaths = new Map<string, { file: string; value: string; previousValue: string | null; previousPresent: boolean }>();
+  const recentDiskInvalidations = new Map<string, { fingerprint: string; ownedDeletion: boolean }>();
+  const interpreters = new Map<string, Interpreter>();
+  let pythonApiPromise: Promise<PythonAPI | typeof activationFailed> | null | undefined;
+  let pythonEnvironments: PythonEnvironments | undefined;
+  const configuredPython = (folder: WorkspaceFolder) => vscode.workspace.getConfiguration("graphqlDesk", folder.uri).get("pythonPath", "");
+  function stopPolling(state: State) {
     clearTimeout(state.pollTimer); state.pollTimer = null;
     state.pollPaused = true; state.pollAbort?.abort();
   }
-  function dropState(root) {
+  function dropState(root: string) {
     const state = states.get(root);
     if (state) {
       stopPolling(state); state.polls.clear();
@@ -115,20 +177,20 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       reconcileSchemaWatches(state, new Set()); reconcileSourcePolls(state, new Set()); states.delete(root);
     }
   }
-  function clearCache(state, reason) {
+  function clearCache(state: State, reason: string) {
     if (state.cached) {
       try { trace(`analysis cache cleared: ${reason}`); } catch { /* Logging must not affect freshness. */ }
     }
     state.cached = null;
   }
-  const selectedKey = selected => selected && typeof selected.id === "string" && selected.id && typeof selected.path === "string" && selected.path ? JSON.stringify([selected.id, selected.path]) : null;
-  async function environments(ticket, skip) {
+  const selectedKey = (selected: SelectedEnvironment | undefined) => selected && typeof selected.id === "string" && selected.id && typeof selected.path === "string" && selected.path ? JSON.stringify([selected.id, selected.path]) : null;
+  async function environments(ticket: number, skip?: Skip) {
     check(ticket);
     if (!pythonApiPromise) {
-      const extension = vscode.extensions?.getExtension("ms-python.python");
+      const extension = vscode.extensions?.getExtension<PythonAPI>("ms-python.python");
       if (!extension) { skip?.("python-extension-unavailable"); return null; }
       const activation = Promise.resolve().then(() => { check(ticket); return extension.activate(); });
-      const pending = activation.catch(() => {
+      const pending = activation.catch((): typeof activationFailed => {
         if (pythonApiPromise === pending) pythonApiPromise = undefined;
         skip?.(!trusted() || epoch !== ticket ? "capture-invalidated" : "python-extension-activation-failed");
         return activationFailed;
@@ -144,7 +206,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       pythonEnvironments = current;
       subscriptions.push(current.onDidChangeActiveEnvironmentPath(event => {
         if (!trusted()) return;
-        const resource = event.resource?.uri ?? event.resource;
+        const resource = (event.resource as { uri?: Uri } | undefined)?.uri ?? event.resource as Uri | undefined;
         if (resource && (resource.scheme !== "file" || !path.isAbsolute(resource.fsPath))) return;
         const filename = resource && canonical(resource.fsPath);
         let affected = false;
@@ -162,7 +224,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     return current;
   }
-  async function selectedPython(folder, root, ticket, skip) {
+  async function selectedPython(folder: WorkspaceFolder, root: string, ticket: number, skip?: Skip) {
     const api = await environments(ticket, skip);
     check(ticket);
     if (!api || configuredPython(folder) !== "") return null;
@@ -175,13 +237,13 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       entry = { key, folder, promise: Promise.resolve().then(() => {
         check(ticket);
         if (configuredPython(folder) !== "" || interpreters.get(root) !== entry) return undefined;
-        return api.resolveEnvironment({ id: selected.id, path: selected.path });
+        return api.resolveEnvironment({ id: selected!.id, path: selected!.path });
       }) };
       interpreters.set(root, entry);
     }
     let resolved;
     try { resolved = await entry.promise; }
-    catch (error) {
+    catch (error: unknown) {
       if (interpreters.get(root) === entry) { interpreters.delete(root); dropState(root); }
       throw error;
     }
@@ -200,14 +262,14 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!allowed) for (const state of states.values()) { stopPolling(state); reconcileSourcePolls(state, new Set()); clearCache(state, "workspace-trust-revoked"); state.worker.invalidate(); }
     return allowed;
   };
-  const localPath = document => {
+  const localPath = (document: Pick<TextDocument, "uri">) => {
     const uri = document.uri;
     if (!["file", "untitled"].includes(uri.scheme) || !path.isAbsolute(uri.fsPath)) return null;
     return canonical(uri.fsPath);
   };
-  const watchesSchema = (state, filename) => [...state.watches.keys()].some(watched => canonical(watched) === filename);
-  const isGraphqlDocument = filename => /\.(?:graphql|graphqls|gql)$/i.test(filename);
-  function verifiedManagedArtifactDocument(folder, filename) {
+  const watchesSchema = (state: State, filename: string) => [...state.watches.keys()].some(watched => canonical(watched) === filename);
+  const isGraphqlDocument = (filename: string) => /\.(?:graphql|graphqls|gql)$/i.test(filename);
+  function verifiedManagedArtifactDocument(folder: WorkspaceFolder | undefined, filename: string) {
     if (!folder || !filename) return false;
     const pythonConfig = vscode.workspace.getConfiguration("python", folder.uri);
     const inspection = pythonConfig.inspect?.("analysis.stubPath");
@@ -221,7 +283,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!artifactRoot) return false;
     return isVerifiedArtifact(filename, artifactRoot) || isVerifiedGenerationFile(filename, artifactRoot);
   }
-  async function stateFor(snapshot, skip) {
+  async function stateFor(snapshot: Snapshot, skip?: Skip) {
     const ticket = epoch;
     if (!trusted()) { skip?.("workspace-untrusted"); return null; }
     const uri = vscode.Uri.parse(snapshot.uri);
@@ -236,13 +298,13 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!folder || folder.uri.scheme !== "file") { skip?.("document-outside-workspace"); return null; }
     const root = canonical(folder.uri.fsPath);
     const setting = configuredPython(folder);
-    let python = setting;
+    let python: string | null = setting;
     if (setting === "") {
       try { python = await selectedPython(folder, root, ticket, skip); } catch { skip?.("python-environment-resolution-failed"); return null; }
     }
     if (!trusted() || epoch !== ticket || configuredPython(folder) !== setting) { skip?.("capture-invalidated"); return null; }
     if (python === null) return null;
-    let state = states.get(root);
+    let state: State | null | undefined = states.get(root);
     if (typeof python !== "string" || !path.isAbsolute(python)) {
       dropState(root);
       skip?.("python-interpreter-invalid");
@@ -257,7 +319,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     return state;
   }
-  function rememberDiskFingerprint(filename, fingerprint, ownedDeletion = false) {
+  function rememberDiskFingerprint(filename: string, fingerprint: string | undefined, ownedDeletion = false) {
     const previous = recentDiskInvalidations.get(filename);
     if (fingerprint === undefined) { recentDiskInvalidations.delete(filename); return false; }
     if (previous?.fingerprint === fingerprint) return true;
@@ -268,13 +330,13 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     return false;
   }
-  function ignoreOwnedDeletion(filename, ownedPaths) {
+  function ignoreOwnedDeletion(filename: string, ownedPaths: Set<string>) {
     if (!ownedPaths.delete(filename)) return false;
     // Keep duplicate cleanup reports in the same bounded cache as other disk events.
     rememberDiskFingerprint(filename, "missing", true);
     return true;
   }
-  function finishOwnedConfigWrite(key, fingerprint) {
+  function finishOwnedConfigWrite(key: string, fingerprint?: string) {
     const pending = pendingOwnedProjectConfigWrites.get(key);
     pendingOwnedProjectConfigWrites.delete(key);
     if (!pending) return;
@@ -286,11 +348,11 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     if (fingerprint !== undefined && fingerprint !== pending.nextHash) return;
     try { fs.lstatSync(pending.temporaryPath); }
-    catch (error) {
-      if (error.code === "ENOENT") rememberDiskFingerprint(pending.temporaryPath, "missing");
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") rememberDiskFingerprint(pending.temporaryPath, "missing");
     }
   }
-  function armOwnedConfigTemporary(key, temporary) {
+  function armOwnedConfigTemporary(key: string, temporary: TemporaryConfig) {
     clearTimeout(temporary.timer);
     temporary.timer = setTimeout(() => {
       if (pendingOwnedProjectConfigWrites.get(temporary.owner)?.temporaryPath === key) return;
@@ -298,17 +360,17 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }, 5000);
     temporary.timer.unref?.();
   }
-  function invalidate(source, ranges, diskEvent = false) {
+  function invalidate(source?: string | Uri | null, ranges?: Span[] | null, diskEvent = false) {
     if (disposed) return;
-    if (diskEvent && ranges == null && source?.scheme === "file") {
-      const filename = canonical(source.fsPath);
+    if (diskEvent && ranges == null && (source as Uri | null | undefined)?.scheme === "file") {
+      const filename = canonical((source as Uri).fsPath);
       let fingerprint;
       try {
-        const stat = fs.lstatSync(source.fsPath);
+        const stat = fs.lstatSync((source as Uri).fsPath);
         if (!stat.isSymbolicLink() && stat.isFile() && stat.size <= 8 * 1024 * 1024) {
-          fingerprint = createHash("sha256").update(fs.readFileSync(source.fsPath)).digest("hex");
+          fingerprint = createHash("sha256").update(fs.readFileSync((source as Uri).fsPath)).digest("hex");
         }
-      } catch (error) { if (error.code === "ENOENT") fingerprint = "missing"; }
+      } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") fingerprint = "missing"; }
       if (rememberDiskFingerprint(filename, fingerprint)) return;
     }
     epoch += 1;
@@ -316,11 +378,11 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const uri = typeof source === "string" ? source : source?.toString?.();
     changed(typeof uri === "string" && uri ? uri : null, Array.isArray(ranges) ? ranges : null);
   }
-  function snapshot(document) {
+  function snapshot(document: TextDocument) {
     const filename = localPath(document);
     return { uri: filename ? vscode.Uri.file(filename).toString() : document.uri.toString(), version: document.version, text: document.getText() };
   }
-  function mapSnapshot(value, bundle) {
+  function mapSnapshot(value: Snapshot, bundle: AnalysisBundle) {
     const parsed = vscode.Uri.parse(value.uri);
     if (parsed.scheme !== "file") return value;
     const matches = bundle.request.modules.filter(item => {
@@ -329,15 +391,15 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     });
     return matches.length === 1 ? { ...value, uri: matches[0].uri } : value;
   }
-  function resolveUri(uri) {
+  function resolveUri(uri: string) {
     const parsed = vscode.Uri.parse(uri);
     if (parsed.scheme !== "file") return parsed;
     const matches = vscode.workspace.textDocuments.filter(document => localPath(document) === canonical(parsed.fsPath));
     return matches.length === 1 ? matches[0].uri : parsed;
   }
-  function captureSignature(captured, schemaPaths = []) {
+  function captureSignature(captured: Captured, schemaPaths: string[] = []) {
     // Dirty status is irrelevant when the buffer still matches its on-disk input.
-    const matchesDisk = buffer => {
+    const matchesDisk = (buffer: CapturedBuffer) => {
       try { return fs.readFileSync(buffer.path, "utf8") === buffer.text; }
       catch { return false; }
     };
@@ -346,21 +408,21 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     const buffers = captured.request.buffers.filter(buffer => buffer.is_dirty && !matchesDisk(buffer));
     const documents = captured.request.documents.filter(document => document.is_dirty &&
       (relevantPaths.has(canonical(document.path)) || schemaPathSet.has(canonical(document.path))) &&
-      !matchesDisk(captured.texts.get(document.id)));
+      !matchesDisk(captured.texts.get(document.id)!));
     const schemaBuffers = [...captured.texts].filter(([, buffer]) => buffer.is_dirty && schemaPathSet.has(canonical(buffer.path)) &&
       !matchesDisk(buffer)).sort(([left], [right]) => left.localeCompare(right));
     return JSON.stringify([captured.request.workspace, captured.request.candidates, buffers,
       documents, captured.request.editor_fallback, [...schemaPathSet].sort(), schemaBuffers]);
   }
-  function captureSignatureChanges(left, right) {
+  function captureSignatureChanges(left: string, right: string) {
     const names = ["workspace", "candidates", "dirty-buffers", "dirty-documents", "editor-fallback", "schema-paths", "dirty-schemas"];
     try {
-      const before = JSON.parse(left);
-      const after = JSON.parse(right);
+      const before: unknown[] = JSON.parse(left);
+      const after: unknown[] = JSON.parse(right);
       return names.filter((_name, index) => JSON.stringify(before[index]) !== JSON.stringify(after[index])).join(",") || "unknown";
     } catch { return "unavailable"; }
   }
-  function currentOwnedProjectConfigRequest(state, request) {
+  function currentOwnedProjectConfigRequest(state: State, request: AnalysisRequest) {
     const managed = managedProjectTomlStubPaths.get(state.root);
     if (!managed || managed.file !== canonical(path.join(state.root, "pyproject.toml"))) return request;
     return { ...request, managed_pyright_config_path: path.relative(state.root, managed.file).split(path.sep).join("/"),
@@ -368,8 +430,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       managed_pyright_previous_stub_path_present: managed.previousPresent,
       ...(managed.previousPresent ? { managed_pyright_previous_stub_path: managed.previousValue } : {}) };
   }
-  function credential(state, target) {
-    const values = Object.create(null);
+  function credential(state: State, target: RemoteTarget) {
+    const values: Record<string, string> = Object.create(null);
     const source = environment();
     for (const name of target.environment_names) if (typeof source[name] === "string") values[name] = source[name];
     // Keep secret-derived fingerprints private; wire revisions are random capabilities.
@@ -379,10 +441,10 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     state.credentials.set(key(target), { fingerprint, revision });
     return { values, revision };
   }
-  function revisions(state) {
+  function revisions(state: State) {
     return state.targets.map(target => ({ project: target.project, schema_name: target.schema_name, revision: credential(state, target).revision }));
   }
-  async function capture(state) {
+  async function capture(state: State): Promise<Captured> {
     const found = await vscode.workspace.findFiles(new vscode.RelativePattern(state.folder, "**/*.py"), null);
     let documents = vscode.workspace.textDocuments.filter(document => {
       const filename = localPath(document);
@@ -399,7 +461,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (generatedRoot && path.basename(path.dirname(generatedRoot)) === "generations") {
       generatedRoot = path.resolve(generatedRoot, "..", "..");
     }
-    const isGeneratedRuntime = filename => {
+    const isGeneratedRuntime = (filename: string) => {
       if (ownedAnalysisPaths.has(filename)) return true;
       if (!generatedRoot || !inside(generatedRoot, filename)) return false;
       const artifactRoot = artifactRootFor(filename, generatedRoot);
@@ -420,7 +482,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       .filter(filename => !isGeneratedRuntime(filename)));
     const diskCandidates = new Set(candidates);
     for (const document of documents) {
-      const filename = localPath(document);
+      const filename = localPath(document)!;
       // VS Code can retain a clean document after its backing file was renamed or deleted.
       if (filename.endsWith(".py") && inside(state.root, filename) &&
           (document.isDirty || document.uri.scheme === "untitled") && !isGeneratedRuntime(filename)) candidates.add(filename);
@@ -437,11 +499,12 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         parent = next;
       }
     }
-    const inventory = documents.map(document => ({ id: document.uri.toString(), path: localPath(document), version: document.version, is_dirty: document.isDirty }));
+    // The first document filter admitted only non-null local paths; IDs also key texts.
+    const inventory = documents.map(document => ({ id: document.uri.toString(), path: localPath(document)!, version: document.version, is_dirty: document.isDirty }));
     inventory.sort((a, b) => a.id.localeCompare(b.id));
-    const buffers = documents.filter(document => allowed.has(localPath(document))).map(document => ({ path: localPath(document), version: document.version, text: document.getText(), is_dirty: document.isDirty }));
+    const buffers = documents.filter(document => allowed.has(localPath(document)!)).map(document => ({ path: localPath(document)!, version: document.version, text: document.getText(), is_dirty: document.isDirty }));
     buffers.sort((a, b) => a.path.localeCompare(b.path));
-    const request = { workspace: state.root, candidates: [...candidates].sort(), buffers, documents: inventory,
+    const request: CapturedRequest = { workspace: state.root, candidates: [...candidates].sort(), buffers, documents: inventory,
       editor_fallback: vscode.workspace.getConfiguration("graphqlDesk", state.folder.uri).get("project", null) };
     const managedToml = managedProjectTomlStubPaths.get(state.root);
     if (managedToml) {
@@ -452,27 +515,28 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         request.managed_pyright_previous_stub_path = managedToml.previousValue;
       }
     }
-    const texts = new Map(documents.map(document => [document.uri.toString(), { path: localPath(document), version: document.version, text: document.getText(), is_dirty: document.isDirty }]));
+    const texts = new Map(documents.map(document => [document.uri.toString(), { path: localPath(document)!, version: document.version, text: document.getText(), is_dirty: document.isDirty }]));
     return { request, texts, diskCandidates };
   }
   // Coalesce analysis work; config transactions need each captured text's reply.
-  function enqueue(state, action, kind = "analyze", ticket = epoch, configRequest = false) {
+  // Coalescing keys identify one reply family; the heterogeneous pending queue stores unknown.
+  function enqueue<T>(state: State, action: () => T | PromiseLike<T>, kind = "analyze", ticket = epoch, configRequest = false): Promise<T | null> {
     const key = configRequest ? Symbol(kind) : kind;
     if (state.running) {
       if (!configRequest && state.pending.has("refresh") && kind !== "refresh") return Promise.resolve(null);
       const existing = !configRequest && state.pending.get(kind);
-      if (existing) { existing.action = action; existing.ticket = ticket; return existing.promise; }
+      if (existing) { existing.action = action; existing.ticket = ticket; return existing.promise as Promise<T | null>; }
       if (kind === "refresh") {
         for (const [pendingKey, pending] of state.pending) if (!pending.configRequest) {
           pending.resolve(null);
           state.pending.delete(pendingKey);
         }
       }
-      let resolve;
-      let reject;
-      const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+      let resolve!: (value: unknown) => void;
+      let reject!: (reason?: unknown) => void;
+      const promise = new Promise<unknown>((yes, no) => { resolve = yes; reject = no; });
       state.pending.set(key, { key, action, kind, ticket, configRequest, promise, resolve, reject });
-      return promise;
+      return promise as Promise<T | null>;
     }
     state.running = true;
     return Promise.resolve().then(() => (configRequest || ticket === epoch) && trusted() && states.get(state.root) === state ? action() : null).finally(() => {
@@ -485,13 +549,13 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       schedulePolling(state);
     });
   }
-  function reconcileSourcePolls(state, filenames, diskCandidates = new Set()) {
+  function reconcileSourcePolls(state: State, filenames: Set<string>, diskCandidates = new Set<string>()) {
     state.sourceDiskCandidates = diskCandidates;
     for (const [filename, listener] of state.sourcePolls) if (!filenames.has(filename)) {
       fs.unwatchFile(filename, listener); state.sourcePolls.delete(filename);
     }
     for (const filename of filenames) if (!state.sourcePolls.has(filename)) {
-      const listener = (current, previous) => {
+      const listener: StatListener = (current, previous) => {
         if (trusted() && states.get(state.root) === state && state.sourcePolls.get(filename) === listener) {
           if (canonical(filename) !== filename) {
             fs.unwatchFile(filename, listener); state.sourcePolls.delete(filename);
@@ -499,31 +563,31 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
             return;
           }
           // Node reports one all-zero stat when a never-saved source starts absent.
-          if (!state.sourceDiskCandidates.has(filename) && current?.nlink === 0n && previous?.nlink === 0n) return;
+          if (!state.sourceDiskCandidates!.has(filename) && current?.nlink === 0n && previous?.nlink === 0n) return;
           invalidate(vscode.Uri.file(filename), null, true);
         }
       };
       state.sourcePolls.set(filename, listener);
       // Stable VS Code subscriptions share native events; stat polling also sees a lost rename.
       try { fs.watchFile(filename, { persistent: false, bigint: true }, listener); }
-      catch (error) { fs.unwatchFile(filename, listener); state.sourcePolls.delete(filename); throw error; }
+      catch (error: unknown) { fs.unwatchFile(filename, listener); state.sourcePolls.delete(filename); throw error; }
     }
   }
-  function reconcileSchemaWatches(state, filenames) {
+  function reconcileSchemaWatches(state: State, filenames: Set<string>) {
     for (const [filename, handles] of state.watches) if (!filenames.has(filename)) {
       handles.forEach(handle => handle.dispose());
       state.watches.delete(filename);
     }
     for (const filename of filenames) if (!state.watches.has(filename)) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(path.dirname(filename), path.basename(filename)));
-      const changedOnDisk = resource => invalidate(resource, null, true);
+      const changedOnDisk = (resource: Uri) => invalidate(resource, null, true);
       state.watches.set(filename, [watcher, watcher.onDidChange(changedOnDisk), watcher.onDidCreate(changedOnDisk), watcher.onDidDelete(changedOnDisk)]);
     }
   }
-  function check(ticket, token, state, signal) {
+  function check(ticket: number, token?: CancellationToken, state?: State, signal?: AbortSignal) {
     if (!trusted() || epoch !== ticket || token?.isCancellationRequested || signal?.aborted || (state && states.get(state.root) !== state)) throw new Error("Superseded analysis");
   }
-  function schedulePolling(state) {
+  function schedulePolling(state: State) {
     clearTimeout(state.pollTimer); state.pollTimer = null;
     if (disposed || states.get(state.root) !== state || state.pollPaused || state.polling || state.running || !state.polls.size) return;
     const next = [...state.polls.values()].sort((a, b) => a.due - b.due)[0];
@@ -554,7 +618,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }, Math.min(2_147_483_647, Math.max(1, next.due - Date.now())));
     state.pollTimer.unref?.();
   }
-  function reconcilePolling(state) {
+  function reconcilePolling(state: State) {
     const targets = new Map(state.targets.filter(target => target.refresh_interval > 0).map(target => [key(target), target]));
     for (const identity of state.polls.keys()) if (!targets.has(identity)) state.polls.delete(identity);
     for (const [identity, target] of targets) {
@@ -566,7 +630,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     state.pollPaused = false;
     schedulePolling(state);
   }
-  async function build(state, token, refreshTarget, pollAbort, stage = () => {}, operationAbort, allowPolling = true) {
+  async function build(state: State, token?: CancellationToken, refreshTarget?: RemoteTarget, pollAbort?: AbortController, stage: Skip = () => {}, operationAbort?: AbortController, allowPolling = true): Promise<Cached | null> {
     const ticket = epoch;
     stage("analysis-capture-failed");
     check(ticket, token, state, pollAbort?.signal);
@@ -582,7 +646,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     // shortcut: stale jobs finish without publishing to retain fetched schemas; refine if measured edit latency needs interruption.
     const abort = operationAbort ?? pollAbort ?? (refreshTarget ? new AbortController() : null);
     const cancellation = !operationAbort && abort ? token?.onCancellationRequested?.(() => abort.abort()) : undefined;
-    const requestWorker = message => state.worker.request(message, abort ? { signal: abort.signal } : undefined);
+    const requestWorker = <O extends keyof WorkerReplies>(message: WorkerMessage<O>) => state.worker.request(message, abort ? { signal: abort.signal } : undefined);
     try {
       stage("worker-prepare-failed");
       const prepared = await requestWorker({ op: "prepare", ...captured.request, remote_revisions: wanted });
@@ -591,7 +655,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       state.revisions = prepared.remote_revisions;
       const schema_buffers = prepared.required_buffers.map(id => {
         if (!captured.texts.has(id)) throw new Error("Missing schema buffer");
-        return captured.texts.get(id);
+        return captured.texts.get(id)!;
       });
       const watchPaths = new Set(prepared.local_schemas.map(schema => schema.path));
       // Keep prior schema repair watches until every invalid project config is fixed.
@@ -651,7 +715,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       return result;
     } finally { cancellation?.dispose(); }
   }
-  async function analyze(value, token) {
+  async function analyze(value: Snapshot, token?: CancellationToken) {
     if (!trusted() || token?.isCancellationRequested) return null;
     const state = await stateFor(value);
     if (!state || token?.isCancellationRequested) return null;
@@ -663,7 +727,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     catch { clearCache(state, "analysis-failed"); if (trusted()) status("Analysis unavailable"); return null; }
   }
-  async function isCurrent(bundle, value, token) {
+  async function isCurrent(bundle: AnalysisBundle, value: Snapshot, token?: CancellationToken) {
     if (!trusted() || token?.isCancellationRequested) return false;
     const state = await stateFor(value);
     if (!state || token?.isCancellationRequested) return false;
@@ -690,8 +754,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       return Boolean(current) && !token?.isCancellationRequested && trusted() && state.cached?.bundle === bundle;
     } catch { clearCache(state, "current-check-error"); return false; }
   }
-  async function capturedPayload(value, token, onSkip, operation) {
-    const skip = reason => { try { onSkip(reason); } catch { /* Diagnostics must not affect analysis. */ } };
+  async function capturedPayload(value: Snapshot, token: CancellationToken | undefined, onSkip: Skip, operation: "artifacts" | "doctor") {
+    const skip = (reason: string) => { try { onSkip(reason); } catch { /* Diagnostics must not affect analysis. */ } };
     if (!trusted()) { skip("workspace-untrusted"); return null; }
     if (token?.isCancellationRequested) { skip("request-cancelled"); return null; }
     const state = await stateFor(value, skip);
@@ -745,9 +809,9 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       return null;
     }
   }
-  const artifacts = (value, token, onSkip = () => {}) => capturedPayload(value, token, onSkip, "artifacts");
-  const doctor = (value, token, onSkip = () => {}) => capturedPayload(value, token, onSkip, "doctor");
-  async function editPyrightConfig(folder, text, action, managedPath = ".graphql-desk/live-typings", ownership = {}) {
+  const artifacts = (value: Snapshot, token?: CancellationToken, onSkip: Skip = () => {}) => capturedPayload(value, token, onSkip, "artifacts");
+  const doctor = (value: Snapshot, token?: CancellationToken, onSkip: Skip = () => {}) => capturedPayload(value, token, onSkip, "doctor");
+  async function editPyrightConfig(folder: WorkspaceFolder, text: string, action: string, managedPath = ".graphql-desk/live-typings", ownership: ConfigOwnership = {}) {
     if (!folder?.uri || folder.uri.scheme !== "file" || !trusted()) throw new Error("Trusted file workspace required");
     const state = await stateFor({ uri: folder.uri.toString() });
     if (!state || !trusted()) throw new Error("Python environment unavailable for Pyright config update");
@@ -768,21 +832,21 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         legacy_top_level: ownership.legacyTopLevel,
         legacy_execution_environment_roots: ownership.legacyExecutionEnvironmentRoots } }),
     `pyright_config:${action}`, epoch, true); }
-    catch (error) { throw new Error(`Pyright config worker action '${action}' failed: ${String(error)}`); }
+    catch (error: unknown) { throw new Error(`Pyright config worker action '${action}' failed: ${String(error)}`); }
     if (!trusted() || states.get(state.root) !== state || !reply || reply.ok !== true) throw new Error("Pyproject Pyright config could not be edited safely");
     return reply;
   }
-  async function configFile(folder, action, payload) {
+  async function configFile(folder: WorkspaceFolder, action: string, payload: Record<string, unknown>) {
     if (!folder?.uri || folder.uri.scheme !== "file" || !trusted()) throw new Error("Trusted file workspace required");
     const state = await stateFor({ uri: folder.uri.toString() });
     if (!state || !trusted()) throw new Error("Python environment unavailable for safe config publication");
     const reply = await enqueue(state, async () => {
       const temporaryKey = action === "stage" && typeof payload?.temporary === "string" ? canonical(payload.temporary) : null;
-      const temporary = ownedProjectConfigTemporaryPaths.get(temporaryKey);
+      const temporary = ownedProjectConfigTemporaryPaths.get(temporaryKey!);
       const pending = temporary && pendingOwnedProjectConfigWrites.get(temporary.owner);
       const activeStage = temporary && pending && trusted() && states.get(state.root) === state &&
-        ["pyrightconfig.json", "pyproject.toml"].includes(payload.file) &&
-        temporary.owner === canonical(path.join(state.root, payload.file)) && pending.temporaryPath === temporaryKey &&
+        ["pyrightconfig.json", "pyproject.toml"].includes(payload.file as string) &&
+        temporary.owner === canonical(path.join(state.root, payload.file as string)) && pending.temporaryPath === temporaryKey &&
         pending.previousHash === payload.expected_hash && typeof payload.text === "string" &&
         pending.nextHash === createHash("sha256").update(payload.text, "utf8").digest("hex") && temporary.hash === pending.nextHash;
       if (activeStage) { clearTimeout(temporary.timer); temporary.staging = true; }
@@ -790,7 +854,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         ? { ...payload, temporary: temporaryKey } : payload;
       try { return await state.worker.request({ ...wire, op: "config_file", workspace: state.root, action }); }
       finally {
-        if (activeStage && ownedProjectConfigTemporaryPaths.get(temporaryKey) === temporary) {
+        if (activeStage && ownedProjectConfigTemporaryPaths.get(temporaryKey!) === temporary) {
           delete temporary.staging;
           armOwnedConfigTemporary(temporaryKey, temporary);
         }
@@ -800,7 +864,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (!trusted() || states.get(state.root) !== state || !reply || reply.ok !== true) throw new Error("Config file could not be verified safely; preserved");
     return reply;
   }
-  function resetConfigWorkspace(folder) {
+  function resetConfigWorkspace(folder: WorkspaceFolder) {
     if (!folder?.uri || folder.uri.scheme !== "file" || !trusted()) throw new Error("Trusted file workspace required");
     const root = canonical(folder.uri.fsPath);
     const owners = (vscode.workspace.workspaceFolders ?? []).filter(item => item.uri.scheme === "file" && canonical(item.uri.fsPath) === root);
@@ -814,7 +878,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       ownedProjectConfigHashes.delete(key);
     }
   }
-  async function quarantine({ workspace, projects, invalidated_owners, preserve_current = false } = {}) {
+  async function quarantine({ workspace, projects, invalidated_owners, preserve_current = false }: { workspace?: string; projects?: unknown[]; invalidated_owners?: unknown[]; preserve_current?: boolean } = {}) {
     if (!trusted() || typeof workspace !== "string" || !path.isAbsolute(workspace) ||
         !Array.isArray(projects) || !Array.isArray(invalidated_owners)) return null;
     const root = canonical(workspace);
@@ -847,7 +911,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       const choices = state.targets.map(target => ({ label: target.schema_name, description: target.project, target }));
       const choice = choices.length === 1 ? choices[0] : await vscode.window.showQuickPick(choices, { placeHolder: "Select a remote GraphQL schema to refresh" });
       if (!choice) { if (!choices.length) report("No remote schema is configured for this project."); return; }
-      const run = token => enqueue(state, () => build(state, token, choice.target), "refresh");
+      const run = (token?: CancellationToken) => enqueue(state, () => build(state, token, choice.target), "refresh");
       if (vscode.window.withProgress) await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification,
         title: "Refreshing GraphQL schema", cancellable: true }, (_progress, token) => run(token));
       else await run();
@@ -855,11 +919,11 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     } catch { report("GraphQL Desk could not refresh this schema. Check configuration and the selected interpreter."); }
     finally { if (epoch === ticket && states.get(state.root) === state && trusted()) reconcilePolling(state); }
   }
-  function clientDirectives(bundle, call) {
+  function clientDirectives(bundle: AnalysisBundle, call: { identity: { module: ModuleIdentity } }) {
     for (const state of states.values()) if (state.cached?.bundle === bundle) return state.cached.preferences.find(item => item.project === call.identity.module.project)?.client_directives ?? [];
     return [];
   }
-  function analysisGenerationStagingFile(filename) {
+  function analysisGenerationStagingFile(filename: string) {
     const parts = path.resolve(filename).split(path.sep);
     const lower = parts.map(part => part.toLowerCase());
     const marker = lower.lastIndexOf(".graphql-desk");
@@ -895,7 +959,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     }
     for (const [uri, folder] of folders) if (!folderWatches.has(uri)) {
       const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, "**/*"));
-      const sourceChanged = resource => {
+      const sourceChanged = (resource: Uri) => {
         if (resource?.scheme === "file" && pendingGenerationRemovals.size) {
           const filename = generationRemovalKey(resource.fsPath);
           if (pendingGenerationRemovals.delete(filename)) {
@@ -903,8 +967,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
             ownedAnalysisDirectories.delete(filename);
             recentDiskInvalidations.delete(filename);
             try { fs.lstatSync(resource.fsPath); }
-            catch (error) {
-              if (error.code === "ENOENT") {
+            catch (error: unknown) {
+              if ((error as NodeJS.ErrnoException).code === "ENOENT") {
                 rememberDiskFingerprint(filename, "missing", true);
                 return;
               }
@@ -922,7 +986,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
                 const bytes = fs.readFileSync(resource.fsPath);
                 if (ownedTemporary.staging || createHash("sha256").update(bytes).digest("hex") === ownedTemporary.hash) return;
               }
-            } catch (error) { if (error.code === "ENOENT") return; }
+            } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; }
             clearTimeout(ownedTemporary.timer);
             ownedProjectConfigTemporaryPaths.delete(temporary);
           }
@@ -941,7 +1005,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
             } catch { /* A missing or unreadable config is a user-visible change. */ }
             if (pending) {
               try { fs.lstatSync(resource.fsPath); }
-              catch (error) { if (error.code === "ENOENT") return; }
+              catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; }
             }
             ownedProjectConfigHashes.delete(filename);
             finishOwnedConfigWrite(filename);
@@ -965,8 +1029,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
                 recentDiskInvalidations.delete(filename);
                 return;
               }
-            } catch (error) {
-              if (error.code === "ENOENT" && ignoreOwnedDeletion(filename, ownedAnalysisDirectories)) return;
+            } catch (error: unknown) {
+              if ((error as NodeJS.ErrnoException).code === "ENOENT" && ignoreOwnedDeletion(filename, ownedAnalysisDirectories)) return;
             }
             ownedAnalysisDirectories.delete(filename);
             const name = path.basename(resource.fsPath).toLowerCase();
@@ -983,7 +1047,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
                   recentDiskInvalidations.delete(filename);
                   return;
                 }
-              } catch (error) { if (error.code === "ENOENT" && ignoreOwnedDeletion(filename, ownedAnalysisPaths)) return; }
+              } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT" && ignoreOwnedDeletion(filename, ownedAnalysisPaths)) return; }
               finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
               ownedAnalysisPaths.delete(filename);
             }
@@ -996,6 +1060,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         const stagedArtifact = extension === ".tmp" && path.basename(resource.fsPath).startsWith(".graphql-desk-");
         const filename = extension === ".pyi" || extension === ".py" || extension === ".typed" || stagedArtifact ? canonical(resource.fsPath) : null;
         if (extension === ".pyi" || extension === ".py" || extension === ".typed" || stagedArtifact) {
+          // This is exactly the predicate that gave filename its non-null value.
           const pythonConfig = vscode.workspace.getConfiguration("python", folder.uri);
           const inspection = pythonConfig.inspect?.("analysis.stubPath");
           const explicitlyConfigured = inspection && [inspection.globalValue, inspection.workspaceValue, inspection.workspaceFolderValue]
@@ -1003,7 +1068,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
           const configuredPath = explicitlyConfigured ? pythonConfig.get("analysis.stubPath", "") : "";
           const selectedPath = typeof configuredPath === "string" ? configuredPath.trim() : "";
           const selectedRoot = path.resolve(canonical(folder.uri.fsPath), selectedPath || (explicitlyConfigured ? "typings" : ".graphql-desk/typings"));
-          if (stagedArtifact && inside(selectedRoot, filename) && /^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.basename(filename))) return;
+          if (stagedArtifact && inside(selectedRoot, filename!) && /^\.graphql-desk-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i.test(path.basename(filename!))) return;
           let descriptor;
           let missing = false;
           try {
@@ -1011,16 +1076,16 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
             const header = Buffer.alloc(96);
             const size = fs.readSync(descriptor, header, 0, header.length, 0);
             const marker = header.subarray(0, size).toString("utf8");
-            const artifactRoot = artifactRootFor(filename, selectedRoot);
+            const artifactRoot = artifactRootFor(filename!, selectedRoot);
             if (marker.startsWith("# Generated by GraphQL Desk; analysis session ") ||
-                artifactRoot !== null && (isVerifiedArtifact(filename, artifactRoot) ||
-                  isVerifiedGenerationFile(filename, artifactRoot) || extension === ".typed" &&
+                artifactRoot !== null && (isVerifiedArtifact(filename!, artifactRoot) ||
+                  isVerifiedGenerationFile(filename!, artifactRoot) || extension === ".typed" &&
                   marker === "partial\n" && ownedAnalysisDirectories.has(canonical(artifactRoot)))) {
-              ownedAnalysisPaths.add(filename);
-              recentDiskInvalidations.delete(filename);
+              ownedAnalysisPaths.add(filename!);
+              recentDiskInvalidations.delete(filename!);
               return;
             }
-          } catch (error) { missing = error.code === "ENOENT"; /* Deleted or inaccessible user stubs remain source changes. */ }
+          } catch (error: unknown) { missing = (error as NodeJS.ErrnoException).code === "ENOENT"; /* Deleted or inaccessible user stubs remain source changes. */ }
           finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
           if (missing && filename && ignoreOwnedDeletion(filename, ownedAnalysisPaths)) return;
           if (filename) ownedAnalysisPaths.delete(filename);
@@ -1032,14 +1097,15 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       folderWatchRoots.set(uri, canonical(folder.uri.fsPath));
     }
   }
-  const extensionSettingsDocument = document => {
+  const extensionSettingsDocument = (document: Partial<TextDocument> | null | undefined) => {
     const uri = document?.uri;
     return uri?.scheme === "file" && path.basename(uri.fsPath).toLowerCase() === "settings.json" &&
       path.basename(path.dirname(uri.fsPath)).toLowerCase() === ".vscode";
   };
-  for (const event of ["onDidOpenTextDocument", "onDidChangeTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument", "onDidChangeConfiguration", "onDidChangeWorkspaceFolders", "onDidGrantWorkspaceTrust"]) {
-    if (vscode.workspace[event]) subscriptions.push(vscode.workspace[event](change => {
-      const document = change?.document ?? (["onDidOpenTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument"].includes(event) ? change : null);
+  // Each named VS Code event supplies its matching document/configuration view below.
+  for (const event of ["onDidOpenTextDocument", "onDidChangeTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument", "onDidChangeConfiguration", "onDidChangeWorkspaceFolders", "onDidGrantWorkspaceTrust"] as const) {
+    if (vscode.workspace[event]) subscriptions.push((vscode.workspace[event] as unknown as Subscription)(change => {
+      const document = change?.document ?? (["onDidOpenTextDocument", "onDidCloseTextDocument", "onDidSaveTextDocument"].includes(event) ? change as TextDocument : null);
       if (event !== "onDidChangeConfiguration" && extensionSettingsDocument(document)) return;
       const filename = event !== "onDidChangeConfiguration" && document ? localPath(document) : null;
       if (filename && analysisGenerationStagingFile(filename)) return;
@@ -1048,8 +1114,8 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
         // Pylance can close a clean generated document after its owned file was removed.
         if (!document.isDirty && recentDiskInvalidations.get(filename)?.ownedDeletion) {
           try { fs.lstatSync(filename); }
-          catch (error) {
-            if (error.code === "ENOENT") return;
+          catch (error: unknown) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
           }
           recentDiskInvalidations.delete(filename);
         }
@@ -1086,27 +1152,27 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     if (event === "onDidChangeTextDocument" && Array.isArray(change?.contentChanges) && !change.contentChanges.length) return;
       const ranges = event === "onDidChangeTextDocument" && Array.isArray(change?.contentChanges)
         ? change.contentChanges.map(item => ({ start: item.rangeOffset, end: item.rangeOffset + item.rangeLength })) : null;
-      invalidate(document?.uri ?? (change?.scheme === "file" ? change : null), ranges);
+      invalidate(document?.uri ?? (change?.scheme === "file" ? change as unknown as Uri : null), ranges);
     }));
   }
   reconcileFolderWatches();
   return { analyze, isCurrent, artifacts, doctor, quarantine, editPyrightConfig, configFile, resetConfigWorkspace, isTrusted: trusted, snapshot, mapSnapshot, resolveUri, clientDirectives, refresh, invalidate,
-    noteOwnedGenerationRemoval(removed) {
+    noteOwnedGenerationRemoval(removed: string) {
       if (disposed) return;
       // Hold one cleanup burst separately from the history of delivered events.
       pendingGenerationRemovals.add(generationRemovalKey(removed));
       if (pendingGenerationRemovals.size > MAX_PENDING_GENERATION_REMOVALS) {
-        pendingGenerationRemovals.delete(pendingGenerationRemovals.values().next().value);
+        pendingGenerationRemovals.delete(pendingGenerationRemovals.values().next().value!);
       }
     },
-    markOwnedProjectConfig(filename, fingerprint) {
+    markOwnedProjectConfig(filename: string, fingerprint: string) {
       if (typeof filename !== "string" || !path.isAbsolute(filename) || typeof fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(fingerprint)) return false;
       const key = canonical(filename);
       ownedProjectConfigHashes.set(key, fingerprint);
       finishOwnedConfigWrite(key, fingerprint);
       return true;
     },
-    trackOwnedProjectConfigWrite(filename, fingerprint, { phase, previousHash, temporaryPath } = {}) {
+    trackOwnedProjectConfigWrite(filename: string, fingerprint: string, { phase, previousHash, temporaryPath }: OwnedWrite = {}) {
       if (typeof filename !== "string" || !path.isAbsolute(filename)) return false;
       const key = canonical(filename);
       if (phase === "begin") {
@@ -1131,7 +1197,7 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
       if (phase === "commit") return this.markOwnedProjectConfig(filename, fingerprint);
       return false;
     },
-    setManagedProjectStubPath(workspace, filename, value, previousValue = null, previousPresent = false) {
+    setManagedProjectStubPath(workspace: string, filename: string | null, value: string | null, previousValue: string | null = null, previousPresent = false) {
       if (typeof workspace !== "string" || !path.isAbsolute(workspace)) return false;
       const root = canonical(workspace);
       if (filename === null && value === null) { managedProjectTomlStubPaths.delete(root); return true; }
@@ -1146,6 +1212,6 @@ function createAnalysisController(vscode, { workerFactory = createAnalysisWorker
     },
     dispose() { disposed = true; epoch += 1; for (const root of states.keys()) dropState(root); interpreters.clear(); for (const handles of folderWatches.values()) handles.forEach(handle => handle.dispose()); folderWatches.clear(); folderWatchRoots.clear(); ownedAnalysisPaths.clear(); ownedAnalysisDirectories.clear(); pendingGenerationRemovals.clear(); ownedProjectConfigHashes.clear(); pendingOwnedProjectConfigWrites.clear(); for (const temporary of ownedProjectConfigTemporaryPaths.values()) clearTimeout(temporary.timer); ownedProjectConfigTemporaryPaths.clear(); managedProjectTomlStubPaths.clear(); recentDiskInvalidations.clear(); subscriptions.forEach(item => item.dispose()); } };
 }
-module.exports = { createAnalysisController };
+export = { createAnalysisController };
 
 
