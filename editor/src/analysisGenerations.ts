@@ -1,9 +1,52 @@
-"use strict";
+type GenerationHost = Pick<typeof import("vscode"), "workspace" | "Uri" | "WorkspaceEdit" | "Range" | "Position">;
+type Span = { start: number; end: number };
+type ModuleIdentity = { project: string; module: string; uri: string; version: number };
+type DocumentIdentity = { module: ModuleIdentity; codepoint: Span; utf16: Span };
+type SourceExport = { relative_path: string; symbol: string; alias: string };
+type CoordinateDependency = { coordinate: string; fingerprint: string };
+type ConfigDependency = { kind: "scalar-input" | "scalar-output" | "enum-mapping"; name: string; value: string | null } |
+  { kind: "client-directive" | "disable-masking"; name: string; value: boolean };
+type Operation = { owner: DocumentIdentity; selector: string | null; operation_name: string | null;
+  operation_kind: "query" | "mutation" | "subscription" | "fragment" | null; schema_identity: [string, string] | null;
+  context_token: string | null; binding: string | null; status: "precise" | "unavailable" | "rejected";
+  declaration_path: string | null; declaration_symbol: string | null; source_exports: SourceExport[];
+  dependencies: ModuleIdentity[]; direct_fragments: DocumentIdentity[] | null; definition_owners: DocumentIdentity[] | null;
+  canonical_owner: DocumentIdentity | null; selector_known: boolean; source_dependencies_known: boolean;
+  mapping_dependencies: "unknown" | ModuleIdentity[]; schema_dependencies: "unknown" | CoordinateDependency[];
+  config_dependencies: "unknown" | ConfigDependency[] };
+type OperationManifest = { project: string; generated_package: string; operations: Operation[] }[];
+type FileDigest = { path: string; sha256: string };
+// Legacy staging guards use RegExp coercion; these fields remain unknown after that check.
+type StagingMarker = { owner: string; format: number; id: string; sequence: number; token: unknown; files: { path: string; sha256: unknown }[] };
+type GenerationManifest = { owner: string; format: number; id: string; sequence: number; analysisId?: unknown;
+  inputFingerprint: string; savedSourceFingerprint?: string; artifactFingerprint: string; files: FileDigest[];
+  operationManifest: OperationManifest };
+type ReadArtifact = { file: string; bytes: Buffer; identity: fs.Stats };
+type ReadGeneration = { directory: string; manifest: GenerationManifest; manifestFingerprint: string;
+  files: Map<string, ReadArtifact>; directories: Map<string, fs.Stats>; manifestBytes: Buffer;
+  manifestIdentity: fs.Stats; identity: fs.Stats; verify(): ReadGeneration };
+type StagingRecord = { fingerprint?: string; markerTemporary?: string };
+type ManagedRoot = { readonly ownsSetting: boolean; readonly selectedSetting: string;
+  ownsGeneration(directory: string, fingerprint: string): boolean;
+  recordGeneration(directory: string, fingerprint: string): boolean | PromiseLike<boolean>;
+  forgetGeneration(directory: string, fingerprint: string): boolean | PromiseLike<boolean>;
+  ownsStaging(directory: string, fingerprint: string): boolean;
+  recordStaging(directory: string, fingerprint: string, temporary: string): boolean | PromiseLike<boolean>;
+  forgetStaging(directory: string, fingerprint: string): boolean | PromiseLike<boolean>;
+  stagingEntries?(): Record<string, StagingRecord>;
+  stillOwnsSetting?(): boolean;
+  selectGeneration(directory: string, isCurrent: () => boolean, verification: ReadGeneration): boolean | PromiseLike<boolean> };
+type ArtifactFile = { relative_path: string; text: string };
+type Packages = Iterable<[string, readonly ArtifactFile[]]>;
+type SelectionProof = Pick<ReadGeneration, "directory" | "manifestFingerprint" | "identity" | "manifestIdentity"> & { analysisId: unknown };
 
-const fs = require("node:fs");
-const path = require("node:path");
-const { createHash, randomUUID } = require("node:crypto");
-const { createOwnedAnalysisArtifacts, renderOwnedAnalysisArtifact } = require("./ownedAnalysisArtifacts");
+// The existing safe-integer guards also narrow untrusted JSON numbers.
+declare const Number: Omit<NumberConstructor, "isSafeInteger"> & { (value?: unknown): number; isSafeInteger(value: unknown): value is number };
+
+import fs = require("node:fs");
+import path = require("node:path");
+const { createHash, randomUUID }: typeof import("node:crypto") = require("node:crypto");
+const { createOwnedAnalysisArtifacts, renderOwnedAnalysisArtifact }: typeof import("./ownedAnalysisArtifacts") = require("./ownedAnalysisArtifacts");
 
 const MANIFEST = "complete.json";
 const STAGING_SUFFIX = ".staging.json";
@@ -15,75 +58,75 @@ const MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 const MAX_OPERATIONS = 8192;
 const MAX_OPERATION_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_GENERATION_MANIFEST_BYTES = 18 * 1024 * 1024;
-const digest = bytes => createHash("sha256").update(bytes).digest("hex");
-const normalized = value => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
-const inside = (root, value) => {
+const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+const normalized = (value: string) => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
+const inside = (root: string, value: string) => {
   const relative = path.relative(root, value);
   return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
 };
-const same = (left, right) => left.dev === right.dev && left.ino === right.ino;
+const same = (left: fs.Stats, right: fs.Stats) => left.dev === right.dev && left.ino === right.ino;
 
-const exactKeys = (value, keys) => value && Object.getPrototypeOf(value) === Object.prototype &&
-  Object.keys(value).sort().join(",") === [...keys].sort().join(",");
-const validArtifactPath = value => typeof value === "string" && !value.includes("\\") && !value.includes("\0") &&
+const exactKeys = <K extends string>(value: unknown, keys: readonly K[]): value is Record<K, unknown> => (value as boolean) && Object.getPrototypeOf(value) === Object.prototype &&
+  Object.keys(value as object).sort().join(",") === [...keys].sort().join(",");
+const validArtifactPath = (value: unknown): value is string => typeof value === "string" && !value.includes("\\") && !value.includes("\0") &&
   !path.posix.isAbsolute(value) &&
   (["graphql_desk-stubs/__init__.pyi", "graphql_desk-stubs/typed_document.pyi", "graphql_desk-stubs/fragment_refs.pyi",
     "graphql_desk-stubs/testing.pyi", "graphql_desk-stubs/py.typed"].includes(value) ||
     value.split("/").every((part, index) => /^[A-Za-z_]\w*$/.test(part) || index === value.split("/").length - 1 && /^[A-Za-z_]\w*\.pyi?$/.test(part)) && /\.pyi?$/.test(value));
-function readStagingMarker(markerPath, id) {
+function readStagingMarker(markerPath: string, id: string) {
   const stat = fs.lstatSync(markerPath);
   if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 8 * 1024 * 1024) throw new Error("Invalid staging marker");
   const bytes = fs.readFileSync(markerPath);
-  const marker = JSON.parse(bytes.toString("utf8"));
+  const marker: StagingMarker = JSON.parse(bytes.toString("utf8"));
   const sequence = Number(/^g-(\d+)-/.exec(id)?.[1]);
   if (!exactKeys(marker, ["owner", "format", "id", "sequence", "token", "files"]) ||
       marker.owner !== "graphql-desk-analysis-staging" || marker.format !== STAGING_FORMAT || marker.id !== id ||
       !Number.isSafeInteger(sequence) || marker.sequence !== sequence ||
-      !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(marker.token) ||
+      !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(marker.token as string) ||
       !Array.isArray(marker.files) || marker.files.length > MAX_FILES ||
-      marker.files.some(item => !exactKeys(item, ["path", "sha256"]) || !validArtifactPath(item.path) || !/^[a-f0-9]{64}$/.test(item.sha256)) ||
+      marker.files.some(item => !exactKeys(item, ["path", "sha256"]) || !validArtifactPath(item.path) || !/^[a-f0-9]{64}$/.test(item.sha256 as string)) ||
       new Set(marker.files.map(item => item.path)).size !== marker.files.length ||
       marker.files.some((item, index) => index > 0 && marker.files[index - 1].path >= item.path)) throw new Error("Invalid staging marker");
   return { marker, bytes, identity: stat, fingerprint: digest(bytes) };
 }
-const validSpan = value => exactKeys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 &&
+const validSpan = (value: unknown): value is Span => exactKeys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 &&
   Number.isSafeInteger(value.end) && value.end >= value.start;
-const validModule = value => exactKeys(value, ["project", "module", "uri", "version"]) &&
+const validModule = (value: unknown): value is ModuleIdentity => exactKeys(value, ["project", "module", "uri", "version"]) &&
   [value.project, value.module, value.uri].every(item => typeof item === "string" && item.length > 0 && item.length <= 4096) &&
   Number.isSafeInteger(value.version) && value.version >= 0;
-const validIdentity = value => exactKeys(value, ["module", "codepoint", "utf16"]) &&
+const validIdentity = (value: unknown): value is DocumentIdentity => exactKeys(value, ["module", "codepoint", "utf16"]) &&
   validModule(value.module) && validSpan(value.codepoint) && validSpan(value.utf16);
-const validIdentifier = value => typeof value === "string" && /^[\p{ID_Start}_][\p{ID_Continue}_]*$/u.test(value);
-const coordinateDependencies = facts => facts === "unknown" || Array.isArray(facts) && facts.length <= 16384 &&
+const validIdentifier = (value: unknown): value is string => typeof value === "string" && /^[\p{ID_Start}_][\p{ID_Continue}_]*$/u.test(value);
+const coordinateDependencies = (facts: unknown): facts is "unknown" | CoordinateDependency[] => facts === "unknown" || Array.isArray(facts) && facts.length <= 16384 &&
   facts.every(item => exactKeys(item, ["coordinate", "fingerprint"]) && typeof item.coordinate === "string" &&
     item.coordinate.length > 0 && item.coordinate.length <= 2048 && typeof item.fingerprint === "string" && /^[a-f0-9]{64}$/.test(item.fingerprint)) &&
   facts.every((item, index) => index === 0 || facts[index - 1].coordinate < item.coordinate);
-const configDependencies = facts => facts === "unknown" || Array.isArray(facts) && facts.length <= 4096 &&
-  facts.every(item => exactKeys(item, ["kind", "name", "value"]) && ["scalar-input", "scalar-output", "enum-mapping", "client-directive", "disable-masking"].includes(item.kind) &&
+const configDependencies = (facts: unknown): facts is "unknown" | ConfigDependency[] => facts === "unknown" || Array.isArray(facts) && facts.length <= 4096 &&
+  facts.every(item => exactKeys(item, ["kind", "name", "value"]) && ["scalar-input", "scalar-output", "enum-mapping", "client-directive", "disable-masking"].includes(item.kind as string) &&
     typeof item.name === "string" && item.name.length > 0 && item.name.length <= 512 &&
-    (item.value === null && ["scalar-input", "scalar-output", "enum-mapping"].includes(item.kind) ||
-      typeof item.value === "boolean" && ["client-directive", "disable-masking"].includes(item.kind) ||
-      typeof item.value === "string" && ["scalar-input", "scalar-output", "enum-mapping"].includes(item.kind) && item.value.length <= 4096)) &&
+    (item.value === null && ["scalar-input", "scalar-output", "enum-mapping"].includes(item.kind as string) ||
+      typeof item.value === "boolean" && ["client-directive", "disable-masking"].includes(item.kind as string) ||
+      typeof item.value === "string" && ["scalar-input", "scalar-output", "enum-mapping"].includes(item.kind as string) && item.value.length <= 4096)) &&
   facts.every((item, index) => index === 0 || facts[index - 1].kind < item.kind ||
     facts[index - 1].kind === item.kind && facts[index - 1].name < item.name);
-const validExports = items => Array.isArray(items) && items.length <= 4096 && items.every(item => exactKeys(item, ["relative_path", "symbol", "alias"]) &&
+const validExports = (items: unknown): items is SourceExport[] => Array.isArray(items) && items.length <= 4096 && items.every(item => exactKeys(item, ["relative_path", "symbol", "alias"]) &&
   typeof item.relative_path === "string" && !item.relative_path.includes("\\") && !path.posix.isAbsolute(item.relative_path) &&
   item.relative_path.split("/").every(part => part && part !== "." && part !== "..") && validIdentifier(item.symbol) && validIdentifier(item.alias));
-const validIdentities = items => items === null || Array.isArray(items) && items.length <= 8192 && items.every(validIdentity);
+const validIdentities = (items: unknown): items is DocumentIdentity[] | null => items === null || Array.isArray(items) && items.length <= 8192 && items.every(validIdentity);
 
-function validOperationManifest(value) {
+function validOperationManifest(value: unknown): value is OperationManifest {
   if (!Array.isArray(value) || value.length > MAX_FILES) return false;
-  const owners = new Set();
-  const projects = new Set();
+  const owners = new Set<string>();
+  const projects = new Set<string>();
   let operations = 0;
-  for (const group of value) {
+  for (const group of value as Record<string, unknown>[]) {
     if (!group || Object.getPrototypeOf(group) !== Object.prototype ||
         Object.keys(group).sort().join(",") !== "generated_package,operations,project" ||
         typeof group.project !== "string" || !group.project.length || group.project.length > 4096 ||
         typeof group.generated_package !== "string" || !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(group.generated_package) ||
         projects.has(group.project) || !Array.isArray(group.operations)) return false;
     projects.add(group.project);
-    for (const operation of group.operations) {
+    for (const operation of group.operations as Record<string, unknown>[]) {
       operations += 1;
       const expected = ["owner", "selector", "operation_name", "operation_kind", "schema_identity", "context_token", "binding", "status",
         "declaration_path", "declaration_symbol", "source_exports", "dependencies", "direct_fragments", "definition_owners",
@@ -92,11 +135,11 @@ function validOperationManifest(value) {
       if (operations > MAX_OPERATIONS || !exactKeys(operation, expected) || !validIdentity(owner) || owner.module.project !== group.project ||
           !(operation.selector === null || typeof operation.selector === "string" && operation.selector.length <= 512) ||
           !(operation.operation_name === null || typeof operation.operation_name === "string" && operation.operation_name.length <= 512) ||
-          !(operation.operation_kind === null || ["query", "mutation", "subscription", "fragment"].includes(operation.operation_kind)) ||
+          !(operation.operation_kind === null || ["query", "mutation", "subscription", "fragment"].includes(operation.operation_kind as string)) ||
           !(operation.schema_identity === null || Array.isArray(operation.schema_identity) && operation.schema_identity.length === 2 && operation.schema_identity.every(item => typeof item === "string" && item.length <= 512)) ||
           !(operation.context_token === null || typeof operation.context_token === "string" && operation.context_token.length <= 4096) ||
           !(operation.binding === null || typeof operation.binding === "string" && operation.binding.length <= 512) ||
-          !["precise", "unavailable", "rejected"].includes(operation.status) ||
+          !["precise", "unavailable", "rejected"].includes(operation.status as string) ||
           !(operation.declaration_path === null || typeof operation.declaration_path === "string" && !operation.declaration_path.includes("\\") &&
             !path.posix.isAbsolute(operation.declaration_path) && operation.declaration_path.split("/").every(part => part && part !== "." && part !== "..") &&
             operation.declaration_path.startsWith(`${group.generated_package.replaceAll(".", "/")}/`) && operation.declaration_path.endsWith(".pyi")) ||
@@ -117,14 +160,14 @@ function validOperationManifest(value) {
   catch { return false; }
 }
 
-function generationFiles(vscode, workspace, directory) {
+function generationFiles(vscode: GenerationHost, workspace: string, directory: string): ReadGeneration {
   const directoryIdentity = fs.lstatSync(directory);
   if (directoryIdentity.isSymbolicLink() || !directoryIdentity.isDirectory()) throw new Error("Invalid generation directory");
   const manifestPath = path.join(directory, MANIFEST);
   const stat = fs.lstatSync(manifestPath);
   if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_GENERATION_MANIFEST_BYTES) throw new Error("Invalid generation manifest");
   const manifestBytes = fs.readFileSync(manifestPath);
-  const manifest = JSON.parse(manifestBytes.toString("utf8"));
+  const manifest: GenerationManifest = JSON.parse(manifestBytes.toString("utf8"));
   if (manifest?.owner !== "graphql-desk-analysis-generation" || manifest.format !== FORMAT ||
       manifest.id !== path.basename(directory) || !Number.isSafeInteger(manifest.sequence) || manifest.sequence < 1 ||
       !Array.isArray(manifest.files) || manifest.files.length > MAX_FILES ||
@@ -132,8 +175,8 @@ function generationFiles(vscode, workspace, directory) {
       (manifest.savedSourceFingerprint !== undefined && (typeof manifest.savedSourceFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(manifest.savedSourceFingerprint))) ||
       typeof manifest.artifactFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(manifest.artifactFingerprint) ||
       !validOperationManifest(manifest.operationManifest)) throw new Error("Invalid generation manifest");
-  const expected = new Map();
-  const expectedDirectories = new Set();
+  const expected = new Map<string, string | ReadArtifact>();
+  const expectedDirectories = new Set<string>();
   for (const item of manifest.files) {
     if (!item || typeof item.path !== "string" || typeof item.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(item.sha256) ||
         item.path.includes("\\") || item.path.includes("\0") || path.posix.isAbsolute(item.path) ||
@@ -155,10 +198,10 @@ function generationFiles(vscode, workspace, directory) {
   for (const group of manifest.operationManifest) for (const operation of group.operations) {
     if (operation.declaration_path && !expected.has(operation.declaration_path)) throw new Error("Generation operation declaration is missing");
   }
-  const directories = new Map();
+  const directories = new Map<string, fs.Stats>();
   let totalBytes = 0;
   let filesRead = 0;
-  function visit(folder, relative = "") {
+  function visit(folder: string, relative = "") {
     const entries = fs.opendirSync(folder);
     try {
       for (let entry; (entry = entries.readSync()); ) {
@@ -205,23 +248,24 @@ function generationFiles(vscode, workspace, directory) {
   const fingerprint = digest(Buffer.from(JSON.stringify(manifest.files.map(({ path, sha256 }) => ({ path, sha256 }))
     .sort((left, right) => left.path.localeCompare(right.path)))));
   if (fingerprint !== manifest.artifactFingerprint) throw new Error("Generation fingerprint mismatch");
-  return { directory, manifest, manifestFingerprint: digest(manifestBytes), files: expected, directories, manifestBytes, manifestIdentity: stat, identity: directoryIdentity,
+  // Every expected file was visited once and replaced with its verified bytes and identity.
+  return { directory, manifest, manifestFingerprint: digest(manifestBytes), files: expected as Map<string, ReadArtifact>, directories, manifestBytes, manifestIdentity: stat, identity: directoryIdentity,
     verify: () => generationFiles(vscode, workspace, directory) };
 }
 
-function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved) {
+function createAnalysisGenerations(vscode: GenerationHost, workspaceRoot: string, managedRoot: string, onRemoved?: (file: string) => void) {
   if (!path.isAbsolute(workspaceRoot) || !path.isAbsolute(managedRoot)) throw new Error("Invalid analysis generation location");
   const workspace = path.resolve(workspaceRoot);
   const root = path.resolve(managedRoot);
   if (!inside(workspace, root) || root === workspace) throw new Error("Analysis generation root must be inside its workspace");
   const generationsRoot = path.join(root, "generations");
-  let publicationQueue = Promise.resolve();
-  let selectedProof;
+  let publicationQueue: Promise<unknown> = Promise.resolve();
+  let selectedProof: SelectionProof | undefined;
   const initialRoot = fs.lstatSync(root);
   if (initialRoot.isSymbolicLink() || !initialRoot.isDirectory()) throw new Error("Analysis generation root is not safe");
   const workspaceStat = fs.lstatSync(workspace);
   if (workspaceStat.isSymbolicLink() || !workspaceStat.isDirectory()) throw new Error("Workspace path is not safe");
-  const rootAncestors = [[workspace, workspaceStat]];
+  const rootAncestors: [string, fs.Stats][] = [[workspace, workspaceStat]];
   let ancestor = workspace;
   for (const part of path.relative(workspace, root).split(path.sep).filter(Boolean)) {
     ancestor = path.join(ancestor, part);
@@ -229,12 +273,12 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("Analysis generation ancestor is not safe");
     rootAncestors.push([ancestor, stat]);
   }
-  try { fs.mkdirSync(generationsRoot); } catch (error) { if (error.code !== "EEXIST") throw error; }
+  try { fs.mkdirSync(generationsRoot); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   const parentIdentity = fs.lstatSync(generationsRoot);
   if (parentIdentity.isSymbolicLink() || !parentIdentity.isDirectory()) throw new Error("Analysis generations directory is not safe");
   rootAncestors.push([generationsRoot, parentIdentity]);
 
-  function currentGenerations(managed) {
+  function currentGenerations(managed: ManagedRoot) {
     return fs.readdirSync(generationsRoot).flatMap(name => {
       if (!/^g-[0-9]+-[0-9a-f-]{36}$/.test(name)) return [];
       const directory = path.join(generationsRoot, name);
@@ -257,11 +301,11 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
         !same(parentIdentity, fs.lstatSync(generationsRoot))) throw new Error("Analysis generation root changed; preserved");
   }
 
-  function rememberSelection({ directory, manifestFingerprint, identity, manifestIdentity }, analysisId) {
+  function rememberSelection({ directory, manifestFingerprint, identity, manifestIdentity }: Pick<ReadGeneration, "directory" | "manifestFingerprint" | "identity" | "manifestIdentity">, analysisId: unknown) {
     selectedProof = { directory, manifestFingerprint, identity, manifestIdentity, analysisId: analysisId ?? null };
   }
 
-  function verification(managed) {
+  function verification(managed: ManagedRoot) {
     const proof = selectedProof;
     if (!proof || !managed.ownsSetting || typeof managed.selectedSetting !== "string" ||
         path.resolve(workspace, managed.selectedSetting) !== proof.directory ||
@@ -276,14 +320,14 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
       analysisId: proof.analysisId };
   }
 
-  function hasDirtyDocument(file) {
+  function hasDirtyDocument(file: string) {
     return vscode.workspace.textDocuments.some(document => document.isDirty &&
       ["file", "untitled"].includes(document.uri.scheme) &&
       (document.uri.fsPath && normalized(document.uri.fsPath) === normalized(file) ||
         document.uri.toString() === vscode.Uri.file(file).toString()));
   }
 
-  function cleanupStagingTemporary(managed, id, fingerprint) {
+  function cleanupStagingTemporary(managed: ManagedRoot, id: string, fingerprint: string) {
     const entry = managed.stagingEntries?.()?.[id];
     const name = entry?.fingerprint === fingerprint ? entry.markerTemporary : null;
     if (typeof name !== "string" || !/^\.graphql-desk-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}-marker-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.tmp$/i.test(name)) return false;
@@ -295,7 +339,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
       identity = fs.lstatSync(temporary);
       if (identity.isSymbolicLink() || !identity.isFile() || identity.size > 8 * 1024 * 1024) return false;
       bytes = fs.readFileSync(temporary);
-    } catch (error) { return error.code === "ENOENT"; }
+    } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
     if (hasDirtyDocument(temporary)) return false;
     verifyRoot();
     const current = fs.lstatSync(temporary);
@@ -304,7 +348,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     return true;
   }
 
-  async function cleanupStagedGeneration(managed, markerName) {
+  async function cleanupStagedGeneration(managed: ManagedRoot, markerName: string) {
     if (!/^g-[0-9]+-[0-9a-f-]{36}\.staging\.json$/i.test(markerName)) return false;
     verifyRoot();
     const id = markerName.slice(0, -STAGING_SUFFIX.length);
@@ -317,7 +361,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     try {
       directoryStat = fs.lstatSync(directory);
       if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) return false;
-    } catch (error) { if (error.code !== "ENOENT") return false; }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false; }
     if (!cleanupStagingTemporary(managed, id, marker.fingerprint)) return false;
     if (!directoryStat) {
       if (!markerOwned) return false;
@@ -347,18 +391,18 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     }
 
     const expected = new Map(marker.marker.files.map(item => [item.path, item.sha256]));
-    const expectedDirectories = new Set();
+    const expectedDirectories = new Set<string>();
     for (const relative of expected.keys()) {
       let parent = path.posix.dirname(relative);
       while (parent !== ".") { expectedDirectories.add(parent); parent = path.posix.dirname(parent); }
     }
-    const files = [];
-    const directories = [];
+    const files: { file: string; bytes: Buffer; stat: fs.Stats }[] = [];
+    const directories: { file: string; stat: fs.Stats }[] = [];
     let safe = true;
     const uuidPattern = "[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}";
     const stagingPattern = new RegExp(`^\\.graphql-desk-${marker.marker.token}-([0-9a-f]{16})-${uuidPattern}\\.tmp$`, "i");
     const manifestPattern = new RegExp(`^\\.graphql-desk-${marker.marker.token}-manifest-${uuidPattern}\\.tmp$`, "i");
-    function visit(folder, relative = "") {
+    function visit(folder: string, relative = "") {
       for (const name of fs.readdirSync(folder)) {
         const file = path.join(folder, name);
         const stat = fs.lstatSync(file);
@@ -424,7 +468,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     return true;
   }
 
-  async function cleanupStagedGenerations(managed) {
+  async function cleanupStagedGenerations(managed: ManagedRoot) {
     if (!managed?.ownsSetting) return;
     verifyRoot();
     const names = fs.readdirSync(generationsRoot);
@@ -434,7 +478,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     for (const [id, entry] of Object.entries(managed.stagingEntries?.() ?? {})) {
       const fingerprint = entry?.fingerprint;
       if (!/^g-[0-9]+-[0-9a-f-]{36}$/i.test(id) || !/^[a-f0-9]{64}$/.test(fingerprint ?? "")) continue;
-      if (!cleanupStagingTemporary(managed, id, fingerprint)) continue;
+      if (!cleanupStagingTemporary(managed, id, fingerprint!)) continue;
       if (names.includes(`${id}${STAGING_SUFFIX}`)) continue;
       const directory = path.join(generationsRoot, id);
       let exists = true;
@@ -442,23 +486,23 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
         const stat = fs.lstatSync(directory);
         if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
       } catch (error) {
-        if (error.code !== "ENOENT") continue;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
         exists = false;
       }
       if (!exists) {
-        await managed.forgetStaging(directory, fingerprint);
+        await managed.forgetStaging(directory, fingerprint!);
         continue;
       }
       try {
         const generation = generationFiles(vscode, workspace, directory);
         if (managed.ownsGeneration(directory, generation.manifestFingerprint)) {
-          await managed.forgetStaging(directory, fingerprint);
+          await managed.forgetStaging(directory, fingerprint!);
         }
       } catch { /* Preserve unverified staging state and its directory. */ }
     }
   }
 
-  function removeGeneration(generation) {
+  function removeGeneration(generation: ReadGeneration) {
     verifyRoot();
     const preflight = generationFiles(vscode, workspace, generation.directory);
     if (preflight.manifest.id !== generation.manifest.id || !preflight.manifestBytes.equals(generation.manifestBytes) ||
@@ -504,7 +548,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     return true;
   }
 
-  async function recoverNow(managed, isCurrent, inputFingerprint, savedSourceFingerprint, operationManifest) {
+  async function recoverNow(managed: ManagedRoot, isCurrent?: () => boolean, inputFingerprint?: string, savedSourceFingerprint?: string, operationManifest?: unknown) {
     if (!managed.ownsSetting || typeof isCurrent !== "function" || isCurrent() !== true ||
         typeof inputFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(inputFingerprint) ||
         typeof savedSourceFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(savedSourceFingerprint) ||
@@ -520,7 +564,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     return managed.selectGeneration(newest.directory, isCurrent, newest);
   }
 
-  async function publishNow(packages, analysisId, isCurrent, managed, inputFingerprint, savedSourceFingerprint, operationManifest) {
+  async function publishNow(packages: Packages, analysisId: unknown, isCurrent: (() => boolean) | undefined, managed: ManagedRoot, inputFingerprint?: string, savedSourceFingerprint?: string, operationManifest?: unknown) {
     if (!managed.ownsSetting || typeof isCurrent !== "function" || isCurrent() !== true ||
         typeof inputFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(inputFingerprint) ||
         typeof savedSourceFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(savedSourceFingerprint) ||
@@ -531,8 +575,8 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     const groups = [...packages].filter(([, files]) => files.length).sort(([a], [b]) => a.localeCompare(b));
     if (groups.reduce((count, [, files]) => count + files.length, 0) > MAX_FILES) throw new Error("Too many generation artifacts");
     let totalInputBytes = 0;
-    const paths = new Set();
-    const outputFiles = [];
+    const paths = new Set<string>();
+    const outputFiles: FileDigest[] = [];
     for (const [packageName, files] of groups) {
       if (packageName !== "graphql_desk-stubs" && !/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(packageName)) throw new Error("Invalid generated package name");
       const prefix = `${packageName.replaceAll(".", "/")}/`;
@@ -589,11 +633,11 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     let markerIdentity;
     if (isCurrent() !== true) return false;
     verifyRoot();
-    const handles = [];
+    const handles: ReturnType<typeof createOwnedAnalysisArtifacts>[] = [];
     let completed = false;
-    let manifestTemporary;
-    let manifestTemporaryBytes;
-    let temporaryIdentity;
+    let manifestTemporary: string | undefined;
+    let manifestTemporaryBytes: Buffer | undefined;
+    let temporaryIdentity: fs.Stats | undefined;
     let stagingRecorded = false;
     try {
       if (!await managed.recordStaging(directory, markerFingerprint, markerTemporaryName)) {
@@ -668,7 +712,7 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
           const bytes = fs.readFileSync(manifestTemporary);
           if (!stat.isSymbolicLink() && stat.isFile() && temporaryIdentity && same(temporaryIdentity, stat) &&
               manifestTemporaryBytes && bytes.length <= manifestTemporaryBytes.length && manifestTemporaryBytes.subarray(0, bytes.length).equals(bytes) &&
-              !vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.fsPath && normalized(document.uri.fsPath) === normalized(manifestTemporary))) fs.unlinkSync(manifestTemporary);
+              !vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.fsPath && normalized(document.uri.fsPath) === normalized(manifestTemporary!))) fs.unlinkSync(manifestTemporary);
         } catch { /* Preserve unverified staging data. */ }
         for (const handle of handles.reverse()) try { await handle.cleanup(); } catch { /* Preserve any changed artifact. */ }
         try { await cleanupStagedGeneration(managed, `${id}${STAGING_SUFFIX}`); } catch { /* Preserve incomplete or changed staging data for manual inspection. */ }
@@ -699,18 +743,18 @@ function createAnalysisGenerations(vscode, workspaceRoot, managedRoot, onRemoved
     }
   }
 
-  function serialize(operation) {
+  function serialize<T>(operation: () => T | PromiseLike<T>): Promise<T> {
     const pending = publicationQueue.then(operation, operation);
     publicationQueue = pending.catch(() => {});
     return pending;
   }
 
   return {
-    publish: (...args) => serialize(() => publishNow(...args)),
-    recover: (...args) => serialize(() => recoverNow(...args)),
-    current: managed => currentGenerations(managed),
+    publish: (...args: Parameters<typeof publishNow>) => serialize(() => publishNow(...args)),
+    recover: (...args: Parameters<typeof recoverNow>) => serialize(() => recoverNow(...args)),
+    current: (managed: ManagedRoot) => currentGenerations(managed),
     verification,
   };
 }
 
-module.exports = { createAnalysisGenerations, generationFiles, validOperationManifest, MAX_GENERATION_MANIFEST_BYTES };
+export = { createAnalysisGenerations, generationFiles, validOperationManifest, MAX_GENERATION_MANIFEST_BYTES };
