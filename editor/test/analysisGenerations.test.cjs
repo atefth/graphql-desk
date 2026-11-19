@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
-const { createAnalysisGenerations, validOperationManifest } = require("../src/analysisGenerations");
+const { createAnalysisGenerations, generationFiles, validOperationManifest } = require("../src/analysisGenerations");
 const { renderOwnedAnalysisArtifact } = require("../src/ownedAnalysisArtifacts");
 
 function fixture(t, onRemoved) {
@@ -420,6 +420,39 @@ test("an ancestor symlink swap prevents publication outside the workspace", asyn
   assert.equal(fs.readdirSync(path.join(movedRoot, "typings", "generations")).length, 1);
 });
 
+test("generation verification rejects linked artifact directories before reading their contents", async t => {
+  const f = fixture(t);
+  await publish(f, files("str"), "analysis-1");
+  const active = path.resolve(f.workspace, f.managed.selectedSetting);
+  const linked = path.join(active, "graphql_desk_generated");
+  const moved = path.join(f.workspace, "moved-artifacts");
+  fs.renameSync(linked, moved);
+  fs.symlinkSync(moved, linked, process.platform === "win32" ? "junction" : "dir");
+  const read = fs.readFileSync;
+  let linkedReads = 0;
+  t.mock.method(fs, "readFileSync", (file, ...options) => {
+    if (typeof file === "string" && file.startsWith(linked + path.sep)) linkedReads += 1;
+    return read(file, ...options);
+  });
+  assert.throws(() => generationFiles(f.vscode, f.workspace, active), /symbolic link/);
+  assert.equal(linkedReads, 0);
+});
+
+test("generation verification rejects the first unknown entry without loading a directory listing", async t => {
+  const f = fixture(t);
+  await publish(f, files("str"), "analysis-1");
+  const active = path.resolve(f.workspace, f.managed.selectedSetting);
+  const foreign = path.join(active, "foreign.txt");
+  fs.writeFileSync(foreign, "preserve");
+  const readdir = fs.readdirSync;
+  t.mock.method(fs, "readdirSync", (directory, ...options) => {
+    assert.notEqual(directory, active, "a user-modified generation directory can have unbounded entries");
+    return readdir(directory, ...options);
+  });
+  assert.throws(() => generationFiles(f.vscode, f.workspace, active), /foreign files/);
+  assert.equal(fs.readFileSync(foreign, "utf8"), "preserve");
+});
+
 test("preflight rejects a foreign generation entry before deleting any owned bytes", async t => {
   const f = fixture(t);
   await publish(f, files("str"), "analysis-1");
@@ -428,7 +461,7 @@ test("preflight rejects a foreign generation entry before deleting any owned byt
   const ownedFile = path.join(first, "graphql_desk_generated", "default.pyi");
   const ownedBefore = fs.readFileSync(ownedFile);
   const foreign = path.join(first, "foreign.txt");
-  const readdir = fs.readdirSync;
+  const opendir = fs.opendirSync;
   const rename = fs.renameSync;
   let committed = false;
   let injected = false;
@@ -437,16 +470,23 @@ test("preflight rejects a foreign generation entry before deleting any owned byt
     if (destination.endsWith("complete.json")) committed = true;
     return result;
   };
-  fs.readdirSync = (...args) => {
-    const result = readdir(...args);
+  fs.opendirSync = (...args) => {
+    const result = opendir(...args);
     if (committed && !injected && path.resolve(args[0]) === first) {
-      injected = true;
-      fs.writeFileSync(foreign, "keep foreign data");
+      const read = result.readSync.bind(result);
+      result.readSync = () => {
+        const item = read();
+        if (item === null && !injected) {
+          injected = true;
+          fs.writeFileSync(foreign, "keep foreign data");
+        }
+        return item;
+      };
     }
     return result;
   };
   try { await publish(f, files("float"), "analysis-3"); }
-  finally { fs.readdirSync = readdir; fs.renameSync = rename; }
+  finally { fs.opendirSync = opendir; fs.renameSync = rename; }
   assert.equal(injected, true);
   assert.deepEqual(fs.readFileSync(ownedFile), ownedBefore);
   assert.equal(fs.readFileSync(foreign, "utf8"), "keep foreign data");
