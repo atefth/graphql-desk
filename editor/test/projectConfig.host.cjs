@@ -5,6 +5,14 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const vscode = require("vscode");
 const workerModule = require("../src/analysisWorker");
+const projectConfigModule = require("../src/projectPyrightConfig");
+const { isManagedGeneration } = require("../src/managedStubPath");
+const createProjectConfig = projectConfigModule.createManagedProjectConfig;
+let fixtureState;
+projectConfigModule.createManagedProjectConfig = (api, folder, state, ...rest) => {
+  fixtureState = state;
+  return createProjectConfig(api, folder, state, ...rest);
+};
 const createWorker = workerModule.createAnalysisWorker;
 const interruptedArtifacts = [];
 let failuresRemaining = 0;
@@ -36,12 +44,32 @@ async function until(action, accept, description, timeout = 45000) {
     if (accept(value)) return value;
     await new Promise(resolve => setTimeout(resolve, 100));
   } while (Date.now() < deadline);
+  let ownership;
+  try {
+    const workspace = process.env.GRAPHQL_DESK_TEST_WORKSPACE;
+    const base = projectConfigModule.MANAGED_PATH;
+    const disk = await fs.readFile(path.join(workspace, base, "project-config-owner.json"), "utf8")
+      .then(JSON.parse, error => { if (error.code !== "ENOENT") throw error; });
+    const owner = record => record && { phase: record.phase, current: record.currentStubPath,
+      python: record.pythonStubPath?.current, target: record.pythonStubPath?.pending };
+    const key = prefix => fixtureState?.keys().find(name => name.startsWith(prefix) && name.includes(":project-"));
+    const record = prefix => { const name = key(prefix); return name && fixtureState.get(name); };
+    const selection = record("managed-analysis-stub:");
+    const ledger = record("managed-analysis-generations:") ?? {};
+    const stored = fixtureState?.get(projectConfigModule.stateKey(workspace));
+    const settings = [disk?.currentStubPath, disk?.pythonStubPath?.pending, stored?.currentStubPath,
+      stored?.pythonStubPath?.pending, selection?.previous, selection?.current];
+    const generations = [...new Set(settings.filter(setting => typeof setting === "string"))].map(setting => ({
+      setting, complete: isManagedGeneration(workspace, setting, base), registered: Object.hasOwn(ledger, path.basename(setting)),
+    }));
+    ownership = { disk: owner(disk), stored: owner(stored), selection, generations };
+  } catch (error) { ownership = { readError: String(error) }; }
   try {
     await fs.writeFile(process.env.GRAPHQL_DESK_RESULT_PATH, JSON.stringify({
       outcome: "project-config-host-failed",
       error: description,
       progress: { phase: process.env.GRAPHQL_DESK_RESTART_PHASE, suite: process.env.GRAPHQL_DESK_TEST_SUITE,
-        lastGeneration: value },
+        ownership, lastGeneration: value },
     }, null, 2));
   } catch (error) { console.error(`Project-config failure evidence could not be saved: ${String(error)}`); }
   assert.fail(`${description}: ${JSON.stringify(value)?.slice(0, 5000)}`);
@@ -156,12 +184,15 @@ async function run() {
   let initialType = null;
   let refreshedType = null;
   let current;
+  const precisePick = value => value?.operationStatuses?.some(item => item.operation === "Pick" && item.status === "precise") &&
+    value.pythonSetting === value.setting;
+  const nullablePick = value => precisePick(value) && value.text?.includes("None") && value.generatedStub?.includes("None");
   if (phase === "before-restart") {
     const configured = await until(generation, value => value?.generatedStubExists && value.operationCount > 0,
       "GraphQL Desk publishes a complete operation generation and resolves the generated package path", 45000);
     assert.equal(configured.consumerImport, "from graphql_desk_generated.default import graphql");
     await vscode.commands.executeCommand("python.analysis.restartLanguageServer");
-    const first = await until(generation, value => value?.text?.includes("String") && !value.text.includes("None"),
+    const first = await until(generation, value => precisePick(value) && value.text?.includes("String") && !value.text.includes("None"),
       "Pylance infers the non-null project-config result after its managed settings refresh");
     assert.ok(first.generatedStub.includes("selected"), `The generated operation result contains selected: ${JSON.stringify(first)}`);
     assert.ok(first.graphqlDefinitions.some(item => item.uri?.endsWith("graphql_desk_generated/default.py")),
@@ -175,12 +206,12 @@ async function run() {
     const before = await fs.readFile(schemaFile, "utf8");
     assert.match(before, /selected: String!/);
     await fs.writeFile(schemaFile, before.replace("selected: String!", "selected: String"), "utf8");
-    current = await until(generation, value => value?.setting !== first.setting && value.text?.includes("None") && value.pythonSetting === value.setting,
+    current = await until(generation, value => value?.setting !== first.setting && nullablePick(value),
       "Pylance refreshes live from a nullable schema edit and selects the same completed generation as Pyright");
     assert.equal(await pythonStubPath(), current.setting, "Pylance setting rotates with the completed project generation");
     refreshedType = current.text;
   } else {
-    current = await until(generation, value => value?.text?.includes("None"),
+    current = await until(generation, nullablePick,
       "Pylance recovers the selected project-config generation after a VS Code restart");
     initialType = current.text;
     refreshedType = current.text;
@@ -262,5 +293,8 @@ async function run() {
 
 module.exports = { async run() {
   try { await run(); }
-  finally { workerModule.createAnalysisWorker = createWorker; }
+  finally {
+    workerModule.createAnalysisWorker = createWorker;
+    projectConfigModule.createManagedProjectConfig = createProjectConfig;
+  }
 } };
