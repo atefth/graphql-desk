@@ -96,22 +96,36 @@ class OperationTypesTests(unittest.TestCase):
         document = next(
             item for item in index.documents if item.call.binding == "query"
         )
-        full = render_indexed_operation_types(
-            context,
-            document,
-            name="Read",
-            fragment_index=index,
-            fixture_input=True,
-            unmasked_fragments=frozenset({"Title", "Name"}),
-        )
-        partial = render_indexed_operation_types(
-            context,
-            document,
-            name="Read",
-            fragment_index=index,
-            fixture_input=True,
-            unmasked_fragments=frozenset({"Title"}),
-        )
+        with patch(
+            "graphql_desk.fragments.DocumentIdentity", wraps=DocumentIdentity
+        ) as identity:
+            full = render_indexed_operation_types(
+                context,
+                document,
+                name="Read",
+                fragment_index=index,
+                fixture_input=True,
+                unmasked_fragments=frozenset({"Title", "Name"}),
+            )
+            partial = render_indexed_operation_types(
+                context,
+                document,
+                name="Read",
+                fragment_index=index,
+                fixture_input=True,
+                unmasked_fragments=frozenset({"Title"}),
+            )
+        self.assertEqual(identity.call_count, len(index.documents) + 2)
+        forged = replace(document, dependencies=())
+        with self.assertRaisesRegex(ValueError, "absent from fragment owner registry"):
+            render_indexed_operation_types(
+                context, forged, name="Read", fragment_index=index
+            )
+        duplicate = replace(index, documents=(*index.documents, document))
+        with self.assertRaisesRegex(ValueError, "Duplicate fragment owner identity"):
+            render_indexed_operation_types(
+                context, document, name="Read", fragment_index=duplicate
+            )
         full_operation = full.split("\nReadFragment_Name =")[0]
         partial_operation = partial.split("\nReadFragment_Name =")[0]
         self.assertIn("'title': 'String'", full_operation)

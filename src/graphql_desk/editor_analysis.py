@@ -159,11 +159,17 @@ def analyze_editor_snapshot(
 
 
 @dataclass(frozen=True)
+class _SchemaReuse:
+    inputs: tuple[str, str, str, str]
+    context: SchemaContext
+
+
+@dataclass(frozen=True)
 class FragmentReuse:
-    """Accepted fragment facts and their exact schema inputs from one capture."""
+    """Accepted fragment facts and validated schemas from one capture."""
 
     documents: tuple[IndexedDocument, ...]
-    schema_inputs: dict[tuple[str, str], tuple[str, str, str, str]]
+    schemas: dict[tuple[str, str], _SchemaReuse]
 
 
 @dataclass(frozen=True)
@@ -334,7 +340,8 @@ def analyze_editor_snapshot_details(
     )
     schemas: dict[tuple[str, str | None], SchemaContext] = {}
     schema_facts: list[dict[str, object]] = []
-    schema_inputs: dict[tuple[str, str], tuple[str, str, str, str]] = {}
+    schema_reuse: dict[tuple[str, str], _SchemaReuse] = {}
+    unchanged_schemas: set[tuple[str, str]] = set()
     seen_schemas: set[tuple[str, str]] = set()
     for value in _array(payload["schemas"], "schemas"):
         item = _object(
@@ -359,20 +366,31 @@ def analyze_editor_snapshot_details(
         token = _string(item["token"], "Schema token")
         format_ = _string(item["format"], "Schema format")
         text = _string(item["text"], "Schema text")
-        schema_inputs[identity] = (uri, token, format_, text)
-        try:
-            if format_ == "sdl":
-                schema = load_from_sdl(text)
-            elif format_ == "introspection":
-                data = _json(text)
-                if not isinstance(data, dict):
-                    raise ValueError("Introspection must be an object")
-                schema = load_from_introspection(cast(dict[str, object], data))
-            else:
-                raise ValueError("Unknown schema format")
-        except ValueError:
-            raise ValueError("Invalid supplied local schema") from None
-        context = SchemaContext(name, schema, token)
+        inputs = (uri, token, format_, text)
+        previous = (
+            previous_fragments.schemas.get(identity)
+            if previous_fragments is not None
+            else None
+        )
+        if previous is not None and previous.inputs == inputs:
+            reusable = previous
+            unchanged_schemas.add(identity)
+        else:
+            try:
+                if format_ == "sdl":
+                    schema = load_from_sdl(text)
+                elif format_ == "introspection":
+                    data = _json(text)
+                    if not isinstance(data, dict):
+                        raise ValueError("Introspection must be an object")
+                    schema = load_from_introspection(cast(dict[str, object], data))
+                else:
+                    raise ValueError("Unknown schema format")
+            except ValueError:
+                raise ValueError("Invalid supplied local schema") from None
+            reusable = _SchemaReuse(inputs, SchemaContext(name, schema, token))
+        schema_reuse[identity] = reusable
+        context = reusable.context
         schemas[identity] = context
         if projects[project].default_schema == name:
             schemas[(project, None)] = context
@@ -386,20 +404,11 @@ def analyze_editor_snapshot_details(
                 "format": format_,
             }
         )
-    unchanged_schemas: frozenset[tuple[str, str]] = (
-        frozenset(
-            identity
-            for identity, inputs in schema_inputs.items()
-            if previous_fragments.schema_inputs.get(identity) == inputs
-        )
-        if previous_fragments is not None
-        else frozenset()
-    )
     index = index_fragments(
         sources,
         schemas=schemas,
         previous_documents=previous_fragments.documents if previous_fragments else (),
-        unchanged_schemas=unchanged_schemas,
+        unchanged_schemas=frozenset(unchanged_schemas),
     )
     unused_selections: list[UnusedSelection] = []
     field_diagnostics = field_usage_diagnostics(
@@ -537,21 +546,29 @@ def analyze_editor_snapshot_details(
         except (ValueError, TypeError, RecursionError):
             return None
 
-    snapshots = {
-        ModuleDependency(item.project, item.module, item.uri, item.version): item.source
-        for item in modules
-    }
     mappings = tuple(
         zip(
             sources.calls, build_source_maps(sources.calls, tuple(modules)), strict=True
         )
     )
-    refactor_contexts = {
-        module: extraction_contexts(
-            snapshots[module], projects[module.project].factories
+    refactor_modules = {call.module for call, _ in mappings}
+    snapshots: dict[ModuleDependency, str] = {}
+    refactor_contexts: dict[
+        ModuleDependency, dict[tuple[int, int], dict[str, object]]
+    ] = {}
+    for snapshot in modules:
+        dependency = ModuleDependency(
+            snapshot.project, snapshot.module, snapshot.uri, snapshot.version
         )
-        for module in {call.module for call, _ in mappings}
-    }
+        snapshots[dependency] = snapshot.source
+        if dependency in refactor_modules:
+            refactor_contexts[dependency] = extraction_contexts(
+                snapshot.source,
+                projects[snapshot.project].factories,
+                tree=resolver.validated_tree(snapshot)
+                if resolver is not None
+                else None,
+            )
     points: dict[ModuleDependency, set[int]] = {item: set() for item in snapshots}
 
     def require(module: ModuleDependency, span: Span) -> None:
@@ -749,5 +766,5 @@ def analyze_editor_snapshot_details(
         tuple(modules),
         schemas,
         index,
-        FragmentReuse(index.documents, schema_inputs) if index.documents else None,
+        FragmentReuse(index.documents, schema_reuse) if schema_reuse else None,
     )

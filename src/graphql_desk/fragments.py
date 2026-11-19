@@ -3,6 +3,8 @@
 from collections import defaultdict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from functools import cached_property
+from types import MappingProxyType
 from typing import Literal
 
 from graphql import (
@@ -89,6 +91,27 @@ class FragmentIndex:
     diagnostics: tuple[GraphDiagnostic, ...]
     unavailable: tuple[RejectedDocument, ...] = ()
     rejected_calls: tuple[RejectedCall, ...] = ()
+
+    @cached_property
+    def _owners(self) -> dict[DocumentIdentity, IndexedDocument]:
+        return {_identity(document.call): document for document in self.documents}
+
+    def owners_for(
+        self, document: IndexedDocument
+    ) -> Mapping[DocumentIdentity, IndexedDocument]:
+        """Require the exact indexed document and expose a read-only owner lookup."""
+        owners = self._owners
+        duplicates = len(owners) != len(self.documents)
+        present = (
+            document in self.documents
+            if duplicates
+            else owners.get(_identity(document.call)) == document
+        )
+        if not present:
+            raise ValueError("Indexed document is absent from fragment owner registry")
+        if duplicates:
+            raise ValueError("Duplicate fragment owner identity")
+        return MappingProxyType(owners)
 
 
 @dataclass(frozen=True)
