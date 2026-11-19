@@ -86,7 +86,7 @@ function readStagingMarker(markerPath: string, id: string): { marker: StagingMar
       marker.files.some(item => !exactKeys(item, ["path", "sha256"]) || !validArtifactPath(item.path) || typeof item.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(item.sha256)) ||
       new Set(marker.files.map(item => item.path)).size !== marker.files.length ||
       marker.files.some((item, index) => index > 0 && (marker.files as FileDigest[])[index - 1].path >= item.path)) throw new Error("Invalid staging marker");
-  return { marker, bytes, identity: stat, fingerprint: digest(bytes) } as ReturnType<typeof readStagingMarker>;
+  return { marker: marker as StagingMarker, bytes, identity: stat, fingerprint: digest(bytes) };
 }
 const validSpan = (value: unknown): value is Span => exactKeys(value, ["start", "end"]) && Number.isSafeInteger(value.start) && value.start >= 0 &&
   Number.isSafeInteger(value.end) && value.end >= value.start;
