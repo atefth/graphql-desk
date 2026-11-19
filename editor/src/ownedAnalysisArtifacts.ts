@@ -45,7 +45,7 @@ function isOwnedAnalysisArtifact(bytes: Buffer, generatedPackage: string, relati
 function identity(file: string, options: { bigint: true }): fs.BigIntStats;
 function identity(file: string): fs.Stats;
 function identity(file: string, options?: { bigint: true }) {
-  const stat = fs.lstatSync(file, options);
+  const stat = fs.lstatSync(file, options)!;
   if (stat.isSymbolicLink()) throw new Error("Analysis path is a symbolic link");
   return stat;
 }
