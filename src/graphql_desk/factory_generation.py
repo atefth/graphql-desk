@@ -803,7 +803,7 @@ def _generate_factory_artifacts(
     canonical_owners: dict[DocumentIdentity, DocumentIdentity] = {}
     overloads: list[str] = []
     error_call = documents[0].call if documents else None
-    imports: list[str] = []
+    document_aliases: dict[tuple[str, str], str] = {}
     exports: list[_SourceExport] = []
     public_names: dict[str, set[str]] = {}
 
@@ -1216,12 +1216,20 @@ def _generate_factory_artifacts(
                             label + suffix,
                         )
                     )
-        for number, document in enumerate(documents):
+
+        def document_alias(identity: DocumentIdentity) -> str:
+            module, name, _ = declarations[identity]
+            symbol = name + ("Unavailable" if identity in rejected else "Document")
+            key = (module, symbol)
+            if key not in document_aliases:
+                document_aliases[key] = (
+                    f"__graphql_desk_Document{len(document_aliases)}"
+                )
+            return document_aliases[key]
+
+        for document in documents:
             error_call = document.call
             identity = DocumentIdentity(document.call.module, document.call.range)
-            module, name, _ = declarations[identity]
-            reference_types: list[str] = []
-            reference_imports: list[str] = []
             reference_keys: list[str] = []
             for reference in document.call.fragments:
                 owner = owners[reference.target]
@@ -1230,13 +1238,6 @@ def _generate_factory_artifacts(
                 assert canonical.primary_fragment is not None
                 key = fragment_identity_key(canonical, canonical.primary_fragment)
                 reference_keys.append(key)
-                owner_module, owner_name, _ = declarations[reference.target]
-                alias = f"__graphql_desk_Fragment{number}_{len(reference_types)}"
-                suffix = "Unavailable" if reference.target in rejected else "Document"
-                reference_imports.append(
-                    f"from {owner_module} import {owner_name}{suffix} as {alias}\n"
-                )
-                reference_types.append(alias)
             selected = document.selected_operation
             operation_name = selected.name if selected is not None else None
             signature = (document.call.source, operation_name, tuple(reference_keys))
@@ -1251,10 +1252,10 @@ def _generate_factory_artifacts(
                 continue
             signatures[signature] = identity
             canonical_owners[identity] = identity
-            imports.extend(reference_imports)
-            return_alias = f"__graphql_desk_Document{number}"
-            suffix = "Unavailable" if identity in rejected else "Document"
-            imports.append(f"from {module} import {name}{suffix} as {return_alias}\n")
+            reference_types = [
+                document_alias(ref.target) for ref in document.call.fragments
+            ]
+            return_alias = document_alias(identity)
             fragments = (
                 "tuple[" + ", ".join(reference_types) + "]"
                 if reference_types
@@ -1307,7 +1308,10 @@ def _generate_factory_artifacts(
             )
             + typing_import
             + "\n"
-            + "".join(imports)
+            + "".join(
+                f"from {module} import {symbol} as {alias}\n"
+                for (module, symbol), alias in document_aliases.items()
+            )
             + "\nclass __graphql_desk_UnresolvedDocument(__graphql_desk_Protocol):\n"
             "    @property\n"
             "    def ast(self) -> __graphql_desk_DocumentNode: ...\n"
